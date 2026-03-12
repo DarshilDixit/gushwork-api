@@ -34,6 +34,7 @@ async function initDB() {
         email         TEXT,
         website       TEXT,
         sell_to       TEXT,
+        page_url      TEXT,
         -- Step 2
         first_name    TEXT,
         last_name     TEXT,
