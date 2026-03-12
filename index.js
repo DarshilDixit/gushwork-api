@@ -7,12 +7,10 @@ const app  = express();
 const PORT = process.env.PORT || 3000;
 
 /* --------------------------------------------------------
-   CORS — only allow requests from your Webflow domains
+   CORS
 -------------------------------------------------------- */
 const allowedOrigins = (process.env.ALLOWED_ORIGIN || '')
-  .split(',')
-  .map(o => o.trim())
-  .filter(Boolean);
+  .split(',').map(o => o.trim()).filter(Boolean);
 
 app.use(cors({
   origin: function (origin, callback) {
@@ -27,6 +25,61 @@ app.use(cors({
 app.use(express.json());
 
 /* --------------------------------------------------------
+   LOOPS HELPER
+   Fires a Loops event for partial capture recovery email.
+   Fire-and-forget — never blocks the main response.
+-------------------------------------------------------- */
+async function sendLoopsEvent(email, firstName, lastName, company, website) {
+  const apiKey = process.env.LOOPS_API_KEY;
+  if (!apiKey) {
+    console.warn('[Loops] LOOPS_API_KEY not set — skipping');
+    return;
+  }
+  if (!email) return;
+
+  try {
+    // 1. Upsert the contact in Loops with latest properties
+    await fetch('https://app.loops.so/api/v1/contacts/upsert', {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        email,
+        firstName: firstName || '',
+        lastName:  lastName  || '',
+        company:   company   || '',
+        website:   website   || '',
+        source:    'form_partial_capture'
+      })
+    });
+
+    // 2. Fire the event to trigger the Loops sequence
+    const eventRes = await fetch('https://app.loops.so/api/v1/events/send', {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        email,
+        eventName: 'form_partial_capture',
+        firstName: firstName || '',
+        lastName:  lastName  || '',
+        company:   company   || '',
+        website:   website   || ''
+      })
+    });
+
+    const result = await eventRes.json();
+    console.log(`[Loops] Event fired for ${email} →`, result.success ? '✅ ok' : '❌ ' + JSON.stringify(result));
+  } catch (err) {
+    console.warn('[Loops] Failed to send event:', err.message);
+  }
+}
+
+/* --------------------------------------------------------
    HEALTH CHECK
 -------------------------------------------------------- */
 app.get('/health', (req, res) => {
@@ -35,7 +88,6 @@ app.get('/health', (req, res) => {
 
 /* --------------------------------------------------------
    POST /session
-   Called on page load — creates a session row with UTMs + page_url
 -------------------------------------------------------- */
 app.post('/session', async (req, res) => {
   const {
@@ -54,12 +106,12 @@ app.post('/session', async (req, res) => {
          referrer, prefill_source, ip_address, user_agent)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
       ON CONFLICT (session_id) DO UPDATE SET
-        page_url      = COALESCE(EXCLUDED.page_url,      form_sessions.page_url),
-        utm_source    = COALESCE(EXCLUDED.utm_source,    form_sessions.utm_source),
-        utm_medium    = COALESCE(EXCLUDED.utm_medium,    form_sessions.utm_medium),
-        utm_campaign  = COALESCE(EXCLUDED.utm_campaign,  form_sessions.utm_campaign),
-        utm_content   = COALESCE(EXCLUDED.utm_content,   form_sessions.utm_content),
-        referrer      = COALESCE(EXCLUDED.referrer,      form_sessions.referrer),
+        page_url       = COALESCE(EXCLUDED.page_url,       form_sessions.page_url),
+        utm_source     = COALESCE(EXCLUDED.utm_source,     form_sessions.utm_source),
+        utm_medium     = COALESCE(EXCLUDED.utm_medium,     form_sessions.utm_medium),
+        utm_campaign   = COALESCE(EXCLUDED.utm_campaign,   form_sessions.utm_campaign),
+        utm_content    = COALESCE(EXCLUDED.utm_content,    form_sessions.utm_content),
+        referrer       = COALESCE(EXCLUDED.referrer,       form_sessions.referrer),
         prefill_source = COALESCE(EXCLUDED.prefill_source, form_sessions.prefill_source)
     `, [
       session_id,
@@ -83,8 +135,6 @@ app.post('/session', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /enrich
-   Called on email blur — looks up person via Apollo
-   Returns safe enrichment fields to prefill step 2
 -------------------------------------------------------- */
 app.post('/enrich', async (req, res) => {
   const { email, session_id } = req.body;
@@ -135,8 +185,7 @@ app.post('/enrich', async (req, res) => {
         raw_response          = EXCLUDED.raw_response,
         enriched_at           = NOW()
     `, [
-      session_id,
-      email,
+      session_id, email,
       person.first_name                      || null,
       person.last_name                       || null,
       person.title                           || null,
@@ -166,7 +215,8 @@ app.post('/enrich', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /partial
-   Called on every Next click — saves progress including page_url
+   Saves progress + fires Loops partial capture event
+   on step 1 completion (when email is first captured)
 -------------------------------------------------------- */
 app.post('/partial', async (req, res) => {
   const {
@@ -243,6 +293,12 @@ app.post('/partial', async (req, res) => {
       VALUES ($1, $2, 'completed')
     `, [session_id, step_reached || 1]);
 
+    // Fire Loops event on step 1 — this is when we first capture email
+    // Loops will wait 5 mins (test) / 24hrs (prod) then send recovery email
+    if (step_reached === 1 && email) {
+      sendLoopsEvent(email, first_name, last_name, company, website);
+    }
+
     res.json({ ok: true });
   } catch (err) {
     console.error('[/partial]', err.message);
@@ -252,8 +308,8 @@ app.post('/partial', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /submit
-   Called when step 2 Next clicked — marks lead complete
-   Saves all fields including page_url, UTMs, enrichment
+   Marks lead complete. Does NOT fire Loops event since
+   they completed the form and will book via Cal.
 -------------------------------------------------------- */
 app.post('/submit', async (req, res) => {
   const {
@@ -277,7 +333,7 @@ app.post('/submit', async (req, res) => {
          referrer, prefill_source,
          enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
          step_reached, completed, submitted_at, updated_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20, 2,true,NOW(),NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,2,true,NOW(),NOW())
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -325,7 +381,7 @@ app.post('/submit', async (req, res) => {
       enriched_linkedin     || null
     ]);
 
-    console.log(`[/submit] Lead completed: ${email} | session: ${session_id} | page: ${page_url}`);
+    console.log(`[/submit] ✅ Lead completed: ${email} | session: ${session_id} | page: ${page_url}`);
     res.json({ ok: true });
 
   } catch (err) {
@@ -336,7 +392,6 @@ app.post('/submit', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /booking-confirmed
-   Called when Cal.com booking is successful
 -------------------------------------------------------- */
 app.post('/booking-confirmed', async (req, res) => {
   const { session_id, booking_uid, start_time, end_time, event_type } = req.body;
@@ -356,7 +411,7 @@ app.post('/booking-confirmed', async (req, res) => {
       WHERE session_id = $1
     `, [session_id, booking_uid, start_time||null, end_time||null, event_type||null]);
 
-    console.log(`[/booking-confirmed] Booked: ${booking_uid} | session: ${session_id}`);
+    console.log(`[/booking-confirmed] ✅ Booked: ${booking_uid} | session: ${session_id}`);
     res.json({ ok: true });
 
   } catch (err) {
@@ -366,7 +421,7 @@ app.post('/booking-confirmed', async (req, res) => {
 });
 
 /* --------------------------------------------------------
-   START SERVER
+   START
 -------------------------------------------------------- */
 async function start() {
   try {
