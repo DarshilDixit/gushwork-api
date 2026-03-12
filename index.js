@@ -156,7 +156,8 @@ app.post('/enrich', async (req, res) => {
       company:      org.name            || '',
       company_size: org.estimated_num_employees?.toString() || '',
       industry:     org.industry        || '',
-      linkedin_url: person.linkedin_url || ''
+      linkedin_url: person.linkedin_url || '',
+      website:      org.website_url     || ''
     });
 
   } catch (err) {
