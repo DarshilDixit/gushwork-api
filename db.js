@@ -53,6 +53,9 @@ async function initDB() {
         enriched_company_size TEXT,
         enriched_industry     TEXT,
         enriched_linkedin     TEXT,
+        -- Disqualification
+        disqualified        BOOLEAN DEFAULT FALSE,
+        disqualified_reason TEXT,
         -- Status
         step_reached   INT DEFAULT 1,
         completed      BOOLEAN DEFAULT FALSE,
@@ -98,7 +101,6 @@ async function initDB() {
 
     // -------------------------------------------------------
     // MIGRATIONS — runs on every startup, safe due to IF NOT EXISTS
-    // Adds columns to existing tables that predate schema changes
     // -------------------------------------------------------
     const migrations = [
       `ALTER TABLE form_sessions ADD COLUMN IF NOT EXISTS page_url TEXT`,
@@ -113,6 +115,8 @@ async function initDB() {
       `ALTER TABLE leads         ADD COLUMN IF NOT EXISTS enriched_company_size TEXT`,
       `ALTER TABLE leads         ADD COLUMN IF NOT EXISTS enriched_industry TEXT`,
       `ALTER TABLE leads         ADD COLUMN IF NOT EXISTS enriched_linkedin TEXT`,
+      `ALTER TABLE leads         ADD COLUMN IF NOT EXISTS disqualified BOOLEAN DEFAULT FALSE`,
+      `ALTER TABLE leads         ADD COLUMN IF NOT EXISTS disqualified_reason TEXT`,
     ];
 
     for (const sql of migrations) {
