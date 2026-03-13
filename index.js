@@ -26,25 +26,19 @@ app.use(express.json());
 
 /* --------------------------------------------------------
    LOOPS HELPER
-   Fires a Loops event for partial capture recovery email.
    Fire-and-forget — never blocks the main response.
+   Only fires for non-disqualified leads.
 -------------------------------------------------------- */
 async function sendLoopsEvent(email, firstName, lastName, company, website) {
   const apiKey = process.env.LOOPS_API_KEY;
-  if (!apiKey) {
-    console.warn('[Loops] LOOPS_API_KEY not set — skipping');
-    return;
-  }
+  if (!apiKey) { console.warn('[Loops] LOOPS_API_KEY not set — skipping'); return; }
   if (!email) return;
 
   try {
-    // 1. Upsert the contact in Loops with latest properties
+    // 1. Upsert contact with latest properties
     await fetch('https://app.loops.so/api/v1/contacts/upsert', {
       method: 'POST',
-      headers: {
-        'Content-Type':  'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify({
         email,
         firstName: firstName || '',
@@ -55,13 +49,10 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
       })
     });
 
-    // 2. Fire the event to trigger the Loops sequence
+    // 2. Fire the event to trigger the sequence
     const eventRes = await fetch('https://app.loops.so/api/v1/events/send', {
       method: 'POST',
-      headers: {
-        'Content-Type':  'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify({
         email,
         eventName: 'form_partial_capture',
@@ -156,11 +147,7 @@ app.post('/enrich', async (req, res) => {
         'Cache-Control': 'no-cache',
         'X-Api-Key':     process.env.APOLLO_API_KEY
       },
-      body: JSON.stringify({
-        email,
-        reveal_personal_emails: false,
-        reveal_phone_number:    false
-      })
+      body: JSON.stringify({ email, reveal_personal_emails: false, reveal_phone_number: false })
     });
 
     const apolloData = await apolloRes.json();
@@ -186,25 +173,25 @@ app.post('/enrich', async (req, res) => {
         enriched_at           = NOW()
     `, [
       session_id, email,
-      person.first_name                      || null,
-      person.last_name                       || null,
-      person.title                           || null,
-      org.name                               || null,
+      person.first_name                       || null,
+      person.last_name                        || null,
+      person.title                            || null,
+      org.name                                || null,
       org.estimated_num_employees?.toString() || null,
-      org.industry                           || null,
-      person.linkedin_url                    || null,
+      org.industry                            || null,
+      person.linkedin_url                     || null,
       JSON.stringify(apolloData)
     ]);
 
     res.json({
-      first_name:   person.first_name                      || '',
-      last_name:    person.last_name                       || '',
-      title:        person.title                           || '',
-      company:      org.name                               || '',
+      first_name:   person.first_name                       || '',
+      last_name:    person.last_name                        || '',
+      title:        person.title                            || '',
+      company:      org.name                                || '',
       company_size: org.estimated_num_employees?.toString() || '',
-      industry:     org.industry                           || '',
-      linkedin_url: person.linkedin_url                    || '',
-      website:      org.website_url                        || ''
+      industry:     org.industry                            || '',
+      linkedin_url: person.linkedin_url                     || '',
+      website:      org.website_url                         || ''
     });
 
   } catch (err) {
@@ -215,8 +202,11 @@ app.post('/enrich', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /partial
-   Saves progress + fires Loops partial capture event
-   on step 1 completion (when email is first captured)
+   Saves progress to DB.
+   Fires Loops recovery email ONLY when:
+     - step 1 completed
+     - email exists
+     - lead is NOT disqualified (B2C/Mixed who chose waitlist)
 -------------------------------------------------------- */
 app.post('/partial', async (req, res) => {
   const {
@@ -226,6 +216,7 @@ app.post('/partial', async (req, res) => {
     utm_source, utm_medium, utm_campaign, utm_content,
     referrer, prefill_source,
     enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
+    disqualified, disqualified_reason,
     step_reached
   } = req.body;
 
@@ -240,8 +231,9 @@ app.post('/partial', async (req, res) => {
          utm_source, utm_medium, utm_campaign, utm_content,
          referrer, prefill_source,
          enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
+         disqualified, disqualified_reason,
          step_reached, completed, updated_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,false,NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,false,NOW())
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -262,6 +254,8 @@ app.post('/partial', async (req, res) => {
         enriched_company_size = COALESCE(EXCLUDED.enriched_company_size, leads.enriched_company_size),
         enriched_industry     = COALESCE(EXCLUDED.enriched_industry,     leads.enriched_industry),
         enriched_linkedin     = COALESCE(EXCLUDED.enriched_linkedin,     leads.enriched_linkedin),
+        disqualified          = COALESCE(EXCLUDED.disqualified,          leads.disqualified),
+        disqualified_reason   = COALESCE(EXCLUDED.disqualified_reason,   leads.disqualified_reason),
         step_reached          = GREATEST(EXCLUDED.step_reached,          leads.step_reached),
         updated_at            = NOW()
     `, [
@@ -285,6 +279,8 @@ app.post('/partial', async (req, res) => {
       enriched_company_size || null,
       enriched_industry     || null,
       enriched_linkedin     || null,
+      disqualified          || false,
+      disqualified_reason   || null,
       step_reached          || 1
     ]);
 
@@ -293,10 +289,12 @@ app.post('/partial', async (req, res) => {
       VALUES ($1, $2, 'completed')
     `, [session_id, step_reached || 1]);
 
-    // Fire Loops event on step 1 — this is when we first capture email
-    // Loops will wait 5 mins (test) / 24hrs (prod) then send recovery email
-    if (step_reached === 1 && email) {
+    // Fire Loops recovery email ONLY for non-disqualified step 1 leads
+    if (step_reached === 1 && email && !disqualified) {
       sendLoopsEvent(email, first_name, last_name, company, website);
+      console.log(`[/partial] Loops event queued for ${email}`);
+    } else if (step_reached === 1 && disqualified) {
+      console.log(`[/partial] Skipping Loops — lead disqualified (${disqualified_reason}): ${email}`);
     }
 
     res.json({ ok: true });
@@ -308,8 +306,7 @@ app.post('/partial', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /submit
-   Marks lead complete. Does NOT fire Loops event since
-   they completed the form and will book via Cal.
+   Marks lead complete with all fields including disqualified status.
 -------------------------------------------------------- */
 app.post('/submit', async (req, res) => {
   const {
@@ -318,7 +315,8 @@ app.post('/submit', async (req, res) => {
     first_name, last_name, phone, company, hear_about_us,
     utm_source, utm_medium, utm_campaign, utm_content,
     referrer, prefill_source,
-    enriched_title, enriched_company_size, enriched_industry, enriched_linkedin
+    enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
+    disqualified, disqualified_reason
   } = req.body;
 
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
@@ -332,8 +330,9 @@ app.post('/submit', async (req, res) => {
          utm_source, utm_medium, utm_campaign, utm_content,
          referrer, prefill_source,
          enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
+         disqualified, disqualified_reason,
          step_reached, completed, submitted_at, updated_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,2,true,NOW(),NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,2,true,NOW(),NOW())
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -354,6 +353,8 @@ app.post('/submit', async (req, res) => {
         enriched_company_size = COALESCE(EXCLUDED.enriched_company_size, leads.enriched_company_size),
         enriched_industry     = COALESCE(EXCLUDED.enriched_industry,     leads.enriched_industry),
         enriched_linkedin     = COALESCE(EXCLUDED.enriched_linkedin,     leads.enriched_linkedin),
+        disqualified          = COALESCE(EXCLUDED.disqualified,          leads.disqualified),
+        disqualified_reason   = COALESCE(EXCLUDED.disqualified_reason,   leads.disqualified_reason),
         step_reached          = 2,
         completed             = true,
         submitted_at          = NOW(),
@@ -378,7 +379,9 @@ app.post('/submit', async (req, res) => {
       enriched_title        || null,
       enriched_company_size || null,
       enriched_industry     || null,
-      enriched_linkedin     || null
+      enriched_linkedin     || null,
+      disqualified          || false,
+      disqualified_reason   || null
     ]);
 
     console.log(`[/submit] ✅ Lead completed: ${email} | session: ${session_id} | page: ${page_url}`);
