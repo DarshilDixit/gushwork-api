@@ -26,24 +26,18 @@ app.use(express.json());
 
 /* --------------------------------------------------------
    LOOPS HELPER — sendLoopsEvent
-
-   FIX 1: Removed 'source' field from upsert body.
-   Loops rejects unknown/invalid source values and returns
-   HTML instead of JSON — causing "Unexpected token <" error.
-   This was why formCompleted was never being set on contacts
-   and why the audience filter was blocking everyone.
-
-   FIX 2: isNewLead check added in /partial endpoint.
-   Loops event only fires ONCE per session — prevents the
-   timer from resetting when user navigates back to step 1.
+   Two separate try/catch blocks so upsert failure never
+   blocks the event send. Uses text() not json() so HTML
+   error responses don't throw.
 -------------------------------------------------------- */
 async function sendLoopsEvent(email, firstName, lastName, company, website) {
   const apiKey = process.env.LOOPS_API_KEY;
   if (!apiKey) { console.warn('[Loops] LOOPS_API_KEY not set — skipping'); return; }
   if (!email) return;
 
+  // Step 1 — Upsert contact properties + reset formCompleted=false
+  // Wrapped in own try/catch — failure here never blocks event send
   try {
-    // Step 1 — Upsert contact with properties + set formCompleted=false
     const upsertRes = await fetch('https://app.loops.so/api/v1/contacts/upsert', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
@@ -54,60 +48,52 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
         company:       company   || '',
         website:       website   || '',
         formCompleted: false
-        // NOTE: 'source' intentionally removed — Loops rejects custom source values
       })
     });
+    const upsertText = await upsertRes.text();
+    console.log(`[Loops] Upsert ${email} → ${upsertRes.status} | ${upsertText.substring(0, 120)}`);
+  } catch (err) {
+    console.warn('[Loops] Upsert failed (non-blocking):', err.message);
+  }
 
-    // Log upsert result so we can confirm it's working
-    const upsertResult = await upsertRes.json();
-    console.log(`[Loops] Contact upserted for ${email} →`, upsertResult.success ? '✅ ok' : '❌ ' + JSON.stringify(upsertResult));
-
-    // Step 2 — Fire the event to trigger the sequence
+  // Step 2 — Fire the event to trigger the sequence
+  // Separate try/catch — always attempts even if upsert failed
+  try {
     const eventRes = await fetch('https://app.loops.so/api/v1/events/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify({
         email,
-        eventName: 'form_partial_capture',
-        firstName: firstName || '',
-        lastName:  lastName  || '',
-        company:   company   || '',
-        website:   website   || ''
+        eventName: 'form_partial_capture'
       })
     });
-
-    const eventResult = await eventRes.json();
-    console.log(`[Loops] Event fired for ${email} →`, eventResult.success ? '✅ ok' : '❌ ' + JSON.stringify(eventResult));
-
+    const eventText = await eventRes.text();
+    console.log(`[Loops] Event ${email} → ${eventRes.status} | ${eventText.substring(0, 120)}`);
   } catch (err) {
-    console.warn('[Loops] Failed to send event:', err.message);
+    console.warn('[Loops] Event send failed:', err.message);
   }
 }
 
 /* --------------------------------------------------------
    LOOPS HELPER — cancelLoopsSequence
-   FIX: Removed 'source' from upsert — same fix as above.
-   Sets formCompleted=true so Loops audience filter blocks
-   the recovery email for leads who actually booked.
+   Called ONLY from /booking-confirmed.
+   Sets formCompleted=true so Loops audience filter
+   suppresses the recovery email.
 -------------------------------------------------------- */
 async function cancelLoopsSequence(email) {
   const apiKey = process.env.LOOPS_API_KEY;
   if (!apiKey || !email) return;
 
   try {
-    const res = await fetch('https://app.loops.so/api/v1/contacts/upsert', {
+    const res  = await fetch('https://app.loops.so/api/v1/contacts/upsert', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        email,
-        formCompleted: true
-        // NOTE: 'source' intentionally removed
-      })
+      body: JSON.stringify({ email, formCompleted: true })
     });
-    const result = await res.json();
-    console.log(`[Loops] Sequence cancelled for ${email} →`, result.success ? '✅ ok' : '❌ ' + JSON.stringify(result));
+    const text = await res.text();
+    console.log(`[Loops] Cancel ${email} → ${res.status} | ${text.substring(0, 120)}`);
   } catch (err) {
-    console.warn('[Loops] Failed to cancel sequence:', err.message);
+    console.warn('[Loops] Cancel failed:', err.message);
   }
 }
 
@@ -157,7 +143,6 @@ app.post('/session', async (req, res) => {
       req.headers['x-forwarded-for'] || req.socket.remoteAddress || null,
       req.headers['user-agent'] || null
     ]);
-
     res.json({ ok: true });
   } catch (err) {
     console.error('[/session]', err.message);
@@ -244,18 +229,8 @@ app.post('/enrich', async (req, res) => {
 /* --------------------------------------------------------
    POST /partial
    Saves progress to DB.
-
-   FIX 2: Single-fire Loops logic.
-   Before firing Loops, check if this session already exists
-   in the leads table. If it does, Loops already fired for
-   this session — skip it. This prevents the 5 min timer
-   from resetting every time user goes back to step 1.
-
-   Loops firing rules:
-   - step 1 + new session + email + not disqualified → fire ✅
-   - step 1 + existing session                       → skip (already fired) ✅
-   - step 1 + disqualified=true                      → skip (waitlist) ✅
-   - any other step                                  → skip ✅
+   Fires Loops ONCE per session for non-disqualified step 1.
+   isNewLead check prevents timer reset on back navigation.
 -------------------------------------------------------- */
 app.post('/partial', async (req, res) => {
   const {
@@ -272,13 +247,9 @@ app.post('/partial', async (req, res) => {
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
   try {
-    // Check if this session already exists BEFORE the upsert
-    // so we know whether Loops has already fired for this session
-    const existing = await pool.query(
-      'SELECT id FROM leads WHERE session_id = $1',
-      [session_id]
-    );
-    const isNewLead = existing.rows.length === 0;
+    // Check BEFORE upsert — if row exists, Loops already fired for this session
+    const existing   = await pool.query('SELECT id FROM leads WHERE session_id = $1', [session_id]);
+    const isNewLead  = existing.rows.length === 0;
 
     await pool.query(`
       INSERT INTO leads
@@ -346,12 +317,12 @@ app.post('/partial', async (req, res) => {
       VALUES ($1, $2, 'completed')
     `, [session_id, step_reached || 1]);
 
-    // Loops firing — single fire per session, non-disqualified only
+    // Fire Loops only on first step 1 save, non-disqualified leads
     if (step_reached === 1 && email && !disqualified && isNewLead) {
       sendLoopsEvent(email, first_name, last_name, company, website);
-      console.log(`[/partial] ✅ Loops event queued for ${email} (new session)`);
+      console.log(`[/partial] ✅ Loops queued for ${email} (new session)`);
     } else if (step_reached === 1 && !isNewLead) {
-      console.log(`[/partial] ⏭ Loops skipped — already fired for session ${session_id}`);
+      console.log(`[/partial] ⏭ Loops skipped — existing session ${session_id}`);
     } else if (step_reached === 1 && disqualified) {
       console.log(`[/partial] ⏭ Loops skipped — disqualified (${disqualified_reason}): ${email}`);
     }
@@ -367,7 +338,7 @@ app.post('/partial', async (req, res) => {
    POST /submit
    Marks lead complete.
    Does NOT cancel Loops — reaching Cal without booking
-   is still a partial we want to recover.
+   still warrants a recovery email.
 -------------------------------------------------------- */
 app.post('/submit', async (req, res) => {
   const {
@@ -456,9 +427,8 @@ app.post('/submit', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /booking-confirmed
-   Only place Loops sequence is cancelled.
-   Fetches email from DB → sets formCompleted=true on contact
-   → Loops audience filter blocks recovery email.
+   Only place Loops is cancelled.
+   Booking confirmed = fully converted, suppress email.
 -------------------------------------------------------- */
 app.post('/booking-confirmed', async (req, res) => {
   const { session_id, booking_uid, start_time, end_time, event_type } = req.body;
@@ -483,9 +453,7 @@ app.post('/booking-confirmed', async (req, res) => {
       [session_id]
     );
     const email = leadRow.rows[0]?.email;
-    if (email) {
-      cancelLoopsSequence(email);
-    }
+    if (email) cancelLoopsSequence(email);
 
     console.log(`[/booking-confirmed] ✅ Booked: ${booking_uid} | session: ${session_id} | email: ${email}`);
     res.json({ ok: true });
