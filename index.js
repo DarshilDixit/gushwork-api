@@ -26,22 +26,16 @@ app.use(express.json());
 
 /* --------------------------------------------------------
    LOOPS HELPER — sendLoopsEvent
-   Fires the partial capture recovery sequence.
 
-   Called ONLY when:
-     - step_reached === 1
-     - email exists
-     - disqualified === false
+   FIX 1: Removed 'source' field from upsert body.
+   Loops rejects unknown/invalid source values and returns
+   HTML instead of JSON — causing "Unexpected token <" error.
+   This was why formCompleted was never being set on contacts
+   and why the audience filter was blocking everyone.
 
-   Also resets formCompleted to false on the contact so that
-   if the same person fills the form again after a previous
-   booking, the Loops audience filter works correctly.
-
-   Edge cases:
-     B2B straight through          → fires ✅
-     B2C/Mixed → waitlist          → blocked (disqualified=true) ✅
-     B2C/Mixed → "actually B2B"    → fires (disqualified=false) ✅
-     Person fills form again later → formCompleted reset to false → fires ✅
+   FIX 2: isNewLead check added in /partial endpoint.
+   Loops event only fires ONCE per session — prevents the
+   timer from resetting when user navigates back to step 1.
 -------------------------------------------------------- */
 async function sendLoopsEvent(email, firstName, lastName, company, website) {
   const apiKey = process.env.LOOPS_API_KEY;
@@ -49,10 +43,8 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
   if (!email) return;
 
   try {
-    // 1. Upsert contact with latest properties
-    //    Reset formCompleted=false so audience filter works correctly
-    //    even for returning visitors who previously booked
-    await fetch('https://app.loops.so/api/v1/contacts/upsert', {
+    // Step 1 — Upsert contact with properties + set formCompleted=false
+    const upsertRes = await fetch('https://app.loops.so/api/v1/contacts/upsert', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify({
@@ -61,12 +53,16 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
         lastName:      lastName  || '',
         company:       company   || '',
         website:       website   || '',
-        source:        'form_partial_capture',
-        formCompleted: false   // ← reset so filter works for repeat visitors
+        formCompleted: false
+        // NOTE: 'source' intentionally removed — Loops rejects custom source values
       })
     });
 
-    // 2. Fire the event to trigger the sequence
+    // Log upsert result so we can confirm it's working
+    const upsertResult = await upsertRes.json();
+    console.log(`[Loops] Contact upserted for ${email} →`, upsertResult.success ? '✅ ok' : '❌ ' + JSON.stringify(upsertResult));
+
+    // Step 2 — Fire the event to trigger the sequence
     const eventRes = await fetch('https://app.loops.so/api/v1/events/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
@@ -80,8 +76,9 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
       })
     });
 
-    const result = await eventRes.json();
-    console.log(`[Loops] Event fired for ${email} →`, result.success ? '✅ ok' : '❌ ' + JSON.stringify(result));
+    const eventResult = await eventRes.json();
+    console.log(`[Loops] Event fired for ${email} →`, eventResult.success ? '✅ ok' : '❌ ' + JSON.stringify(eventResult));
+
   } catch (err) {
     console.warn('[Loops] Failed to send event:', err.message);
   }
@@ -89,19 +86,9 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
 
 /* --------------------------------------------------------
    LOOPS HELPER — cancelLoopsSequence
-   Called ONLY from /booking-confirmed — the single true
-   conversion event. Sets formCompleted=true on the Loops
-   contact so the Audience filter node suppresses the
-   recovery email before it sends.
-
-   NOT called from /submit because reaching Cal without
-   booking is still a partial we want to recover.
-
-   Edge cases covered:
-     Books after B2B flow              → cancelled ✅
-     Books after "actually B2B" flow   → cancelled ✅
-     Reaches Cal but doesn't book      → NOT cancelled → email sends ✅
-     Waitlist (disqualified)           → Loops never fired → nothing to cancel ✅
+   FIX: Removed 'source' from upsert — same fix as above.
+   Sets formCompleted=true so Loops audience filter blocks
+   the recovery email for leads who actually booked.
 -------------------------------------------------------- */
 async function cancelLoopsSequence(email) {
   const apiKey = process.env.LOOPS_API_KEY;
@@ -113,7 +100,8 @@ async function cancelLoopsSequence(email) {
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify({
         email,
-        formCompleted: true   // ← Loops audience filter checks this before sending
+        formCompleted: true
+        // NOTE: 'source' intentionally removed
       })
     });
     const result = await res.json();
@@ -256,7 +244,18 @@ app.post('/enrich', async (req, res) => {
 /* --------------------------------------------------------
    POST /partial
    Saves progress to DB.
-   Fires Loops ONLY on step 1 for non-disqualified leads.
+
+   FIX 2: Single-fire Loops logic.
+   Before firing Loops, check if this session already exists
+   in the leads table. If it does, Loops already fired for
+   this session — skip it. This prevents the 5 min timer
+   from resetting every time user goes back to step 1.
+
+   Loops firing rules:
+   - step 1 + new session + email + not disqualified → fire ✅
+   - step 1 + existing session                       → skip (already fired) ✅
+   - step 1 + disqualified=true                      → skip (waitlist) ✅
+   - any other step                                  → skip ✅
 -------------------------------------------------------- */
 app.post('/partial', async (req, res) => {
   const {
@@ -273,6 +272,14 @@ app.post('/partial', async (req, res) => {
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
   try {
+    // Check if this session already exists BEFORE the upsert
+    // so we know whether Loops has already fired for this session
+    const existing = await pool.query(
+      'SELECT id FROM leads WHERE session_id = $1',
+      [session_id]
+    );
+    const isNewLead = existing.rows.length === 0;
+
     await pool.query(`
       INSERT INTO leads
         (session_id, page_url,
@@ -339,10 +346,12 @@ app.post('/partial', async (req, res) => {
       VALUES ($1, $2, 'completed')
     `, [session_id, step_reached || 1]);
 
-    // Fire Loops ONLY on step 1 for non-disqualified leads
-    if (step_reached === 1 && email && !disqualified) {
+    // Loops firing — single fire per session, non-disqualified only
+    if (step_reached === 1 && email && !disqualified && isNewLead) {
       sendLoopsEvent(email, first_name, last_name, company, website);
-      console.log(`[/partial] ✅ Loops event queued for ${email}`);
+      console.log(`[/partial] ✅ Loops event queued for ${email} (new session)`);
+    } else if (step_reached === 1 && !isNewLead) {
+      console.log(`[/partial] ⏭ Loops skipped — already fired for session ${session_id}`);
     } else if (step_reached === 1 && disqualified) {
       console.log(`[/partial] ⏭ Loops skipped — disqualified (${disqualified_reason}): ${email}`);
     }
@@ -358,7 +367,7 @@ app.post('/partial', async (req, res) => {
    POST /submit
    Marks lead complete.
    Does NOT cancel Loops — reaching Cal without booking
-   is still a partial we want to recover via email.
+   is still a partial we want to recover.
 -------------------------------------------------------- */
 app.post('/submit', async (req, res) => {
   const {
@@ -447,9 +456,9 @@ app.post('/submit', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /booking-confirmed
-   The ONLY place Loops sequence is cancelled.
-   Only an actual Cal booking = fully converted lead.
-   Fetches email from DB to pass to cancelLoopsSequence.
+   Only place Loops sequence is cancelled.
+   Fetches email from DB → sets formCompleted=true on contact
+   → Loops audience filter blocks recovery email.
 -------------------------------------------------------- */
 app.post('/booking-confirmed', async (req, res) => {
   const { session_id, booking_uid, start_time, end_time, event_type } = req.body;
@@ -469,8 +478,6 @@ app.post('/booking-confirmed', async (req, res) => {
       WHERE session_id = $1
     `, [session_id, booking_uid, start_time||null, end_time||null, event_type||null]);
 
-    // Fetch email from DB then cancel Loops recovery sequence
-    // This is fire-and-forget — never blocks the response
     const leadRow = await pool.query(
       'SELECT email FROM leads WHERE session_id = $1',
       [session_id]
