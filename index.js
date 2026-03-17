@@ -26,19 +26,18 @@ app.use(express.json());
 
 /* --------------------------------------------------------
    LOOPS HELPER — sendLoopsEvent
-   Two separate try/catch blocks so upsert failure never
-   blocks the event send. Uses text() not json() so HTML
-   error responses don't throw.
+   Fixed endpoint: createOrUpdate (was upsert which 404'd)
+   Separate try/catch so upsert failure never blocks event.
+   Single-fire handled in /partial via isNewLead check.
 -------------------------------------------------------- */
 async function sendLoopsEvent(email, firstName, lastName, company, website) {
   const apiKey = process.env.LOOPS_API_KEY;
   if (!apiKey) { console.warn('[Loops] LOOPS_API_KEY not set — skipping'); return; }
   if (!email) return;
 
-  // Step 1 — Upsert contact properties + reset formCompleted=false
-  // Wrapped in own try/catch — failure here never blocks event send
+  // Step 1 — Upsert contact + set formCompleted=false
   try {
-    const upsertRes = await fetch('https://app.loops.so/api/v1/contacts/upsert', {
+    const upsertRes  = await fetch('https://app.loops.so/api/v1/contacts/createOrUpdate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify({
@@ -57,9 +56,8 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
   }
 
   // Step 2 — Fire the event to trigger the sequence
-  // Separate try/catch — always attempts even if upsert failed
   try {
-    const eventRes = await fetch('https://app.loops.so/api/v1/events/send', {
+    const eventRes  = await fetch('https://app.loops.so/api/v1/events/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify({
@@ -76,16 +74,17 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
 
 /* --------------------------------------------------------
    LOOPS HELPER — cancelLoopsSequence
+   Fixed endpoint: createOrUpdate (was upsert which 404'd)
    Called ONLY from /booking-confirmed.
-   Sets formCompleted=true so Loops audience filter
-   suppresses the recovery email.
+   Sets formCompleted=true so if Audience filter is ever
+   re-added, it will correctly suppress the recovery email.
 -------------------------------------------------------- */
 async function cancelLoopsSequence(email) {
   const apiKey = process.env.LOOPS_API_KEY;
   if (!apiKey || !email) return;
 
   try {
-    const res  = await fetch('https://app.loops.so/api/v1/contacts/upsert', {
+    const res  = await fetch('https://app.loops.so/api/v1/contacts/createOrUpdate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify({ email, formCompleted: true })
@@ -230,7 +229,6 @@ app.post('/enrich', async (req, res) => {
    POST /partial
    Saves progress to DB.
    Fires Loops ONCE per session for non-disqualified step 1.
-   isNewLead check prevents timer reset on back navigation.
 -------------------------------------------------------- */
 app.post('/partial', async (req, res) => {
   const {
@@ -247,9 +245,9 @@ app.post('/partial', async (req, res) => {
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
   try {
-    // Check BEFORE upsert — if row exists, Loops already fired for this session
-    const existing   = await pool.query('SELECT id FROM leads WHERE session_id = $1', [session_id]);
-    const isNewLead  = existing.rows.length === 0;
+    // Check BEFORE upsert — existing session means Loops already fired
+    const existing  = await pool.query('SELECT id FROM leads WHERE session_id = $1', [session_id]);
+    const isNewLead = existing.rows.length === 0;
 
     await pool.query(`
       INSERT INTO leads
@@ -317,7 +315,7 @@ app.post('/partial', async (req, res) => {
       VALUES ($1, $2, 'completed')
     `, [session_id, step_reached || 1]);
 
-    // Fire Loops only on first step 1 save, non-disqualified leads
+    // Fire Loops only once per session, only for non-disqualified step 1
     if (step_reached === 1 && email && !disqualified && isNewLead) {
       sendLoopsEvent(email, first_name, last_name, company, website);
       console.log(`[/partial] ✅ Loops queued for ${email} (new session)`);
@@ -428,7 +426,8 @@ app.post('/submit', async (req, res) => {
 /* --------------------------------------------------------
    POST /booking-confirmed
    Only place Loops is cancelled.
-   Booking confirmed = fully converted, suppress email.
+   Sets formCompleted=true on contact so if Audience filter
+   is ever re-added it will suppress the recovery email.
 -------------------------------------------------------- */
 app.post('/booking-confirmed', async (req, res) => {
   const { session_id, booking_uid, start_time, end_time, event_type } = req.body;
