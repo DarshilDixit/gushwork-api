@@ -26,19 +26,24 @@ app.use(express.json());
 
 /* --------------------------------------------------------
    LOOPS HELPER — sendLoopsEvent
-   Fixed endpoint: createOrUpdate (was upsert which 404'd)
-   Separate try/catch so upsert failure never blocks event.
-   Single-fire handled in /partial via isNewLead check.
+
+   FIXED: correct endpoint + method
+   - URL:    https://app.loops.so/api/v1/contacts/update
+   - Method: PUT (was POST — that's why it was 404ing)
+
+   Two separate try/catch blocks so upsert failure never
+   blocks the event send.
 -------------------------------------------------------- */
 async function sendLoopsEvent(email, firstName, lastName, company, website) {
   const apiKey = process.env.LOOPS_API_KEY;
   if (!apiKey) { console.warn('[Loops] LOOPS_API_KEY not set — skipping'); return; }
   if (!email) return;
 
-  // Step 1 — Upsert contact + set formCompleted=false
+  // Step 1 — Update contact + set formCompleted=false
+  // Uses PUT /contacts/update — creates contact if it doesn't exist
   try {
-    const upsertRes  = await fetch('https://app.loops.so/api/v1/contacts/createOrUpdate', {
-      method: 'POST',
+    const upsertRes  = await fetch('https://app.loops.so/api/v1/contacts/update', {
+      method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify({
         email,
@@ -74,18 +79,22 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
 
 /* --------------------------------------------------------
    LOOPS HELPER — cancelLoopsSequence
-   Fixed endpoint: createOrUpdate (was upsert which 404'd)
+
+   FIXED: correct endpoint + method
+   - URL:    https://app.loops.so/api/v1/contacts/update
+   - Method: PUT (was POST — that's why it was 404ing)
+
    Called ONLY from /booking-confirmed.
-   Sets formCompleted=true so if Audience filter is ever
-   re-added, it will correctly suppress the recovery email.
+   Sets formCompleted=true so Loops Audience filter
+   (Form Completed is false) suppresses the recovery email.
 -------------------------------------------------------- */
 async function cancelLoopsSequence(email) {
   const apiKey = process.env.LOOPS_API_KEY;
   if (!apiKey || !email) return;
 
   try {
-    const res  = await fetch('https://app.loops.so/api/v1/contacts/createOrUpdate', {
-      method: 'POST',
+    const res  = await fetch('https://app.loops.so/api/v1/contacts/update', {
+      method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify({ email, formCompleted: true })
     });
@@ -425,9 +434,9 @@ app.post('/submit', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /booking-confirmed
-   Only place Loops is cancelled.
-   Sets formCompleted=true on contact so if Audience filter
-   is ever re-added it will suppress the recovery email.
+   ONLY place Loops is cancelled.
+   Sets formCompleted=true via PUT /contacts/update
+   so Audience filter (Form Completed is false) blocks email.
 -------------------------------------------------------- */
 app.post('/booking-confirmed', async (req, res) => {
   const { session_id, booking_uid, start_time, end_time, event_type } = req.body;
