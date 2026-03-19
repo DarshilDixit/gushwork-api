@@ -26,7 +26,6 @@ app.use(express.json());
 
 /* --------------------------------------------------------
    LOOPS HELPER — sendLoopsEvent
-   PUT /contacts/update — correct endpoint + method.
 -------------------------------------------------------- */
 async function sendLoopsEvent(email, firstName, lastName, company, website) {
   const apiKey = process.env.LOOPS_API_KEY;
@@ -34,7 +33,7 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
   if (!email) return;
 
   try {
-    const upsertRes  = await fetch('https://app.loops.so/api/v1/contacts/update', {
+    const upsertRes = await fetch('https://app.loops.so/api/v1/contacts/update', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify({
@@ -53,7 +52,7 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
   }
 
   try {
-    const eventRes  = await fetch('https://app.loops.so/api/v1/events/send', {
+    const eventRes = await fetch('https://app.loops.so/api/v1/events/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify({ email, eventName: 'form_partial_capture' })
@@ -67,7 +66,6 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
 
 /* --------------------------------------------------------
    LOOPS HELPER — cancelLoopsSequence
-   Called ONLY from /booking-confirmed.
 -------------------------------------------------------- */
 async function cancelLoopsSequence(email) {
   const apiKey = process.env.LOOPS_API_KEY;
@@ -95,19 +93,17 @@ app.get('/health', (req, res) => {
 
 /* --------------------------------------------------------
    POST /verify-email
-   Validates email via EmailListVerify before we proceed.
-   Keeps API key server-side — never exposed to browser.
+   FIX: correct URL is apps.emaillistverify.com (not app.)
+   FIX: 5 second timeout so it never hangs
+   FIX: expanded valid statuses — only block confirmed bad emails
 
-   Valid statuses we accept:
-   - ok          → confirmed valid mailbox
-   - catch_all   → domain accepts all emails (treat as valid)
+   Valid: ok, catch_all, ok_for_all, accept_all, unknown,
+          antispam_system, smtp_error, smtp_protocol,
+          relay_error, role, email_disabled, dead_server
+          (anything we can't confirm is BAD = let through)
 
-   Everything else is rejected:
-   - unknown     → can't verify
-   - dead        → domain/mailbox doesn't exist
-   - disposable  → throwaway email
-   - spam_trap   → spam trap
-   - invalid     → bad format
+   Blocked: unknown_email, incorrect, disposable, fail
+            (confirmed does not exist or is throwaway)
 -------------------------------------------------------- */
 app.post('/verify-email', async (req, res) => {
   const { email } = req.body;
@@ -115,32 +111,38 @@ app.post('/verify-email', async (req, res) => {
 
   const apiKey = process.env.ELV_API_KEY;
   if (!apiKey) {
-    console.warn('[ELV] ELV_API_KEY not set — skipping verification, allowing through');
+    console.warn('[ELV] ELV_API_KEY not set — skipping, allowing through');
     return res.json({ valid: true, status: 'skipped' });
   }
 
   try {
-    const url = `https://app.emaillistverify.com/api/verifyEmail?secret=${apiKey}&email=${encodeURIComponent(email)}`;
-    const response = await fetch(url);
-    const text     = await response.text();
-    const status   = text.trim().toLowerCase();
+    // 5 second timeout — never hang the user
+    const controller = new AbortController();
+    const timeout    = setTimeout(() => controller.abort(), 5000);
 
-    console.log(`[ELV] ${email} → ${status}`);
+    const url      = `https://apps.emaillistverify.com/api/verifyEmail?secret=${apiKey}&email=${encodeURIComponent(email)}`;
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
 
-// Accept all statuses that indicate the email CAN receive mail
-// Reject only statuses that confirm it CANNOT
-const invalid = [
-  'unknown_email',  // confirmed doesn't exist
-  'dead_server',    // domain server is down/dead
-  'incorrect',      // bad syntax
-  'disposable',     // throwaway email
-  'fail'            // explicitly failed
-];
-const valid = !invalid.includes(status);
+    const text   = await response.text();
+    const status = text.trim().toLowerCase();
+
+    console.log(`[ELV] ${email} → "${status}"`);
+
+    // Only block emails confirmed to NOT exist or be throwaway
+    // Everything else (unknown, catch_all, antispam etc) = let through
+    const definitelyInvalid = ['unknown_email', 'incorrect', 'disposable', 'fail'];
+    const valid = !definitelyInvalid.includes(status);
+
+    res.json({ valid, status });
 
   } catch (err) {
-    console.warn('[ELV] Verification failed:', err.message);
-    // On API failure, allow through — don't block the user
+    if (err.name === 'AbortError') {
+      console.warn(`[ELV] Timeout for ${email} — allowing through`);
+    } else {
+      console.warn('[ELV] Verification failed:', err.message);
+    }
+    // Always fail open — never block user on API error or timeout
     res.json({ valid: true, status: 'error_fallback' });
   }
 });
@@ -193,7 +195,7 @@ app.post('/session', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /enrich
-   Personal emails skipped silently — no Apollo credits used.
+   Personal emails skipped — no Apollo credits wasted.
 -------------------------------------------------------- */
 app.post('/enrich', async (req, res) => {
   const { email, session_id } = req.body;
@@ -273,8 +275,6 @@ app.post('/enrich', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /partial
-   Saves progress to DB.
-   Fires Loops ONCE per session for non-disqualified step 1.
 -------------------------------------------------------- */
 app.post('/partial', async (req, res) => {
   const {
