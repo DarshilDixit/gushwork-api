@@ -27,8 +27,6 @@ app.use(express.json());
 /* --------------------------------------------------------
    LOOPS HELPER — sendLoopsEvent
    PUT /contacts/update — correct endpoint + method.
-   Two separate try/catch so upsert never blocks event send.
-   Single-fire per session handled via isNewLead in /partial.
 -------------------------------------------------------- */
 async function sendLoopsEvent(email, firstName, lastName, company, website) {
   const apiKey = process.env.LOOPS_API_KEY;
@@ -70,7 +68,6 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
 /* --------------------------------------------------------
    LOOPS HELPER — cancelLoopsSequence
    Called ONLY from /booking-confirmed.
-   Sets formCompleted=true so Audience filter suppresses email.
 -------------------------------------------------------- */
 async function cancelLoopsSequence(email) {
   const apiKey = process.env.LOOPS_API_KEY;
@@ -94,6 +91,51 @@ async function cancelLoopsSequence(email) {
 -------------------------------------------------------- */
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+/* --------------------------------------------------------
+   POST /verify-email
+   Validates email via EmailListVerify before we proceed.
+   Keeps API key server-side — never exposed to browser.
+
+   Valid statuses we accept:
+   - ok          → confirmed valid mailbox
+   - catch_all   → domain accepts all emails (treat as valid)
+
+   Everything else is rejected:
+   - unknown     → can't verify
+   - dead        → domain/mailbox doesn't exist
+   - disposable  → throwaway email
+   - spam_trap   → spam trap
+   - invalid     → bad format
+-------------------------------------------------------- */
+app.post('/verify-email', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ valid: false, error: 'email required' });
+
+  const apiKey = process.env.ELV_API_KEY;
+  if (!apiKey) {
+    console.warn('[ELV] ELV_API_KEY not set — skipping verification, allowing through');
+    return res.json({ valid: true, status: 'skipped' });
+  }
+
+  try {
+    const url = `https://app.emaillistverify.com/api/verifyEmail?secret=${apiKey}&email=${encodeURIComponent(email)}`;
+    const response = await fetch(url);
+    const text     = await response.text();
+    const status   = text.trim().toLowerCase();
+
+    console.log(`[ELV] ${email} → ${status}`);
+
+    // Accept ok and catch_all, reject everything else
+    const valid = status === 'ok' || status === 'catch_all';
+    res.json({ valid, status });
+
+  } catch (err) {
+    console.warn('[ELV] Verification failed:', err.message);
+    // On API failure, allow through — don't block the user
+    res.json({ valid: true, status: 'error_fallback' });
+  }
 });
 
 /* --------------------------------------------------------
@@ -144,15 +186,12 @@ app.post('/session', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /enrich
-   v2.9.1: All emails accepted by the form BUT Apollo is only
-   called for work emails to avoid burning API credits on
-   gmail/yahoo etc which Apollo won't have data for anyway.
+   Personal emails skipped silently — no Apollo credits used.
 -------------------------------------------------------- */
 app.post('/enrich', async (req, res) => {
   const { email, session_id } = req.body;
   if (!email || !session_id) return res.status(400).json({ error: 'email and session_id required' });
 
-  // Skip Apollo for personal emails — no credits wasted, silent empty response
   const personalDomains = [
     'gmail.com','yahoo.com','hotmail.com','outlook.com','icloud.com',
     'protonmail.com','aol.com','mail.com','yahoo.in','rediffmail.com',
