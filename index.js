@@ -26,21 +26,15 @@ app.use(express.json());
 
 /* --------------------------------------------------------
    LOOPS HELPER — sendLoopsEvent
-
-   FIXED: correct endpoint + method
-   - URL:    https://app.loops.so/api/v1/contacts/update
-   - Method: PUT (was POST — that's why it was 404ing)
-
-   Two separate try/catch blocks so upsert failure never
-   blocks the event send.
+   PUT /contacts/update — correct endpoint + method.
+   Two separate try/catch so upsert never blocks event send.
+   Single-fire per session handled via isNewLead in /partial.
 -------------------------------------------------------- */
 async function sendLoopsEvent(email, firstName, lastName, company, website) {
   const apiKey = process.env.LOOPS_API_KEY;
   if (!apiKey) { console.warn('[Loops] LOOPS_API_KEY not set — skipping'); return; }
   if (!email) return;
 
-  // Step 1 — Update contact + set formCompleted=false
-  // Uses PUT /contacts/update — creates contact if it doesn't exist
   try {
     const upsertRes  = await fetch('https://app.loops.so/api/v1/contacts/update', {
       method: 'PUT',
@@ -60,15 +54,11 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
     console.warn('[Loops] Upsert failed (non-blocking):', err.message);
   }
 
-  // Step 2 — Fire the event to trigger the sequence
   try {
     const eventRes  = await fetch('https://app.loops.so/api/v1/events/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        email,
-        eventName: 'form_partial_capture'
-      })
+      body: JSON.stringify({ email, eventName: 'form_partial_capture' })
     });
     const eventText = await eventRes.text();
     console.log(`[Loops] Event ${email} → ${eventRes.status} | ${eventText.substring(0, 120)}`);
@@ -79,14 +69,8 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
 
 /* --------------------------------------------------------
    LOOPS HELPER — cancelLoopsSequence
-
-   FIXED: correct endpoint + method
-   - URL:    https://app.loops.so/api/v1/contacts/update
-   - Method: PUT (was POST — that's why it was 404ing)
-
    Called ONLY from /booking-confirmed.
-   Sets formCompleted=true so Loops Audience filter
-   (Form Completed is false) suppresses the recovery email.
+   Sets formCompleted=true so Audience filter suppresses email.
 -------------------------------------------------------- */
 async function cancelLoopsSequence(email) {
   const apiKey = process.env.LOOPS_API_KEY;
@@ -160,17 +144,24 @@ app.post('/session', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /enrich
+   v2.9.1: All emails accepted by the form BUT Apollo is only
+   called for work emails to avoid burning API credits on
+   gmail/yahoo etc which Apollo won't have data for anyway.
 -------------------------------------------------------- */
 app.post('/enrich', async (req, res) => {
   const { email, session_id } = req.body;
   if (!email || !session_id) return res.status(400).json({ error: 'email and session_id required' });
 
-  const blocked = ['gmail.com','yahoo.com','hotmail.com','outlook.com',
-                   'icloud.com','protonmail.com','aol.com','mail.com',
-                   'yahoo.in','rediffmail.com','ymail.com'];
+  // Skip Apollo for personal emails — no credits wasted, silent empty response
+  const personalDomains = [
+    'gmail.com','yahoo.com','hotmail.com','outlook.com','icloud.com',
+    'protonmail.com','aol.com','mail.com','yahoo.in','rediffmail.com',
+    'ymail.com','live.com','msn.com','me.com','mac.com','googlemail.com'
+  ];
   const domain = email.split('@')[1]?.toLowerCase() || '';
-  if (blocked.includes(domain)) {
-    return res.status(400).json({ error: 'Please use a work email address' });
+  if (personalDomains.includes(domain)) {
+    console.log(`[/enrich] Skipping Apollo for personal email: ${email}`);
+    return res.json({ first_name: '', last_name: '', title: '', company: '', company_size: '', industry: '', linkedin_url: '', website: '' });
   }
 
   try {
@@ -254,7 +245,6 @@ app.post('/partial', async (req, res) => {
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
   try {
-    // Check BEFORE upsert — existing session means Loops already fired
     const existing  = await pool.query('SELECT id FROM leads WHERE session_id = $1', [session_id]);
     const isNewLead = existing.rows.length === 0;
 
@@ -324,7 +314,6 @@ app.post('/partial', async (req, res) => {
       VALUES ($1, $2, 'completed')
     `, [session_id, step_reached || 1]);
 
-    // Fire Loops only once per session, only for non-disqualified step 1
     if (step_reached === 1 && email && !disqualified && isNewLead) {
       sendLoopsEvent(email, first_name, last_name, company, website);
       console.log(`[/partial] ✅ Loops queued for ${email} (new session)`);
@@ -343,9 +332,6 @@ app.post('/partial', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /submit
-   Marks lead complete.
-   Does NOT cancel Loops — reaching Cal without booking
-   still warrants a recovery email.
 -------------------------------------------------------- */
 app.post('/submit', async (req, res) => {
   const {
@@ -434,9 +420,6 @@ app.post('/submit', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /booking-confirmed
-   ONLY place Loops is cancelled.
-   Sets formCompleted=true via PUT /contacts/update
-   so Audience filter (Form Completed is false) blocks email.
 -------------------------------------------------------- */
 app.post('/booking-confirmed', async (req, res) => {
   const { session_id, booking_uid, start_time, end_time, event_type } = req.body;
