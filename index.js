@@ -127,9 +127,16 @@ app.post('/verify-email', async (req, res) => {
 
     console.log(`[ELV] ${email} → ${status}`);
 
-    // Accept ok and catch_all, reject everything else
-    const valid = status === 'ok' || status === 'catch_all';
-    res.json({ valid, status });
+// Accept all statuses that indicate the email CAN receive mail
+// Reject only statuses that confirm it CANNOT
+const invalid = [
+  'unknown_email',  // confirmed doesn't exist
+  'dead_server',    // domain server is down/dead
+  'incorrect',      // bad syntax
+  'disposable',     // throwaway email
+  'fail'            // explicitly failed
+];
+const valid = !invalid.includes(status);
 
   } catch (err) {
     console.warn('[ELV] Verification failed:', err.message);
