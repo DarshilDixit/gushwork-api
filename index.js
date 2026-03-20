@@ -131,7 +131,14 @@ app.post('/verify-email', async (req, res) => {
 
     // Only block emails confirmed to NOT exist or be throwaway
     // Everything else (unknown, catch_all, antispam etc) = let through
-    const definitelyInvalid = ['unknown_email', 'incorrect', 'disposable', 'fail'];
+    const definitelyInvalid = [
+  'unknown_email', // confirmed doesn't exist
+  'incorrect',     // bad syntax
+  'disposable',    // throwaway email
+  'fail',          // explicitly failed
+  'dead_server',   // domain server doesn't exist
+  'unknown'        // can't verify — treat as invalid for form purposes
+];
     const valid = !definitelyInvalid.includes(status);
 
     res.json({ valid, status });
