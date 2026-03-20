@@ -317,7 +317,7 @@ app.post('/partial', async (req, res) => {
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
   try {
-    const existing  = await pool.query('SELECT id FROM leads WHERE session_id = $1', [session_id]);
+    const existing  = await pool.query(`SELECT id FROM leads WHERE session_id = $1 AND email = $2`, [session_id, email]);
     const isNewLead = existing.rows.length === 0;
 
     await pool.query(`
