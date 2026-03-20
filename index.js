@@ -93,17 +93,34 @@ app.get('/health', (req, res) => {
 
 /* --------------------------------------------------------
    POST /verify-email
-   FIX: correct URL is apps.emaillistverify.com (not app.)
-   FIX: 5 second timeout so it never hangs
-   FIX: expanded valid statuses — only block confirmed bad emails
 
-   Valid: ok, catch_all, ok_for_all, accept_all, unknown,
-          antispam_system, smtp_error, smtp_protocol,
-          relay_error, role, email_disabled, dead_server
-          (anything we can't confirm is BAD = let through)
+   Strict spam wall using EmailListVerify.
+   URL: https://apps.emaillistverify.com (note the 's')
+   Timeout: 8 seconds max — never hangs the user
 
-   Blocked: unknown_email, incorrect, disposable, fail
-            (confirmed does not exist or is throwaway)
+   ALLOW only:
+   - ok          → confirmed valid mailbox
+   - catch_all   → domain accepts all (treat as valid)
+   - ok_for_all  → valid but may be catch-all
+   - antispam_system → anti-spam blocking verification
+                       (real domains do this — allow through)
+
+   BLOCK everything else:
+   - unknown_email  → confirmed doesn't exist
+   - unknown        → cannot verify (treat as suspicious)
+   - dead_server    → domain server doesn't exist
+   - invalid_mx     → no valid MX records (can't receive email)
+   - incorrect      → bad syntax
+   - disposable     → throwaway email
+   - fail           → explicitly failed
+   - smtp_error     → SMTP error (bad domain)
+   - smtp_protocol  → SMTP session failed
+   - relay_error    → relay problem
+   - email_disabled → account suspended/disabled
+   - error          → delivery failed
+
+   On API timeout or error → FAIL OPEN (allow through)
+   We never block a real user due to our own API issues.
 -------------------------------------------------------- */
 app.post('/verify-email', async (req, res) => {
   const { email } = req.body;
@@ -116,9 +133,8 @@ app.post('/verify-email', async (req, res) => {
   }
 
   try {
-    // 5 second timeout — never hang the user
     const controller = new AbortController();
-    const timeout    = setTimeout(() => controller.abort(), 5000);
+    const timeout    = setTimeout(() => controller.abort(), 8000);
 
     const url      = `https://apps.emaillistverify.com/api/verifyEmail?secret=${apiKey}&email=${encodeURIComponent(email)}`;
     const response = await fetch(url, { signal: controller.signal });
@@ -129,27 +145,30 @@ app.post('/verify-email', async (req, res) => {
 
     console.log(`[ELV] ${email} → "${status}"`);
 
-    // Only block emails confirmed to NOT exist or be throwaway
-    // Everything else (unknown, catch_all, antispam etc) = let through
-    const definitelyInvalid = [
-  'unknown_email', // confirmed doesn't exist
-  'incorrect',     // bad syntax
-  'disposable',    // throwaway email
-  'fail',          // explicitly failed
-  'dead_server',   // domain server doesn't exist
-  'unknown'        // can't verify — treat as invalid for form purposes
-];
-    const valid = !definitelyInvalid.includes(status);
+    // Whitelist approach — only explicitly allowed statuses pass
+    const allowedStatuses = [
+      'ok',              // confirmed valid
+      'catch_all',       // domain accepts all emails
+      'ok_for_all',      // valid, possible catch-all
+      'antispam_system', // real domain blocking SMTP verification
+      'accept_all'       // alias for catch_all on some responses
+    ];
+
+    const valid = allowedStatuses.includes(status);
+
+    if (!valid) {
+      console.log(`[ELV] BLOCKED ${email} — status: "${status}"`);
+    }
 
     res.json({ valid, status });
 
   } catch (err) {
     if (err.name === 'AbortError') {
-      console.warn(`[ELV] Timeout for ${email} — allowing through`);
+      console.warn(`[ELV] Timeout for ${email} — failing open (allowing through)`);
     } else {
-      console.warn('[ELV] Verification failed:', err.message);
+      console.warn('[ELV] Verification error:', err.message, '— failing open');
     }
-    // Always fail open — never block user on API error or timeout
+    // Fail open on any API/network error — never block real users due to our issues
     res.json({ valid: true, status: 'error_fallback' });
   }
 });
