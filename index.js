@@ -7,6 +7,8 @@ const { pool, initDB } = require('./db');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
+// Trust Railway's proxy so rate limiting can identify real client IPs
+app.set('trust proxy', 1);
 
 /* --------------------------------------------------------
    SECURITY — Helmet (standard HTTP security headers)
