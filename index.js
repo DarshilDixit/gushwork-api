@@ -1,13 +1,21 @@
 require('dotenv').config();
-const express = require('express');
-const cors    = require('cors');
+const express   = require('express');
+const cors      = require('cors');
+const helmet    = require('helmet');
+const rateLimit = require('express-rate-limit');
 const { pool, initDB } = require('./db');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
 /* --------------------------------------------------------
-   CORS
+   SECURITY — Helmet (standard HTTP security headers)
+   Sets X-Frame-Options, X-Content-Type-Options, HSTS etc.
+-------------------------------------------------------- */
+app.use(helmet());
+
+/* --------------------------------------------------------
+   CORS — only allow requests from your domains
 -------------------------------------------------------- */
 const allowedOrigins = (process.env.ALLOWED_ORIGIN || '')
   .split(',').map(o => o.trim()).filter(Boolean);
@@ -22,7 +30,44 @@ app.use(cors({
   allowedHeaders: ['Content-Type']
 }));
 
-app.use(express.json());
+/* --------------------------------------------------------
+   BODY PARSER — cap at 10kb to prevent large payload attacks
+-------------------------------------------------------- */
+app.use(express.json({ limit: '10kb' }));
+
+/* --------------------------------------------------------
+   RATE LIMITING
+
+   Global limiter — 100 requests per 15 mins per IP
+   Applied to all routes as baseline protection.
+
+   Strict limiter — 10 requests per hour per IP
+   Applied only to expensive endpoints that call paid APIs
+   (/verify-email → ELV credits, /enrich → Apollo credits)
+   Prevents credential draining if someone finds the URL.
+-------------------------------------------------------- */
+const globalLimiter = rateLimit({
+  windowMs:        15 * 60 * 1000, // 15 minutes
+  max:             100,
+  message:         { error: 'Too many requests — please try again later.' },
+  standardHeaders: true,
+  legacyHeaders:   false
+});
+
+const strictLimiter = rateLimit({
+  windowMs:        60 * 60 * 1000, // 1 hour
+  max:             10,
+  message:         { error: 'Rate limit exceeded — please try again later.' },
+  standardHeaders: true,
+  legacyHeaders:   false
+});
+
+// Apply global limiter to everything
+app.use(globalLimiter);
+
+// Apply strict limiter to paid API endpoints
+app.use('/verify-email', strictLimiter);
+app.use('/enrich',       strictLimiter);
 
 /* --------------------------------------------------------
    LOOPS HELPER — sendLoopsEvent
@@ -93,37 +138,13 @@ app.get('/health', (req, res) => {
 
 /* --------------------------------------------------------
    POST /verify-email
-
-   Strict spam wall using EmailListVerify.
-   URL: https://apps.emaillistverify.com (note the 's')
-   Timeout: 8 seconds max — never hangs the user
-
-   ALLOW only:
-   - ok          → confirmed valid mailbox
-   - catch_all   → domain accepts all (treat as valid)
-   - ok_for_all  → valid but may be catch-all
-   - antispam_system → anti-spam blocking verification
-                       (real domains do this — allow through)
-
-   BLOCK everything else:
-   - unknown_email  → confirmed doesn't exist
-   - unknown        → cannot verify (treat as suspicious)
-   - dead_server    → domain server doesn't exist
-   - invalid_mx     → no valid MX records (can't receive email)
-   - incorrect      → bad syntax
-   - disposable     → throwaway email
-   - fail           → explicitly failed
-   - smtp_error     → SMTP error (bad domain)
-   - smtp_protocol  → SMTP session failed
-   - relay_error    → relay problem
-   - email_disabled → account suspended/disabled
-   - error          → delivery failed
-
-   On API timeout or error → FAIL OPEN (allow through)
-   We never block a real user due to our own API issues.
+   Whitelist approach — only explicitly valid statuses pass.
+   8 second timeout. Fails open on error.
+   Rate limited to 10/hr per IP via strictLimiter above.
 -------------------------------------------------------- */
 app.post('/verify-email', async (req, res) => {
-  const { email } = req.body;
+  // Sanitize input — max 254 chars (RFC email limit), strip whitespace
+  const email = (req.body.email || '').toString().trim().slice(0, 254).toLowerCase();
   if (!email) return res.status(400).json({ valid: false, error: 'email required' });
 
   const apiKey = process.env.ELV_API_KEY;
@@ -145,30 +166,26 @@ app.post('/verify-email', async (req, res) => {
 
     console.log(`[ELV] ${email} → "${status}"`);
 
-    // Whitelist approach — only explicitly allowed statuses pass
+    // Whitelist — only confirmed valid statuses pass through
     const allowedStatuses = [
-      'ok',              // confirmed valid
+      'ok',              // confirmed valid mailbox
       'catch_all',       // domain accepts all emails
       'ok_for_all',      // valid, possible catch-all
-      'antispam_system', // real domain blocking SMTP verification
-      'accept_all'       // alias for catch_all on some responses
+      'antispam_system', // real domain blocking SMTP checks
+      'accept_all'       // alias for catch_all
     ];
 
     const valid = allowedStatuses.includes(status);
-
-    if (!valid) {
-      console.log(`[ELV] BLOCKED ${email} — status: "${status}"`);
-    }
+    if (!valid) console.log(`[ELV] BLOCKED ${email} — status: "${status}"`);
 
     res.json({ valid, status });
 
   } catch (err) {
     if (err.name === 'AbortError') {
-      console.warn(`[ELV] Timeout for ${email} — failing open (allowing through)`);
+      console.warn(`[ELV] Timeout for ${email} — failing open`);
     } else {
-      console.warn('[ELV] Verification error:', err.message, '— failing open');
+      console.warn('[ELV] Error:', err.message, '— failing open');
     }
-    // Fail open on any API/network error — never block real users due to our issues
     res.json({ valid: true, status: 'error_fallback' });
   }
 });
@@ -177,11 +194,15 @@ app.post('/verify-email', async (req, res) => {
    POST /session
 -------------------------------------------------------- */
 app.post('/session', async (req, res) => {
-  const {
-    session_id, page_url,
-    utm_source, utm_medium, utm_campaign, utm_content,
-    referrer, prefill_source
-  } = req.body;
+  // Sanitize inputs
+  const session_id    = (req.body.session_id    || '').toString().trim().slice(0, 100);
+  const page_url      = (req.body.page_url      || '').toString().trim().slice(0, 500);
+  const utm_source    = (req.body.utm_source    || '').toString().trim().slice(0, 100);
+  const utm_medium    = (req.body.utm_medium    || '').toString().trim().slice(0, 100);
+  const utm_campaign  = (req.body.utm_campaign  || '').toString().trim().slice(0, 100);
+  const utm_content   = (req.body.utm_content   || '').toString().trim().slice(0, 100);
+  const referrer      = (req.body.referrer      || '').toString().trim().slice(0, 500);
+  const prefill_source = (req.body.prefill_source || '').toString().trim().slice(0, 100);
 
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
@@ -202,15 +223,15 @@ app.post('/session', async (req, res) => {
         prefill_source = COALESCE(EXCLUDED.prefill_source, form_sessions.prefill_source)
     `, [
       session_id,
-      page_url       || null,
-      utm_source     || null,
-      utm_medium     || null,
-      utm_campaign   || null,
-      utm_content    || null,
-      referrer       || null,
+      page_url      || null,
+      utm_source    || null,
+      utm_medium    || null,
+      utm_campaign  || null,
+      utm_content   || null,
+      referrer      || null,
       prefill_source || null,
       req.headers['x-forwarded-for'] || req.socket.remoteAddress || null,
-      req.headers['user-agent'] || null
+      req.headers['user-agent']?.slice(0, 500) || null
     ]);
     res.json({ ok: true });
   } catch (err) {
@@ -222,9 +243,13 @@ app.post('/session', async (req, res) => {
 /* --------------------------------------------------------
    POST /enrich
    Personal emails skipped — no Apollo credits wasted.
+   Rate limited to 10/hr per IP via strictLimiter above.
 -------------------------------------------------------- */
 app.post('/enrich', async (req, res) => {
-  const { email, session_id } = req.body;
+  // Sanitize inputs
+  const email      = (req.body.email      || '').toString().trim().slice(0, 254).toLowerCase();
+  const session_id = (req.body.session_id || '').toString().trim().slice(0, 100);
+
   if (!email || !session_id) return res.status(400).json({ error: 'email and session_id required' });
 
   const personalDomains = [
@@ -303,21 +328,39 @@ app.post('/enrich', async (req, res) => {
    POST /partial
 -------------------------------------------------------- */
 app.post('/partial', async (req, res) => {
-  const {
-    session_id, page_url,
-    email, website, sell_to,
-    first_name, last_name, phone, company, hear_about_us,
-    utm_source, utm_medium, utm_campaign, utm_content,
-    referrer, prefill_source,
-    enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
-    disqualified, disqualified_reason,
-    step_reached
-  } = req.body;
+  // Sanitize all string inputs
+  const session_id          = (req.body.session_id          || '').toString().trim().slice(0, 100);
+  const page_url            = (req.body.page_url            || '').toString().trim().slice(0, 500);
+  const email               = (req.body.email               || '').toString().trim().slice(0, 254).toLowerCase();
+  const website             = (req.body.website             || '').toString().trim().slice(0, 500);
+  const sell_to             = (req.body.sell_to             || '').toString().trim().slice(0, 50);
+  const first_name          = (req.body.first_name          || '').toString().trim().slice(0, 100);
+  const last_name           = (req.body.last_name           || '').toString().trim().slice(0, 100);
+  const phone               = (req.body.phone               || '').toString().trim().slice(0, 30);
+  const company             = (req.body.company             || '').toString().trim().slice(0, 200);
+  const hear_about_us       = (req.body.hear_about_us       || '').toString().trim().slice(0, 200);
+  const utm_source          = (req.body.utm_source          || '').toString().trim().slice(0, 100);
+  const utm_medium          = (req.body.utm_medium          || '').toString().trim().slice(0, 100);
+  const utm_campaign        = (req.body.utm_campaign        || '').toString().trim().slice(0, 100);
+  const utm_content         = (req.body.utm_content         || '').toString().trim().slice(0, 100);
+  const referrer            = (req.body.referrer            || '').toString().trim().slice(0, 500);
+  const prefill_source      = (req.body.prefill_source      || '').toString().trim().slice(0, 100);
+  const enriched_title      = (req.body.enriched_title      || '').toString().trim().slice(0, 200);
+  const enriched_company_size = (req.body.enriched_company_size || '').toString().trim().slice(0, 50);
+  const enriched_industry   = (req.body.enriched_industry   || '').toString().trim().slice(0, 200);
+  const enriched_linkedin   = (req.body.enriched_linkedin   || '').toString().trim().slice(0, 500);
+  const disqualified        = Boolean(req.body.disqualified);
+  const disqualified_reason = (req.body.disqualified_reason || '').toString().trim().slice(0, 100);
+  const step_reached        = parseInt(req.body.step_reached) || 1;
 
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
   try {
-    const existing  = await pool.query(`SELECT id FROM leads WHERE session_id = $1 AND email = $2`, [session_id, email]);
+    // Check BEFORE upsert — match session AND email so changing email fires Loops again
+    const existing  = await pool.query(
+      'SELECT id FROM leads WHERE session_id = $1 AND email = $2',
+      [session_id, email]
+    );
     const isNewLead = existing.rows.length === 0;
 
     await pool.query(`
@@ -376,21 +419,21 @@ app.post('/partial', async (req, res) => {
       enriched_company_size || null,
       enriched_industry     || null,
       enriched_linkedin     || null,
-      disqualified          || false,
+      disqualified,
       disqualified_reason   || null,
-      step_reached          || 1
+      step_reached
     ]);
 
     await pool.query(`
       INSERT INTO step_events (session_id, step_number, action)
       VALUES ($1, $2, 'completed')
-    `, [session_id, step_reached || 1]);
+    `, [session_id, step_reached]);
 
     if (step_reached === 1 && email && !disqualified && isNewLead) {
       sendLoopsEvent(email, first_name, last_name, company, website);
-      console.log(`[/partial] ✅ Loops queued for ${email} (new session)`);
+      console.log(`[/partial] ✅ Loops queued for ${email} (new session+email)`);
     } else if (step_reached === 1 && !isNewLead) {
-      console.log(`[/partial] ⏭ Loops skipped — existing session ${session_id}`);
+      console.log(`[/partial] ⏭ Loops skipped — existing session+email ${session_id}`);
     } else if (step_reached === 1 && disqualified) {
       console.log(`[/partial] ⏭ Loops skipped — disqualified (${disqualified_reason}): ${email}`);
     }
@@ -406,15 +449,28 @@ app.post('/partial', async (req, res) => {
    POST /submit
 -------------------------------------------------------- */
 app.post('/submit', async (req, res) => {
-  const {
-    session_id, page_url,
-    email, website, sell_to,
-    first_name, last_name, phone, company, hear_about_us,
-    utm_source, utm_medium, utm_campaign, utm_content,
-    referrer, prefill_source,
-    enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
-    disqualified, disqualified_reason
-  } = req.body;
+  const session_id          = (req.body.session_id          || '').toString().trim().slice(0, 100);
+  const page_url            = (req.body.page_url            || '').toString().trim().slice(0, 500);
+  const email               = (req.body.email               || '').toString().trim().slice(0, 254).toLowerCase();
+  const website             = (req.body.website             || '').toString().trim().slice(0, 500);
+  const sell_to             = (req.body.sell_to             || '').toString().trim().slice(0, 50);
+  const first_name          = (req.body.first_name          || '').toString().trim().slice(0, 100);
+  const last_name           = (req.body.last_name           || '').toString().trim().slice(0, 100);
+  const phone               = (req.body.phone               || '').toString().trim().slice(0, 30);
+  const company             = (req.body.company             || '').toString().trim().slice(0, 200);
+  const hear_about_us       = (req.body.hear_about_us       || '').toString().trim().slice(0, 200);
+  const utm_source          = (req.body.utm_source          || '').toString().trim().slice(0, 100);
+  const utm_medium          = (req.body.utm_medium          || '').toString().trim().slice(0, 100);
+  const utm_campaign        = (req.body.utm_campaign        || '').toString().trim().slice(0, 100);
+  const utm_content         = (req.body.utm_content         || '').toString().trim().slice(0, 100);
+  const referrer            = (req.body.referrer            || '').toString().trim().slice(0, 500);
+  const prefill_source      = (req.body.prefill_source      || '').toString().trim().slice(0, 100);
+  const enriched_title      = (req.body.enriched_title      || '').toString().trim().slice(0, 200);
+  const enriched_company_size = (req.body.enriched_company_size || '').toString().trim().slice(0, 50);
+  const enriched_industry   = (req.body.enriched_industry   || '').toString().trim().slice(0, 200);
+  const enriched_linkedin   = (req.body.enriched_linkedin   || '').toString().trim().slice(0, 500);
+  const disqualified        = Boolean(req.body.disqualified);
+  const disqualified_reason = (req.body.disqualified_reason || '').toString().trim().slice(0, 100);
 
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
@@ -477,7 +533,7 @@ app.post('/submit', async (req, res) => {
       enriched_company_size || null,
       enriched_industry     || null,
       enriched_linkedin     || null,
-      disqualified          || false,
+      disqualified,
       disqualified_reason   || null
     ]);
 
@@ -494,7 +550,12 @@ app.post('/submit', async (req, res) => {
    POST /booking-confirmed
 -------------------------------------------------------- */
 app.post('/booking-confirmed', async (req, res) => {
-  const { session_id, booking_uid, start_time, end_time, event_type } = req.body;
+  const session_id  = (req.body.session_id  || '').toString().trim().slice(0, 100);
+  const booking_uid = (req.body.booking_uid || '').toString().trim().slice(0, 100);
+  const start_time  = req.body.start_time || null;
+  const end_time    = req.body.end_time   || null;
+  const event_type  = (req.body.event_type || '').toString().trim().slice(0, 100);
+
   if (!session_id || !booking_uid) {
     return res.status(400).json({ error: 'session_id and booking_uid required' });
   }
@@ -509,7 +570,7 @@ app.post('/booking-confirmed', async (req, res) => {
         booked_at   = NOW(),
         updated_at  = NOW()
       WHERE session_id = $1
-    `, [session_id, booking_uid, start_time||null, end_time||null, event_type||null]);
+    `, [session_id, booking_uid, start_time, end_time, event_type || null]);
 
     const leadRow = await pool.query(
       'SELECT email FROM leads WHERE session_id = $1',
