@@ -53,8 +53,6 @@ app.use('/enrich',       strictLimiter);
 
 /* --------------------------------------------------------
    AWS RDS POOL
-   Secondary database — fire-and-forget writes only.
-   If AWS is unreachable, nothing breaks on the main flow.
 -------------------------------------------------------- */
 let awsPool = null;
 
@@ -68,7 +66,7 @@ if (process.env.AWS_PG_HOST) {
     ssl:      { rejectUnauthorized: false },
     connectionTimeoutMillis: 5000,
     idleTimeoutMillis:       10000,
-    max:                     3   // small pool — secondary use only
+    max:                     3
   });
   console.log('[AWS] Pool configured for', process.env.AWS_PG_HOST);
 } else {
@@ -77,8 +75,6 @@ if (process.env.AWS_PG_HOST) {
 
 /* --------------------------------------------------------
    AWS HELPER — initAWSTable
-   Creates gw_form_leads table in AWS RDS if it doesn't exist.
-   Runs once on startup.
 -------------------------------------------------------- */
 async function initAWSTable() {
   if (!awsPool) return;
@@ -128,8 +124,7 @@ async function initAWSTable() {
 
 /* --------------------------------------------------------
    AWS HELPER — syncToAWS
-   Fire-and-forget upsert into gw_form_leads.
-   Never awaited in endpoints — never blocks response.
+   Fire-and-forget — never blocks response
 -------------------------------------------------------- */
 function syncToAWS(data) {
   if (!awsPool) return;
@@ -169,18 +164,18 @@ function syncToAWS(data) {
       step_reached          = GREATEST(EXCLUDED.step_reached,          gw_form_leads.step_reached),
       updated_at            = NOW()
   `, [
-    data.session_id,       data.page_url        || null,
-    data.email             || null, data.website          || null,
-    data.sell_to           || null, data.first_name       || null,
-    data.last_name         || null, data.phone            || null,
-    data.company           || null, data.hear_about_us    || null,
-    data.utm_source        || null, data.utm_medium       || null,
-    data.utm_campaign      || null, data.utm_content      || null,
-    data.referrer          || null, data.prefill_source   || null,
-    data.enriched_title    || null, data.enriched_company_size || null,
-    data.enriched_industry || null, data.enriched_linkedin || null,
-    data.disqualified      || false, data.disqualified_reason || null,
-    data.step_reached      || 1,    data.completed        || false
+    data.session_id,                   data.page_url              || null,
+    data.email             || null,    data.website               || null,
+    data.sell_to           || null,    data.first_name            || null,
+    data.last_name         || null,    data.phone                 || null,
+    data.company           || null,    data.hear_about_us         || null,
+    data.utm_source        || null,    data.utm_medium            || null,
+    data.utm_campaign      || null,    data.utm_content           || null,
+    data.referrer          || null,    data.prefill_source        || null,
+    data.enriched_title    || null,    data.enriched_company_size || null,
+    data.enriched_industry || null,    data.enriched_linkedin     || null,
+    data.disqualified      || false,   data.disqualified_reason   || null,
+    data.step_reached      || 1,       data.completed             || false
   ]).then(() => {
     console.log(`[AWS] ✅ Synced session ${data.session_id}`);
   }).catch(err => {
@@ -190,8 +185,6 @@ function syncToAWS(data) {
 
 /* --------------------------------------------------------
    AWS HELPER — syncBookingToAWS
-   Updates booking fields in gw_form_leads after Cal booking.
-   Fire-and-forget.
 -------------------------------------------------------- */
 function syncBookingToAWS(session_id, booking_uid, start_time, end_time, event_type) {
   if (!awsPool) return;
@@ -207,6 +200,140 @@ function syncBookingToAWS(session_id, booking_uid, start_time, end_time, event_t
   `, [session_id, booking_uid, start_time || null, end_time || null, event_type || null])
   .then(() => console.log(`[AWS] ✅ Booking synced for session ${session_id}`))
   .catch(err => console.warn(`[AWS] ⚠ Booking sync failed:`, err.message));
+}
+
+/* --------------------------------------------------------
+   SLACK HELPER — sendSlack
+   Fire-and-forget. Reads from SLACK_WEBHOOK_URL env var.
+-------------------------------------------------------- */
+function sendSlack(text) {
+  const webhookUrl = process.env.SLACK_WEBHOOK_URL;
+  if (!webhookUrl) {
+    console.warn('[Slack] SLACK_WEBHOOK_URL not set — skipping');
+    return;
+  }
+  fetch(webhookUrl, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ text })
+  })
+  .then(() => console.log('[Slack] ✅ Notification sent'))
+  .catch(err => console.warn('[Slack] ⚠ Failed:', err.message));
+}
+
+/* --------------------------------------------------------
+   SLACK FORMATTER — partial (step 1 complete)
+   Available at this stage: email, sell_to, UTMs, referrer, page_url
+   NOT available yet: website, name, phone, company (all step 2)
+-------------------------------------------------------- */
+function slackPartial({ email, sell_to, utm_source, utm_medium, utm_campaign, utm_content, referrer, page_url, disqualified, disqualified_reason }) {
+  const source   = [utm_source, utm_medium].filter(Boolean).join(' / ') || '—';
+  const campaign = utm_campaign || '—';
+  const content  = utm_content  || '—';
+  const ref      = referrer     || '—';
+  const page     = page_url     || '—';
+  const disqNote = disqualified ? `\n⚠️ Disqualified: ${disqualified_reason || 'unknown'}` : '';
+
+  sendSlack(
+`📥 New Lead Started${disqNote}
+
+👤 ${email || '—'}
+🎯 Sells to: ${sell_to || '—'}
+
+📊 Attribution
+├ Source: ${source}
+├ Campaign: ${campaign}
+├ Content: ${content}
+├ Referrer: ${ref}
+└ Page: ${page}`
+  );
+}
+
+/* --------------------------------------------------------
+   SLACK FORMATTER — submit (step 2 complete)
+   Available: everything — name, phone, company, website,
+   hear_about_us, sell_to, enrichment, full attribution
+-------------------------------------------------------- */
+function slackSubmit({ first_name, last_name, email, phone, company, website, sell_to, hear_about_us, enriched_title, enriched_company_size, enriched_industry, enriched_linkedin, utm_source, utm_medium, utm_campaign, utm_content, referrer, prefill_source, page_url }) {
+  const name     = [first_name, last_name].filter(Boolean).join(' ') || '—';
+  const source   = [utm_source, utm_medium].filter(Boolean).join(' / ') || '—';
+  const campaign = utm_campaign   || '—';
+  const content  = utm_content    || '—';
+  const ref      = referrer       || '—';
+  const prefill  = prefill_source || '—';
+  const page     = page_url       || '—';
+
+  const enrichmentBlock = (enriched_title || enriched_company_size || enriched_industry || enriched_linkedin)
+    ? `\n🔍 Enrichment\n├ Title: ${enriched_title || '—'}\n├ Company Size: ${enriched_company_size || '—'}\n├ Industry: ${enriched_industry || '—'}\n└ LinkedIn: ${enriched_linkedin || '—'}\n`
+    : '';
+
+  sendSlack(
+`✅ Lead Form Completed
+
+👤 ${name} — ${email || '—'}
+📞 ${phone || '—'}
+🏢 ${company || '—'}
+🌐 ${website || '—'}
+🎯 Sells to: ${sell_to || '—'}
+💬 Heard about us: ${hear_about_us || '—'}
+${enrichmentBlock}
+📊 Attribution
+├ Source: ${source}
+├ Campaign: ${campaign}
+├ Content: ${content}
+├ Referrer: ${ref}
+├ Prefill: ${prefill}
+└ Page: ${page}`
+  );
+}
+
+/* --------------------------------------------------------
+   SLACK FORMATTER — booking confirmed
+   Available: full lead from DB + booking details
+   website, hear_about_us, sell_to all available since
+   they were saved at step 2 before booking
+-------------------------------------------------------- */
+function slackBooking({ first_name, last_name, email, phone, company, website, sell_to, hear_about_us, booking_uid, start_time, event_type, utm_source, utm_medium, utm_campaign, utm_content, referrer, page_url }) {
+  const name     = [first_name, last_name].filter(Boolean).join(' ') || '—';
+  const source   = [utm_source, utm_medium].filter(Boolean).join(' / ') || '—';
+  const campaign = utm_campaign || '—';
+  const content  = utm_content  || '—';
+  const ref      = referrer     || '—';
+  const page     = page_url     || '—';
+
+  let formattedTime = '—';
+  if (start_time) {
+    try {
+      formattedTime = new Date(start_time).toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        weekday:  'short', year: 'numeric', month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit'
+      });
+    } catch { formattedTime = start_time; }
+  }
+
+  sendSlack(
+`🎉 Demo Booked!
+
+👤 ${name} — ${email || '—'}
+📞 ${phone || '—'}
+🏢 ${company || '—'}
+🌐 ${website || '—'}
+🎯 Sells to: ${sell_to || '—'}
+💬 Heard about us: ${hear_about_us || '—'}
+
+📅 Booking
+├ ID: ${booking_uid || '—'}
+├ Time: ${formattedTime}
+└ Event: ${event_type || '—'}
+
+📊 Attribution
+├ Source: ${source}
+├ Campaign: ${campaign}
+├ Content: ${content}
+├ Referrer: ${ref}
+└ Page: ${page}`
+  );
 }
 
 /* --------------------------------------------------------
@@ -315,12 +442,11 @@ app.post('/verify-email', async (req, res) => {
 });
 
 /* --------------------------------------------------------
-   POST /session  (page load tracking — Railway only)
+   POST /session  (page load — acknowledge only)
 -------------------------------------------------------- */
 app.post('/session', async (req, res) => {
   const session_id = (req.body.session_id || '').toString().trim().slice(0, 100);
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
-  // session table removed — just acknowledge silently
   res.json({ ok: true });
 });
 
@@ -345,7 +471,7 @@ app.post('/enrich', async (req, res) => {
   }
 
   try {
-    const apolloRes  = await fetch('https://api.apollo.io/api/v1/people/match', {
+    const apolloRes = await fetch('https://api.apollo.io/api/v1/people/match', {
       method: 'POST',
       headers: {
         'Content-Type':  'application/json',
@@ -407,7 +533,7 @@ app.post('/enrich', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /partial
-   Writes to Railway leads + fires AWS sync + Loops
+   Railway write + AWS sync + Slack partial + Loops
 -------------------------------------------------------- */
 app.post('/partial', async (req, res) => {
   const session_id            = (req.body.session_id          || '').toString().trim().slice(0, 100);
@@ -479,21 +605,21 @@ app.post('/partial', async (req, res) => {
         step_reached          = GREATEST(EXCLUDED.step_reached,          leads.step_reached),
         updated_at            = NOW()
     `, [
-      session_id,       page_url              || null,
-      email             || null, website               || null,
-      sell_to           || null, first_name            || null,
-      last_name         || null, phone                 || null,
-      company           || null, hear_about_us         || null,
-      utm_source        || null, utm_medium            || null,
-      utm_campaign      || null, utm_content           || null,
-      referrer          || null, prefill_source        || null,
-      enriched_title    || null, enriched_company_size || null,
-      enriched_industry || null, enriched_linkedin     || null,
-      disqualified,              disqualified_reason   || null,
+      session_id,                    page_url              || null,
+      email             || null,     website               || null,
+      sell_to           || null,     first_name            || null,
+      last_name         || null,     phone                 || null,
+      company           || null,     hear_about_us         || null,
+      utm_source        || null,     utm_medium            || null,
+      utm_campaign      || null,     utm_content           || null,
+      referrer          || null,     prefill_source        || null,
+      enriched_title    || null,     enriched_company_size || null,
+      enriched_industry || null,     enriched_linkedin     || null,
+      disqualified,                  disqualified_reason   || null,
       step_reached
     ]);
 
-    // Fire AWS sync — non-blocking
+    // AWS sync — non-blocking
     syncToAWS({
       session_id, page_url, email, website, sell_to,
       first_name, last_name, phone, company, hear_about_us,
@@ -503,6 +629,17 @@ app.post('/partial', async (req, res) => {
       disqualified, disqualified_reason, step_reached, completed: false
     });
 
+    // Slack — fire on step 1 for new leads only
+    if (step_reached === 1 && email && isNewLead) {
+      slackPartial({
+        email, sell_to,
+        utm_source, utm_medium, utm_campaign, utm_content,
+        referrer, page_url,
+        disqualified, disqualified_reason
+      });
+    }
+
+    // Loops — non-disqualified new leads only
     if (step_reached === 1 && email && !disqualified && isNewLead) {
       sendLoopsEvent(email, first_name, last_name, company, website);
       console.log(`[/partial] ✅ Loops queued for ${email} (new session+email)`);
@@ -521,7 +658,7 @@ app.post('/partial', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /submit
-   Writes to Railway leads + fires AWS sync
+   Railway write + AWS sync + Slack submit
 -------------------------------------------------------- */
 app.post('/submit', async (req, res) => {
   const session_id            = (req.body.session_id          || '').toString().trim().slice(0, 100);
@@ -588,20 +725,20 @@ app.post('/submit', async (req, res) => {
         submitted_at          = NOW(),
         updated_at            = NOW()
     `, [
-      session_id,       page_url              || null,
-      email             || null, website               || null,
-      sell_to           || null, first_name            || null,
-      last_name         || null, phone                 || null,
-      company           || null, hear_about_us         || null,
-      utm_source        || null, utm_medium            || null,
-      utm_campaign      || null, utm_content           || null,
-      referrer          || null, prefill_source        || null,
-      enriched_title    || null, enriched_company_size || null,
-      enriched_industry || null, enriched_linkedin     || null,
-      disqualified,              disqualified_reason   || null
+      session_id,                    page_url              || null,
+      email             || null,     website               || null,
+      sell_to           || null,     first_name            || null,
+      last_name         || null,     phone                 || null,
+      company           || null,     hear_about_us         || null,
+      utm_source        || null,     utm_medium            || null,
+      utm_campaign      || null,     utm_content           || null,
+      referrer          || null,     prefill_source        || null,
+      enriched_title    || null,     enriched_company_size || null,
+      enriched_industry || null,     enriched_linkedin     || null,
+      disqualified,                  disqualified_reason   || null
     ]);
 
-    // Fire AWS sync — non-blocking
+    // AWS sync — non-blocking
     syncToAWS({
       session_id, page_url, email, website, sell_to,
       first_name, last_name, phone, company, hear_about_us,
@@ -609,6 +746,15 @@ app.post('/submit', async (req, res) => {
       referrer, prefill_source,
       enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
       disqualified, disqualified_reason, step_reached: 2, completed: true
+    });
+
+    // Slack — non-blocking
+    slackSubmit({
+      first_name, last_name, email, phone, company, website,
+      sell_to, hear_about_us,
+      enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
+      utm_source, utm_medium, utm_campaign, utm_content,
+      referrer, prefill_source, page_url
     });
 
     console.log(`[/submit] ✅ Lead completed: ${email} | session: ${session_id}`);
@@ -622,7 +768,7 @@ app.post('/submit', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /booking-confirmed
-   Updates Railway + fires AWS booking sync + cancels Loops
+   Railway update + AWS sync + Loops cancel + Slack booking
 -------------------------------------------------------- */
 app.post('/booking-confirmed', async (req, res) => {
   const session_id  = (req.body.session_id  || '').toString().trim().slice(0, 100);
@@ -647,14 +793,43 @@ app.post('/booking-confirmed', async (req, res) => {
       WHERE session_id = $1
     `, [session_id, booking_uid, start_time, end_time, event_type || null]);
 
-    // Fire AWS booking sync — non-blocking
+    // AWS booking sync — non-blocking
     syncBookingToAWS(session_id, booking_uid, start_time, end_time, event_type);
 
+    // Fetch full lead for Slack + Loops
     const leadRow = await pool.query(
-      'SELECT email FROM leads WHERE session_id = $1',
+      `SELECT email, first_name, last_name, phone, company, website,
+              sell_to, hear_about_us,
+              utm_source, utm_medium, utm_campaign, utm_content,
+              referrer, page_url
+       FROM leads WHERE session_id = $1`,
       [session_id]
     );
-    const email = leadRow.rows[0]?.email;
+    const lead  = leadRow.rows[0] || {};
+    const email = lead.email;
+
+    // Slack booking notification — non-blocking
+    slackBooking({
+      first_name:    lead.first_name,
+      last_name:     lead.last_name,
+      email:         lead.email,
+      phone:         lead.phone,
+      company:       lead.company,
+      website:       lead.website,
+      sell_to:       lead.sell_to,
+      hear_about_us: lead.hear_about_us,
+      booking_uid,
+      start_time,
+      event_type,
+      utm_source:    lead.utm_source,
+      utm_medium:    lead.utm_medium,
+      utm_campaign:  lead.utm_campaign,
+      utm_content:   lead.utm_content,
+      referrer:      lead.referrer,
+      page_url:      lead.page_url
+    });
+
+    // Cancel Loops recovery sequence
     if (email) cancelLoopsSequence(email);
 
     console.log(`[/booking-confirmed] ✅ Booked: ${booking_uid} | session: ${session_id} | email: ${email}`);
