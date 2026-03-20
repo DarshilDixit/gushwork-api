@@ -3,21 +3,21 @@ const express   = require('express');
 const cors      = require('cors');
 const helmet    = require('helmet');
 const rateLimit = require('express-rate-limit');
+const { Pool }  = require('pg');
 const { pool, initDB } = require('./db');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
-// Trust Railway's proxy so rate limiting can identify real client IPs
+
 app.set('trust proxy', 1);
 
 /* --------------------------------------------------------
-   SECURITY — Helmet (standard HTTP security headers)
-   Sets X-Frame-Options, X-Content-Type-Options, HSTS etc.
+   SECURITY
 -------------------------------------------------------- */
 app.use(helmet());
 
 /* --------------------------------------------------------
-   CORS — only allow requests from your domains
+   CORS
 -------------------------------------------------------- */
 const allowedOrigins = (process.env.ALLOWED_ORIGIN || '')
   .split(',').map(o => o.trim()).filter(Boolean);
@@ -32,44 +32,182 @@ app.use(cors({
   allowedHeaders: ['Content-Type']
 }));
 
-/* --------------------------------------------------------
-   BODY PARSER — cap at 10kb to prevent large payload attacks
--------------------------------------------------------- */
 app.use(express.json({ limit: '10kb' }));
 
 /* --------------------------------------------------------
    RATE LIMITING
-
-   Global limiter — 100 requests per 15 mins per IP
-   Applied to all routes as baseline protection.
-
-   Strict limiter — 10 requests per hour per IP
-   Applied only to expensive endpoints that call paid APIs
-   (/verify-email → ELV credits, /enrich → Apollo credits)
-   Prevents credential draining if someone finds the URL.
 -------------------------------------------------------- */
 const globalLimiter = rateLimit({
-  windowMs:        15 * 60 * 1000, // 15 minutes
-  max:             100,
-  message:         { error: 'Too many requests — please try again later.' },
-  standardHeaders: true,
-  legacyHeaders:   false
+  windowMs: 15 * 60 * 1000, max: 100,
+  message: { error: 'Too many requests — please try again later.' },
+  standardHeaders: true, legacyHeaders: false
 });
-
 const strictLimiter = rateLimit({
-  windowMs:        60 * 60 * 1000, // 1 hour
-  max:             10,
-  message:         { error: 'Rate limit exceeded — please try again later.' },
-  standardHeaders: true,
-  legacyHeaders:   false
+  windowMs: 60 * 60 * 1000, max: 10,
+  message: { error: 'Rate limit exceeded — please try again later.' },
+  standardHeaders: true, legacyHeaders: false
 });
-
-// Apply global limiter to everything
 app.use(globalLimiter);
-
-// Apply strict limiter to paid API endpoints
 app.use('/verify-email', strictLimiter);
 app.use('/enrich',       strictLimiter);
+
+/* --------------------------------------------------------
+   AWS RDS POOL
+   Secondary database — fire-and-forget writes only.
+   If AWS is unreachable, nothing breaks on the main flow.
+-------------------------------------------------------- */
+let awsPool = null;
+
+if (process.env.AWS_PG_HOST) {
+  awsPool = new Pool({
+    host:     process.env.AWS_PG_HOST,
+    port:     parseInt(process.env.AWS_PG_PORT) || 5432,
+    user:     process.env.AWS_PG_USER,
+    password: process.env.AWS_PG_PASSWORD,
+    database: process.env.AWS_PG_DATABASE,
+    ssl:      { rejectUnauthorized: false },
+    connectionTimeoutMillis: 5000,
+    idleTimeoutMillis:       10000,
+    max:                     3   // small pool — secondary use only
+  });
+  console.log('[AWS] Pool configured for', process.env.AWS_PG_HOST);
+} else {
+  console.warn('[AWS] AWS_PG_HOST not set — AWS sync disabled');
+}
+
+/* --------------------------------------------------------
+   AWS HELPER — initAWSTable
+   Creates gw_form_leads table in AWS RDS if it doesn't exist.
+   Runs once on startup.
+-------------------------------------------------------- */
+async function initAWSTable() {
+  if (!awsPool) return;
+  try {
+    await awsPool.query(`
+      CREATE TABLE IF NOT EXISTS gw_form_leads (
+        id                    SERIAL PRIMARY KEY,
+        session_id            TEXT UNIQUE NOT NULL,
+        page_url              TEXT,
+        email                 TEXT,
+        website               TEXT,
+        sell_to               TEXT,
+        first_name            TEXT,
+        last_name             TEXT,
+        phone                 TEXT,
+        company               TEXT,
+        hear_about_us         TEXT,
+        utm_source            TEXT,
+        utm_medium            TEXT,
+        utm_campaign          TEXT,
+        utm_content           TEXT,
+        referrer              TEXT,
+        prefill_source        TEXT,
+        enriched_title        TEXT,
+        enriched_company_size TEXT,
+        enriched_industry     TEXT,
+        enriched_linkedin     TEXT,
+        disqualified          BOOLEAN DEFAULT FALSE,
+        disqualified_reason   TEXT,
+        step_reached          INT DEFAULT 1,
+        completed             BOOLEAN DEFAULT FALSE,
+        submitted_at          TIMESTAMPTZ,
+        booking_uid           TEXT,
+        start_time            TEXT,
+        end_time              TEXT,
+        event_type            TEXT,
+        booked_at             TIMESTAMPTZ,
+        created_at            TIMESTAMPTZ DEFAULT NOW(),
+        updated_at            TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    console.log('[AWS] gw_form_leads table ready');
+  } catch (err) {
+    console.warn('[AWS] Table init failed (non-blocking):', err.message);
+  }
+}
+
+/* --------------------------------------------------------
+   AWS HELPER — syncToAWS
+   Fire-and-forget upsert into gw_form_leads.
+   Never awaited in endpoints — never blocks response.
+-------------------------------------------------------- */
+function syncToAWS(data) {
+  if (!awsPool) return;
+  awsPool.query(`
+    INSERT INTO gw_form_leads
+      (session_id, page_url,
+       email, website, sell_to,
+       first_name, last_name, phone, company, hear_about_us,
+       utm_source, utm_medium, utm_campaign, utm_content,
+       referrer, prefill_source,
+       enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
+       disqualified, disqualified_reason,
+       step_reached, completed, updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,NOW())
+    ON CONFLICT (session_id) DO UPDATE SET
+      page_url              = COALESCE(EXCLUDED.page_url,              gw_form_leads.page_url),
+      email                 = COALESCE(EXCLUDED.email,                 gw_form_leads.email),
+      website               = COALESCE(EXCLUDED.website,               gw_form_leads.website),
+      sell_to               = COALESCE(EXCLUDED.sell_to,               gw_form_leads.sell_to),
+      first_name            = COALESCE(EXCLUDED.first_name,            gw_form_leads.first_name),
+      last_name             = COALESCE(EXCLUDED.last_name,             gw_form_leads.last_name),
+      phone                 = COALESCE(EXCLUDED.phone,                 gw_form_leads.phone),
+      company               = COALESCE(EXCLUDED.company,               gw_form_leads.company),
+      hear_about_us         = COALESCE(EXCLUDED.hear_about_us,         gw_form_leads.hear_about_us),
+      utm_source            = COALESCE(EXCLUDED.utm_source,            gw_form_leads.utm_source),
+      utm_medium            = COALESCE(EXCLUDED.utm_medium,            gw_form_leads.utm_medium),
+      utm_campaign          = COALESCE(EXCLUDED.utm_campaign,          gw_form_leads.utm_campaign),
+      utm_content           = COALESCE(EXCLUDED.utm_content,           gw_form_leads.utm_content),
+      referrer              = COALESCE(EXCLUDED.referrer,              gw_form_leads.referrer),
+      prefill_source        = COALESCE(EXCLUDED.prefill_source,        gw_form_leads.prefill_source),
+      enriched_title        = COALESCE(EXCLUDED.enriched_title,        gw_form_leads.enriched_title),
+      enriched_company_size = COALESCE(EXCLUDED.enriched_company_size, gw_form_leads.enriched_company_size),
+      enriched_industry     = COALESCE(EXCLUDED.enriched_industry,     gw_form_leads.enriched_industry),
+      enriched_linkedin     = COALESCE(EXCLUDED.enriched_linkedin,     gw_form_leads.enriched_linkedin),
+      disqualified          = COALESCE(EXCLUDED.disqualified,          gw_form_leads.disqualified),
+      disqualified_reason   = COALESCE(EXCLUDED.disqualified_reason,   gw_form_leads.disqualified_reason),
+      step_reached          = GREATEST(EXCLUDED.step_reached,          gw_form_leads.step_reached),
+      updated_at            = NOW()
+  `, [
+    data.session_id,       data.page_url        || null,
+    data.email             || null, data.website          || null,
+    data.sell_to           || null, data.first_name       || null,
+    data.last_name         || null, data.phone            || null,
+    data.company           || null, data.hear_about_us    || null,
+    data.utm_source        || null, data.utm_medium       || null,
+    data.utm_campaign      || null, data.utm_content      || null,
+    data.referrer          || null, data.prefill_source   || null,
+    data.enriched_title    || null, data.enriched_company_size || null,
+    data.enriched_industry || null, data.enriched_linkedin || null,
+    data.disqualified      || false, data.disqualified_reason || null,
+    data.step_reached      || 1,    data.completed        || false
+  ]).then(() => {
+    console.log(`[AWS] ✅ Synced session ${data.session_id}`);
+  }).catch(err => {
+    console.warn(`[AWS] ⚠ Sync failed for ${data.session_id}:`, err.message);
+  });
+}
+
+/* --------------------------------------------------------
+   AWS HELPER — syncBookingToAWS
+   Updates booking fields in gw_form_leads after Cal booking.
+   Fire-and-forget.
+-------------------------------------------------------- */
+function syncBookingToAWS(session_id, booking_uid, start_time, end_time, event_type) {
+  if (!awsPool) return;
+  awsPool.query(`
+    UPDATE gw_form_leads SET
+      booking_uid = $2,
+      start_time  = $3,
+      end_time    = $4,
+      event_type  = $5,
+      booked_at   = NOW(),
+      updated_at  = NOW()
+    WHERE session_id = $1
+  `, [session_id, booking_uid, start_time || null, end_time || null, event_type || null])
+  .then(() => console.log(`[AWS] ✅ Booking synced for session ${session_id}`))
+  .catch(err => console.warn(`[AWS] ⚠ Booking sync failed:`, err.message));
+}
 
 /* --------------------------------------------------------
    LOOPS HELPER — sendLoopsEvent
@@ -117,7 +255,6 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
 async function cancelLoopsSequence(email) {
   const apiKey = process.env.LOOPS_API_KEY;
   if (!apiKey || !email) return;
-
   try {
     const res  = await fetch('https://app.loops.so/api/v1/contacts/update', {
       method: 'PUT',
@@ -140,12 +277,8 @@ app.get('/health', (req, res) => {
 
 /* --------------------------------------------------------
    POST /verify-email
-   Whitelist approach — only explicitly valid statuses pass.
-   8 second timeout. Fails open on error.
-   Rate limited to 10/hr per IP via strictLimiter above.
 -------------------------------------------------------- */
 app.post('/verify-email', async (req, res) => {
-  // Sanitize input — max 254 chars (RFC email limit), strip whitespace
   const email = (req.body.email || '').toString().trim().slice(0, 254).toLowerCase();
   if (!email) return res.status(400).json({ valid: false, error: 'email required' });
 
@@ -158,28 +291,17 @@ app.post('/verify-email', async (req, res) => {
   try {
     const controller = new AbortController();
     const timeout    = setTimeout(() => controller.abort(), 8000);
-
-    const url      = `https://apps.emaillistverify.com/api/verifyEmail?secret=${apiKey}&email=${encodeURIComponent(email)}`;
-    const response = await fetch(url, { signal: controller.signal });
+    const url        = `https://apps.emaillistverify.com/api/verifyEmail?secret=${apiKey}&email=${encodeURIComponent(email)}`;
+    const response   = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
 
     const text   = await response.text();
     const status = text.trim().toLowerCase();
-
     console.log(`[ELV] ${email} → "${status}"`);
 
-    // Whitelist — only confirmed valid statuses pass through
-    const allowedStatuses = [
-      'ok',              // confirmed valid mailbox
-      'catch_all',       // domain accepts all emails
-      'ok_for_all',      // valid, possible catch-all
-      'antispam_system', // real domain blocking SMTP checks
-      'accept_all'       // alias for catch_all
-    ];
-
+    const allowedStatuses = ['ok', 'catch_all', 'ok_for_all', 'antispam_system', 'accept_all'];
     const valid = allowedStatuses.includes(status);
     if (!valid) console.log(`[ELV] BLOCKED ${email} — status: "${status}"`);
-
     res.json({ valid, status });
 
   } catch (err) {
@@ -193,62 +315,19 @@ app.post('/verify-email', async (req, res) => {
 });
 
 /* --------------------------------------------------------
-   POST /session
+   POST /session  (page load tracking — Railway only)
 -------------------------------------------------------- */
 app.post('/session', async (req, res) => {
-  // Sanitize inputs
-  const session_id    = (req.body.session_id    || '').toString().trim().slice(0, 100);
-  const page_url      = (req.body.page_url      || '').toString().trim().slice(0, 500);
-  const utm_source    = (req.body.utm_source    || '').toString().trim().slice(0, 100);
-  const utm_medium    = (req.body.utm_medium    || '').toString().trim().slice(0, 100);
-  const utm_campaign  = (req.body.utm_campaign  || '').toString().trim().slice(0, 100);
-  const utm_content   = (req.body.utm_content   || '').toString().trim().slice(0, 100);
-  const referrer      = (req.body.referrer      || '').toString().trim().slice(0, 500);
-  const prefill_source = (req.body.prefill_source || '').toString().trim().slice(0, 100);
-
+  const session_id = (req.body.session_id || '').toString().trim().slice(0, 100);
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
-
-  try {
-    await pool.query(`
-      INSERT INTO form_sessions
-        (session_id, page_url,
-         utm_source, utm_medium, utm_campaign, utm_content,
-         referrer, prefill_source, ip_address, user_agent)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-      ON CONFLICT (session_id) DO UPDATE SET
-        page_url       = COALESCE(EXCLUDED.page_url,       form_sessions.page_url),
-        utm_source     = COALESCE(EXCLUDED.utm_source,     form_sessions.utm_source),
-        utm_medium     = COALESCE(EXCLUDED.utm_medium,     form_sessions.utm_medium),
-        utm_campaign   = COALESCE(EXCLUDED.utm_campaign,   form_sessions.utm_campaign),
-        utm_content    = COALESCE(EXCLUDED.utm_content,    form_sessions.utm_content),
-        referrer       = COALESCE(EXCLUDED.referrer,       form_sessions.referrer),
-        prefill_source = COALESCE(EXCLUDED.prefill_source, form_sessions.prefill_source)
-    `, [
-      session_id,
-      page_url      || null,
-      utm_source    || null,
-      utm_medium    || null,
-      utm_campaign  || null,
-      utm_content   || null,
-      referrer      || null,
-      prefill_source || null,
-      req.headers['x-forwarded-for'] || req.socket.remoteAddress || null,
-      req.headers['user-agent']?.slice(0, 500) || null
-    ]);
-    res.json({ ok: true });
-  } catch (err) {
-    console.error('[/session]', err.message);
-    res.status(500).json({ error: 'Session save failed' });
-  }
+  // session table removed — just acknowledge silently
+  res.json({ ok: true });
 });
 
 /* --------------------------------------------------------
    POST /enrich
-   Personal emails skipped — no Apollo credits wasted.
-   Rate limited to 10/hr per IP via strictLimiter above.
 -------------------------------------------------------- */
 app.post('/enrich', async (req, res) => {
-  // Sanitize inputs
   const email      = (req.body.email      || '').toString().trim().slice(0, 254).toLowerCase();
   const session_id = (req.body.session_id || '').toString().trim().slice(0, 100);
 
@@ -266,7 +345,7 @@ app.post('/enrich', async (req, res) => {
   }
 
   try {
-    const apolloRes = await fetch('https://api.apollo.io/api/v1/people/match', {
+    const apolloRes  = await fetch('https://api.apollo.io/api/v1/people/match', {
       method: 'POST',
       headers: {
         'Content-Type':  'application/json',
@@ -328,37 +407,36 @@ app.post('/enrich', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /partial
+   Writes to Railway leads + fires AWS sync + Loops
 -------------------------------------------------------- */
 app.post('/partial', async (req, res) => {
-  // Sanitize all string inputs
-  const session_id          = (req.body.session_id          || '').toString().trim().slice(0, 100);
-  const page_url            = (req.body.page_url            || '').toString().trim().slice(0, 500);
-  const email               = (req.body.email               || '').toString().trim().slice(0, 254).toLowerCase();
-  const website             = (req.body.website             || '').toString().trim().slice(0, 500);
-  const sell_to             = (req.body.sell_to             || '').toString().trim().slice(0, 50);
-  const first_name          = (req.body.first_name          || '').toString().trim().slice(0, 100);
-  const last_name           = (req.body.last_name           || '').toString().trim().slice(0, 100);
-  const phone               = (req.body.phone               || '').toString().trim().slice(0, 30);
-  const company             = (req.body.company             || '').toString().trim().slice(0, 200);
-  const hear_about_us       = (req.body.hear_about_us       || '').toString().trim().slice(0, 200);
-  const utm_source          = (req.body.utm_source          || '').toString().trim().slice(0, 100);
-  const utm_medium          = (req.body.utm_medium          || '').toString().trim().slice(0, 100);
-  const utm_campaign        = (req.body.utm_campaign        || '').toString().trim().slice(0, 100);
-  const utm_content         = (req.body.utm_content         || '').toString().trim().slice(0, 100);
-  const referrer            = (req.body.referrer            || '').toString().trim().slice(0, 500);
-  const prefill_source      = (req.body.prefill_source      || '').toString().trim().slice(0, 100);
-  const enriched_title      = (req.body.enriched_title      || '').toString().trim().slice(0, 200);
+  const session_id            = (req.body.session_id          || '').toString().trim().slice(0, 100);
+  const page_url              = (req.body.page_url            || '').toString().trim().slice(0, 500);
+  const email                 = (req.body.email               || '').toString().trim().slice(0, 254).toLowerCase();
+  const website               = (req.body.website             || '').toString().trim().slice(0, 500);
+  const sell_to               = (req.body.sell_to             || '').toString().trim().slice(0, 50);
+  const first_name            = (req.body.first_name          || '').toString().trim().slice(0, 100);
+  const last_name             = (req.body.last_name           || '').toString().trim().slice(0, 100);
+  const phone                 = (req.body.phone               || '').toString().trim().slice(0, 30);
+  const company               = (req.body.company             || '').toString().trim().slice(0, 200);
+  const hear_about_us         = (req.body.hear_about_us       || '').toString().trim().slice(0, 200);
+  const utm_source            = (req.body.utm_source          || '').toString().trim().slice(0, 100);
+  const utm_medium            = (req.body.utm_medium          || '').toString().trim().slice(0, 100);
+  const utm_campaign          = (req.body.utm_campaign        || '').toString().trim().slice(0, 100);
+  const utm_content           = (req.body.utm_content         || '').toString().trim().slice(0, 100);
+  const referrer              = (req.body.referrer            || '').toString().trim().slice(0, 500);
+  const prefill_source        = (req.body.prefill_source      || '').toString().trim().slice(0, 100);
+  const enriched_title        = (req.body.enriched_title      || '').toString().trim().slice(0, 200);
   const enriched_company_size = (req.body.enriched_company_size || '').toString().trim().slice(0, 50);
-  const enriched_industry   = (req.body.enriched_industry   || '').toString().trim().slice(0, 200);
-  const enriched_linkedin   = (req.body.enriched_linkedin   || '').toString().trim().slice(0, 500);
-  const disqualified        = Boolean(req.body.disqualified);
-  const disqualified_reason = (req.body.disqualified_reason || '').toString().trim().slice(0, 100);
-  const step_reached        = parseInt(req.body.step_reached) || 1;
+  const enriched_industry     = (req.body.enriched_industry   || '').toString().trim().slice(0, 200);
+  const enriched_linkedin     = (req.body.enriched_linkedin   || '').toString().trim().slice(0, 500);
+  const disqualified          = Boolean(req.body.disqualified);
+  const disqualified_reason   = (req.body.disqualified_reason || '').toString().trim().slice(0, 100);
+  const step_reached          = parseInt(req.body.step_reached) || 1;
 
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
   try {
-    // Check BEFORE upsert — match session AND email so changing email fires Loops again
     const existing  = await pool.query(
       'SELECT id FROM leads WHERE session_id = $1 AND email = $2',
       [session_id, email]
@@ -401,35 +479,29 @@ app.post('/partial', async (req, res) => {
         step_reached          = GREATEST(EXCLUDED.step_reached,          leads.step_reached),
         updated_at            = NOW()
     `, [
-      session_id,
-      page_url              || null,
-      email                 || null,
-      website               || null,
-      sell_to               || null,
-      first_name            || null,
-      last_name             || null,
-      phone                 || null,
-      company               || null,
-      hear_about_us         || null,
-      utm_source            || null,
-      utm_medium            || null,
-      utm_campaign          || null,
-      utm_content           || null,
-      referrer              || null,
-      prefill_source        || null,
-      enriched_title        || null,
-      enriched_company_size || null,
-      enriched_industry     || null,
-      enriched_linkedin     || null,
-      disqualified,
-      disqualified_reason   || null,
+      session_id,       page_url              || null,
+      email             || null, website               || null,
+      sell_to           || null, first_name            || null,
+      last_name         || null, phone                 || null,
+      company           || null, hear_about_us         || null,
+      utm_source        || null, utm_medium            || null,
+      utm_campaign      || null, utm_content           || null,
+      referrer          || null, prefill_source        || null,
+      enriched_title    || null, enriched_company_size || null,
+      enriched_industry || null, enriched_linkedin     || null,
+      disqualified,              disqualified_reason   || null,
       step_reached
     ]);
 
-    await pool.query(`
-      INSERT INTO step_events (session_id, step_number, action)
-      VALUES ($1, $2, 'completed')
-    `, [session_id, step_reached]);
+    // Fire AWS sync — non-blocking
+    syncToAWS({
+      session_id, page_url, email, website, sell_to,
+      first_name, last_name, phone, company, hear_about_us,
+      utm_source, utm_medium, utm_campaign, utm_content,
+      referrer, prefill_source,
+      enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
+      disqualified, disqualified_reason, step_reached, completed: false
+    });
 
     if (step_reached === 1 && email && !disqualified && isNewLead) {
       sendLoopsEvent(email, first_name, last_name, company, website);
@@ -449,30 +521,31 @@ app.post('/partial', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /submit
+   Writes to Railway leads + fires AWS sync
 -------------------------------------------------------- */
 app.post('/submit', async (req, res) => {
-  const session_id          = (req.body.session_id          || '').toString().trim().slice(0, 100);
-  const page_url            = (req.body.page_url            || '').toString().trim().slice(0, 500);
-  const email               = (req.body.email               || '').toString().trim().slice(0, 254).toLowerCase();
-  const website             = (req.body.website             || '').toString().trim().slice(0, 500);
-  const sell_to             = (req.body.sell_to             || '').toString().trim().slice(0, 50);
-  const first_name          = (req.body.first_name          || '').toString().trim().slice(0, 100);
-  const last_name           = (req.body.last_name           || '').toString().trim().slice(0, 100);
-  const phone               = (req.body.phone               || '').toString().trim().slice(0, 30);
-  const company             = (req.body.company             || '').toString().trim().slice(0, 200);
-  const hear_about_us       = (req.body.hear_about_us       || '').toString().trim().slice(0, 200);
-  const utm_source          = (req.body.utm_source          || '').toString().trim().slice(0, 100);
-  const utm_medium          = (req.body.utm_medium          || '').toString().trim().slice(0, 100);
-  const utm_campaign        = (req.body.utm_campaign        || '').toString().trim().slice(0, 100);
-  const utm_content         = (req.body.utm_content         || '').toString().trim().slice(0, 100);
-  const referrer            = (req.body.referrer            || '').toString().trim().slice(0, 500);
-  const prefill_source      = (req.body.prefill_source      || '').toString().trim().slice(0, 100);
-  const enriched_title      = (req.body.enriched_title      || '').toString().trim().slice(0, 200);
+  const session_id            = (req.body.session_id          || '').toString().trim().slice(0, 100);
+  const page_url              = (req.body.page_url            || '').toString().trim().slice(0, 500);
+  const email                 = (req.body.email               || '').toString().trim().slice(0, 254).toLowerCase();
+  const website               = (req.body.website             || '').toString().trim().slice(0, 500);
+  const sell_to               = (req.body.sell_to             || '').toString().trim().slice(0, 50);
+  const first_name            = (req.body.first_name          || '').toString().trim().slice(0, 100);
+  const last_name             = (req.body.last_name           || '').toString().trim().slice(0, 100);
+  const phone                 = (req.body.phone               || '').toString().trim().slice(0, 30);
+  const company               = (req.body.company             || '').toString().trim().slice(0, 200);
+  const hear_about_us         = (req.body.hear_about_us       || '').toString().trim().slice(0, 200);
+  const utm_source            = (req.body.utm_source          || '').toString().trim().slice(0, 100);
+  const utm_medium            = (req.body.utm_medium          || '').toString().trim().slice(0, 100);
+  const utm_campaign          = (req.body.utm_campaign        || '').toString().trim().slice(0, 100);
+  const utm_content           = (req.body.utm_content         || '').toString().trim().slice(0, 100);
+  const referrer              = (req.body.referrer            || '').toString().trim().slice(0, 500);
+  const prefill_source        = (req.body.prefill_source      || '').toString().trim().slice(0, 100);
+  const enriched_title        = (req.body.enriched_title      || '').toString().trim().slice(0, 200);
   const enriched_company_size = (req.body.enriched_company_size || '').toString().trim().slice(0, 50);
-  const enriched_industry   = (req.body.enriched_industry   || '').toString().trim().slice(0, 200);
-  const enriched_linkedin   = (req.body.enriched_linkedin   || '').toString().trim().slice(0, 500);
-  const disqualified        = Boolean(req.body.disqualified);
-  const disqualified_reason = (req.body.disqualified_reason || '').toString().trim().slice(0, 100);
+  const enriched_industry     = (req.body.enriched_industry   || '').toString().trim().slice(0, 200);
+  const enriched_linkedin     = (req.body.enriched_linkedin   || '').toString().trim().slice(0, 500);
+  const disqualified          = Boolean(req.body.disqualified);
+  const disqualified_reason   = (req.body.disqualified_reason || '').toString().trim().slice(0, 100);
 
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
@@ -515,31 +588,30 @@ app.post('/submit', async (req, res) => {
         submitted_at          = NOW(),
         updated_at            = NOW()
     `, [
-      session_id,
-      page_url              || null,
-      email                 || null,
-      website               || null,
-      sell_to               || null,
-      first_name            || null,
-      last_name             || null,
-      phone                 || null,
-      company               || null,
-      hear_about_us         || null,
-      utm_source            || null,
-      utm_medium            || null,
-      utm_campaign          || null,
-      utm_content           || null,
-      referrer              || null,
-      prefill_source        || null,
-      enriched_title        || null,
-      enriched_company_size || null,
-      enriched_industry     || null,
-      enriched_linkedin     || null,
-      disqualified,
-      disqualified_reason   || null
+      session_id,       page_url              || null,
+      email             || null, website               || null,
+      sell_to           || null, first_name            || null,
+      last_name         || null, phone                 || null,
+      company           || null, hear_about_us         || null,
+      utm_source        || null, utm_medium            || null,
+      utm_campaign      || null, utm_content           || null,
+      referrer          || null, prefill_source        || null,
+      enriched_title    || null, enriched_company_size || null,
+      enriched_industry || null, enriched_linkedin     || null,
+      disqualified,              disqualified_reason   || null
     ]);
 
-    console.log(`[/submit] ✅ Lead completed: ${email} | session: ${session_id} | page: ${page_url}`);
+    // Fire AWS sync — non-blocking
+    syncToAWS({
+      session_id, page_url, email, website, sell_to,
+      first_name, last_name, phone, company, hear_about_us,
+      utm_source, utm_medium, utm_campaign, utm_content,
+      referrer, prefill_source,
+      enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
+      disqualified, disqualified_reason, step_reached: 2, completed: true
+    });
+
+    console.log(`[/submit] ✅ Lead completed: ${email} | session: ${session_id}`);
     res.json({ ok: true });
 
   } catch (err) {
@@ -550,6 +622,7 @@ app.post('/submit', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /booking-confirmed
+   Updates Railway + fires AWS booking sync + cancels Loops
 -------------------------------------------------------- */
 app.post('/booking-confirmed', async (req, res) => {
   const session_id  = (req.body.session_id  || '').toString().trim().slice(0, 100);
@@ -574,6 +647,9 @@ app.post('/booking-confirmed', async (req, res) => {
       WHERE session_id = $1
     `, [session_id, booking_uid, start_time, end_time, event_type || null]);
 
+    // Fire AWS booking sync — non-blocking
+    syncBookingToAWS(session_id, booking_uid, start_time, end_time, event_type);
+
     const leadRow = await pool.query(
       'SELECT email FROM leads WHERE session_id = $1',
       [session_id]
@@ -596,6 +672,7 @@ app.post('/booking-confirmed', async (req, res) => {
 async function start() {
   try {
     await initDB();
+    await initAWSTable();
     app.listen(PORT, () => {
       console.log(`[GW API] Running on port ${PORT}`);
       console.log(`[GW API] Allowed origins: ${allowedOrigins.join(', ')}`);
