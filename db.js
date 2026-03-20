@@ -10,22 +10,6 @@ async function initDB() {
   try {
     await client.query(`
 
-      -- Every form visit gets a session row created on page load
-      CREATE TABLE IF NOT EXISTS form_sessions (
-        id             SERIAL PRIMARY KEY,
-        session_id     UUID UNIQUE NOT NULL,
-        page_url       TEXT,
-        utm_source     TEXT,
-        utm_medium     TEXT,
-        utm_campaign   TEXT,
-        utm_content    TEXT,
-        referrer       TEXT,
-        prefill_source TEXT,
-        ip_address     TEXT,
-        user_agent     TEXT,
-        created_at     TIMESTAMPTZ DEFAULT NOW()
-      );
-
       -- One lead row per visitor, upserted as they progress through steps
       CREATE TABLE IF NOT EXISTS leads (
         id             SERIAL PRIMARY KEY,
@@ -88,35 +72,25 @@ async function initDB() {
         enriched_at           TIMESTAMPTZ DEFAULT NOW()
       );
 
-      -- Every step view/completion tracked for funnel analytics
-      CREATE TABLE IF NOT EXISTS step_events (
-        id          SERIAL PRIMARY KEY,
-        session_id  UUID NOT NULL,
-        step_number INT,
-        action      TEXT,
-        created_at  TIMESTAMPTZ DEFAULT NOW()
-      );
-
     `);
 
     // -------------------------------------------------------
     // MIGRATIONS — runs on every startup, safe due to IF NOT EXISTS
     // -------------------------------------------------------
     const migrations = [
-      `ALTER TABLE form_sessions ADD COLUMN IF NOT EXISTS page_url TEXT`,
-      `ALTER TABLE leads         ADD COLUMN IF NOT EXISTS page_url TEXT`,
-      `ALTER TABLE leads         ADD COLUMN IF NOT EXISTS utm_source TEXT`,
-      `ALTER TABLE leads         ADD COLUMN IF NOT EXISTS utm_medium TEXT`,
-      `ALTER TABLE leads         ADD COLUMN IF NOT EXISTS utm_campaign TEXT`,
-      `ALTER TABLE leads         ADD COLUMN IF NOT EXISTS utm_content TEXT`,
-      `ALTER TABLE leads         ADD COLUMN IF NOT EXISTS referrer TEXT`,
-      `ALTER TABLE leads         ADD COLUMN IF NOT EXISTS prefill_source TEXT`,
-      `ALTER TABLE leads         ADD COLUMN IF NOT EXISTS enriched_title TEXT`,
-      `ALTER TABLE leads         ADD COLUMN IF NOT EXISTS enriched_company_size TEXT`,
-      `ALTER TABLE leads         ADD COLUMN IF NOT EXISTS enriched_industry TEXT`,
-      `ALTER TABLE leads         ADD COLUMN IF NOT EXISTS enriched_linkedin TEXT`,
-      `ALTER TABLE leads         ADD COLUMN IF NOT EXISTS disqualified BOOLEAN DEFAULT FALSE`,
-      `ALTER TABLE leads         ADD COLUMN IF NOT EXISTS disqualified_reason TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS page_url TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS utm_source TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS utm_medium TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS utm_campaign TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS utm_content TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS referrer TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS prefill_source TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS enriched_title TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS enriched_company_size TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS enriched_industry TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS enriched_linkedin TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS disqualified BOOLEAN DEFAULT FALSE`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS disqualified_reason TEXT`,
     ];
 
     for (const sql of migrations) {
