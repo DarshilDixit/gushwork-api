@@ -222,11 +222,11 @@ function sendSlack(text) {
 }
 
 /* --------------------------------------------------------
-   SLACK FORMATTER — partial (step 1 complete)
-   Available at this stage: email, sell_to, UTMs, referrer, page_url
-   NOT available yet: website, name, phone, company (all step 2)
+   SLACK FORMATTER — partial (genuine drop-off, fired from cron)
+   Available: email, sell_to, UTMs, referrer, page_url
+   completed flag tells us if they reached Cal or dropped at step 1
 -------------------------------------------------------- */
-function slackPartial({ email, sell_to, utm_source, utm_medium, utm_campaign, utm_content, referrer, page_url, disqualified, disqualified_reason }) {
+function slackPartial({ email, sell_to, utm_source, utm_medium, utm_campaign, utm_content, referrer, page_url, disqualified, disqualified_reason, completed }) {
   const source   = [utm_source, utm_medium].filter(Boolean).join(' / ') || '—';
   const campaign = utm_campaign || '—';
   const content  = utm_content  || '—';
@@ -234,8 +234,14 @@ function slackPartial({ email, sell_to, utm_source, utm_medium, utm_campaign, ut
   const page     = page_url     || '—';
   const disqNote = disqualified ? `\n⚠️ Disqualified: ${disqualified_reason || 'unknown'}` : '';
 
+  // completed = true means they reached Cal but didn't book
+  // completed = false means they dropped at step 1
+  const label = completed
+    ? '⏰ Reached Cal — Did Not Book'
+    : '👻 Dropped at Step 1';
+
   sendSlack(
-`📥 New Lead Started${disqNote}
+`${label}${disqNote}
 
 👤 ${email || '—'}
 🎯 Sells to: ${sell_to || '—'}
@@ -629,25 +635,12 @@ app.post('/partial', async (req, res) => {
       disqualified, disqualified_reason, step_reached, completed: false
     });
 
-    // Slack — fire on step 1 for new leads only
-    if (step_reached === 1 && email && isNewLead) {
-      slackPartial({
-        email, sell_to,
-        utm_source, utm_medium, utm_campaign, utm_content,
-        referrer, page_url,
-        disqualified, disqualified_reason
-      });
-    }
+    // Slack partial is NOT fired here — cron handles it after 30 mins
+    // so we only notify for genuine partials who didn't complete
 
-    // Loops — non-disqualified new leads only
-    if (step_reached === 1 && email && !disqualified && isNewLead) {
-      sendLoopsEvent(email, first_name, last_name, company, website);
-      console.log(`[/partial] ✅ Loops queued for ${email} (new session+email)`);
-    } else if (step_reached === 1 && !isNewLead) {
-      console.log(`[/partial] ⏭ Loops skipped — existing session+email ${session_id}`);
-    } else if (step_reached === 1 && disqualified) {
-      console.log(`[/partial] ⏭ Loops skipped — disqualified (${disqualified_reason}): ${email}`);
-    }
+    // Loops is NOT fired here — cron job handles it after 30 mins
+    // Only non-bookers who are still partial after 30 mins get pushed to Loops
+    console.log(`[/partial] ✅ Saved session ${session_id} | step ${step_reached} | email ${email}`);
 
     res.json({ ok: true });
   } catch (err) {
@@ -757,6 +750,7 @@ app.post('/submit', async (req, res) => {
       referrer, prefill_source, page_url
     });
 
+    // Loops is NOT fired here — cron job handles it
     console.log(`[/submit] ✅ Lead completed: ${email} | session: ${session_id}`);
     res.json({ ok: true });
 
@@ -838,6 +832,79 @@ app.post('/booking-confirmed', async (req, res) => {
   } catch (err) {
     console.error('[/booking-confirmed]', err.message);
     res.status(500).json({ error: 'Booking update failed' });
+  }
+});
+
+/* --------------------------------------------------------
+   POST /cron/send-partials
+   Called by Railway cron every 30 mins.
+   Finds leads who:
+     - filled the form (have an email)
+     - are NOT disqualified (waitlist)
+     - have NOT booked a call (booking_uid IS NULL)
+     - were created more than 30 mins ago
+     - haven't been sent to Loops yet (loops_sent = false)
+   For each: sends Slack partial notification + pushes to Loops
+   Covers both step 1 only AND step 1+2 without booking.
+-------------------------------------------------------- */
+app.post('/cron/send-partials', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT session_id, email, first_name, last_name,
+             company, website, sell_to,
+             utm_source, utm_medium, utm_campaign, utm_content,
+             referrer, page_url,
+             disqualified, disqualified_reason,
+             completed
+      FROM leads
+      WHERE email IS NOT NULL
+        AND disqualified = false
+        AND booking_uid IS NULL
+        AND loops_sent = false
+        AND created_at < NOW() - INTERVAL '30 minutes'
+    `);
+
+    const leads = result.rows;
+    console.log(`[Cron] Found ${leads.length} leads to process`);
+
+    for (const lead of leads) {
+      // Send Slack partial notification
+      slackPartial({
+        email:               lead.email,
+        sell_to:             lead.sell_to,
+        utm_source:          lead.utm_source,
+        utm_medium:          lead.utm_medium,
+        utm_campaign:        lead.utm_campaign,
+        utm_content:         lead.utm_content,
+        referrer:            lead.referrer,
+        page_url:            lead.page_url,
+        disqualified:        lead.disqualified,
+        disqualified_reason: lead.disqualified_reason,
+        completed:           lead.completed
+      });
+
+      // Push to Loops
+      await sendLoopsEvent(
+        lead.email,
+        lead.first_name,
+        lead.last_name,
+        lead.company,
+        lead.website
+      );
+
+      // Mark as sent so it never fires again
+      await pool.query(
+        'UPDATE leads SET loops_sent = true WHERE session_id = $1',
+        [lead.session_id]
+      );
+
+      console.log(`[Cron] ✅ Processed partial for ${lead.email} | completed: ${lead.completed}`);
+    }
+
+    res.json({ ok: true, processed: leads.length });
+  } catch (err) {
+    console.error('[Cron] Error:', err.message);
+    res.status(500).json({ error: 'Cron failed' });
   }
 });
 
