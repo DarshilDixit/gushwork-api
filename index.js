@@ -236,7 +236,8 @@ function syncBookingToAWS(session_id, booking_uid, start_time, end_time, event_t
 
 /* --------------------------------------------------------
    SLACK HELPER — sendSlack
-   Sends Block Kit payload. Fire-and-forget.
+   Accepts either blocks array or plain text string.
+   Fire-and-forget.
 -------------------------------------------------------- */
 function sendSlack(blocks, fallbackText) {
   const webhookUrl = process.env.SLACK_WEBHOOK_URL;
@@ -244,12 +245,20 @@ function sendSlack(blocks, fallbackText) {
     console.warn('[Slack] SLACK_WEBHOOK_URL not set — skipping');
     return;
   }
+
+  // Filter out any null blocks before sending
+  const cleanBlocks = Array.isArray(blocks) ? blocks.filter(Boolean) : null;
+
+  const payload = cleanBlocks && cleanBlocks.length > 0
+    ? { text: fallbackText || 'Gushwork notification', blocks: cleanBlocks }
+    : { text: fallbackText || 'Gushwork notification' };
+
   fetch(webhookUrl, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ text: fallbackText, blocks })
+    body:    JSON.stringify(payload)
   })
-  .then(() => console.log('[Slack] ✅ Notification sent'))
+  .then(r => r.text().then(t => console.log(`[Slack] ✅ Sent — status: ${r.status} | response: ${t.substring(0, 50)}`)))
   .catch(err => console.warn('[Slack] ⚠ Failed:', err.message));
 }
 
