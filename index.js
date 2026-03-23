@@ -75,10 +75,13 @@ if (process.env.AWS_PG_HOST) {
 
 /* --------------------------------------------------------
    AWS HELPER — initAWSTable
+   Creates table if not exists + runs migrations on every
+   startup so new columns are always added automatically.
 -------------------------------------------------------- */
 async function initAWSTable() {
   if (!awsPool) return;
   try {
+    // Create table if it doesn't exist
     await awsPool.query(`
       CREATE TABLE IF NOT EXISTS gw_form_leads (
         id                    SERIAL PRIMARY KEY,
@@ -112,10 +115,34 @@ async function initAWSTable() {
         end_time              TEXT,
         event_type            TEXT,
         booked_at             TIMESTAMPTZ,
+        loops_sent            BOOLEAN DEFAULT FALSE,
         created_at            TIMESTAMPTZ DEFAULT NOW(),
         updated_at            TIMESTAMPTZ DEFAULT NOW()
       )
     `);
+
+    // Migrations — safe to run every time, adds missing columns
+    const migrations = [
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS disqualified BOOLEAN DEFAULT FALSE`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS disqualified_reason TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS booking_uid TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS start_time TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS end_time TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS event_type TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS booked_at TIMESTAMPTZ`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS page_url TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_title TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_company_size TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_industry TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_linkedin TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS loops_sent BOOLEAN DEFAULT FALSE`,
+    ];
+
+    for (const sql of migrations) {
+      await awsPool.query(sql);
+    }
+
     console.log('[AWS] gw_form_leads table ready');
   } catch (err) {
     console.warn('[AWS] Table init failed (non-blocking):', err.message);
@@ -137,8 +164,8 @@ function syncToAWS(data) {
        referrer, prefill_source,
        enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
        disqualified, disqualified_reason,
-       step_reached, completed, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,NOW())
+       step_reached, completed, submitted_at, loops_sent, updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,NOW())
     ON CONFLICT (session_id) DO UPDATE SET
       page_url              = COALESCE(EXCLUDED.page_url,              gw_form_leads.page_url),
       email                 = COALESCE(EXCLUDED.email,                 gw_form_leads.email),
@@ -162,6 +189,9 @@ function syncToAWS(data) {
       disqualified          = COALESCE(EXCLUDED.disqualified,          gw_form_leads.disqualified),
       disqualified_reason   = COALESCE(EXCLUDED.disqualified_reason,   gw_form_leads.disqualified_reason),
       step_reached          = GREATEST(EXCLUDED.step_reached,          gw_form_leads.step_reached),
+      completed             = COALESCE(EXCLUDED.completed,             gw_form_leads.completed),
+      submitted_at          = COALESCE(EXCLUDED.submitted_at,          gw_form_leads.submitted_at),
+      loops_sent            = COALESCE(EXCLUDED.loops_sent,            gw_form_leads.loops_sent),
       updated_at            = NOW()
   `, [
     data.session_id,                   data.page_url              || null,
@@ -175,7 +205,8 @@ function syncToAWS(data) {
     data.enriched_title    || null,    data.enriched_company_size || null,
     data.enriched_industry || null,    data.enriched_linkedin     || null,
     data.disqualified      || false,   data.disqualified_reason   || null,
-    data.step_reached      || 1,       data.completed             || false
+    data.step_reached      || 1,       data.completed             || false,
+    data.completed ? new Date() : null, data.loops_sent           || false
   ]).then(() => {
     console.log(`[AWS] ✅ Synced session ${data.session_id}`);
   }).catch(err => {
@@ -190,12 +221,13 @@ function syncBookingToAWS(session_id, booking_uid, start_time, end_time, event_t
   if (!awsPool) return;
   awsPool.query(`
     UPDATE gw_form_leads SET
-      booking_uid = $2,
-      start_time  = $3,
-      end_time    = $4,
-      event_type  = $5,
-      booked_at   = NOW(),
-      updated_at  = NOW()
+      booking_uid  = $2,
+      start_time   = $3,
+      end_time     = $4,
+      event_type   = $5,
+      booked_at    = NOW(),
+      completed    = true,
+      updated_at   = NOW()
     WHERE session_id = $1
   `, [session_id, booking_uid, start_time || null, end_time || null, event_type || null])
   .then(() => console.log(`[AWS] ✅ Booking synced for session ${session_id}`))
@@ -892,11 +924,19 @@ app.post('/cron/send-partials', async (req, res) => {
         lead.website
       );
 
-      // Mark as sent so it never fires again
+      // Mark as sent in Railway
       await pool.query(
         'UPDATE leads SET loops_sent = true WHERE session_id = $1',
         [lead.session_id]
       );
+
+      // Sync loops_sent to AWS as well
+      if (awsPool) {
+        awsPool.query(
+          'UPDATE gw_form_leads SET loops_sent = true, updated_at = NOW() WHERE session_id = $1',
+          [lead.session_id]
+        ).catch(err => console.warn('[AWS] ⚠ loops_sent sync failed:', err.message));
+      }
 
       console.log(`[Cron] ✅ Processed partial for ${lead.email} | completed: ${lead.completed}`);
     }
