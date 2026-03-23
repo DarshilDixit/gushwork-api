@@ -236,9 +236,9 @@ function syncBookingToAWS(session_id, booking_uid, start_time, end_time, event_t
 
 /* --------------------------------------------------------
    SLACK HELPER — sendSlack
-   Fire-and-forget. Reads from SLACK_WEBHOOK_URL env var.
+   Sends Block Kit payload. Fire-and-forget.
 -------------------------------------------------------- */
-function sendSlack(text) {
+function sendSlack(blocks, fallbackText) {
   const webhookUrl = process.env.SLACK_WEBHOOK_URL;
   if (!webhookUrl) {
     console.warn('[Slack] SLACK_WEBHOOK_URL not set — skipping');
@@ -247,131 +247,158 @@ function sendSlack(text) {
   fetch(webhookUrl, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ text })
+    body:    JSON.stringify({ text: fallbackText, blocks })
   })
   .then(() => console.log('[Slack] ✅ Notification sent'))
   .catch(err => console.warn('[Slack] ⚠ Failed:', err.message));
 }
 
 /* --------------------------------------------------------
-   SLACK FORMATTER — partial (genuine drop-off, fired from cron)
-   Available: email, sell_to, UTMs, referrer, page_url
-   completed flag tells us if they reached Cal or dropped at step 1
+   SLACK BLOCK HELPERS
 -------------------------------------------------------- */
-function slackPartial({ email, sell_to, utm_source, utm_medium, utm_campaign, utm_content, referrer, page_url, disqualified, disqualified_reason, completed }) {
-  const source   = [utm_source, utm_medium].filter(Boolean).join(' / ') || '—';
-  const campaign = utm_campaign || '—';
-  const content  = utm_content  || '—';
-  const ref      = referrer     || '—';
-  const page     = page_url     || '—';
-  const disqNote = disqualified ? `\n⚠️ Disqualified: ${disqualified_reason || 'unknown'}` : '';
+function bHeader(text) {
+  return { type: 'header', text: { type: 'plain_text', text, emoji: true } };
+}
+function bSection(text) {
+  return { type: 'section', text: { type: 'mrkdwn', text } };
+}
+function bFields(fields) {
+  // fields = array of { label, value } — only includes ones with a value
+  const filtered = fields.filter(f => f.value);
+  if (!filtered.length) return null;
+  return {
+    type: 'section',
+    fields: filtered.map(f => ({
+      type: 'mrkdwn',
+      text: `*${f.label}*\n${f.value}`
+    }))
+  };
+}
+function bDivider() {
+  return { type: 'divider' };
+}
+function bContext(text) {
+  return { type: 'context', elements: [{ type: 'mrkdwn', text }] };
+}
 
-  // completed = true means they reached Cal but didn't book
-  // completed = false means they dropped at step 1
-  const label = completed
-    ? '⏰ Reached Cal — Did Not Book'
-    : '👻 Dropped at Step 1';
+/* --------------------------------------------------------
+   SLACK FORMATTER — partial (fired from cron after 30 mins)
+   Only shows fields that have data.
+   completed = true → reached Cal, didn't book
+   completed = false → dropped at step 1
+-------------------------------------------------------- */
+function slackPartial({ email, sell_to, utm_source, utm_medium, utm_campaign, utm_content, referrer, page_url, disqualified, disqualified_reason, completed, enriched_title, enriched_company_size, enriched_industry, enriched_linkedin, company, website }) {
+  const label = completed ? '⏰ Reached Cal — Did Not Book' : '👻 Dropped at Step 1';
+  const disqNote = disqualified ? ` • ⚠️ ${disqualified_reason || 'Disqualified'}` : '';
 
-  sendSlack(
-`${label}${disqNote}
+  const blocks = [];
 
-👤 ${email || '—'}
-🎯 Sells to: ${sell_to || '—'}
+  // Header
+  blocks.push(bHeader(label + disqNote));
+  blocks.push(bDivider());
 
-📊 Attribution
-├ Source: ${source}
-├ Campaign: ${campaign}
-├ Content: ${content}
-├ Referrer: ${ref}
-└ Page: ${page}`
-  );
+  // Lead info
+  const leadFields = bFields([
+    { label: '📧 Email',    value: email },
+    { label: '🎯 Sells to', value: sell_to },
+    { label: '🏢 Company',  value: company },
+    { label: '🌐 Website',  value: website },
+  ]);
+  if (leadFields) blocks.push(leadFields);
+
+  // Enrichment — only if Apollo has data
+  const hasEnrichment = enriched_title || enriched_company_size || enriched_industry || enriched_linkedin;
+  if (hasEnrichment) {
+    blocks.push(bDivider());
+    blocks.push(bSection('*🔍 Enrichment*'));
+    const enrichFields = bFields([
+      { label: 'Title',        value: enriched_title },
+      { label: 'Company Size', value: enriched_company_size },
+      { label: 'Industry',     value: enriched_industry },
+      { label: 'LinkedIn',     value: enriched_linkedin },
+    ]);
+    if (enrichFields) blocks.push(enrichFields);
+  }
+
+  // Attribution — only if any UTM/referrer data exists
+  const hasAttribution = utm_source || utm_medium || utm_campaign || utm_content || referrer;
+  if (hasAttribution) {
+    blocks.push(bDivider());
+    blocks.push(bSection('*📊 Attribution*'));
+    const source = [utm_source, utm_medium].filter(Boolean).join(' / ');
+    const attrFields = bFields([
+      { label: 'Source',   value: source },
+      { label: 'Campaign', value: utm_campaign },
+      { label: 'Content',  value: utm_content },
+      { label: 'Referrer', value: referrer },
+    ]);
+    if (attrFields) blocks.push(attrFields);
+  }
+
+  // Page URL as context
+  if (page_url) blocks.push(bContext(`📄 ${page_url}`));
+
+  sendSlack(blocks, label);
 }
 
 /* --------------------------------------------------------
    SLACK FORMATTER — submit (step 2 complete)
-   Available: everything — name, phone, company, website,
-   hear_about_us, sell_to, enrichment, full attribution
+   Only shows fields that have data.
 -------------------------------------------------------- */
 function slackSubmit({ first_name, last_name, email, phone, company, website, sell_to, hear_about_us, enriched_title, enriched_company_size, enriched_industry, enriched_linkedin, utm_source, utm_medium, utm_campaign, utm_content, referrer, prefill_source, page_url }) {
-  const name     = [first_name, last_name].filter(Boolean).join(' ') || '—';
-  const source   = [utm_source, utm_medium].filter(Boolean).join(' / ') || '—';
-  const campaign = utm_campaign   || '—';
-  const content  = utm_content    || '—';
-  const ref      = referrer       || '—';
-  const prefill  = prefill_source || '—';
-  const page     = page_url       || '—';
+  const name = [first_name, last_name].filter(Boolean).join(' ');
+  const blocks = [];
 
-  const enrichmentBlock = (enriched_title || enriched_company_size || enriched_industry || enriched_linkedin)
-    ? `\n🔍 Enrichment\n├ Title: ${enriched_title || '—'}\n├ Company Size: ${enriched_company_size || '—'}\n├ Industry: ${enriched_industry || '—'}\n└ LinkedIn: ${enriched_linkedin || '—'}\n`
-    : '';
+  // Header
+  blocks.push(bHeader('✅ Lead Form Completed'));
+  blocks.push(bDivider());
 
-  sendSlack(
-`✅ Lead Form Completed
+  // Lead info
+  const leadFields = bFields([
+    { label: '👤 Name',           value: name },
+    { label: '📧 Email',          value: email },
+    { label: '📞 Phone',          value: phone },
+    { label: '🏢 Company',        value: company },
+    { label: '🌐 Website',        value: website },
+    { label: '🎯 Sells to',       value: sell_to },
+    { label: '💬 Heard about us', value: hear_about_us },
+  ]);
+  if (leadFields) blocks.push(leadFields);
 
-👤 ${name} — ${email || '—'}
-📞 ${phone || '—'}
-🏢 ${company || '—'}
-🌐 ${website || '—'}
-🎯 Sells to: ${sell_to || '—'}
-💬 Heard about us: ${hear_about_us || '—'}
-${enrichmentBlock}
-📊 Attribution
-├ Source: ${source}
-├ Campaign: ${campaign}
-├ Content: ${content}
-├ Referrer: ${ref}
-├ Prefill: ${prefill}
-└ Page: ${page}`
-  );
-}
-
-/* --------------------------------------------------------
-   SLACK FORMATTER — booking confirmed
-   Available: full lead from DB + booking details
-   website, hear_about_us, sell_to all available since
-   they were saved at step 2 before booking
--------------------------------------------------------- */
-function slackBooking({ first_name, last_name, email, phone, company, website, sell_to, hear_about_us, booking_uid, start_time, event_type, utm_source, utm_medium, utm_campaign, utm_content, referrer, page_url }) {
-  const name     = [first_name, last_name].filter(Boolean).join(' ') || '—';
-  const source   = [utm_source, utm_medium].filter(Boolean).join(' / ') || '—';
-  const campaign = utm_campaign || '—';
-  const content  = utm_content  || '—';
-  const ref      = referrer     || '—';
-  const page     = page_url     || '—';
-
-  let formattedTime = '—';
-  if (start_time) {
-    try {
-      formattedTime = new Date(start_time).toLocaleString('en-IN', {
-        timeZone: 'Asia/Kolkata',
-        weekday:  'short', year: 'numeric', month: 'short', day: 'numeric',
-        hour: '2-digit', minute: '2-digit'
-      });
-    } catch { formattedTime = start_time; }
+  // Enrichment — only if Apollo has data
+  const hasEnrichment = enriched_title || enriched_company_size || enriched_industry || enriched_linkedin;
+  if (hasEnrichment) {
+    blocks.push(bDivider());
+    blocks.push(bSection('*🔍 Enrichment*'));
+    const enrichFields = bFields([
+      { label: 'Title',        value: enriched_title },
+      { label: 'Company Size', value: enriched_company_size },
+      { label: 'Industry',     value: enriched_industry },
+      { label: 'LinkedIn',     value: enriched_linkedin },
+    ]);
+    if (enrichFields) blocks.push(enrichFields);
   }
 
-  sendSlack(
-`🎉 Demo Booked!
+  // Attribution — only if any data exists
+  const hasAttribution = utm_source || utm_medium || utm_campaign || utm_content || referrer || prefill_source;
+  if (hasAttribution) {
+    blocks.push(bDivider());
+    blocks.push(bSection('*📊 Attribution*'));
+    const source = [utm_source, utm_medium].filter(Boolean).join(' / ');
+    const attrFields = bFields([
+      { label: 'Source',   value: source },
+      { label: 'Campaign', value: utm_campaign },
+      { label: 'Content',  value: utm_content },
+      { label: 'Referrer', value: referrer },
+      { label: 'Prefill',  value: prefill_source },
+    ]);
+    if (attrFields) blocks.push(attrFields);
+  }
 
-👤 ${name} — ${email || '—'}
-📞 ${phone || '—'}
-🏢 ${company || '—'}
-🌐 ${website || '—'}
-🎯 Sells to: ${sell_to || '—'}
-💬 Heard about us: ${hear_about_us || '—'}
+  // Page URL as context
+  if (page_url) blocks.push(bContext(`📄 ${page_url}`));
 
-📅 Booking
-├ ID: ${booking_uid || '—'}
-├ Time: ${formattedTime}
-└ Event: ${event_type || '—'}
-
-📊 Attribution
-├ Source: ${source}
-├ Campaign: ${campaign}
-├ Content: ${content}
-├ Referrer: ${ref}
-└ Page: ${page}`
-  );
+  sendSlack(blocks, `✅ Lead Form Completed — ${email}`);
 }
 
 /* --------------------------------------------------------
@@ -822,38 +849,15 @@ app.post('/booking-confirmed', async (req, res) => {
     // AWS booking sync — non-blocking
     syncBookingToAWS(session_id, booking_uid, start_time, end_time, event_type);
 
-    // Fetch full lead for Slack + Loops
+    // Fetch email for Loops cancellation
     const leadRow = await pool.query(
-      `SELECT email, first_name, last_name, phone, company, website,
-              sell_to, hear_about_us,
-              utm_source, utm_medium, utm_campaign, utm_content,
-              referrer, page_url
-       FROM leads WHERE session_id = $1`,
+      `SELECT email FROM leads WHERE session_id = $1`,
       [session_id]
     );
     const lead  = leadRow.rows[0] || {};
     const email = lead.email;
 
-    // Slack booking notification — non-blocking
-    slackBooking({
-      first_name:    lead.first_name,
-      last_name:     lead.last_name,
-      email:         lead.email,
-      phone:         lead.phone,
-      company:       lead.company,
-      website:       lead.website,
-      sell_to:       lead.sell_to,
-      hear_about_us: lead.hear_about_us,
-      booking_uid,
-      start_time,
-      event_type,
-      utm_source:    lead.utm_source,
-      utm_medium:    lead.utm_medium,
-      utm_campaign:  lead.utm_campaign,
-      utm_content:   lead.utm_content,
-      referrer:      lead.referrer,
-      page_url:      lead.page_url
-    });
+    // No Slack here — Cal sends its own booking confirmation notification
 
     // Cancel Loops recovery sequence
     if (email) cancelLoopsSequence(email);
@@ -887,7 +891,9 @@ app.post('/cron/send-partials', async (req, res) => {
              utm_source, utm_medium, utm_campaign, utm_content,
              referrer, page_url,
              disqualified, disqualified_reason,
-             completed
+             completed,
+             enriched_title, enriched_company_size,
+             enriched_industry, enriched_linkedin
       FROM leads
       WHERE email IS NOT NULL
         AND disqualified = false
@@ -912,7 +918,13 @@ app.post('/cron/send-partials', async (req, res) => {
         page_url:            lead.page_url,
         disqualified:        lead.disqualified,
         disqualified_reason: lead.disqualified_reason,
-        completed:           lead.completed
+        completed:           lead.completed,
+        company:             lead.company,
+        website:             lead.website,
+        enriched_title:        lead.enriched_title,
+        enriched_company_size: lead.enriched_company_size,
+        enriched_industry:     lead.enriched_industry,
+        enriched_linkedin:     lead.enriched_linkedin
       });
 
       // Push to Loops
