@@ -1,5 +1,5 @@
 /* ==========================================================
-   GUSHWORK — MULTI-STEP FORM  v3.2
+   GUSHWORK — MULTI-STEP FORM  v3.3
    Hosted on GitHub — reference via jsDelivr CDN
    https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@main/gushwork-form.js
 
@@ -7,6 +7,9 @@
    - Styles (error messages + step 3 full width + Cal embed)
    - Phone input (Memberstack intl-tel-input)
    - Form logic (validation, enrichment, ELV, Cal, Railway)
+
+   v3.3 changes:
+   - HubSpot synthetic form submit fired on Cal booking
 ========================================================== */
 
 /* --------------------------------------------------------
@@ -635,6 +638,14 @@
         const data = e?.detail?.data || {};
         if (!data.uid) return;
         console.log('[GW] ✅ Booking confirmed:', data.uid);
+
+        // Fire synthetic form submit for HubSpot tracking
+        const form = document.querySelector('form');
+        if (form) {
+          form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+          console.log('[GW] HubSpot synthetic submit fired');
+        }
+
         if (isRailwayReady()) {
           await fetch(`${RAILWAY_API_URL}/booking-confirmed`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
