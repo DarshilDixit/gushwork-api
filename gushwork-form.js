@@ -1,5 +1,5 @@
 /* ==========================================================
-   GUSHWORK — MULTI-STEP FORM  v3.3
+   GUSHWORK — MULTI-STEP FORM  v3.4
    Hosted on GitHub — reference via jsDelivr CDN
    https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@main/gushwork-form.js
 
@@ -8,7 +8,8 @@
    - Phone input (Memberstack intl-tel-input)
    - Form logic (validation, enrichment, ELV, Cal, Railway)
 
-   v3.3 changes:
+   v3.4 changes:
+   - Double submit fix — _submitting debounce added to all step handlers
    - HubSpot synthetic form submit fired on Cal booking
 ========================================================== */
 
@@ -72,14 +73,12 @@
    Memberstack intl-tel-input v17
 -------------------------------------------------------- */
 (function injectPhoneDeps() {
-  // CSS
   const link = document.createElement('link');
   link.rel  = 'stylesheet';
   link.type = 'text/css';
   link.href = 'https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/css/intlTelInput.min.css';
   document.head.appendChild(link);
 
-  // Load scripts in order: jQuery → intlTelInput → utils → init phone
   function loadScript(src, onload) {
     const s = document.createElement('script');
     s.src = src;
@@ -104,7 +103,7 @@
         preferredCountries: preferredCountries,
         utilsScript: 'https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/utils.js'
       });
-      input._iti = iti; // store instance for form JS access
+      input._iti = iti;
 
       $.get('https://ipinfo.io', function(response) {
         iti.setCountry(response.country);
@@ -171,6 +170,7 @@
 
   let _enrichedForEmail  = '';
   let _lastVerifiedEmail = '';
+  let _submitting        = false; // global debounce flag — prevents double submit on any step
 
   /* =======================================================
      SECTION 1 — INITIALISATION
@@ -640,6 +640,19 @@
         console.log('[GW] ✅ Booking confirmed:', data.uid);
 
         // Fire synthetic form submit for HubSpot tracking
+        // Populate fields first so HubSpot sees real values
+        const hsEmail = document.getElementById('email');
+        const hsFirst = document.getElementById('first-name');
+        const hsLast  = document.getElementById('last-name');
+        const hsPhone = document.getElementById('phone');
+        const hsCo    = document.getElementById('company');
+        const hsWeb   = document.getElementById('website');
+        if (hsEmail) hsEmail.value = formState.email;
+        if (hsFirst) hsFirst.value = formState.first_name;
+        if (hsLast)  hsLast.value  = formState.last_name;
+        if (hsPhone) hsPhone.value = formState.phone;
+        if (hsCo)    hsCo.value    = formState.company;
+        if (hsWeb)   hsWeb.value   = formState.website;
         const form = document.querySelector('form');
         if (form) {
           form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
@@ -664,81 +677,99 @@
 
   /* =======================================================
      SECTION 9 — STEP HANDLERS
+     v3.4: _submitting flag on ALL handlers prevents any
+     double submission from double clicks or Enter key.
   ======================================================= */
 
   async function handleStep1Next() {
+    if (_submitting) return;
     const { valid, sellTo } = validateStep1();
     if (!valid) return;
 
     const email = getField('email');
     if (email !== _enrichedForEmail) clearEnrichedFields();
 
+    _submitting = true;
     setLoading('step-1-next', true, 'Verifying...');
 
-    const isVerified = await verifyEmail(email);
-    if (!isVerified) {
-      setLoading('step-1-next', false);
-      showError('email-error', 'This email address appears to be invalid. Please use a real email.');
-      return;
-    }
+    try {
+      const isVerified = await verifyEmail(email);
+      if (!isVerified) {
+        showError('email-error', 'This email address appears to be invalid. Please use a real email.');
+        return;
+      }
 
-    hideError('email-error');
-    formState.email   = email;
-    formState.sell_to = sellTo;
-    localStorage.setItem('gw_email', formState.email);
+      hideError('email-error');
+      formState.email   = email;
+      formState.sell_to = sellTo;
+      localStorage.setItem('gw_email', formState.email);
 
-    triggerEnrichment(formState.email);
+      triggerEnrichment(formState.email);
 
-    if (sellTo === 'B2C' || sellTo === 'Mixed') {
+      if (sellTo === 'B2C' || sellTo === 'Mixed') {
+        showStep('step-disqualified');
+      } else {
+        await savePartial(1);
+        showStep('step-2');
+      }
+    } finally {
+      _submitting = false;
       setLoading('step-1-next', false);
-      showStep('step-disqualified');
-    } else {
-      await savePartial(1);
-      setLoading('step-1-next', false);
-      showStep('step-2');
     }
   }
 
   async function handleDisqualifiedNext() {
+    if (_submitting) return;
     const { valid, choice } = validateDisqualified();
     if (!valid) return;
 
-    formState.disqualified_reason = choice;
+    _submitting = true;
+    setLoading('step-disqualified-next', true);
 
-    if (choice === 'waitlist') {
-      formState.disqualified = true;
-      setLoading('step-disqualified-next', true);
-      await savePartial(1);
+    try {
+      formState.disqualified_reason = choice;
+
+      if (choice === 'waitlist') {
+        formState.disqualified = true;
+        await savePartial(1);
+        showStep('step-disqualified-thanks');
+      } else if (choice === 'b2b') {
+        formState.disqualified = false;
+        formState.sell_to = 'B2B (clarified from ' + formState.sell_to + ')';
+        await savePartial(1);
+        showStep('step-2');
+      }
+    } finally {
+      _submitting = false;
       setLoading('step-disqualified-next', false);
-      showStep('step-disqualified-thanks');
-    } else if (choice === 'b2b') {
-      formState.disqualified = false;
-      formState.sell_to = 'B2B (clarified from ' + formState.sell_to + ')';
-      setLoading('step-disqualified-next', true);
-      await savePartial(1);
-      setLoading('step-disqualified-next', false);
-      showStep('step-2');
     }
   }
 
   async function handleStep2Next() {
+    if (_submitting) return;
     const valid = validateStep2();
     if (!valid) return;
 
-    formState.first_name    = getField('first-name');
-    formState.last_name     = getField('last-name');
-    formState.phone         = getPhoneNumber();
-    formState.company       = getField('company');
-    formState.website       = getField('website');
-    formState.hear_about_us = getField('hear-about-us');
-
+    _submitting = true;
     setLoading('step-2-next', true);
-    await submitLead();
-    setLoading('step-2-next', false);
 
-    showStep('step-3');
-    resetCalEmbed();
-    mountCalEmbed();
+    try {
+      formState.first_name    = getField('first-name');
+      formState.last_name     = getField('last-name');
+      formState.phone         = getPhoneNumber();
+      formState.company       = getField('company');
+      formState.website       = getField('website');
+      formState.hear_about_us = getField('hear-about-us');
+
+      await submitLead();
+
+      showStep('step-3');
+      resetCalEmbed();
+      mountCalEmbed();
+    } finally {
+      _submitting = false;
+      setLoading('step-2-next', false);
+    }
   }
 
   /* =======================================================
