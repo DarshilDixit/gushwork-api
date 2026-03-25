@@ -75,13 +75,10 @@ if (process.env.AWS_PG_HOST) {
 
 /* --------------------------------------------------------
    AWS HELPER — initAWSTable
-   Creates table if not exists + runs migrations on every
-   startup so new columns are always added automatically.
 -------------------------------------------------------- */
 async function initAWSTable() {
   if (!awsPool) return;
   try {
-    // Create table if it doesn't exist
     await awsPool.query(`
       CREATE TABLE IF NOT EXISTS gw_form_leads (
         id                    SERIAL PRIMARY KEY,
@@ -121,7 +118,6 @@ async function initAWSTable() {
       )
     `);
 
-    // Migrations — safe to run every time, adds missing columns
     const migrations = [
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS disqualified BOOLEAN DEFAULT FALSE`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS disqualified_reason TEXT`,
@@ -151,7 +147,6 @@ async function initAWSTable() {
 
 /* --------------------------------------------------------
    AWS HELPER — syncToAWS
-   Fire-and-forget — never blocks response
 -------------------------------------------------------- */
 function syncToAWS(data) {
   if (!awsPool) return;
@@ -236,8 +231,7 @@ function syncBookingToAWS(session_id, booking_uid, start_time, end_time, event_t
 
 /* --------------------------------------------------------
    SLACK HELPER — sendSlack
-   Accepts either blocks array or plain text string.
-   Fire-and-forget.
+   Accepts blocks array. Fire-and-forget.
 -------------------------------------------------------- */
 function sendSlack(blocks, fallbackText) {
   const webhookUrl = process.env.SLACK_WEBHOOK_URL;
@@ -246,7 +240,6 @@ function sendSlack(blocks, fallbackText) {
     return;
   }
 
-  // Filter out any null blocks before sending
   const cleanBlocks = Array.isArray(blocks) ? blocks.filter(Boolean) : null;
 
   const payload = cleanBlocks && cleanBlocks.length > 0
@@ -272,7 +265,6 @@ function bSection(text) {
   return { type: 'section', text: { type: 'mrkdwn', text } };
 }
 function bFields(fields) {
-  // fields = array of { label, value } — only includes ones with a value
   const filtered = fields.filter(f => f.value);
   if (!filtered.length) return null;
   return {
@@ -292,21 +284,15 @@ function bContext(text) {
 
 /* --------------------------------------------------------
    SLACK FORMATTER — partial (fired from cron after 30 mins)
-   Only shows fields that have data.
-   completed = true → reached Cal, didn't book
-   completed = false → dropped at step 1
 -------------------------------------------------------- */
 function slackPartial({ email, sell_to, utm_source, utm_medium, utm_campaign, utm_content, referrer, page_url, disqualified, disqualified_reason, completed, enriched_title, enriched_company_size, enriched_industry, enriched_linkedin, company, website }) {
-  const label = completed ? '⏰ Reached Cal — Did Not Book' : '👻 Dropped at Step 1';
+  const label    = completed ? '⏰ Reached Cal — Did Not Book' : '👻 Dropped at Step 1';
   const disqNote = disqualified ? ` • ⚠️ ${disqualified_reason || 'Disqualified'}` : '';
+  const blocks   = [];
 
-  const blocks = [];
-
-  // Header
   blocks.push(bHeader(label + disqNote));
   blocks.push(bDivider());
 
-  // Lead info
   const leadFields = bFields([
     { label: '📧 Email',    value: email },
     { label: '🎯 Sells to', value: sell_to },
@@ -315,7 +301,6 @@ function slackPartial({ email, sell_to, utm_source, utm_medium, utm_campaign, ut
   ]);
   if (leadFields) blocks.push(leadFields);
 
-  // Enrichment — only if Apollo has data
   const hasEnrichment = enriched_title || enriched_company_size || enriched_industry || enriched_linkedin;
   if (hasEnrichment) {
     blocks.push(bDivider());
@@ -329,7 +314,6 @@ function slackPartial({ email, sell_to, utm_source, utm_medium, utm_campaign, ut
     if (enrichFields) blocks.push(enrichFields);
   }
 
-  // Attribution — only if any UTM/referrer data exists
   const hasAttribution = utm_source || utm_medium || utm_campaign || utm_content || referrer;
   if (hasAttribution) {
     blocks.push(bDivider());
@@ -344,7 +328,6 @@ function slackPartial({ email, sell_to, utm_source, utm_medium, utm_campaign, ut
     if (attrFields) blocks.push(attrFields);
   }
 
-  // Page URL as context
   if (page_url) blocks.push(bContext(`📄 ${page_url}`));
 
   sendSlack(blocks, label);
@@ -352,17 +335,14 @@ function slackPartial({ email, sell_to, utm_source, utm_medium, utm_campaign, ut
 
 /* --------------------------------------------------------
    SLACK FORMATTER — submit (step 2 complete)
-   Only shows fields that have data.
 -------------------------------------------------------- */
 function slackSubmit({ first_name, last_name, email, phone, company, website, sell_to, hear_about_us, enriched_title, enriched_company_size, enriched_industry, enriched_linkedin, utm_source, utm_medium, utm_campaign, utm_content, referrer, prefill_source, page_url }) {
-  const name = [first_name, last_name].filter(Boolean).join(' ');
+  const name   = [first_name, last_name].filter(Boolean).join(' ');
   const blocks = [];
 
-  // Header
   blocks.push(bHeader('✅ Lead Form Completed'));
   blocks.push(bDivider());
 
-  // Lead info
   const leadFields = bFields([
     { label: '👤 Name',           value: name },
     { label: '📧 Email',          value: email },
@@ -374,7 +354,6 @@ function slackSubmit({ first_name, last_name, email, phone, company, website, se
   ]);
   if (leadFields) blocks.push(leadFields);
 
-  // Enrichment — only if Apollo has data
   const hasEnrichment = enriched_title || enriched_company_size || enriched_industry || enriched_linkedin;
   if (hasEnrichment) {
     blocks.push(bDivider());
@@ -388,7 +367,6 @@ function slackSubmit({ first_name, last_name, email, phone, company, website, se
     if (enrichFields) blocks.push(enrichFields);
   }
 
-  // Attribution — only if any data exists
   const hasAttribution = utm_source || utm_medium || utm_campaign || utm_content || referrer || prefill_source;
   if (hasAttribution) {
     blocks.push(bDivider());
@@ -404,7 +382,6 @@ function slackSubmit({ first_name, last_name, email, phone, company, website, se
     if (attrFields) blocks.push(attrFields);
   }
 
-  // Page URL as context
   if (page_url) blocks.push(bContext(`📄 ${page_url}`));
 
   sendSlack(blocks, `✅ Lead Form Completed — ${email}`);
@@ -607,7 +584,8 @@ app.post('/enrich', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /partial
-   Railway write + AWS sync + Slack partial + Loops
+   Railway write + AWS sync
+   Slack + Loops handled by cron after 30 mins
 -------------------------------------------------------- */
 app.post('/partial', async (req, res) => {
   const session_id            = (req.body.session_id          || '').toString().trim().slice(0, 100);
@@ -637,12 +615,6 @@ app.post('/partial', async (req, res) => {
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
   try {
-    const existing  = await pool.query(
-      'SELECT id FROM leads WHERE session_id = $1 AND email = $2',
-      [session_id, email]
-    );
-    const isNewLead = existing.rows.length === 0;
-
     await pool.query(`
       INSERT INTO leads
         (session_id, page_url,
@@ -693,7 +665,6 @@ app.post('/partial', async (req, res) => {
       step_reached
     ]);
 
-    // AWS sync — non-blocking
     syncToAWS({
       session_id, page_url, email, website, sell_to,
       first_name, last_name, phone, company, hear_about_us,
@@ -703,14 +674,9 @@ app.post('/partial', async (req, res) => {
       disqualified, disqualified_reason, step_reached, completed: false
     });
 
-    // Slack partial is NOT fired here — cron handles it after 30 mins
-    // so we only notify for genuine partials who didn't complete
-
-    // Loops is NOT fired here — cron job handles it after 30 mins
-    // Only non-bookers who are still partial after 30 mins get pushed to Loops
     console.log(`[/partial] ✅ Saved session ${session_id} | step ${step_reached} | email ${email}`);
-
     res.json({ ok: true });
+
   } catch (err) {
     console.error('[/partial]', err.message);
     res.status(500).json({ error: 'Partial save failed' });
@@ -719,7 +685,8 @@ app.post('/partial', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /submit
-   Railway write + AWS sync + Slack submit
+   Railway write + AWS sync + Slack submit (deduplicated)
+   Slack only fires on FIRST completion — never on double submit
 -------------------------------------------------------- */
 app.post('/submit', async (req, res) => {
   const session_id            = (req.body.session_id          || '').toString().trim().slice(0, 100);
@@ -748,6 +715,13 @@ app.post('/submit', async (req, res) => {
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
   try {
+    // Check if already completed BEFORE upsert — for Slack deduplication
+    const existing = await pool.query(
+      'SELECT completed FROM leads WHERE session_id = $1',
+      [session_id]
+    );
+    const alreadyCompleted = existing.rows[0]?.completed === true;
+
     await pool.query(`
       INSERT INTO leads
         (session_id, page_url,
@@ -799,7 +773,6 @@ app.post('/submit', async (req, res) => {
       disqualified,                  disqualified_reason   || null
     ]);
 
-    // AWS sync — non-blocking
     syncToAWS({
       session_id, page_url, email, website, sell_to,
       first_name, last_name, phone, company, hear_about_us,
@@ -809,17 +782,20 @@ app.post('/submit', async (req, res) => {
       disqualified, disqualified_reason, step_reached: 2, completed: true
     });
 
-    // Slack — non-blocking
-    slackSubmit({
-      first_name, last_name, email, phone, company, website,
-      sell_to, hear_about_us,
-      enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
-      utm_source, utm_medium, utm_campaign, utm_content,
-      referrer, prefill_source, page_url
-    });
+    // Only fire Slack on FIRST completion — never on double submit
+    if (!alreadyCompleted) {
+      slackSubmit({
+        first_name, last_name, email, phone, company, website,
+        sell_to, hear_about_us,
+        enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
+        utm_source, utm_medium, utm_campaign, utm_content,
+        referrer, prefill_source, page_url
+      });
+      console.log(`[/submit] ✅ Lead completed: ${email} | session: ${session_id}`);
+    } else {
+      console.log(`[/submit] ⏭ Slack skipped — already completed: ${email} | session: ${session_id}`);
+    }
 
-    // Loops is NOT fired here — cron job handles it
-    console.log(`[/submit] ✅ Lead completed: ${email} | session: ${session_id}`);
     res.json({ ok: true });
 
   } catch (err) {
@@ -830,7 +806,7 @@ app.post('/submit', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /booking-confirmed
-   Railway update + AWS sync + Loops cancel + Slack booking
+   Railway update + AWS sync + Loops cancel
 -------------------------------------------------------- */
 app.post('/booking-confirmed', async (req, res) => {
   const session_id  = (req.body.session_id  || '').toString().trim().slice(0, 100);
@@ -855,10 +831,8 @@ app.post('/booking-confirmed', async (req, res) => {
       WHERE session_id = $1
     `, [session_id, booking_uid, start_time, end_time, event_type || null]);
 
-    // AWS booking sync — non-blocking
     syncBookingToAWS(session_id, booking_uid, start_time, end_time, event_type);
 
-    // Fetch email for Loops cancellation
     const leadRow = await pool.query(
       `SELECT email FROM leads WHERE session_id = $1`,
       [session_id]
@@ -866,9 +840,7 @@ app.post('/booking-confirmed', async (req, res) => {
     const lead  = leadRow.rows[0] || {};
     const email = lead.email;
 
-    // No Slack here — Cal sends its own booking confirmation notification
-
-    // Cancel Loops recovery sequence
+    // No Slack here — Cal sends its own booking confirmation
     if (email) cancelLoopsSequence(email);
 
     console.log(`[/booking-confirmed] ✅ Booked: ${booking_uid} | session: ${session_id} | email: ${email}`);
@@ -882,15 +854,8 @@ app.post('/booking-confirmed', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /cron/send-partials
-   Called by Railway cron every 30 mins.
-   Finds leads who:
-     - filled the form (have an email)
-     - are NOT disqualified (waitlist)
-     - have NOT booked a call (booking_uid IS NULL)
-     - were created more than 30 mins ago
-     - haven't been sent to Loops yet (loops_sent = false)
-   For each: sends Slack partial notification + pushes to Loops
-   Covers both step 1 only AND step 1+2 without booking.
+   Called by cron-job.org every 30 mins.
+   Finds genuine partials → Slack + Loops + marks loops_sent
 -------------------------------------------------------- */
 app.post('/cron/send-partials', async (req, res) => {
   try {
@@ -915,28 +880,26 @@ app.post('/cron/send-partials', async (req, res) => {
     console.log(`[Cron] Found ${leads.length} leads to process`);
 
     for (const lead of leads) {
-      // Send Slack partial notification
       slackPartial({
-        email:               lead.email,
-        sell_to:             lead.sell_to,
-        utm_source:          lead.utm_source,
-        utm_medium:          lead.utm_medium,
-        utm_campaign:        lead.utm_campaign,
-        utm_content:         lead.utm_content,
-        referrer:            lead.referrer,
-        page_url:            lead.page_url,
-        disqualified:        lead.disqualified,
-        disqualified_reason: lead.disqualified_reason,
-        completed:           lead.completed,
-        company:             lead.company,
-        website:             lead.website,
+        email:                 lead.email,
+        sell_to:               lead.sell_to,
+        utm_source:            lead.utm_source,
+        utm_medium:            lead.utm_medium,
+        utm_campaign:          lead.utm_campaign,
+        utm_content:           lead.utm_content,
+        referrer:              lead.referrer,
+        page_url:              lead.page_url,
+        disqualified:          lead.disqualified,
+        disqualified_reason:   lead.disqualified_reason,
+        completed:             lead.completed,
+        company:               lead.company,
+        website:               lead.website,
         enriched_title:        lead.enriched_title,
         enriched_company_size: lead.enriched_company_size,
         enriched_industry:     lead.enriched_industry,
         enriched_linkedin:     lead.enriched_linkedin
       });
 
-      // Push to Loops
       await sendLoopsEvent(
         lead.email,
         lead.first_name,
@@ -945,13 +908,11 @@ app.post('/cron/send-partials', async (req, res) => {
         lead.website
       );
 
-      // Mark as sent in Railway
       await pool.query(
         'UPDATE leads SET loops_sent = true WHERE session_id = $1',
         [lead.session_id]
       );
 
-      // Sync loops_sent to AWS as well
       if (awsPool) {
         awsPool.query(
           'UPDATE gw_form_leads SET loops_sent = true, updated_at = NOW() WHERE session_id = $1',
