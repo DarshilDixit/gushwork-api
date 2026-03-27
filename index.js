@@ -624,26 +624,25 @@ app.post('/enrich', async (req, res) => {
     const org        = person.organization || {};
 
     // Extract all fields
-    const city           = person.city                                          || null;
-    const state          = person.state                                         || null;
-    const country        = person.country                                       || null;
+    // Location — try person first, fall back to org
+    const city           = person.city    || org.city    || null;
+    const state          = person.state   || org.state   || null;
+    const country        = person.country || org.country || null;
     const seniority      = person.seniority                                     || null;
 
-    // Departments — Apollo returns as array on person_departments or departments
+    // Departments — Apollo returns as array, empty array = no data
     const deptRaw     = person.departments || person.person_departments || null;
-    const departments = Array.isArray(deptRaw)
+    const departments = Array.isArray(deptRaw) && deptRaw.length > 0
                           ? deptRaw.join(', ')
-                          : (deptRaw || null);
+                          : null;
 
     const emailStatus    = person.email_status                                  || null;
     const foundedYear    = org.founded_year?.toString()                         || null;
 
-    // Annual revenue — Apollo returns raw USD number e.g. 50000000
-    // Format as $50M, $1.2B etc for readability
-    const annualRevenueRaw = org.annual_revenue || null;
-    const annualRevenue = annualRevenueRaw
-      ? formatRevenue(annualRevenueRaw)
-      : null;
+    // Use Apollo's pre-formatted revenue string e.g. "50M" → "$50M USD"
+    const annualRevenue  = org.annual_revenue_printed
+                             ? `$${org.annual_revenue_printed} USD`
+                             : (org.annual_revenue ? formatRevenue(org.annual_revenue) : null);
 
     const fundingEvents  = Array.isArray(org.funding_events) && org.funding_events.length > 0
                              ? org.funding_events.map(f =>
@@ -653,7 +652,7 @@ app.post('/enrich', async (req, res) => {
     const keywords       = Array.isArray(org.keywords)
                              ? org.keywords.slice(0, 8).join(', ')             : (org.keywords || null);
 
-    console.log(`[/enrich] Apollo fields — seniority: ${seniority} | departments: ${departments} | revenue: ${annualRevenue} | city: ${city}`);
+    console.log(`[/enrich] Apollo fields — seniority: ${seniority} | departments: ${departments} | revenue: ${annualRevenue} | city: ${city} | country: ${country}`);
 
     // Save to enrichment_data
     await pool.query(`
@@ -703,7 +702,7 @@ app.post('/enrich', async (req, res) => {
       seniority, departments, emailStatus,
       foundedYear, annualRevenue,
       fundingEvents, alexaRanking, keywords,
-      JSON.stringify(apolloData)
+      apolloData  // pass object directly — pg handles JSONB conversion
     ]);
 
     // Also update leads table with new enrichment fields
@@ -742,7 +741,7 @@ app.post('/enrich', async (req, res) => {
     });
 
   } catch (err) {
-    console.error('[/enrich]', err.message);
+    console.error('[/enrich] Error:', err.message, err.detail || '');
     res.json({ first_name: '', last_name: '', title: '', company: '', company_size: '', industry: '', linkedin_url: '', website: '' });
   }
 });
