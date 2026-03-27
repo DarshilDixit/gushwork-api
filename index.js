@@ -155,6 +155,9 @@ async function initAWSTable() {
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_funding_events TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_alexa_ranking TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_keywords TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_org_hq TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_total_funding TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_funding_stage TEXT`,
     ];
 
     for (const sql of migrations) {
@@ -328,11 +331,12 @@ function bContext(text) {
 function buildEnrichmentBlocks(blocks, e) {
   const hasPersonInfo = e.enriched_title || e.enriched_seniority || e.enriched_departments || e.enriched_email_status;
   const hasOrgInfo    = e.enriched_company_size || e.enriched_industry || e.enriched_founded_year || e.enriched_annual_revenue || e.enriched_alexa_ranking || e.enriched_keywords;
-  const hasFunding    = e.enriched_funding_events;
+  const hasFunding    = e.enriched_funding_events || e.enriched_total_funding || e.enriched_funding_stage;
   const hasLocation   = e.enriched_city || e.enriched_state || e.enriched_country;
+  const hasOrgHQ      = e.enriched_org_hq;
   const hasLinkedIn   = e.enriched_linkedin;
 
-  if (!hasPersonInfo && !hasOrgInfo && !hasFunding && !hasLocation && !hasLinkedIn) return;
+  if (!hasPersonInfo && !hasOrgInfo && !hasFunding && !hasLocation && !hasOrgHQ && !hasLinkedIn) return;
 
   blocks.push(bDivider());
   blocks.push(bSection('*🔍 Enrichment*'));
@@ -351,29 +355,40 @@ function buildEnrichmentBlocks(blocks, e) {
   // Org info
   if (hasOrgInfo) {
     const f = bFields([
-      { label: 'Company Size',    value: e.enriched_company_size },
-      { label: 'Industry',        value: e.enriched_industry },
-      { label: 'Founded',         value: e.enriched_founded_year },
-      { label: 'Annual Revenue',  value: e.enriched_annual_revenue },
-      { label: 'Alexa Rank',      value: e.enriched_alexa_ranking },
-      { label: 'Keywords',        value: e.enriched_keywords },
+      { label: 'Company Size',   value: e.enriched_company_size },
+      { label: 'Industry',       value: e.enriched_industry },
+      { label: 'Founded',        value: e.enriched_founded_year },
+      { label: 'Annual Revenue', value: e.enriched_annual_revenue },
+      { label: 'Alexa Rank',     value: e.enriched_alexa_ranking },
+      { label: 'Keywords',       value: e.enriched_keywords },
     ]);
     if (f) blocks.push(f);
   }
 
-  // Funding events
+  // Funding
   if (hasFunding) {
+    blocks.push(bDivider());
     const f = bFields([
-      { label: '💰 Funding', value: e.enriched_funding_events },
+      { label: '💰 Total Funding', value: e.enriched_total_funding },
+      { label: 'Funding Stage',    value: e.enriched_funding_stage },
+      { label: 'Funding Events',   value: e.enriched_funding_events },
     ]);
     if (f) blocks.push(f);
   }
 
-  // Location
+  // Person location — only from person object, never org
   if (hasLocation) {
     const location = [e.enriched_city, e.enriched_state, e.enriched_country].filter(Boolean).join(', ');
     const f = bFields([
-      { label: '📍 Location', value: location },
+      { label: '📍 Person Location', value: location },
+    ]);
+    if (f) blocks.push(f);
+  }
+
+  // Org HQ — separately labelled
+  if (hasOrgHQ) {
+    const f = bFields([
+      { label: '🏢 Company HQ', value: e.enriched_org_hq },
     ]);
     if (f) blocks.push(f);
   }
@@ -624,11 +639,20 @@ app.post('/enrich', async (req, res) => {
     const org        = person.organization || {};
 
     // Extract all fields
-    // Location — try person first, fall back to org
-    const city           = person.city    || org.city    || null;
-    const state          = person.state   || org.state   || null;
-    const country        = person.country || org.country || null;
-    const seniority      = person.seniority                                     || null;
+
+    // Person location — only use person fields, never org
+    // If Apollo doesn't have person city, we just don't show it
+    const city           = person.city    || null;
+    const state          = person.state   || null;
+    const country        = person.country || null;
+
+    // Org HQ — separately stored and labelled in Slack
+    const orgCity        = org.city    || null;
+    const orgState       = org.state   || null;
+    const orgCountry     = org.country || null;
+    const orgHQ          = [orgCity, orgState, orgCountry].filter(Boolean).join(', ') || null;
+
+    const seniority      = person.seniority || null;
 
     // Departments — Apollo returns as array, empty array = no data
     const deptRaw     = person.departments || person.person_departments || null;
@@ -639,20 +663,29 @@ app.post('/enrich', async (req, res) => {
     const emailStatus    = person.email_status                                  || null;
     const foundedYear    = org.founded_year?.toString()                         || null;
 
-    // Use Apollo's pre-formatted revenue string e.g. "50M" → "$50M USD"
+    // Use Apollo's pre-formatted revenue string e.g. "1M" → "$1M USD"
     const annualRevenue  = org.annual_revenue_printed
                              ? `$${org.annual_revenue_printed} USD`
                              : (org.annual_revenue ? formatRevenue(org.annual_revenue) : null);
 
+    // Total funding — very useful signal
+    const totalFunding   = org.total_funding_printed
+                             ? `$${org.total_funding_printed}`
+                             : null;
+    const fundingStage   = org.latest_funding_stage || null;
+
+    // Funding events — formatted as readable string
     const fundingEvents  = Array.isArray(org.funding_events) && org.funding_events.length > 0
                              ? org.funding_events.map(f =>
-                                 `${f.date || ''} ${f.series || ''} ${f.amount ? formatRevenue(f.amount) : '?'}`
-                               ).join(' | ')                                    : null;
+                                 [f.date ? f.date.substring(0, 10) : '', f.type || f.series || '', f.amount ? `${f.currency || '$'}${f.amount}` : ''].filter(Boolean).join(' ')
+                               ).join(' | ')
+                             : null;
+
     const alexaRanking   = org.alexa_ranking?.toString()                        || null;
     const keywords       = Array.isArray(org.keywords)
                              ? org.keywords.slice(0, 8).join(', ')             : (org.keywords || null);
 
-    console.log(`[/enrich] Apollo fields — seniority: ${seniority} | departments: ${departments} | revenue: ${annualRevenue} | city: ${city} | country: ${country}`);
+    console.log(`[/enrich] Apollo — seniority: ${seniority} | dept: ${departments} | revenue: ${annualRevenue} | funding: ${totalFunding} (${fundingStage}) | location: ${city || country || 'n/a'} | org HQ: ${orgHQ}`);
 
     // Save to enrichment_data
     await pool.query(`
@@ -665,8 +698,9 @@ app.post('/enrich', async (req, res) => {
          enriched_seniority, enriched_departments, enriched_email_status,
          enriched_founded_year, enriched_annual_revenue,
          enriched_funding_events, enriched_alexa_ranking, enriched_keywords,
+         enriched_org_hq, enriched_total_funding, enriched_funding_stage,
          raw_response)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
       ON CONFLICT (session_id) DO UPDATE SET
         email                   = EXCLUDED.email,
         enriched_first_name     = EXCLUDED.enriched_first_name,
@@ -687,6 +721,9 @@ app.post('/enrich', async (req, res) => {
         enriched_funding_events = EXCLUDED.enriched_funding_events,
         enriched_alexa_ranking  = EXCLUDED.enriched_alexa_ranking,
         enriched_keywords       = EXCLUDED.enriched_keywords,
+        enriched_org_hq         = EXCLUDED.enriched_org_hq,
+        enriched_total_funding  = EXCLUDED.enriched_total_funding,
+        enriched_funding_stage  = EXCLUDED.enriched_funding_stage,
         raw_response            = EXCLUDED.raw_response,
         enriched_at             = NOW()
     `, [
@@ -702,7 +739,8 @@ app.post('/enrich', async (req, res) => {
       seniority, departments, emailStatus,
       foundedYear, annualRevenue,
       fundingEvents, alexaRanking, keywords,
-      apolloData  // pass object directly — pg handles JSONB conversion
+      orgHQ, totalFunding, fundingStage,
+      apolloData
     ]);
 
     // Also update leads table with new enrichment fields
