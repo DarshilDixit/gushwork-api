@@ -81,40 +81,51 @@ async function initAWSTable() {
   try {
     await awsPool.query(`
       CREATE TABLE IF NOT EXISTS gw_form_leads (
-        id                    SERIAL PRIMARY KEY,
-        session_id            TEXT UNIQUE NOT NULL,
-        page_url              TEXT,
-        email                 TEXT,
-        website               TEXT,
-        sell_to               TEXT,
-        first_name            TEXT,
-        last_name             TEXT,
-        phone                 TEXT,
-        company               TEXT,
-        hear_about_us         TEXT,
-        utm_source            TEXT,
-        utm_medium            TEXT,
-        utm_campaign          TEXT,
-        utm_content           TEXT,
-        referrer              TEXT,
-        prefill_source        TEXT,
-        enriched_title        TEXT,
-        enriched_company_size TEXT,
-        enriched_industry     TEXT,
-        enriched_linkedin     TEXT,
-        disqualified          BOOLEAN DEFAULT FALSE,
-        disqualified_reason   TEXT,
-        step_reached          INT DEFAULT 1,
-        completed             BOOLEAN DEFAULT FALSE,
-        submitted_at          TIMESTAMPTZ,
-        booking_uid           TEXT,
-        start_time            TEXT,
-        end_time              TEXT,
-        event_type            TEXT,
-        booked_at             TIMESTAMPTZ,
-        loops_sent            BOOLEAN DEFAULT FALSE,
-        created_at            TIMESTAMPTZ DEFAULT NOW(),
-        updated_at            TIMESTAMPTZ DEFAULT NOW()
+        id                      SERIAL PRIMARY KEY,
+        session_id              TEXT UNIQUE NOT NULL,
+        page_url                TEXT,
+        email                   TEXT,
+        website                 TEXT,
+        sell_to                 TEXT,
+        first_name              TEXT,
+        last_name               TEXT,
+        phone                   TEXT,
+        company                 TEXT,
+        hear_about_us           TEXT,
+        utm_source              TEXT,
+        utm_medium              TEXT,
+        utm_campaign            TEXT,
+        utm_content             TEXT,
+        referrer                TEXT,
+        prefill_source          TEXT,
+        enriched_title          TEXT,
+        enriched_company_size   TEXT,
+        enriched_industry       TEXT,
+        enriched_linkedin       TEXT,
+        enriched_city           TEXT,
+        enriched_state          TEXT,
+        enriched_country        TEXT,
+        enriched_seniority      TEXT,
+        enriched_departments    TEXT,
+        enriched_email_status   TEXT,
+        enriched_founded_year   TEXT,
+        enriched_annual_revenue TEXT,
+        enriched_funding_events TEXT,
+        enriched_alexa_ranking  TEXT,
+        enriched_keywords       TEXT,
+        disqualified            BOOLEAN DEFAULT FALSE,
+        disqualified_reason     TEXT,
+        step_reached            INT DEFAULT 1,
+        completed               BOOLEAN DEFAULT FALSE,
+        submitted_at            TIMESTAMPTZ,
+        booking_uid             TEXT,
+        start_time              TEXT,
+        end_time                TEXT,
+        event_type              TEXT,
+        booked_at               TIMESTAMPTZ,
+        loops_sent              BOOLEAN DEFAULT FALSE,
+        created_at              TIMESTAMPTZ DEFAULT NOW(),
+        updated_at              TIMESTAMPTZ DEFAULT NOW()
       )
     `);
 
@@ -133,6 +144,17 @@ async function initAWSTable() {
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_industry TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_linkedin TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS loops_sent BOOLEAN DEFAULT FALSE`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_city TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_state TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_country TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_seniority TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_departments TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_email_status TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_founded_year TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_annual_revenue TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_funding_events TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_alexa_ranking TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS enriched_keywords TEXT`,
     ];
 
     for (const sql of migrations) {
@@ -158,50 +180,71 @@ function syncToAWS(data) {
        utm_source, utm_medium, utm_campaign, utm_content,
        referrer, prefill_source,
        enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
+       enriched_city, enriched_state, enriched_country,
+       enriched_seniority, enriched_departments, enriched_email_status,
+       enriched_founded_year, enriched_annual_revenue,
+       enriched_funding_events, enriched_alexa_ranking, enriched_keywords,
        disqualified, disqualified_reason,
        step_reached, completed, submitted_at, loops_sent, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,NOW())
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,NOW())
     ON CONFLICT (session_id) DO UPDATE SET
-      page_url              = COALESCE(EXCLUDED.page_url,              gw_form_leads.page_url),
-      email                 = COALESCE(EXCLUDED.email,                 gw_form_leads.email),
-      website               = COALESCE(EXCLUDED.website,               gw_form_leads.website),
-      sell_to               = COALESCE(EXCLUDED.sell_to,               gw_form_leads.sell_to),
-      first_name            = COALESCE(EXCLUDED.first_name,            gw_form_leads.first_name),
-      last_name             = COALESCE(EXCLUDED.last_name,             gw_form_leads.last_name),
-      phone                 = COALESCE(EXCLUDED.phone,                 gw_form_leads.phone),
-      company               = COALESCE(EXCLUDED.company,               gw_form_leads.company),
-      hear_about_us         = COALESCE(EXCLUDED.hear_about_us,         gw_form_leads.hear_about_us),
-      utm_source            = COALESCE(EXCLUDED.utm_source,            gw_form_leads.utm_source),
-      utm_medium            = COALESCE(EXCLUDED.utm_medium,            gw_form_leads.utm_medium),
-      utm_campaign          = COALESCE(EXCLUDED.utm_campaign,          gw_form_leads.utm_campaign),
-      utm_content           = COALESCE(EXCLUDED.utm_content,           gw_form_leads.utm_content),
-      referrer              = COALESCE(EXCLUDED.referrer,              gw_form_leads.referrer),
-      prefill_source        = COALESCE(EXCLUDED.prefill_source,        gw_form_leads.prefill_source),
-      enriched_title        = COALESCE(EXCLUDED.enriched_title,        gw_form_leads.enriched_title),
-      enriched_company_size = COALESCE(EXCLUDED.enriched_company_size, gw_form_leads.enriched_company_size),
-      enriched_industry     = COALESCE(EXCLUDED.enriched_industry,     gw_form_leads.enriched_industry),
-      enriched_linkedin     = COALESCE(EXCLUDED.enriched_linkedin,     gw_form_leads.enriched_linkedin),
-      disqualified          = COALESCE(EXCLUDED.disqualified,          gw_form_leads.disqualified),
-      disqualified_reason   = COALESCE(EXCLUDED.disqualified_reason,   gw_form_leads.disqualified_reason),
-      step_reached          = GREATEST(EXCLUDED.step_reached,          gw_form_leads.step_reached),
-      completed             = COALESCE(EXCLUDED.completed,             gw_form_leads.completed),
-      submitted_at          = COALESCE(EXCLUDED.submitted_at,          gw_form_leads.submitted_at),
-      loops_sent            = COALESCE(EXCLUDED.loops_sent,            gw_form_leads.loops_sent),
-      updated_at            = NOW()
+      page_url                = COALESCE(EXCLUDED.page_url,                gw_form_leads.page_url),
+      email                   = COALESCE(EXCLUDED.email,                   gw_form_leads.email),
+      website                 = COALESCE(EXCLUDED.website,                 gw_form_leads.website),
+      sell_to                 = COALESCE(EXCLUDED.sell_to,                 gw_form_leads.sell_to),
+      first_name              = COALESCE(EXCLUDED.first_name,              gw_form_leads.first_name),
+      last_name               = COALESCE(EXCLUDED.last_name,               gw_form_leads.last_name),
+      phone                   = COALESCE(EXCLUDED.phone,                   gw_form_leads.phone),
+      company                 = COALESCE(EXCLUDED.company,                 gw_form_leads.company),
+      hear_about_us           = COALESCE(EXCLUDED.hear_about_us,           gw_form_leads.hear_about_us),
+      utm_source              = COALESCE(EXCLUDED.utm_source,              gw_form_leads.utm_source),
+      utm_medium              = COALESCE(EXCLUDED.utm_medium,              gw_form_leads.utm_medium),
+      utm_campaign            = COALESCE(EXCLUDED.utm_campaign,            gw_form_leads.utm_campaign),
+      utm_content             = COALESCE(EXCLUDED.utm_content,             gw_form_leads.utm_content),
+      referrer                = COALESCE(EXCLUDED.referrer,                gw_form_leads.referrer),
+      prefill_source          = COALESCE(EXCLUDED.prefill_source,          gw_form_leads.prefill_source),
+      enriched_title          = COALESCE(EXCLUDED.enriched_title,          gw_form_leads.enriched_title),
+      enriched_company_size   = COALESCE(EXCLUDED.enriched_company_size,   gw_form_leads.enriched_company_size),
+      enriched_industry       = COALESCE(EXCLUDED.enriched_industry,       gw_form_leads.enriched_industry),
+      enriched_linkedin       = COALESCE(EXCLUDED.enriched_linkedin,       gw_form_leads.enriched_linkedin),
+      enriched_city           = COALESCE(EXCLUDED.enriched_city,           gw_form_leads.enriched_city),
+      enriched_state          = COALESCE(EXCLUDED.enriched_state,          gw_form_leads.enriched_state),
+      enriched_country        = COALESCE(EXCLUDED.enriched_country,        gw_form_leads.enriched_country),
+      enriched_seniority      = COALESCE(EXCLUDED.enriched_seniority,      gw_form_leads.enriched_seniority),
+      enriched_departments    = COALESCE(EXCLUDED.enriched_departments,    gw_form_leads.enriched_departments),
+      enriched_email_status   = COALESCE(EXCLUDED.enriched_email_status,   gw_form_leads.enriched_email_status),
+      enriched_founded_year   = COALESCE(EXCLUDED.enriched_founded_year,   gw_form_leads.enriched_founded_year),
+      enriched_annual_revenue = COALESCE(EXCLUDED.enriched_annual_revenue, gw_form_leads.enriched_annual_revenue),
+      enriched_funding_events = COALESCE(EXCLUDED.enriched_funding_events, gw_form_leads.enriched_funding_events),
+      enriched_alexa_ranking  = COALESCE(EXCLUDED.enriched_alexa_ranking,  gw_form_leads.enriched_alexa_ranking),
+      enriched_keywords       = COALESCE(EXCLUDED.enriched_keywords,       gw_form_leads.enriched_keywords),
+      disqualified            = COALESCE(EXCLUDED.disqualified,            gw_form_leads.disqualified),
+      disqualified_reason     = COALESCE(EXCLUDED.disqualified_reason,     gw_form_leads.disqualified_reason),
+      step_reached            = GREATEST(EXCLUDED.step_reached,            gw_form_leads.step_reached),
+      completed               = COALESCE(EXCLUDED.completed,               gw_form_leads.completed),
+      submitted_at            = COALESCE(EXCLUDED.submitted_at,            gw_form_leads.submitted_at),
+      loops_sent              = COALESCE(EXCLUDED.loops_sent,              gw_form_leads.loops_sent),
+      updated_at              = NOW()
   `, [
-    data.session_id,                   data.page_url              || null,
-    data.email             || null,    data.website               || null,
-    data.sell_to           || null,    data.first_name            || null,
-    data.last_name         || null,    data.phone                 || null,
-    data.company           || null,    data.hear_about_us         || null,
-    data.utm_source        || null,    data.utm_medium            || null,
-    data.utm_campaign      || null,    data.utm_content           || null,
-    data.referrer          || null,    data.prefill_source        || null,
-    data.enriched_title    || null,    data.enriched_company_size || null,
-    data.enriched_industry || null,    data.enriched_linkedin     || null,
-    data.disqualified      || false,   data.disqualified_reason   || null,
-    data.step_reached      || 1,       data.completed             || false,
-    data.completed ? new Date() : null, data.loops_sent           || false
+    data.session_id,                        data.page_url                  || null,
+    data.email                   || null,   data.website                   || null,
+    data.sell_to                 || null,   data.first_name                || null,
+    data.last_name               || null,   data.phone                     || null,
+    data.company                 || null,   data.hear_about_us             || null,
+    data.utm_source              || null,   data.utm_medium                || null,
+    data.utm_campaign            || null,   data.utm_content               || null,
+    data.referrer                || null,   data.prefill_source            || null,
+    data.enriched_title          || null,   data.enriched_company_size     || null,
+    data.enriched_industry       || null,   data.enriched_linkedin         || null,
+    data.enriched_city           || null,   data.enriched_state            || null,
+    data.enriched_country        || null,   data.enriched_seniority        || null,
+    data.enriched_departments    || null,   data.enriched_email_status     || null,
+    data.enriched_founded_year   || null,   data.enriched_annual_revenue   || null,
+    data.enriched_funding_events || null,   data.enriched_alexa_ranking    || null,
+    data.enriched_keywords       || null,   data.disqualified              || false,
+    data.disqualified_reason     || null,   data.step_reached              || 1,
+    data.completed               || false,  data.completed ? new Date() : null,
+    data.loops_sent              || false
   ]).then(() => {
     console.log(`[AWS] ✅ Synced session ${data.session_id}`);
   }).catch(err => {
@@ -231,7 +274,6 @@ function syncBookingToAWS(session_id, booking_uid, start_time, end_time, event_t
 
 /* --------------------------------------------------------
    SLACK HELPER — sendSlack
-   Accepts blocks array. Fire-and-forget.
 -------------------------------------------------------- */
 function sendSlack(blocks, fallbackText) {
   const webhookUrl = process.env.SLACK_WEBHOOK_URL;
@@ -239,9 +281,7 @@ function sendSlack(blocks, fallbackText) {
     console.warn('[Slack] SLACK_WEBHOOK_URL not set — skipping');
     return;
   }
-
   const cleanBlocks = Array.isArray(blocks) ? blocks.filter(Boolean) : null;
-
   const payload = cleanBlocks && cleanBlocks.length > 0
     ? { text: fallbackText || 'Gushwork notification', blocks: cleanBlocks }
     : { text: fallbackText || 'Gushwork notification' };
@@ -275,69 +315,122 @@ function bFields(fields) {
     }))
   };
 }
-function bDivider() {
-  return { type: 'divider' };
-}
+function bDivider() { return { type: 'divider' }; }
 function bContext(text) {
   return { type: 'context', elements: [{ type: 'mrkdwn', text }] };
 }
 
 /* --------------------------------------------------------
+   SLACK ENRICHMENT BLOCK BUILDER
+   Shared by slackPartial and slackSubmit
+   Only shows sections that have data
+-------------------------------------------------------- */
+function buildEnrichmentBlocks(blocks, e) {
+  const hasPersonInfo = e.enriched_title || e.enriched_seniority || e.enriched_departments || e.enriched_email_status;
+  const hasOrgInfo    = e.enriched_company_size || e.enriched_industry || e.enriched_founded_year || e.enriched_annual_revenue || e.enriched_alexa_ranking || e.enriched_keywords;
+  const hasFunding    = e.enriched_funding_events;
+  const hasLocation   = e.enriched_city || e.enriched_state || e.enriched_country;
+  const hasLinkedIn   = e.enriched_linkedin;
+
+  if (!hasPersonInfo && !hasOrgInfo && !hasFunding && !hasLocation && !hasLinkedIn) return;
+
+  blocks.push(bDivider());
+  blocks.push(bSection('*🔍 Enrichment*'));
+
+  // Person info
+  if (hasPersonInfo) {
+    const f = bFields([
+      { label: 'Title',        value: e.enriched_title },
+      { label: 'Seniority',    value: e.enriched_seniority },
+      { label: 'Department',   value: e.enriched_departments },
+      { label: 'Email Status', value: e.enriched_email_status },
+    ]);
+    if (f) blocks.push(f);
+  }
+
+  // Org info
+  if (hasOrgInfo) {
+    const f = bFields([
+      { label: 'Company Size',    value: e.enriched_company_size },
+      { label: 'Industry',        value: e.enriched_industry },
+      { label: 'Founded',         value: e.enriched_founded_year },
+      { label: 'Annual Revenue',  value: e.enriched_annual_revenue },
+      { label: 'Alexa Rank',      value: e.enriched_alexa_ranking },
+      { label: 'Keywords',        value: e.enriched_keywords },
+    ]);
+    if (f) blocks.push(f);
+  }
+
+  // Funding events
+  if (hasFunding) {
+    const f = bFields([
+      { label: '💰 Funding', value: e.enriched_funding_events },
+    ]);
+    if (f) blocks.push(f);
+  }
+
+  // Location
+  if (hasLocation) {
+    const location = [e.enriched_city, e.enriched_state, e.enriched_country].filter(Boolean).join(', ');
+    const f = bFields([
+      { label: '📍 Location', value: location },
+    ]);
+    if (f) blocks.push(f);
+  }
+
+  // LinkedIn
+  if (hasLinkedIn) {
+    const f = bFields([
+      { label: 'LinkedIn', value: e.enriched_linkedin },
+    ]);
+    if (f) blocks.push(f);
+  }
+}
+
+/* --------------------------------------------------------
    SLACK FORMATTER — partial (fired from cron after 30 mins)
 -------------------------------------------------------- */
-function slackPartial({ email, sell_to, utm_source, utm_medium, utm_campaign, utm_content, referrer, page_url, disqualified, disqualified_reason, completed, enriched_title, enriched_company_size, enriched_industry, enriched_linkedin, company, website }) {
-  const label    = completed ? '⏰ Reached Cal — Did Not Book' : '👻 Dropped at Step 1';
-  const disqNote = disqualified ? ` • ⚠️ ${disqualified_reason || 'Disqualified'}` : '';
+function slackPartial(d) {
+  const label    = d.completed ? '⏰ Reached Cal — Did Not Book' : '👻 Dropped at Step 1';
+  const disqNote = d.disqualified ? ` • ⚠️ ${d.disqualified_reason || 'Disqualified'}` : '';
   const blocks   = [];
 
   blocks.push(bHeader(label + disqNote));
   blocks.push(bDivider());
 
   const leadFields = bFields([
-    { label: '📧 Email',    value: email },
-    { label: '🎯 Sells to', value: sell_to },
-    { label: '🏢 Company',  value: company },
-    { label: '🌐 Website',  value: website },
+    { label: '📧 Email',    value: d.email },
+    { label: '🎯 Sells to', value: d.sell_to },
+    { label: '🏢 Company',  value: d.company },
+    { label: '🌐 Website',  value: d.website },
   ]);
   if (leadFields) blocks.push(leadFields);
 
-  const hasEnrichment = enriched_title || enriched_company_size || enriched_industry || enriched_linkedin;
-  if (hasEnrichment) {
-    blocks.push(bDivider());
-    blocks.push(bSection('*🔍 Enrichment*'));
-    const enrichFields = bFields([
-      { label: 'Title',        value: enriched_title },
-      { label: 'Company Size', value: enriched_company_size },
-      { label: 'Industry',     value: enriched_industry },
-      { label: 'LinkedIn',     value: enriched_linkedin },
-    ]);
-    if (enrichFields) blocks.push(enrichFields);
-  }
+  buildEnrichmentBlocks(blocks, d);
 
-  const hasAttribution = utm_source || utm_medium || utm_campaign || utm_content || referrer;
+  const hasAttribution = d.utm_source || d.utm_medium || d.utm_campaign || d.utm_content || d.referrer;
   if (hasAttribution) {
     blocks.push(bDivider());
     blocks.push(bSection('*📊 Attribution*'));
-    const source = [utm_source, utm_medium].filter(Boolean).join(' / ');
-    const attrFields = bFields([
+    const source = [d.utm_source, d.utm_medium].filter(Boolean).join(' / ');
+    const f = bFields([
       { label: 'Source',   value: source },
-      { label: 'Campaign', value: utm_campaign },
-      { label: 'Content',  value: utm_content },
-      { label: 'Referrer', value: referrer },
+      { label: 'Campaign', value: d.utm_campaign },
+      { label: 'Content',  value: d.utm_content },
+      { label: 'Referrer', value: d.referrer },
     ]);
-    if (attrFields) blocks.push(attrFields);
+    if (f) blocks.push(f);
   }
 
-  if (page_url) blocks.push(bContext(`📄 ${page_url}`));
-
+  if (d.page_url) blocks.push(bContext(`📄 ${d.page_url}`));
   sendSlack(blocks, label);
 }
 
 /* --------------------------------------------------------
    SLACK FORMATTER — submit (step 2 complete)
 -------------------------------------------------------- */
-function slackSubmit({ first_name, last_name, email, phone, company, website, sell_to, hear_about_us, enriched_title, enriched_company_size, enriched_industry, enriched_linkedin, utm_source, utm_medium, utm_campaign, utm_content, referrer, prefill_source, page_url }) {
-  const name   = [first_name, last_name].filter(Boolean).join(' ');
+function slackSubmit(d) {
+  const name   = [d.first_name, d.last_name].filter(Boolean).join(' ');
   const blocks = [];
 
   blocks.push(bHeader('✅ Lead Form Completed'));
@@ -345,46 +438,34 @@ function slackSubmit({ first_name, last_name, email, phone, company, website, se
 
   const leadFields = bFields([
     { label: '👤 Name',           value: name },
-    { label: '📧 Email',          value: email },
-    { label: '📞 Phone',          value: phone },
-    { label: '🏢 Company',        value: company },
-    { label: '🌐 Website',        value: website },
-    { label: '🎯 Sells to',       value: sell_to },
-    { label: '💬 Heard about us', value: hear_about_us },
+    { label: '📧 Email',          value: d.email },
+    { label: '📞 Phone',          value: d.phone },
+    { label: '🏢 Company',        value: d.company },
+    { label: '🌐 Website',        value: d.website },
+    { label: '🎯 Sells to',       value: d.sell_to },
+    { label: '💬 Heard about us', value: d.hear_about_us },
   ]);
   if (leadFields) blocks.push(leadFields);
 
-  const hasEnrichment = enriched_title || enriched_company_size || enriched_industry || enriched_linkedin;
-  if (hasEnrichment) {
-    blocks.push(bDivider());
-    blocks.push(bSection('*🔍 Enrichment*'));
-    const enrichFields = bFields([
-      { label: 'Title',        value: enriched_title },
-      { label: 'Company Size', value: enriched_company_size },
-      { label: 'Industry',     value: enriched_industry },
-      { label: 'LinkedIn',     value: enriched_linkedin },
-    ]);
-    if (enrichFields) blocks.push(enrichFields);
-  }
+  buildEnrichmentBlocks(blocks, d);
 
-  const hasAttribution = utm_source || utm_medium || utm_campaign || utm_content || referrer || prefill_source;
+  const hasAttribution = d.utm_source || d.utm_medium || d.utm_campaign || d.utm_content || d.referrer || d.prefill_source;
   if (hasAttribution) {
     blocks.push(bDivider());
     blocks.push(bSection('*📊 Attribution*'));
-    const source = [utm_source, utm_medium].filter(Boolean).join(' / ');
-    const attrFields = bFields([
+    const source = [d.utm_source, d.utm_medium].filter(Boolean).join(' / ');
+    const f = bFields([
       { label: 'Source',   value: source },
-      { label: 'Campaign', value: utm_campaign },
-      { label: 'Content',  value: utm_content },
-      { label: 'Referrer', value: referrer },
-      { label: 'Prefill',  value: prefill_source },
+      { label: 'Campaign', value: d.utm_campaign },
+      { label: 'Content',  value: d.utm_content },
+      { label: 'Referrer', value: d.referrer },
+      { label: 'Prefill',  value: d.prefill_source },
     ]);
-    if (attrFields) blocks.push(attrFields);
+    if (f) blocks.push(f);
   }
 
-  if (page_url) blocks.push(bContext(`📄 ${page_url}`));
-
-  sendSlack(blocks, `✅ Lead Form Completed — ${email}`);
+  if (d.page_url) blocks.push(bContext(`📄 ${d.page_url}`));
+  sendSlack(blocks, `✅ Lead Form Completed — ${d.email}`);
 }
 
 /* --------------------------------------------------------
@@ -399,14 +480,7 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
     const upsertRes = await fetch('https://app.loops.so/api/v1/contacts/update', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        email,
-        firstName:     firstName || '',
-        lastName:      lastName  || '',
-        company:       company   || '',
-        website:       website   || '',
-        formCompleted: false
-      })
+      body: JSON.stringify({ email, firstName: firstName || '', lastName: lastName || '', company: company || '', website: website || '', formCompleted: false })
     });
     const upsertText = await upsertRes.text();
     console.log(`[Loops] Upsert ${email} → ${upsertRes.status} | ${upsertText.substring(0, 120)}`);
@@ -472,16 +546,13 @@ app.post('/verify-email', async (req, res) => {
     const url        = `https://apps.emaillistverify.com/api/verifyEmail?secret=${apiKey}&email=${encodeURIComponent(email)}`;
     const response   = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
-
     const text   = await response.text();
     const status = text.trim().toLowerCase();
     console.log(`[ELV] ${email} → "${status}"`);
-
     const allowedStatuses = ['ok', 'catch_all', 'ok_for_all', 'antispam_system', 'accept_all'];
     const valid = allowedStatuses.includes(status);
     if (!valid) console.log(`[ELV] BLOCKED ${email} — status: "${status}"`);
     res.json({ valid, status });
-
   } catch (err) {
     if (err.name === 'AbortError') {
       console.warn(`[ELV] Timeout for ${email} — failing open`);
@@ -493,7 +564,7 @@ app.post('/verify-email', async (req, res) => {
 });
 
 /* --------------------------------------------------------
-   POST /session  (page load — acknowledge only)
+   POST /session
 -------------------------------------------------------- */
 app.post('/session', async (req, res) => {
   const session_id = (req.body.session_id || '').toString().trim().slice(0, 100);
@@ -503,6 +574,7 @@ app.post('/session', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /enrich
+   Now captures all Apollo fields including new ones
 -------------------------------------------------------- */
 app.post('/enrich', async (req, res) => {
   const email      = (req.body.email      || '').toString().trim().slice(0, 254).toLowerCase();
@@ -536,23 +608,59 @@ app.post('/enrich', async (req, res) => {
     const person     = apolloData.person || {};
     const org        = person.organization || {};
 
+    // Extract all fields
+    const city           = person.city                                          || null;
+    const state          = person.state                                         || null;
+    const country        = person.country                                       || null;
+    const seniority      = person.seniority                                     || null;
+    const departments    = Array.isArray(person.departments)
+                             ? person.departments.join(', ')                    : (person.departments || null);
+    const emailStatus    = person.email_status                                  || null;
+    const foundedYear    = org.founded_year?.toString()                         || null;
+    const annualRevenue  = org.annual_revenue?.toString()                       || null;
+    const fundingEvents  = Array.isArray(org.funding_events) && org.funding_events.length > 0
+                             ? org.funding_events.map(f =>
+                                 `${f.date || ''} ${f.series || ''} $${f.amount ? (f.amount/1000000).toFixed(1)+'M' : '?'}`
+                               ).join(' | ')                                    : null;
+    const alexaRanking   = org.alexa_ranking?.toString()                        || null;
+    const keywords       = Array.isArray(org.keywords)
+                             ? org.keywords.slice(0, 8).join(', ')             : (org.keywords || null);
+
+    // Save to enrichment_data
     await pool.query(`
       INSERT INTO enrichment_data
-        (session_id, email, enriched_first_name, enriched_last_name,
+        (session_id, email,
+         enriched_first_name, enriched_last_name,
          enriched_title, enriched_company, enriched_company_size,
-         enriched_industry, enriched_linkedin, raw_response)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+         enriched_industry, enriched_linkedin,
+         enriched_city, enriched_state, enriched_country,
+         enriched_seniority, enriched_departments, enriched_email_status,
+         enriched_founded_year, enriched_annual_revenue,
+         enriched_funding_events, enriched_alexa_ranking, enriched_keywords,
+         raw_response)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
       ON CONFLICT (session_id) DO UPDATE SET
-        email                 = EXCLUDED.email,
-        enriched_first_name   = EXCLUDED.enriched_first_name,
-        enriched_last_name    = EXCLUDED.enriched_last_name,
-        enriched_title        = EXCLUDED.enriched_title,
-        enriched_company      = EXCLUDED.enriched_company,
-        enriched_company_size = EXCLUDED.enriched_company_size,
-        enriched_industry     = EXCLUDED.enriched_industry,
-        enriched_linkedin     = EXCLUDED.enriched_linkedin,
-        raw_response          = EXCLUDED.raw_response,
-        enriched_at           = NOW()
+        email                   = EXCLUDED.email,
+        enriched_first_name     = EXCLUDED.enriched_first_name,
+        enriched_last_name      = EXCLUDED.enriched_last_name,
+        enriched_title          = EXCLUDED.enriched_title,
+        enriched_company        = EXCLUDED.enriched_company,
+        enriched_company_size   = EXCLUDED.enriched_company_size,
+        enriched_industry       = EXCLUDED.enriched_industry,
+        enriched_linkedin       = EXCLUDED.enriched_linkedin,
+        enriched_city           = EXCLUDED.enriched_city,
+        enriched_state          = EXCLUDED.enriched_state,
+        enriched_country        = EXCLUDED.enriched_country,
+        enriched_seniority      = EXCLUDED.enriched_seniority,
+        enriched_departments    = EXCLUDED.enriched_departments,
+        enriched_email_status   = EXCLUDED.enriched_email_status,
+        enriched_founded_year   = EXCLUDED.enriched_founded_year,
+        enriched_annual_revenue = EXCLUDED.enriched_annual_revenue,
+        enriched_funding_events = EXCLUDED.enriched_funding_events,
+        enriched_alexa_ranking  = EXCLUDED.enriched_alexa_ranking,
+        enriched_keywords       = EXCLUDED.enriched_keywords,
+        raw_response            = EXCLUDED.raw_response,
+        enriched_at             = NOW()
     `, [
       session_id, email,
       person.first_name                       || null,
@@ -562,7 +670,35 @@ app.post('/enrich', async (req, res) => {
       org.estimated_num_employees?.toString() || null,
       org.industry                            || null,
       person.linkedin_url                     || null,
+      city, state, country,
+      seniority, departments, emailStatus,
+      foundedYear, annualRevenue,
+      fundingEvents, alexaRanking, keywords,
       JSON.stringify(apolloData)
+    ]);
+
+    // Also update leads table with new enrichment fields
+    await pool.query(`
+      UPDATE leads SET
+        enriched_city           = $2,
+        enriched_state          = $3,
+        enriched_country        = $4,
+        enriched_seniority      = $5,
+        enriched_departments    = $6,
+        enriched_email_status   = $7,
+        enriched_founded_year   = $8,
+        enriched_annual_revenue = $9,
+        enriched_funding_events = $10,
+        enriched_alexa_ranking  = $11,
+        enriched_keywords       = $12,
+        updated_at              = NOW()
+      WHERE session_id = $1
+    `, [
+      session_id,
+      city, state, country,
+      seniority, departments, emailStatus,
+      foundedYear, annualRevenue,
+      fundingEvents, alexaRanking, keywords
     ]);
 
     res.json({
@@ -584,8 +720,6 @@ app.post('/enrich', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /partial
-   Railway write + AWS sync
-   Slack + Loops handled by cron after 30 mins
 -------------------------------------------------------- */
 app.post('/partial', async (req, res) => {
   const session_id            = (req.body.session_id          || '').toString().trim().slice(0, 100);
@@ -651,18 +785,17 @@ app.post('/partial', async (req, res) => {
         step_reached          = GREATEST(EXCLUDED.step_reached,          leads.step_reached),
         updated_at            = NOW()
     `, [
-      session_id,                    page_url              || null,
-      email             || null,     website               || null,
-      sell_to           || null,     first_name            || null,
-      last_name         || null,     phone                 || null,
-      company           || null,     hear_about_us         || null,
-      utm_source        || null,     utm_medium            || null,
-      utm_campaign      || null,     utm_content           || null,
-      referrer          || null,     prefill_source        || null,
-      enriched_title    || null,     enriched_company_size || null,
-      enriched_industry || null,     enriched_linkedin     || null,
-      disqualified,                  disqualified_reason   || null,
-      step_reached
+      session_id,       page_url              || null,
+      email    || null, website               || null,
+      sell_to  || null, first_name            || null,
+      last_name|| null, phone                 || null,
+      company  || null, hear_about_us         || null,
+      utm_source||null, utm_medium            || null,
+      utm_campaign||null, utm_content         || null,
+      referrer ||null,  prefill_source        || null,
+      enriched_title||null, enriched_company_size||null,
+      enriched_industry||null, enriched_linkedin||null,
+      disqualified, disqualified_reason||null, step_reached
     ]);
 
     syncToAWS({
@@ -685,8 +818,7 @@ app.post('/partial', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /submit
-   Railway write + AWS sync + Slack submit (deduplicated)
-   Slack only fires on FIRST completion — never on double submit
+   Slack deduplicated — only fires on first completion
 -------------------------------------------------------- */
 app.post('/submit', async (req, res) => {
   const session_id            = (req.body.session_id          || '').toString().trim().slice(0, 100);
@@ -715,12 +847,18 @@ app.post('/submit', async (req, res) => {
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
   try {
-    // Check if already completed BEFORE upsert — for Slack deduplication
+    // Check if already completed + fetch enrichment fields saved by /enrich
     const existing = await pool.query(
-      'SELECT completed FROM leads WHERE session_id = $1',
+      `SELECT completed,
+              enriched_city, enriched_state, enriched_country,
+              enriched_seniority, enriched_departments, enriched_email_status,
+              enriched_founded_year, enriched_annual_revenue,
+              enriched_funding_events, enriched_alexa_ranking, enriched_keywords
+       FROM leads WHERE session_id = $1`,
       [session_id]
     );
-    const alreadyCompleted = existing.rows[0]?.completed === true;
+    const alreadyCompleted    = existing.rows[0]?.completed === true;
+    const enrichedExtra       = existing.rows[0] || {};
 
     await pool.query(`
       INSERT INTO leads
@@ -760,17 +898,17 @@ app.post('/submit', async (req, res) => {
         submitted_at          = NOW(),
         updated_at            = NOW()
     `, [
-      session_id,                    page_url              || null,
-      email             || null,     website               || null,
-      sell_to           || null,     first_name            || null,
-      last_name         || null,     phone                 || null,
-      company           || null,     hear_about_us         || null,
-      utm_source        || null,     utm_medium            || null,
-      utm_campaign      || null,     utm_content           || null,
-      referrer          || null,     prefill_source        || null,
-      enriched_title    || null,     enriched_company_size || null,
-      enriched_industry || null,     enriched_linkedin     || null,
-      disqualified,                  disqualified_reason   || null
+      session_id,       page_url         || null,
+      email    || null, website          || null,
+      sell_to  || null, first_name       || null,
+      last_name|| null, phone            || null,
+      company  || null, hear_about_us    || null,
+      utm_source||null, utm_medium       || null,
+      utm_campaign||null, utm_content    || null,
+      referrer ||null,  prefill_source   || null,
+      enriched_title||null, enriched_company_size||null,
+      enriched_industry||null, enriched_linkedin||null,
+      disqualified, disqualified_reason  || null
     ]);
 
     syncToAWS({
@@ -779,15 +917,37 @@ app.post('/submit', async (req, res) => {
       utm_source, utm_medium, utm_campaign, utm_content,
       referrer, prefill_source,
       enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
+      enriched_city:           enrichedExtra.enriched_city,
+      enriched_state:          enrichedExtra.enriched_state,
+      enriched_country:        enrichedExtra.enriched_country,
+      enriched_seniority:      enrichedExtra.enriched_seniority,
+      enriched_departments:    enrichedExtra.enriched_departments,
+      enriched_email_status:   enrichedExtra.enriched_email_status,
+      enriched_founded_year:   enrichedExtra.enriched_founded_year,
+      enriched_annual_revenue: enrichedExtra.enriched_annual_revenue,
+      enriched_funding_events: enrichedExtra.enriched_funding_events,
+      enriched_alexa_ranking:  enrichedExtra.enriched_alexa_ranking,
+      enriched_keywords:       enrichedExtra.enriched_keywords,
       disqualified, disqualified_reason, step_reached: 2, completed: true
     });
 
-    // Only fire Slack on FIRST completion — never on double submit
+    // Only fire Slack on FIRST completion
     if (!alreadyCompleted) {
       slackSubmit({
         first_name, last_name, email, phone, company, website,
         sell_to, hear_about_us,
         enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
+        enriched_city:           enrichedExtra.enriched_city,
+        enriched_state:          enrichedExtra.enriched_state,
+        enriched_country:        enrichedExtra.enriched_country,
+        enriched_seniority:      enrichedExtra.enriched_seniority,
+        enriched_departments:    enrichedExtra.enriched_departments,
+        enriched_email_status:   enrichedExtra.enriched_email_status,
+        enriched_founded_year:   enrichedExtra.enriched_founded_year,
+        enriched_annual_revenue: enrichedExtra.enriched_annual_revenue,
+        enriched_funding_events: enrichedExtra.enriched_funding_events,
+        enriched_alexa_ranking:  enrichedExtra.enriched_alexa_ranking,
+        enriched_keywords:       enrichedExtra.enriched_keywords,
         utm_source, utm_medium, utm_campaign, utm_content,
         referrer, prefill_source, page_url
       });
@@ -806,7 +966,6 @@ app.post('/submit', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /booking-confirmed
-   Railway update + AWS sync + Loops cancel
 -------------------------------------------------------- */
 app.post('/booking-confirmed', async (req, res) => {
   const session_id  = (req.body.session_id  || '').toString().trim().slice(0, 100);
@@ -822,25 +981,15 @@ app.post('/booking-confirmed', async (req, res) => {
   try {
     await pool.query(`
       UPDATE leads SET
-        booking_uid = $2,
-        start_time  = $3,
-        end_time    = $4,
-        event_type  = $5,
-        booked_at   = NOW(),
-        updated_at  = NOW()
+        booking_uid = $2, start_time = $3, end_time = $4,
+        event_type  = $5, booked_at  = NOW(), updated_at = NOW()
       WHERE session_id = $1
     `, [session_id, booking_uid, start_time, end_time, event_type || null]);
 
     syncBookingToAWS(session_id, booking_uid, start_time, end_time, event_type);
 
-    const leadRow = await pool.query(
-      `SELECT email FROM leads WHERE session_id = $1`,
-      [session_id]
-    );
-    const lead  = leadRow.rows[0] || {};
-    const email = lead.email;
-
-    // No Slack here — Cal sends its own booking confirmation
+    const leadRow = await pool.query('SELECT email FROM leads WHERE session_id = $1', [session_id]);
+    const email   = leadRow.rows[0]?.email;
     if (email) cancelLoopsSequence(email);
 
     console.log(`[/booking-confirmed] ✅ Booked: ${booking_uid} | session: ${session_id} | email: ${email}`);
@@ -854,8 +1003,6 @@ app.post('/booking-confirmed', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /cron/send-partials
-   Called by cron-job.org every 30 mins.
-   Finds genuine partials → Slack + Loops + marks loops_sent
 -------------------------------------------------------- */
 app.post('/cron/send-partials', async (req, res) => {
   try {
@@ -864,10 +1011,12 @@ app.post('/cron/send-partials', async (req, res) => {
              company, website, sell_to,
              utm_source, utm_medium, utm_campaign, utm_content,
              referrer, page_url,
-             disqualified, disqualified_reason,
-             completed,
-             enriched_title, enriched_company_size,
-             enriched_industry, enriched_linkedin
+             disqualified, disqualified_reason, completed,
+             enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
+             enriched_city, enriched_state, enriched_country,
+             enriched_seniority, enriched_departments, enriched_email_status,
+             enriched_founded_year, enriched_annual_revenue,
+             enriched_funding_events, enriched_alexa_ranking, enriched_keywords
       FROM leads
       WHERE email IS NOT NULL
         AND disqualified = false
@@ -880,38 +1029,11 @@ app.post('/cron/send-partials', async (req, res) => {
     console.log(`[Cron] Found ${leads.length} leads to process`);
 
     for (const lead of leads) {
-      slackPartial({
-        email:                 lead.email,
-        sell_to:               lead.sell_to,
-        utm_source:            lead.utm_source,
-        utm_medium:            lead.utm_medium,
-        utm_campaign:          lead.utm_campaign,
-        utm_content:           lead.utm_content,
-        referrer:              lead.referrer,
-        page_url:              lead.page_url,
-        disqualified:          lead.disqualified,
-        disqualified_reason:   lead.disqualified_reason,
-        completed:             lead.completed,
-        company:               lead.company,
-        website:               lead.website,
-        enriched_title:        lead.enriched_title,
-        enriched_company_size: lead.enriched_company_size,
-        enriched_industry:     lead.enriched_industry,
-        enriched_linkedin:     lead.enriched_linkedin
-      });
+      slackPartial(lead);
 
-      await sendLoopsEvent(
-        lead.email,
-        lead.first_name,
-        lead.last_name,
-        lead.company,
-        lead.website
-      );
+      await sendLoopsEvent(lead.email, lead.first_name, lead.last_name, lead.company, lead.website);
 
-      await pool.query(
-        'UPDATE leads SET loops_sent = true WHERE session_id = $1',
-        [lead.session_id]
-      );
+      await pool.query('UPDATE leads SET loops_sent = true WHERE session_id = $1', [lead.session_id]);
 
       if (awsPool) {
         awsPool.query(
