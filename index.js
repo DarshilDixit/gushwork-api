@@ -187,9 +187,10 @@ function syncToAWS(data) {
        enriched_seniority, enriched_departments, enriched_email_status,
        enriched_founded_year, enriched_annual_revenue,
        enriched_funding_events, enriched_alexa_ranking, enriched_keywords,
+       enriched_org_hq, enriched_total_funding, enriched_funding_stage,
        disqualified, disqualified_reason,
        step_reached, completed, submitted_at, loops_sent, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,NOW())
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,NOW())
     ON CONFLICT (session_id) DO UPDATE SET
       page_url                = COALESCE(EXCLUDED.page_url,                gw_form_leads.page_url),
       email                   = COALESCE(EXCLUDED.email,                   gw_form_leads.email),
@@ -221,6 +222,9 @@ function syncToAWS(data) {
       enriched_funding_events = COALESCE(EXCLUDED.enriched_funding_events, gw_form_leads.enriched_funding_events),
       enriched_alexa_ranking  = COALESCE(EXCLUDED.enriched_alexa_ranking,  gw_form_leads.enriched_alexa_ranking),
       enriched_keywords       = COALESCE(EXCLUDED.enriched_keywords,       gw_form_leads.enriched_keywords),
+      enriched_org_hq         = COALESCE(EXCLUDED.enriched_org_hq,         gw_form_leads.enriched_org_hq),
+      enriched_total_funding  = COALESCE(EXCLUDED.enriched_total_funding,  gw_form_leads.enriched_total_funding),
+      enriched_funding_stage  = COALESCE(EXCLUDED.enriched_funding_stage,  gw_form_leads.enriched_funding_stage),
       disqualified            = COALESCE(EXCLUDED.disqualified,            gw_form_leads.disqualified),
       disqualified_reason     = COALESCE(EXCLUDED.disqualified_reason,     gw_form_leads.disqualified_reason),
       step_reached            = GREATEST(EXCLUDED.step_reached,            gw_form_leads.step_reached),
@@ -244,10 +248,11 @@ function syncToAWS(data) {
     data.enriched_departments    || null,   data.enriched_email_status     || null,
     data.enriched_founded_year   || null,   data.enriched_annual_revenue   || null,
     data.enriched_funding_events || null,   data.enriched_alexa_ranking    || null,
-    data.enriched_keywords       || null,   data.disqualified              || false,
-    data.disqualified_reason     || null,   data.step_reached              || 1,
-    data.completed               || false,  data.completed ? new Date() : null,
-    data.loops_sent              || false
+    data.enriched_keywords       || null,   data.enriched_org_hq           || null,
+    data.enriched_total_funding  || null,   data.enriched_funding_stage    || null,
+    data.disqualified            || false,  data.disqualified_reason       || null,
+    data.step_reached            || 1,      data.completed                 || false,
+    data.completed ? new Date() : null,     data.loops_sent                || false
   ]).then(() => {
     console.log(`[AWS] ✅ Synced session ${data.session_id}`);
   }).catch(err => {
@@ -757,6 +762,9 @@ app.post('/enrich', async (req, res) => {
         enriched_funding_events = $10,
         enriched_alexa_ranking  = $11,
         enriched_keywords       = $12,
+        enriched_org_hq         = $13,
+        enriched_total_funding  = $14,
+        enriched_funding_stage  = $15,
         updated_at              = NOW()
       WHERE session_id = $1
     `, [
@@ -764,7 +772,8 @@ app.post('/enrich', async (req, res) => {
       city, state, country,
       seniority, departments, emailStatus,
       foundedYear, annualRevenue,
-      fundingEvents, alexaRanking, keywords
+      fundingEvents, alexaRanking, keywords,
+      orgHQ, totalFunding, fundingStage
     ]);
 
     res.json({
@@ -983,7 +992,6 @@ app.post('/submit', async (req, res) => {
       first_name, last_name, phone, company, hear_about_us,
       utm_source, utm_medium, utm_campaign, utm_content,
       referrer, prefill_source,
-      // All from enrichment_data — freshest and most complete
       enriched_title:          enrich.enriched_title,
       enriched_company_size:   enrich.enriched_company_size,
       enriched_industry:       enrich.enriched_industry,
@@ -999,6 +1007,9 @@ app.post('/submit', async (req, res) => {
       enriched_funding_events: enrich.enriched_funding_events,
       enriched_alexa_ranking:  enrich.enriched_alexa_ranking,
       enriched_keywords:       enrich.enriched_keywords,
+      enriched_org_hq:         enrich.enriched_org_hq,
+      enriched_total_funding:  enrich.enriched_total_funding,
+      enriched_funding_stage:  enrich.enriched_funding_stage,
       disqualified, disqualified_reason, step_reached: 2, completed: true
     });
 
@@ -1007,7 +1018,6 @@ app.post('/submit', async (req, res) => {
       slackSubmit({
         first_name, last_name, email, phone, company, website,
         sell_to, hear_about_us,
-        // All from enrichment_data — freshest and most complete
         enriched_title:          enrich.enriched_title,
         enriched_company_size:   enrich.enriched_company_size,
         enriched_industry:       enrich.enriched_industry,
@@ -1023,6 +1033,9 @@ app.post('/submit', async (req, res) => {
         enriched_funding_events: enrich.enriched_funding_events,
         enriched_alexa_ranking:  enrich.enriched_alexa_ranking,
         enriched_keywords:       enrich.enriched_keywords,
+        enriched_org_hq:         enrich.enriched_org_hq,
+        enriched_total_funding:  enrich.enriched_total_funding,
+        enriched_funding_stage:  enrich.enriched_funding_stage,
         utm_source, utm_medium, utm_campaign, utm_content,
         referrer, prefill_source, page_url
       });
@@ -1128,6 +1141,9 @@ app.post('/cron/send-partials', async (req, res) => {
         enriched_funding_events: enrich.enriched_funding_events,
         enriched_alexa_ranking:  enrich.enriched_alexa_ranking,
         enriched_keywords:       enrich.enriched_keywords,
+        enriched_org_hq:         enrich.enriched_org_hq,
+        enriched_total_funding:  enrich.enriched_total_funding,
+        enriched_funding_stage:  enrich.enriched_funding_stage,
       });
 
       await sendLoopsEvent(lead.email, lead.first_name, lead.last_name, lead.company, lead.website);
