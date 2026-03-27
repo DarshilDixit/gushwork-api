@@ -564,6 +564,21 @@ app.post('/verify-email', async (req, res) => {
 });
 
 /* --------------------------------------------------------
+   HELPER — formatRevenue
+   Converts raw USD number to readable string
+   50000000 → $50M | 1200000000 → $1.2B | 500000 → $500K
+-------------------------------------------------------- */
+function formatRevenue(amount) {
+  if (!amount) return null;
+  const n = parseFloat(amount);
+  if (isNaN(n)) return amount.toString();
+  if (n >= 1_000_000_000) return `$${(n / 1_000_000_000).toFixed(1)}B USD`;
+  if (n >= 1_000_000)     return `$${(n / 1_000_000).toFixed(1)}M USD`;
+  if (n >= 1_000)         return `$${(n / 1_000).toFixed(0)}K USD`;
+  return `$${n} USD`;
+}
+
+/* --------------------------------------------------------
    POST /session
 -------------------------------------------------------- */
 app.post('/session', async (req, res) => {
@@ -613,18 +628,32 @@ app.post('/enrich', async (req, res) => {
     const state          = person.state                                         || null;
     const country        = person.country                                       || null;
     const seniority      = person.seniority                                     || null;
-    const departments    = Array.isArray(person.departments)
-                             ? person.departments.join(', ')                    : (person.departments || null);
+
+    // Departments — Apollo returns as array on person_departments or departments
+    const deptRaw     = person.departments || person.person_departments || null;
+    const departments = Array.isArray(deptRaw)
+                          ? deptRaw.join(', ')
+                          : (deptRaw || null);
+
     const emailStatus    = person.email_status                                  || null;
     const foundedYear    = org.founded_year?.toString()                         || null;
-    const annualRevenue  = org.annual_revenue?.toString()                       || null;
+
+    // Annual revenue — Apollo returns raw USD number e.g. 50000000
+    // Format as $50M, $1.2B etc for readability
+    const annualRevenueRaw = org.annual_revenue || null;
+    const annualRevenue = annualRevenueRaw
+      ? formatRevenue(annualRevenueRaw)
+      : null;
+
     const fundingEvents  = Array.isArray(org.funding_events) && org.funding_events.length > 0
                              ? org.funding_events.map(f =>
-                                 `${f.date || ''} ${f.series || ''} $${f.amount ? (f.amount/1000000).toFixed(1)+'M' : '?'}`
+                                 `${f.date || ''} ${f.series || ''} ${f.amount ? formatRevenue(f.amount) : '?'}`
                                ).join(' | ')                                    : null;
     const alexaRanking   = org.alexa_ranking?.toString()                        || null;
     const keywords       = Array.isArray(org.keywords)
                              ? org.keywords.slice(0, 8).join(', ')             : (org.keywords || null);
+
+    console.log(`[/enrich] Apollo fields — seniority: ${seniority} | departments: ${departments} | revenue: ${annualRevenue} | city: ${city}`);
 
     // Save to enrichment_data
     await pool.query(`
@@ -847,18 +876,19 @@ app.post('/submit', async (req, res) => {
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
   try {
-    // Check if already completed + fetch enrichment fields saved by /enrich
+    // Check if already completed + fetch ALL enrichment from enrichment_data
+    // This gives Apollo maximum time to have responded before we read the data
     const existing = await pool.query(
-      `SELECT completed,
-              enriched_city, enriched_state, enriched_country,
-              enriched_seniority, enriched_departments, enriched_email_status,
-              enriched_founded_year, enriched_annual_revenue,
-              enriched_funding_events, enriched_alexa_ranking, enriched_keywords
-       FROM leads WHERE session_id = $1`,
+      `SELECT completed FROM leads WHERE session_id = $1`,
       [session_id]
     );
-    const alreadyCompleted    = existing.rows[0]?.completed === true;
-    const enrichedExtra       = existing.rows[0] || {};
+    const alreadyCompleted = existing.rows[0]?.completed === true;
+
+    const enrichRow = await pool.query(
+      `SELECT * FROM enrichment_data WHERE session_id = $1`,
+      [session_id]
+    );
+    const enrich = enrichRow.rows[0] || {};
 
     await pool.query(`
       INSERT INTO leads
@@ -916,18 +946,22 @@ app.post('/submit', async (req, res) => {
       first_name, last_name, phone, company, hear_about_us,
       utm_source, utm_medium, utm_campaign, utm_content,
       referrer, prefill_source,
-      enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
-      enriched_city:           enrichedExtra.enriched_city,
-      enriched_state:          enrichedExtra.enriched_state,
-      enriched_country:        enrichedExtra.enriched_country,
-      enriched_seniority:      enrichedExtra.enriched_seniority,
-      enriched_departments:    enrichedExtra.enriched_departments,
-      enriched_email_status:   enrichedExtra.enriched_email_status,
-      enriched_founded_year:   enrichedExtra.enriched_founded_year,
-      enriched_annual_revenue: enrichedExtra.enriched_annual_revenue,
-      enriched_funding_events: enrichedExtra.enriched_funding_events,
-      enriched_alexa_ranking:  enrichedExtra.enriched_alexa_ranking,
-      enriched_keywords:       enrichedExtra.enriched_keywords,
+      // All from enrichment_data — freshest and most complete
+      enriched_title:          enrich.enriched_title,
+      enriched_company_size:   enrich.enriched_company_size,
+      enriched_industry:       enrich.enriched_industry,
+      enriched_linkedin:       enrich.enriched_linkedin,
+      enriched_city:           enrich.enriched_city,
+      enriched_state:          enrich.enriched_state,
+      enriched_country:        enrich.enriched_country,
+      enriched_seniority:      enrich.enriched_seniority,
+      enriched_departments:    enrich.enriched_departments,
+      enriched_email_status:   enrich.enriched_email_status,
+      enriched_founded_year:   enrich.enriched_founded_year,
+      enriched_annual_revenue: enrich.enriched_annual_revenue,
+      enriched_funding_events: enrich.enriched_funding_events,
+      enriched_alexa_ranking:  enrich.enriched_alexa_ranking,
+      enriched_keywords:       enrich.enriched_keywords,
       disqualified, disqualified_reason, step_reached: 2, completed: true
     });
 
@@ -936,18 +970,22 @@ app.post('/submit', async (req, res) => {
       slackSubmit({
         first_name, last_name, email, phone, company, website,
         sell_to, hear_about_us,
-        enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
-        enriched_city:           enrichedExtra.enriched_city,
-        enriched_state:          enrichedExtra.enriched_state,
-        enriched_country:        enrichedExtra.enriched_country,
-        enriched_seniority:      enrichedExtra.enriched_seniority,
-        enriched_departments:    enrichedExtra.enriched_departments,
-        enriched_email_status:   enrichedExtra.enriched_email_status,
-        enriched_founded_year:   enrichedExtra.enriched_founded_year,
-        enriched_annual_revenue: enrichedExtra.enriched_annual_revenue,
-        enriched_funding_events: enrichedExtra.enriched_funding_events,
-        enriched_alexa_ranking:  enrichedExtra.enriched_alexa_ranking,
-        enriched_keywords:       enrichedExtra.enriched_keywords,
+        // All from enrichment_data — freshest and most complete
+        enriched_title:          enrich.enriched_title,
+        enriched_company_size:   enrich.enriched_company_size,
+        enriched_industry:       enrich.enriched_industry,
+        enriched_linkedin:       enrich.enriched_linkedin,
+        enriched_city:           enrich.enriched_city,
+        enriched_state:          enrich.enriched_state,
+        enriched_country:        enrich.enriched_country,
+        enriched_seniority:      enrich.enriched_seniority,
+        enriched_departments:    enrich.enriched_departments,
+        enriched_email_status:   enrich.enriched_email_status,
+        enriched_founded_year:   enrich.enriched_founded_year,
+        enriched_annual_revenue: enrich.enriched_annual_revenue,
+        enriched_funding_events: enrich.enriched_funding_events,
+        enriched_alexa_ranking:  enrich.enriched_alexa_ranking,
+        enriched_keywords:       enrich.enriched_keywords,
         utm_source, utm_medium, utm_campaign, utm_content,
         referrer, prefill_source, page_url
       });
@@ -1029,7 +1067,31 @@ app.post('/cron/send-partials', async (req, res) => {
     console.log(`[Cron] Found ${leads.length} leads to process`);
 
     for (const lead of leads) {
-      slackPartial(lead);
+      // Fetch enrichment from enrichment_data — most complete source
+      const enrichRow = await pool.query(
+        'SELECT * FROM enrichment_data WHERE session_id = $1',
+        [lead.session_id]
+      );
+      const enrich = enrichRow.rows[0] || {};
+
+      slackPartial({
+        ...lead,
+        enriched_title:          enrich.enriched_title,
+        enriched_company_size:   enrich.enriched_company_size,
+        enriched_industry:       enrich.enriched_industry,
+        enriched_linkedin:       enrich.enriched_linkedin,
+        enriched_city:           enrich.enriched_city,
+        enriched_state:          enrich.enriched_state,
+        enriched_country:        enrich.enriched_country,
+        enriched_seniority:      enrich.enriched_seniority,
+        enriched_departments:    enrich.enriched_departments,
+        enriched_email_status:   enrich.enriched_email_status,
+        enriched_founded_year:   enrich.enriched_founded_year,
+        enriched_annual_revenue: enrich.enriched_annual_revenue,
+        enriched_funding_events: enrich.enriched_funding_events,
+        enriched_alexa_ranking:  enrich.enriched_alexa_ranking,
+        enriched_keywords:       enrich.enriched_keywords,
+      });
 
       await sendLoopsEvent(lead.email, lead.first_name, lead.last_name, lead.company, lead.website);
 
