@@ -1,5 +1,5 @@
 /* ==========================================================
-   GUSHWORK — MULTI-STEP FORM  v3.4
+   GUSHWORK — MULTI-STEP FORM  v3.5
    Hosted on GitHub — reference via jsDelivr CDN
    https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@main/gushwork-form.js
 
@@ -8,9 +8,10 @@
    - Phone input (Memberstack intl-tel-input)
    - Form logic (validation, enrichment, ELV, Cal, Railway)
 
-   v3.4 changes:
-   - Double submit fix — _submitting debounce added to all step handlers
-   - HubSpot synthetic form submit fired on Cal booking
+   v3.5 changes:
+   - triggerEnrichment now returns a promise so it can be awaited
+   - handleStep1Next awaits enrichment before savePartial
+   - Dashboard always shows enriched name/company from Step 1
 ========================================================== */
 
 /* --------------------------------------------------------
@@ -170,7 +171,7 @@
 
   let _enrichedForEmail  = '';
   let _lastVerifiedEmail = '';
-  let _submitting        = false; // global debounce flag — prevents double submit on any step
+  let _submitting        = false;
 
   /* =======================================================
      SECTION 1 — INITIALISATION
@@ -473,6 +474,7 @@
 
   /* =======================================================
      SECTION 7 — ENRICHMENT
+     v3.5: triggerEnrichment now returns a promise
   ======================================================= */
 
   function getEnrichmentCache(email) {
@@ -552,14 +554,16 @@
     _enrichedForEmail = email;
   }
 
-  function triggerEnrichment(email) {
+  /* v3.5: triggerEnrichment returns a promise so handleStep1Next can await it */
+  async function triggerEnrichment(email) {
     if (!email || !isValidEmail(email) || !isWorkEmail(email)) return;
     if (email === _enrichedForEmail) return;
     const cached = getEnrichmentCache(email);
     if (cached) {
       applyEnrichment(email, cached);
     } else {
-      enrichEmail(email).then(data => applyEnrichment(email, data));
+      const data = await enrichEmail(email);
+      applyEnrichment(email, data);
     }
   }
 
@@ -639,8 +643,6 @@
         if (!data.uid) return;
         console.log('[GW] ✅ Booking confirmed:', data.uid);
 
-        // Fire synthetic form submit for HubSpot tracking
-        // Populate fields first so HubSpot sees real values
         const hsEmail = document.getElementById('email');
         const hsFirst = document.getElementById('first-name');
         const hsLast  = document.getElementById('last-name');
@@ -677,8 +679,8 @@
 
   /* =======================================================
      SECTION 9 — STEP HANDLERS
-     v3.4: _submitting flag on ALL handlers prevents any
-     double submission from double clicks or Enter key.
+     v3.5: handleStep1Next now awaits triggerEnrichment
+     so enriched data is saved with /partial
   ======================================================= */
 
   async function handleStep1Next() {
@@ -704,7 +706,9 @@
       formState.sell_to = sellTo;
       localStorage.setItem('gw_email', formState.email);
 
-      triggerEnrichment(formState.email);
+      /* v3.5: await enrichment so formState has name/company before savePartial */
+      setLoading('step-1-next', true, 'Loading...');
+      await triggerEnrichment(formState.email);
 
       if (sellTo === 'B2C' || sellTo === 'Mixed') {
         showStep('step-disqualified');
