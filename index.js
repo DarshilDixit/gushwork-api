@@ -533,42 +533,39 @@ app.get('/monitor/metrics', async (req, res) => {
           COUNT(*) FILTER (WHERE booking_uid IS NOT NULL)     AS booked,
           COUNT(*) FILTER (WHERE disqualified = true)         AS disqualified,
           COUNT(*) FILTER (WHERE loops_sent = true)           AS loops_sent
-        FROM leads WHERE ctid >= '(0,1)'
+        FROM (SELECT * FROM leads WHERE ctid >= '(0,1)') l
       `),
-      pool.query(`SELECT COUNT(*) AS count FROM enrichment_data WHERE ctid >= '(0,1)'`),
+      pool.query(`SELECT COUNT(*) AS count FROM (SELECT session_id FROM enrichment_data WHERE ctid >= '(0,1)') e`),
       pool.query(`
         SELECT
           COUNT(*) AS total,
           COUNT(*) FILTER (WHERE enriched_title IS NOT NULL)          AS has_title,
           COUNT(*) FILTER (WHERE enriched_total_funding IS NOT NULL)  AS has_funding,
           COUNT(*) FILTER (WHERE enriched_country IS NOT NULL)        AS has_location
-        FROM enrichment_data WHERE ctid >= '(0,1)'
+        FROM (SELECT * FROM enrichment_data WHERE ctid >= '(0,1)') e
       `),
       pool.query(`
-        SELECT COUNT(*) AS count FROM leads
-        WHERE ctid >= '(0,1)'
-          AND email IS NOT NULL
-          AND disqualified = false
-          AND booking_uid IS NULL
-          AND loops_sent = false
-          AND created_at < NOW() - INTERVAL '30 minutes'
+        SELECT COUNT(*) AS count FROM (SELECT * FROM leads WHERE ctid >= '(0,1)') l
+        WHERE l.email IS NOT NULL
+          AND l.disqualified = false
+          AND l.booking_uid IS NULL
+          AND l.loops_sent = false
+          AND l.created_at < NOW() - INTERVAL '30 minutes'
       `),
       pool.query(`
-        SELECT COUNT(*) AS count FROM leads
-        WHERE ctid >= '(0,1)'
-          AND completed = true
-          AND booking_uid IS NULL
+        SELECT COUNT(*) AS count FROM (SELECT * FROM leads WHERE ctid >= '(0,1)') l
+        WHERE l.completed = true
+          AND l.booking_uid IS NULL
       `),
       pool.query(`
         SELECT session_id, email, company, first_name, last_name,
                completed, booking_uid, disqualified, created_at, page_url
-        FROM leads WHERE ctid >= '(0,1)'
-        ORDER BY created_at DESC LIMIT 50
+        FROM (SELECT * FROM leads WHERE ctid >= '(0,1)') l
+        ORDER BY l.created_at DESC LIMIT 50
       `),
       pool.query(`
-        SELECT COUNT(*) AS count FROM leads
-        WHERE ctid >= '(0,1)'
-          AND created_at >= NOW() - INTERVAL '24 hours'
+        SELECT COUNT(*) AS count FROM (SELECT * FROM leads WHERE ctid >= '(0,1)') l
+        WHERE l.created_at >= NOW() - INTERVAL '24 hours'
       `)
     ]);
 
@@ -623,23 +620,35 @@ app.get('/monitor/leads', async (req, res) => {
   const dateTo   = req.query.dateTo   || null;
   const search   = req.query.search   || null;
 
-  let where = `WHERE l.ctid >= '(0,1)'`;
+  // Build dynamic WHERE clause — params start empty, indexes start at 1
+  let conditions = [];
   const params = [];
 
-  if (stage === 'booked')       where += ` AND l.booking_uid IS NOT NULL`;
-  if (stage === 'completed')    where += ` AND l.completed = true AND l.booking_uid IS NULL`;
-  if (stage === 'step1')        where += ` AND l.completed = false AND l.disqualified = false`;
-  if (stage === 'disqualified') where += ` AND l.disqualified = true`;
+  if (stage === 'booked')       conditions.push(`l.booking_uid IS NOT NULL`);
+  if (stage === 'completed')    conditions.push(`l.completed = true AND l.booking_uid IS NULL`);
+  if (stage === 'step1')        conditions.push(`l.completed = false AND l.disqualified = false`);
+  if (stage === 'disqualified') conditions.push(`l.disqualified = true`);
 
-  if (dateFrom) { params.push(dateFrom); where += ` AND l.created_at >= $${params.length}::date`; }
-  if (dateTo)   { params.push(dateTo);   where += ` AND l.created_at < ($${params.length}::date + INTERVAL '1 day')`; }
-  if (search)   { params.push(`%${search.toLowerCase()}%`); where += ` AND (LOWER(l.email) LIKE $${params.length} OR LOWER(l.company) LIKE $${params.length} OR LOWER(l.first_name) LIKE $${params.length})`; }
+  if (dateFrom) { params.push(dateFrom); conditions.push(`l.created_at >= $${params.length}::date`); }
+  if (dateTo)   { params.push(dateTo);   conditions.push(`l.created_at < ($${params.length}::date + INTERVAL '1 day')`); }
+  if (search) {
+    params.push(`%${search.toLowerCase()}%`);
+    const i = params.length;
+    conditions.push(`(LOWER(l.email) LIKE $${i} OR LOWER(COALESCE(l.company,'')) LIKE $${i} OR LOWER(COALESCE(l.first_name,'')) LIKE $${i})`);
+  }
+
+  const whereClause = conditions.length > 0 ? 'AND ' + conditions.join(' AND ') : '';
 
   try {
-    const countResult = await pool.query(`SELECT COUNT(*) AS total FROM leads l ${where}`, params);
+    const countResult = await pool.query(
+      `SELECT COUNT(*) AS total FROM (SELECT session_id FROM leads WHERE ctid >= '(0,1)') l WHERE true ${whereClause}`,
+      params
+    );
     const total = parseInt(countResult.rows[0].total) || 0;
 
-    params.push(limit, offset);
+    const limitParam  = params.length + 1;
+    const offsetParam = params.length + 2;
+
     const leadsResult = await pool.query(`
       SELECT
         l.session_id, l.email, l.first_name, l.last_name, l.phone,
@@ -657,12 +666,13 @@ app.get('/monitor/leads', async (req, res) => {
         e.enriched_company AS e_company,
         e.enriched_first_name AS e_first_name, e.enriched_last_name AS e_last_name,
         e.enriched_phone AS e_phone, e.enriched_at
-      FROM leads l
-      LEFT JOIN enrichment_data e ON e.session_id = l.session_id AND e.ctid >= '(0,1)'
-      ${where}
+      FROM (SELECT * FROM leads WHERE ctid >= '(0,1)') l
+      LEFT JOIN (SELECT * FROM enrichment_data WHERE ctid >= '(0,1)') e
+        ON e.session_id = l.session_id
+      WHERE true ${whereClause}
       ORDER BY l.created_at DESC
-      LIMIT $${params.length - 1} OFFSET $${params.length}
-    `, params);
+      LIMIT $${limitParam} OFFSET $${offsetParam}
+    `, [...params, limit, offset]);
 
     res.json({
       total,
