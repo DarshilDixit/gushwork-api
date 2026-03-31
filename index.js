@@ -525,7 +525,7 @@ app.get('/monitor/metrics', async (req, res) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   try {
-    const [totals, enrichCount, enrichCoverage, pendingPartials, noBooking, recent, today] = await Promise.all([
+    const [totals, enrichCount, pendingPartials, noBooking, recent, today] = await Promise.all([
       pool.query(`
         SELECT
           COUNT(*)                                             AS total,
@@ -533,58 +533,47 @@ app.get('/monitor/metrics', async (req, res) => {
           COUNT(*) FILTER (WHERE booking_uid IS NOT NULL)     AS booked,
           COUNT(*) FILTER (WHERE disqualified = true)         AS disqualified,
           COUNT(*) FILTER (WHERE loops_sent = true)           AS loops_sent
-        FROM (SELECT * FROM leads WHERE ctid >= '(0,1)') l
+        FROM leads WHERE ctid >= '(0,1)'
       `),
-      pool.query(`SELECT COUNT(*) AS count FROM (SELECT session_id FROM enrichment_data WHERE ctid >= '(0,1)') e`),
+      pool.query(`SELECT COUNT(*) AS count FROM enrichment_data WHERE ctid >= '(0,1)'`),
       pool.query(`
-        SELECT
-          COUNT(*) AS total,
-          COUNT(*) FILTER (WHERE enriched_title IS NOT NULL)          AS has_title,
-          COUNT(*) FILTER (WHERE enriched_total_funding IS NOT NULL)  AS has_funding,
-          COUNT(*) FILTER (WHERE enriched_country IS NOT NULL)        AS has_location
-        FROM (SELECT * FROM enrichment_data WHERE ctid >= '(0,1)') e
-      `),
-      pool.query(`
-        SELECT COUNT(*) AS count FROM (SELECT * FROM leads WHERE ctid >= '(0,1)') l
-        WHERE l.email IS NOT NULL
-          AND l.disqualified = false
-          AND l.booking_uid IS NULL
-          AND l.loops_sent = false
-          AND l.created_at < NOW() - INTERVAL '30 minutes'
+        SELECT COUNT(*) AS count FROM leads
+        WHERE ctid >= '(0,1)'
+          AND email IS NOT NULL
+          AND disqualified = false
+          AND booking_uid IS NULL
+          AND loops_sent = false
+          AND created_at < NOW() - INTERVAL '30 minutes'
       `),
       pool.query(`
-        SELECT COUNT(*) AS count FROM (SELECT * FROM leads WHERE ctid >= '(0,1)') l
-        WHERE l.completed = true
-          AND l.booking_uid IS NULL
+        SELECT COUNT(*) AS count FROM leads
+        WHERE ctid >= '(0,1)'
+          AND completed = true
+          AND booking_uid IS NULL
       `),
       pool.query(`
         SELECT session_id, email, company, first_name, last_name,
                completed, booking_uid, disqualified, created_at, page_url
-        FROM (SELECT * FROM leads WHERE ctid >= '(0,1)') l
-        ORDER BY l.created_at DESC LIMIT 50
+        FROM leads WHERE ctid >= '(0,1)'
+        ORDER BY created_at DESC LIMIT 10
       `),
       pool.query(`
-        SELECT COUNT(*) AS count FROM (SELECT * FROM leads WHERE ctid >= '(0,1)') l
-        WHERE l.created_at >= NOW() - INTERVAL '24 hours'
+        SELECT COUNT(*) AS count FROM leads
+        WHERE ctid >= '(0,1)'
+          AND created_at >= NOW() - INTERVAL '24 hours'
       `)
     ]);
 
     const t = totals.rows[0];
-    const total        = parseInt(t.total) || 0;
-    const completed    = parseInt(t.completed) || 0;
-    const booked       = parseInt(t.booked) || 0;
+    const total       = parseInt(t.total) || 0;
+    const completed   = parseInt(t.completed) || 0;
+    const booked      = parseInt(t.booked) || 0;
     const disqualified = parseInt(t.disqualified) || 0;
-    const loopsSent    = parseInt(t.loops_sent) || 0;
-    const enriched     = parseInt(enrichCount.rows[0].count) || 0;
-    const pending      = parseInt(pendingPartials.rows[0].count) || 0;
+    const loopsSent   = parseInt(t.loops_sent) || 0;
+    const enriched    = parseInt(enrichCount.rows[0].count) || 0;
+    const pending     = parseInt(pendingPartials.rows[0].count) || 0;
     const noBookingUid = parseInt(noBooking.rows[0].count) || 0;
-    const todayCount   = parseInt(today.rows[0].count) || 0;
-
-    const ec = enrichCoverage.rows[0];
-    const ecTotal    = parseInt(ec.total) || 0;
-    const titlePct   = ecTotal ? Math.round(parseInt(ec.has_title) / ecTotal * 100) : 0;
-    const fundingPct = ecTotal ? Math.round(parseInt(ec.has_funding) / ecTotal * 100) : 0;
-    const locPct     = ecTotal ? Math.round(parseInt(ec.has_location) / ecTotal * 100) : 0;
+    const todayCount  = parseInt(today.rows[0].count) || 0;
 
     res.json({
       total, completed, booked, disqualified,
@@ -593,96 +582,12 @@ app.get('/monitor/metrics', async (req, res) => {
       noBookingUid,
       todayCount,
       awsSynced: !!awsPool,
-      enrichTitlePct:    titlePct,
-      enrichFundingPct:  fundingPct,
-      enrichLocationPct: locPct,
       recentLeads: recent.rows,
       generatedAt: new Date().toISOString()
     });
   } catch (err) {
     console.error('[/monitor/metrics]', err.message);
     res.status(500).json({ error: 'Metrics query failed', detail: err.message });
-  }
-});
-
-/* --------------------------------------------------------
-   GET /monitor/leads  — paginated leads + enrichment, protected
--------------------------------------------------------- */
-app.get('/monitor/leads', async (req, res) => {
-  const token = process.env.MONITOR_TOKEN;
-  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
-
-  const page     = Math.max(1, parseInt(req.query.page) || 1);
-  const limit    = 25;
-  const offset   = (page - 1) * limit;
-  const stage    = req.query.stage    || 'all';
-  const dateFrom = req.query.dateFrom || null;
-  const dateTo   = req.query.dateTo   || null;
-  const search   = req.query.search   || null;
-
-  // Build dynamic WHERE clause — params start empty, indexes start at 1
-  let conditions = [];
-  const params = [];
-
-  if (stage === 'booked')       conditions.push(`l.booking_uid IS NOT NULL`);
-  if (stage === 'completed')    conditions.push(`l.completed = true AND l.booking_uid IS NULL`);
-  if (stage === 'step1')        conditions.push(`l.completed = false AND l.disqualified = false`);
-  if (stage === 'disqualified') conditions.push(`l.disqualified = true`);
-
-  if (dateFrom) { params.push(dateFrom); conditions.push(`l.created_at >= $${params.length}::date`); }
-  if (dateTo)   { params.push(dateTo);   conditions.push(`l.created_at < ($${params.length}::date + INTERVAL '1 day')`); }
-  if (search) {
-    params.push(`%${search.toLowerCase()}%`);
-    const i = params.length;
-    conditions.push(`(LOWER(l.email) LIKE $${i} OR LOWER(COALESCE(l.company,'')) LIKE $${i} OR LOWER(COALESCE(l.first_name,'')) LIKE $${i})`);
-  }
-
-  const whereClause = conditions.length > 0 ? 'AND ' + conditions.join(' AND ') : '';
-
-  try {
-    const countResult = await pool.query(
-      `SELECT COUNT(*) AS total FROM (SELECT session_id FROM leads WHERE ctid >= '(0,1)') l WHERE true ${whereClause}`,
-      params
-    );
-    const total = parseInt(countResult.rows[0].total) || 0;
-
-    const limitParam  = params.length + 1;
-    const offsetParam = params.length + 2;
-
-    const leadsResult = await pool.query(`
-      SELECT
-        l.session_id, l.email, l.first_name, l.last_name, l.phone,
-        l.company, l.website, l.sell_to, l.hear_about_us,
-        l.completed, l.booking_uid, l.booked_at, l.start_time, l.end_time,
-        l.disqualified, l.disqualified_reason, l.step_reached,
-        l.loops_sent, l.created_at, l.submitted_at, l.page_url,
-        l.utm_source, l.utm_medium, l.utm_campaign, l.referrer, l.prefill_source,
-        l.enriched_title, l.enriched_company_size, l.enriched_industry,
-        l.enriched_linkedin, l.enriched_city, l.enriched_state, l.enriched_country,
-        l.enriched_seniority, l.enriched_departments, l.enriched_email_status,
-        l.enriched_founded_year, l.enriched_annual_revenue, l.enriched_funding_events,
-        l.enriched_alexa_ranking, l.enriched_keywords, l.enriched_org_hq,
-        l.enriched_total_funding, l.enriched_funding_stage,
-        e.enriched_company AS e_company,
-        e.enriched_first_name AS e_first_name, e.enriched_last_name AS e_last_name,
-        e.enriched_phone AS e_phone, e.enriched_at
-      FROM (SELECT * FROM leads WHERE ctid >= '(0,1)') l
-      LEFT JOIN (SELECT * FROM enrichment_data WHERE ctid >= '(0,1)') e
-        ON e.session_id = l.session_id
-      WHERE true ${whereClause}
-      ORDER BY l.created_at DESC
-      LIMIT $${limitParam} OFFSET $${offsetParam}
-    `, [...params, limit, offset]);
-
-    res.json({
-      total,
-      page,
-      pages: Math.ceil(total / limit),
-      leads: leadsResult.rows
-    });
-  } catch (err) {
-    console.error('[/monitor/leads]', err.message);
-    res.status(500).json({ error: 'Query failed', detail: err.message });
   }
 });
 
@@ -695,178 +600,388 @@ app.get('/monitor', (req, res) => {
     return res.status(401).send('<h2 style="font-family:sans-serif;padding:2rem">401 — Unauthorized. Add ?token=YOUR_TOKEN to the URL.</h2>');
   }
 
-  const tp = req.query.token ? '?token=' + req.query.token : '';
-
-  const html = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Gushwork Monitor</title>' +
-  '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"><\/script>' +
-  '<style>' +
-  '*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}' +
-  'body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f5f5;color:#1a1a1a;font-size:14px;line-height:1.5}' +
-  '.topbar{background:#fff;border-bottom:1px solid #e5e5e5;padding:12px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}' +
-  '.logo{font-size:15px;font-weight:600}' +
-  '.apill{display:flex;align-items:center;gap:6px;font-size:12px;padding:4px 10px;border-radius:999px;border:1px solid #e5e5e5;background:#fff;color:#666}' +
-  '.dot{width:7px;height:7px;border-radius:50%;background:#ccc;display:inline-block;flex-shrink:0}' +
-  '.dot-green{background:#22c55e}.dot-red{background:#ef4444}.dot-amber{background:#f59e0b}' +
-  '.btn{font-size:12px;padding:6px 14px;border-radius:6px;border:1px solid #e5e5e5;background:#fff;cursor:pointer;color:#333}' +
-  '.btn:hover{background:#f5f5f5}' +
-  '.page{max-width:1200px;margin:0 auto;padding:24px}' +
-  '.sl{font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:10px}' +
-  '.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px}' +
-  '.g2{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:24px}' +
-  '.card{background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:16px 20px}' +
-  '.mc{background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:16px}' +
-  '.ml{font-size:12px;color:#888;margin-bottom:6px}' +
-  '.mv{font-size:28px;font-weight:600;color:#1a1a1a;line-height:1}' +
-  '.ms{font-size:11px;color:#aaa;margin-top:6px}' +
-  '.sr{display:flex;align-items:center;justify-content:space-between;padding:11px 0;border-bottom:1px solid #f0f0f0}' +
-  '.sr:last-child{border-bottom:none}' +
-  '.sn{font-size:13px;font-weight:500}.sd{font-size:11px;color:#999;margin-top:2px}' +
-  '.badge{font-size:11px;font-weight:500;padding:3px 9px;border-radius:5px;white-space:nowrap}' +
-  '.bg{background:#f0fdf4;color:#15803d}.br{background:#fef2f2;color:#b91c1c}.ba{background:#fffbeb;color:#b45309}.bx{background:#f5f5f5;color:#666}.bb{background:#eff6ff;color:#1d4ed8}' +
-  '.ab{border-radius:8px;padding:10px 14px;margin-bottom:8px;font-size:13px;display:flex;align-items:flex-start;gap:8px}' +
-  '.ao{background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0}.aw{background:#fffbeb;color:#b45309;border:1px solid #fde68a}.ae{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca}' +
-  '.fr{margin-bottom:10px}.fl{display:flex;justify-content:space-between;font-size:12px;color:#666;margin-bottom:4px}' +
-  '.fb{height:7px;border-radius:4px;background:#f0f0f0;overflow:hidden}.ff{height:100%;border-radius:4px;transition:width 0.6s ease}' +
-  '.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px}' +
-  '.filters input,.filters select{font-size:13px;padding:7px 10px;border:1px solid #e5e5e5;border-radius:7px;background:#fff;color:#1a1a1a;outline:none}' +
-  '.filters input:focus,.filters select:focus{border-color:#999}' +
-  '.filters input[type=text]{min-width:200px}' +
-  'table{width:100%;border-collapse:collapse;font-size:12px}' +
-  'th{text-align:left;padding:9px 10px;font-weight:500;color:#888;border-bottom:1px solid #e5e5e5;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;white-space:nowrap}' +
-  'td{padding:10px;border-bottom:1px solid #f5f5f5;color:#333;vertical-align:top}' +
-  'tr:hover td{background:#fafafa}tr:last-child td{border-bottom:none}' +
-  '.te{font-weight:500;color:#1a1a1a;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
-  '.tc{max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
-  '.xbtn{cursor:pointer;color:#bbb;font-size:13px;padding:10px 8px;text-align:center;user-select:none}' +
-  '.xbtn:hover{color:#333}' +
-  '.erow{background:#f9f9ff}.erow td{padding:14px;border-bottom:1px solid #eee}' +
-  '.egrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}' +
-  '.ef{background:#fff;border:1px solid #eee;border-radius:6px;padding:8px 10px}' +
-  '.efl{font-size:10px;font-weight:600;color:#aaa;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:3px}' +
-  '.efv{font-size:12px;color:#1a1a1a;word-break:break-word}.efv a{color:#2563eb;text-decoration:none}' +
-  '.pg{display:flex;align-items:center;gap:8px;justify-content:center;padding:16px 0;flex-wrap:wrap}' +
-  '.pb{padding:5px 12px;border:1px solid #e5e5e5;border-radius:6px;background:#fff;cursor:pointer;font-size:12px;color:#333}' +
-  '.pb:hover{background:#f5f5f5}.pb.act{background:#1a1a1a;color:#fff;border-color:#1a1a1a}.pb:disabled{opacity:0.4;cursor:not-allowed}' +
-  '.pi{font-size:12px;color:#888}' +
-  '.cw{position:relative;width:100%;height:180px}' +
-  '.tabs{display:flex;border-bottom:1px solid #e5e5e5;margin-bottom:20px}' +
-  '.tab{padding:10px 18px;font-size:13px;cursor:pointer;color:#888;border-bottom:2px solid transparent;font-weight:500}' +
-  '.tab:hover{color:#333}.tab.act{color:#1a1a1a;border-bottom-color:#1a1a1a}' +
-  '.tp{display:none}.tp.act{display:block}' +
-  '.lu{font-size:11px;color:#aaa}' +
-  '.nd{text-align:center;padding:40px;color:#999;font-size:13px}' +
-  '@media(max-width:700px){.g4{grid-template-columns:repeat(2,1fr)}.g2{grid-template-columns:1fr}}' +
-  '</style></head><body>' +
-  '<div class="topbar"><div style="display:flex;align-items:center;gap:12px"><span class="logo">Gushwork &#8212; Form Monitor</span>' +
-  '<div class="apill"><span class="dot" id="apidot"></span><span id="apist">Checking...</span></div></div>' +
-  '<div style="display:flex;align-items:center;gap:10px"><span class="lu" id="lupd">&#8212;</span>' +
-  '<button class="btn" onclick="loadAll()">&#8635; Refresh</button></div></div>' +
-  '<div class="page">' +
-  '<div class="tabs">' +
-  '<div class="tab act" id="t-overview" onclick="showTab(&apos;overview&apos;)">Overview</div>' +
-  '<div class="tab" id="t-leads" onclick="showTab(&apos;leads&apos;)">All Leads</div>' +
-  '<div class="tab" id="t-health" onclick="showTab(&apos;health&apos;)">System Health</div>' +
-  '</div>' +
-  '<div class="tp act" id="tp-overview">' +
-  '<div class="sl">Overview</div>' +
-  '<div class="g4">' +
-  '<div class="mc"><div class="ml">Total leads</div><div class="mv" id="m-total">&#8212;</div><div class="ms" id="m-today">&#8212; today</div></div>' +
-  '<div class="mc"><div class="ml">Step 2 completed</div><div class="mv" id="m-comp">&#8212;</div><div class="ms" id="m-cpct">of leads</div></div>' +
-  '<div class="mc"><div class="ml">Calls booked</div><div class="mv" id="m-book">&#8212;</div><div class="ms" id="m-bpct">of completed</div></div>' +
-  '<div class="mc"><div class="ml">Disqualified</div><div class="mv" id="m-disq">&#8212;</div><div class="ms">B2C / Mixed</div></div>' +
-  '</div>' +
-  '<div class="g2">' +
-  '<div><div class="sl">Alerts</div><div id="alerts"><div class="ab" style="background:#f5f5f5;color:#999;border:1px solid #eee">Loading...</div></div></div>' +
-  '<div><div class="sl">Conversion funnel</div><div class="card"><div id="funnel">Loading...</div></div></div>' +
-  '</div>' +
-  '<div class="sl">Leads over time</div>' +
-  '<div class="card" style="margin-bottom:24px"><div class="cw"><canvas id="lchart"></canvas></div></div>' +
-  '</div>' +
-  '<div class="tp" id="tp-leads">' +
-  '<div class="filters">' +
-  '<input type="text" id="fsearch" placeholder="Search email, company..." oninput="debounce()">' +
-  '<select id="fstage" onchange="loadLeads(1)"><option value="all">All stages</option><option value="booked">Booked</option><option value="completed">Completed (no booking)</option><option value="step1">Step 1 only</option><option value="disqualified">Disqualified</option></select>' +
-  '<input type="date" id="ffrom" onchange="loadLeads(1)">' +
-  '<input type="date" id="fto" onchange="loadLeads(1)">' +
-  '<button class="btn" onclick="clearF()">Clear</button>' +
-  '<span id="lcount" style="font-size:12px;color:#888"></span>' +
-  '</div>' +
-  '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
-  '<th style="width:30px"></th><th>Email</th><th>Name</th><th>Company</th><th>Sells to</th><th>Stage</th><th>Booked</th><th>Enrichment</th><th>Created (IST)</th><th>Source</th>' +
-  '</tr></thead><tbody id="ltbody"><tr><td colspan="10" class="nd">Loading leads...</td></tr></tbody></table></div></div>' +
-  '<div class="pg" id="lpag"></div>' +
-  '</div>' +
-  '<div class="tp" id="tp-health">' +
-  '<div class="sl">Step health</div>' +
-  '<div class="card" style="margin-bottom:24px">' +
-  '<div class="sr"><div><div class="sn">API uptime</div><div class="sd">/health responding</div></div><span class="badge bx" id="s-api">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Step 1 &#8212; /partial</div><div class="sd">Email + lead saved to Railway + AWS</div></div><span class="badge bx" id="s-partial">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Step 2 &#8212; /submit</div><div class="sd">Lead completed + Slack fired</div></div><span class="badge bx" id="s-submit">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Apollo enrichment</div><div class="sd">enrichment_data populated per session</div></div><span class="badge bx" id="s-enrich">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Cal booking</div><div class="sd">Completed leads with booking_uid</div></div><span class="badge bx" id="s-cal">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Cron &#8212; partial recovery</div><div class="sd">Leads awaiting Loops + Slack</div></div><span class="badge bx" id="s-cron">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">AWS sync</div><div class="sd">gw_form_leads mirror</div></div><span class="badge bx" id="s-aws">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Loops recovery</div><div class="sd">Partial leads pushed to Loops</div></div><span class="badge bx" id="s-loops">Checking...</span></div>' +
-  '</div>' +
-  '<div class="sl">Enrichment coverage</div>' +
-  '<div class="g4" style="margin-bottom:24px">' +
-  '<div class="mc"><div class="ml">Enriched sessions</div><div class="mv" id="h-enr">&#8212;</div><div class="ms">in enrichment_data</div></div>' +
-  '<div class="mc"><div class="ml">With title</div><div class="mv" id="h-tit">&#8212;</div><div class="ms">% of enriched</div></div>' +
-  '<div class="mc"><div class="ml">With funding data</div><div class="mv" id="h-fun">&#8212;</div><div class="ms">% of enriched</div></div>' +
-  '<div class="mc"><div class="ml">With location</div><div class="mv" id="h-loc">&#8212;</div><div class="ms">% of enriched</div></div>' +
-  '</div>' +
-  '</div>' +
-  '</div>';
-
-  const js = '<script>' +
-  'var TP="' + tp + '";' +
-  'var API=window.location.origin;' +
-  'var lChart=null,curPage=1,stimer=null;' +
-  'function showTab(n){["overview","leads","health"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"&&document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}' +
-  'function badge(id,text,cls){var el=document.getElementById(id);if(!el)return;el.textContent=text;el.className="badge "+cls;}' +
-  'function set(id,v){var el=document.getElementById(id);if(el)el.textContent=v;}' +
-  'function pct(a,b){return b?Math.round(a/b*100)+"%":"0%";}' +
-  'function ist(ts){if(!ts)return"\u2014";return new Date(ts).toLocaleString("en-IN",{timeZone:"Asia/Kolkata",dateStyle:"short",timeStyle:"short"});}' +
-  'function esc(s){if(!s)return"";return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}' +
-  'async function checkApi(){try{var r=await fetch(API+"/health",{signal:AbortSignal.timeout(5000)});if(r.ok){document.getElementById("apidot").className="dot dot-green";document.getElementById("apist").textContent="API online";badge("s-api","Online","bg");return true;}throw new Error("HTTP "+r.status);}catch(e){document.getElementById("apidot").className="dot dot-red";document.getElementById("apist").textContent="API offline";badge("s-api","Offline","br");return false;}}' +
-  'function renderAlerts(d){var a=[];if(d.pendingPartials>0)a.push({c:"aw",i:"!",m:d.pendingPartials+" lead(s) waiting >30 mins."});if(d.noBookingUid>0)a.push({c:"aw",i:"!",m:d.noBookingUid+" completed lead(s) with no booking."});if(!d.awsSynced)a.push({c:"ae",i:"x",m:"AWS sync disabled."});if(d.total>5&&d.enriched<d.total*0.3)a.push({c:"aw",i:"!",m:"Low enrichment rate ("+Math.round(d.enriched/d.total*100)+"%)."});if(d.todayCount===0)a.push({c:"aw",i:"o",m:"No new leads in 24 hours."});if(a.length===0)a.push({c:"ao",i:"✓",m:"All systems healthy."});document.getElementById("alerts").innerHTML=a.map(function(x){return"<div class=\"ab "+x.c+"\"><span>"+x.i+"</span><span>"+x.m+"</span></div>";}).join("");}' +
-  'function renderFunnel(t,c,b,d){var steps=[{l:"Step 1 submitted",v:t,p:100,col:"#818cf8"},{l:"Step 2 completed",v:c,p:t?Math.round(c/t*100):0,col:"#38bdf8"},{l:"Call booked",v:b,p:t?Math.round(b/t*100):0,col:"#34d399"},{l:"Disqualified",v:d,p:t?Math.round(d/t*100):0,col:"#fb923c"}];document.getElementById("funnel").innerHTML=steps.map(function(s){return"<div class=\"fr\"><div class=\"fl\"><span>"+s.l+"</span><span style=\"font-weight:500\">"+s.v+" <span style=\"color:#aaa\">("+s.p+"%)</span></span></div><div class=\"fb\"><div class=\"ff\" style=\"width:"+s.p+"%;background:"+s.col+"\"></div></div></div>";}).join("");}' +
-  'function renderChart(leads){var counts={};(leads||[]).forEach(function(l){var k=new Date(l.created_at).toLocaleDateString("en-IN",{timeZone:"Asia/Kolkata",month:"short",day:"numeric"});counts[k]=(counts[k]||0)+1;});var labels=Object.keys(counts).reverse(),data=Object.values(counts).reverse();if(lChart)lChart.destroy();var ctx=document.getElementById("lchart").getContext("2d");lChart=new Chart(ctx,{type:"bar",data:{labels:labels,datasets:[{data:data,backgroundColor:"#818cf8",borderRadius:4,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{stepSize:1,color:"#aaa"},grid:{color:"#f0f0f0"}},x:{ticks:{color:"#aaa",maxRotation:45,autoSkip:false},grid:{display:false}}}}});}' +
-  'function stageBadge(l){if(l.booking_uid)return"<span class=\"badge bg\">Booked</span>";if(l.disqualified)return"<span class=\"badge br\">Disqualified</span>";if(l.completed)return"<span class=\"badge bb\">Completed</span>";return"<span class=\"badge ba\">Step 1</span>";}' +
-  'function enrichBadge(l){return(l.enriched_title||l.enriched_company_size||l.e_company)?"<span class=\"badge bg\">Yes</span>":"<span class=\"badge bx\">No</span>";}' +
-  'function enrichPanel(l){var loc=[l.enriched_city,l.enriched_state,l.enriched_country].filter(Boolean).join(", ");var fields=[{lb:"Title",v:l.enriched_title},{lb:"Seniority",v:l.enriched_seniority},{lb:"Department",v:l.enriched_departments},{lb:"Email status",v:l.enriched_email_status},{lb:"Company",v:l.e_company||l.company},{lb:"Company size",v:l.enriched_company_size},{lb:"Industry",v:l.enriched_industry},{lb:"Founded",v:l.enriched_founded_year},{lb:"Annual revenue",v:l.enriched_annual_revenue},{lb:"Total funding",v:l.enriched_total_funding},{lb:"Funding stage",v:l.enriched_funding_stage},{lb:"Funding events",v:l.enriched_funding_events},{lb:"Alexa rank",v:l.enriched_alexa_ranking},{lb:"Keywords",v:l.enriched_keywords},{lb:"Person location",v:loc||null},{lb:"Company HQ",v:l.enriched_org_hq},{lb:"LinkedIn",v:l.enriched_linkedin,lnk:true},{lb:"Phone",v:l.e_phone||l.phone},{lb:"Website",v:l.website,lnk:true},{lb:"Hear about us",v:l.hear_about_us},{lb:"UTM source",v:l.utm_source},{lb:"UTM medium",v:l.utm_medium},{lb:"UTM campaign",v:l.utm_campaign},{lb:"Referrer",v:l.referrer},{lb:"Prefill",v:l.prefill_source},{lb:"Page URL",v:l.page_url,lnk:true},{lb:"Submitted",v:ist(l.submitted_at)},{lb:"Booked at",v:ist(l.booked_at)},{lb:"Meeting",v:l.start_time?ist(l.start_time):null},{lb:"Loops sent",v:l.loops_sent?"Yes":"No"},{lb:"Session ID",v:l.session_id,mono:true},{lb:"Enriched at",v:ist(l.enriched_at)}].filter(function(f){return f.v;});if(!fields.length)return"<div style=\"color:#999;font-size:12px\">No enrichment data.</div>";return"<div class=\"egrid\">"+fields.map(function(f){var val=f.lnk&&f.v?"<a href=\"" +(f.v.startsWith("http")?"":"https://")+esc(f.v)+"\" target=\"_blank\">"+esc(f.v)+"</a>":f.mono?"<code style=\"font-size:10px\">"+esc(f.v)+"</code>":esc(f.v);return"<div class=\"ef\"><div class=\"efl\">"+f.lb+"</div><div class=\"efv\">"+val+"</div></div>";}).join("")+"</div>";}' +
-  'function debounce(){clearTimeout(stimer);stimer=setTimeout(function(){loadLeads(1);},400);}' +
-  'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("ffrom").value="";document.getElementById("fto").value="";loadLeads(1);}' +
-  'function toggleRow(sid){var row=document.getElementById("er-"+sid);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=row.previousElementSibling&&row.previousElementSibling.querySelector(".xbtn");if(btn)btn.textContent=vis?"\u25B6":"\u25BC";}' +
-  'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
-  'var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"page="+curPage+"&stage="+stage;' +
-  'if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;' +
-  'document.getElementById("ltbody").innerHTML="<tr><td colspan=\"10\" class=\"nd\">Loading...</td></tr>";' +
-  'try{var r=await fetch(url,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
-  'set("lcount",d.total+" lead"+(d.total!==1?"s":"")+" found");' +
-  'if(!d.leads.length){document.getElementById("ltbody").innerHTML="<tr><td colspan=\"10\" class=\"nd\">No leads match your filters.</td></tr>";document.getElementById("lpag").innerHTML="";return;}' +
-  'var html=d.leads.map(function(l){var sid=esc(l.session_id),name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\u2014",src=l.utm_source?esc(l.utm_source)+(l.utm_medium?" / "+esc(l.utm_medium):""):(l.referrer?"referral":"\u2014");' +
-  'return"<tr><td class=\"xbtn\" onclick=\"toggleRow(&apos;"+sid+"&apos;)\"">&#9658;</td><td class=\"te\" title=\""+esc(l.email)+"\">"+esc(l.email||"\u2014")+"</td><td>"+name+"</td><td class=\"tc\">"+esc(l.company||"\u2014")+"</td><td>"+esc(l.sell_to||"\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\"badge bg\">Yes</span>":"<span class=\"badge bx\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\"color:#999;white-space:nowrap\">"+ist(l.created_at)+"</td><td style=\"color:#999;font-size:11px\">"+src+"</td></tr>"+' +
-  '"<tr class=\"erow\" id=\"er-"+sid+"\" style=\"display:none\"><td></td><td colspan=\"9\">"+enrichPanel(l)+"</td></tr>";}).join("");' +
-  'document.getElementById("ltbody").innerHTML=html;renderPag(d.page,d.pages);}catch(e){document.getElementById("ltbody").innerHTML="<tr><td colspan=\"10\" class=\"nd\" style=\"color:#b91c1c\">Failed: "+esc(e.message)+"</td></tr>";}}' +
-  'function renderPag(pg,pages){if(pages<=1){document.getElementById("lpag").innerHTML="";return;}var h="";h+="<button class=\"pb\" onclick=\"loadLeads("+(pg-1)+")\""+(pg<=1?" disabled":"")+">&larr;</button>";var s=Math.max(1,pg-2),e=Math.min(pages,pg+2);if(s>1)h+="<button class=\"pb\" onclick=\"loadLeads(1)\">1</button>"+(s>2?"<span class=\"pi\">&#8230;</span>":"");for(var i=s;i<=e;i++)h+="<button class=\"pb"+(i===pg?" act":"")+"\" onclick=\"loadLeads("+i+")\">"+i+"</button>";if(e<pages)h+=(e<pages-1?"<span class=\"pi\">&#8230;</span>":"")+"<button class=\"pb\" onclick=\"loadLeads("+pages+")\">"+pages+"</button>";h+="<button class=\"pb\" onclick=\"loadLeads("+(pg+1)+")\""+(pg>=pages?" disabled":"")+">&rarr;</button><span class=\"pi\">Page "+pg+" of "+pages+"</span>";document.getElementById("lpag").innerHTML=h;}' +
-  'async function loadAll(){set("lupd","Refreshing...");var ok=await checkApi();if(!ok){document.getElementById("alerts").innerHTML="<div class=\"ab ae\"><span>x</span><span>API offline.</span></div>";set("lupd","API offline");return;}' +
-  'try{var r=await fetch(API+"/monitor/metrics"+TP,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
-  'set("m-total",d.total);set("m-comp",d.completed);set("m-book",d.booked);set("m-disq",d.disqualified);set("m-today",d.todayCount+" today");set("m-cpct",pct(d.completed,d.total)+" of leads");set("m-bpct",pct(d.booked,d.completed)+" of completed");' +
-  'var er=d.total?Math.round(d.enriched/d.total*100):0,br=d.completed?Math.round(d.booked/d.completed*100):0;' +
-  'badge("s-partial",d.total+" leads saved","bg");badge("s-submit",d.completed>0?d.completed+" completed":"No completions",d.completed>0?"bg":"ba");badge("s-enrich",er+"% enriched",er>=60?"bg":er>=30?"ba":"br");badge("s-cal",br+"% booking rate",br>=50?"bg":br>=20?"ba":"bx");badge("s-cron",d.pendingPartials===0?"No pending":d.pendingPartials+" pending",d.pendingPartials===0?"bg":"ba");badge("s-aws",d.awsSynced?"Active":"Disabled",d.awsSynced?"bg":"br");badge("s-loops",d.loopsSent+" pushed",d.loopsSent>0?"bg":"bx");' +
-  'set("h-enr",d.enriched);set("h-tit",d.enrichTitlePct!==undefined?d.enrichTitlePct+"%":"\u2014");set("h-fun",d.enrichFundingPct!==undefined?d.enrichFundingPct+"%":"\u2014");set("h-loc",d.enrichLocationPct!==undefined?d.enrichLocationPct+"%":"\u2014");' +
-  'renderAlerts(d);renderFunnel(d.total,d.completed,d.booked,d.disqualified);if(d.recentLeads&&d.recentLeads.length)renderChart(d.recentLeads);' +
-  'set("lupd","Updated "+new Date().toLocaleTimeString("en-IN",{timeZone:"Asia/Kolkata"})+" IST");' +
-  '}catch(e){document.getElementById("alerts").innerHTML="<div class=\"ab ae\"><span>x</span><span>Failed: "+esc(e.message)+"</span></div>";set("lupd","Error");}' +
-  'if(document.getElementById("tp-leads").classList.contains("act"))loadLeads(curPage);}' +
-  'loadAll();setInterval(loadAll,60000);' +
-  '<\/script></body></html>';
+  const tokenParam = req.query.token ? `?token=${req.query.token}` : '';
 
   res.setHeader('Content-Type', 'text/html');
-  res.send(html + js);
-});
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gushwork Form Monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; color: #1a1a1a; font-size: 14px; }
+  .topbar { background: #fff; border-bottom: 1px solid #e5e5e5; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 10; }
+  .topbar-left { display: flex; align-items: center; gap: 12px; }
+  .logo { font-size: 15px; font-weight: 600; color: #1a1a1a; }
+  .api-pill { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid #e5e5e5; background: #fff; color: #666; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: #ccc; display: inline-block; }
+  .dot-green { background: #22c55e; }
+  .dot-red { background: #ef4444; }
+  .dot-amber { background: #f59e0b; }
+  .refresh-btn { font-size: 12px; padding: 6px 14px; border-radius: 6px; border: 1px solid #e5e5e5; background: #fff; cursor: pointer; color: #333; }
+  .refresh-btn:hover { background: #f5f5f5; }
+  .page { max-width: 1100px; margin: 0 auto; padding: 24px; }
+  .section-label { font-size: 11px; font-weight: 600; color: #888; text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 10px; }
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
+  .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 24px; }
+  .card { background: #fff; border: 1px solid #e5e5e5; border-radius: 10px; padding: 16px 20px; }
+  .metric-card { background: #fff; border: 1px solid #e5e5e5; border-radius: 10px; padding: 16px; }
+  .metric-label { font-size: 12px; color: #888; margin-bottom: 6px; }
+  .metric-value { font-size: 28px; font-weight: 600; color: #1a1a1a; line-height: 1; }
+  .metric-sub { font-size: 11px; color: #aaa; margin-top: 6px; }
+  .step-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #f0f0f0; }
+  .step-row:last-child { border-bottom: none; }
+  .step-name { font-size: 13px; font-weight: 500; color: #1a1a1a; }
+  .step-desc { font-size: 11px; color: #999; margin-top: 2px; }
+  .badge { font-size: 11px; font-weight: 500; padding: 3px 9px; border-radius: 5px; }
+  .badge-green  { background: #f0fdf4; color: #15803d; }
+  .badge-red    { background: #fef2f2; color: #b91c1c; }
+  .badge-amber  { background: #fffbeb; color: #b45309; }
+  .badge-gray   { background: #f5f5f5; color: #666; }
+  .alert-box { border-radius: 8px; padding: 10px 14px; margin-bottom: 8px; font-size: 13px; display: flex; align-items: flex-start; gap: 8px; }
+  .alert-ok   { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+  .alert-warn { background: #fffbeb; color: #b45309; border: 1px solid #fde68a; }
+  .alert-err  { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+  .alert-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
+  .funnel-row { margin-bottom: 12px; }
+  .funnel-labels { display: flex; justify-content: space-between; font-size: 12px; color: #666; margin-bottom: 4px; }
+  .funnel-bar { height: 8px; border-radius: 4px; background: #f0f0f0; overflow: hidden; }
+  .funnel-fill { height: 100%; border-radius: 4px; transition: width 0.6s ease; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; padding: 8px 10px; font-weight: 500; color: #888; border-bottom: 1px solid #f0f0f0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+  td { padding: 10px; border-bottom: 1px solid #f9f9f9; color: #333; }
+  tr:last-child td { border-bottom: none; }
+  td.email { font-weight: 500; color: #1a1a1a; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .last-updated { font-size: 11px; color: #aaa; }
+  .chart-wrap { position: relative; width: 100%; height: 200px; margin-top: 16px; }
+  @media (max-width: 700px) {
+    .grid-4 { grid-template-columns: repeat(2, 1fr); }
+    .grid-2 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
 
+<div class="topbar">
+  <div class="topbar-left">
+    <span class="logo">Gushwork — Form Monitor</span>
+    <div class="api-pill">
+      <span class="dot" id="api-dot"></span>
+      <span id="api-status">Checking...</span>
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <span class="last-updated" id="last-updated">—</span>
+    <button class="refresh-btn" onclick="load()">↻ Refresh</button>
+  </div>
+</div>
+
+<div class="page">
+
+  <div class="section-label" style="margin-top:4px;">Overview</div>
+  <div class="grid-4">
+    <div class="metric-card">
+      <div class="metric-label">Total leads</div>
+      <div class="metric-value" id="m-total">—</div>
+      <div class="metric-sub" id="m-today">— today</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Step 2 completed</div>
+      <div class="metric-value" id="m-completed">—</div>
+      <div class="metric-sub" id="m-completed-pct">of leads</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Calls booked</div>
+      <div class="metric-value" id="m-booked">—</div>
+      <div class="metric-sub" id="m-booked-pct">of completed</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Disqualified</div>
+      <div class="metric-value" id="m-disq">—</div>
+      <div class="metric-sub">B2C / Mixed</div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div>
+      <div class="section-label">Alerts</div>
+      <div id="alerts-container">
+        <div class="alert-box alert-gray" style="background:#f5f5f5;color:#666;border:1px solid #e5e5e5;">
+          <span class="alert-icon">○</span> Loading alerts...
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="section-label">Conversion funnel</div>
+      <div class="card" style="padding:16px;">
+        <div id="funnel-container">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-label">Step health</div>
+  <div class="card" style="margin-bottom:24px;">
+    <div class="step-row">
+      <div><div class="step-name">API uptime</div><div class="step-desc">/health endpoint responding</div></div>
+      <span class="badge badge-gray" id="s-api">Checking...</span>
+    </div>
+    <div class="step-row">
+      <div><div class="step-name">Step 1 — /partial</div><div class="step-desc">Email verified + lead saved to DB + AWS</div></div>
+      <span class="badge badge-gray" id="s-partial">Checking...</span>
+    </div>
+    <div class="step-row">
+      <div><div class="step-name">Step 2 — /submit</div><div class="step-desc">Lead completed + Slack fired</div></div>
+      <span class="badge badge-gray" id="s-submit">Checking...</span>
+    </div>
+    <div class="step-row">
+      <div><div class="step-name">Apollo enrichment</div><div class="step-desc">Enrichment data saved per lead</div></div>
+      <span class="badge badge-gray" id="s-enrich">Checking...</span>
+    </div>
+    <div class="step-row">
+      <div><div class="step-name">Cal booking confirmation</div><div class="step-desc">Completed leads with booking_uid</div></div>
+      <span class="badge badge-gray" id="s-cal">Checking...</span>
+    </div>
+    <div class="step-row">
+      <div><div class="step-name">Cron — partial recovery</div><div class="step-desc">Leads pending Loops/Slack notification</div></div>
+      <span class="badge badge-gray" id="s-cron">Checking...</span>
+    </div>
+    <div class="step-row">
+      <div><div class="step-name">AWS sync</div><div class="step-desc">gw_form_leads mirror active</div></div>
+      <span class="badge badge-gray" id="s-aws">Checking...</span>
+    </div>
+  </div>
+
+  <div class="section-label">Recent leads</div>
+  <div class="card" style="margin-bottom:24px;overflow-x:auto;">
+    <div id="recent-leads-container">Loading...</div>
+  </div>
+
+  <div class="section-label">Chart — leads over time</div>
+  <div class="card" style="margin-bottom:24px;">
+    <div class="chart-wrap">
+      <canvas id="leadsChart"></canvas>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const TOKEN_PARAM = '${tokenParam}';
+const API = window.location.origin;
+let leadsChart = null;
+
+function setBadge(id, text, color) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'badge badge-' + color;
+}
+
+function setMetric(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+
+function pct(a, b) {
+  if (!b) return '0%';
+  return Math.round(a / b * 100) + '%';
+}
+
+async function checkApi() {
+  try {
+    const r = await fetch(API + '/health', { signal: AbortSignal.timeout(5000) });
+    if (r.ok) {
+      document.getElementById('api-dot').className = 'dot dot-green';
+      document.getElementById('api-status').textContent = 'API online';
+      setBadge('s-api', 'Online', 'green');
+      return true;
+    }
+    throw new Error('HTTP ' + r.status);
+  } catch(e) {
+    document.getElementById('api-dot').className = 'dot dot-red';
+    document.getElementById('api-status').textContent = 'API offline';
+    setBadge('s-api', 'Offline', 'red');
+    return false;
+  }
+}
+
+function renderAlerts(d) {
+  const alerts = [];
+
+  if (d.pendingPartials > 0) {
+    alerts.push({ type: 'warn', icon: '⚠', msg: d.pendingPartials + ' lead(s) waiting >30 mins — Loops/Slack not yet sent. Cron may be delayed.' });
+  }
+  if (d.noBookingUid > 0) {
+    alerts.push({ type: 'warn', icon: '⚠', msg: d.noBookingUid + ' completed lead(s) have no booking — Cal callback may not be firing reliably.' });
+  }
+  if (!d.awsSynced) {
+    alerts.push({ type: 'err', icon: '✕', msg: 'AWS sync is disabled — AWS_PG_HOST not set in Railway env vars.' });
+  }
+  if (d.enriched < d.total * 0.3 && d.total > 5) {
+    alerts.push({ type: 'warn', icon: '⚠', msg: 'Enrichment rate is low (' + Math.round(d.enriched/d.total*100) + '%) — Apollo may be returning empty responses.' });
+  }
+  if (d.todayCount === 0) {
+    alerts.push({ type: 'warn', icon: '○', msg: 'No new leads in the last 24 hours — check if form is live and accessible.' });
+  }
+
+  if (alerts.length === 0) {
+    alerts.push({ type: 'ok', icon: '✓', msg: 'All systems healthy — no issues detected.' });
+  }
+
+  document.getElementById('alerts-container').innerHTML = alerts.map(a => \`
+    <div class="alert-box alert-\${a.type}">
+      <span class="alert-icon">\${a.icon}</span>
+      <span>\${a.msg}</span>
+    </div>
+  \`).join('');
+}
+
+function renderFunnel(total, completed, booked, disq) {
+  const steps = [
+    { label: 'Step 1 submitted', val: total, pct: 100, color: '#818cf8' },
+    { label: 'Step 2 completed', val: completed, pct: total ? Math.round(completed/total*100) : 0, color: '#38bdf8' },
+    { label: 'Call booked',      val: booked,    pct: total ? Math.round(booked/total*100) : 0,    color: '#34d399' },
+    { label: 'Disqualified',     val: disq,      pct: total ? Math.round(disq/total*100) : 0,      color: '#fb923c' },
+  ];
+  document.getElementById('funnel-container').innerHTML = steps.map(s => \`
+    <div class="funnel-row">
+      <div class="funnel-labels">
+        <span>\${s.label}</span>
+        <span style="font-weight:500;color:#1a1a1a;">\${s.val} <span style="color:#aaa;font-weight:400;">(\${s.pct}%)</span></span>
+      </div>
+      <div class="funnel-bar">
+        <div class="funnel-fill" style="width:\${s.pct}%;background:\${s.color};"></div>
+      </div>
+    </div>
+  \`).join('');
+}
+
+function renderRecentLeads(leads) {
+  if (!leads || !leads.length) {
+    document.getElementById('recent-leads-container').innerHTML = '<p style="color:#999;font-size:13px;">No leads found.</p>';
+    return;
+  }
+  document.getElementById('recent-leads-container').innerHTML = \`
+    <table>
+      <thead>
+        <tr>
+          <th>Email</th>
+          <th>Company</th>
+          <th>Status</th>
+          <th>Booked</th>
+          <th>Created (IST)</th>
+        </tr>
+      </thead>
+      <tbody>
+        \${leads.map(l => {
+          const d = new Date(l.created_at);
+          const ist = d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'short' });
+          return \`<tr>
+            <td class="email">\${l.email || '—'}</td>
+            <td>\${l.company || '—'}</td>
+            <td>\${l.completed ? '<span class="badge badge-green">Completed</span>' : '<span class="badge badge-amber">Step 1</span>'}\${l.disqualified ? ' <span class="badge badge-red">Disq</span>' : ''}</td>
+            <td>\${l.booking_uid ? '<span class="badge badge-green">Yes</span>' : '<span class="badge badge-gray">No</span>'}</td>
+            <td style="color:#999;">\${ist}</td>
+          </tr>\`;
+        }).join('')}
+      </tbody>
+    </table>
+  \`;
+}
+
+function renderChart(leads) {
+  const counts = {};
+  leads.forEach(l => {
+    const d = new Date(l.created_at);
+    const key = d.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric' });
+    counts[key] = (counts[key] || 0) + 1;
+  });
+  const labels = Object.keys(counts);
+  const data   = Object.values(counts);
+
+  if (leadsChart) leadsChart.destroy();
+  const ctx = document.getElementById('leadsChart').getContext('2d');
+  leadsChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Leads',
+        data,
+        backgroundColor: '#818cf8',
+        borderRadius: 4,
+        borderSkipped: false,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { beginAtZero: true, ticks: { stepSize: 1, color: '#aaa' }, grid: { color: '#f0f0f0' } },
+        x: { ticks: { color: '#aaa', maxRotation: 45 }, grid: { display: false } }
+      }
+    }
+  });
+}
+
+async function load() {
+  document.getElementById('last-updated').textContent = 'Refreshing...';
+
+  const apiOk = await checkApi();
+  if (!apiOk) {
+    document.getElementById('alerts-container').innerHTML = \`
+      <div class="alert-box alert-err"><span class="alert-icon">✕</span><span>API is offline — all form submissions are failing. Check Railway deployment immediately.</span></div>
+    \`;
+    return;
+  }
+
+  try {
+    const r = await fetch(API + '/monitor/metrics' + TOKEN_PARAM, { signal: AbortSignal.timeout(10000) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+
+    setMetric('m-total',     d.total);
+    setMetric('m-completed', d.completed);
+    setMetric('m-booked',    d.booked);
+    setMetric('m-disq',      d.disqualified);
+    setMetric('m-today',     d.todayCount + ' today');
+    setMetric('m-completed-pct', pct(d.completed, d.total) + ' of leads');
+    setMetric('m-booked-pct',    pct(d.booked, d.completed) + ' of completed');
+
+    const enrichRate = d.total ? Math.round(d.enriched / d.total * 100) : 0;
+    const bookingRate = d.completed ? Math.round(d.booked / d.completed * 100) : 0;
+
+    setBadge('s-partial', d.total + ' leads saved', 'green');
+    setBadge('s-submit',  d.completed > 0 ? d.completed + ' completed' : 'No completions yet', d.completed > 0 ? 'green' : 'amber');
+    setBadge('s-enrich',  enrichRate + '% enriched', enrichRate >= 60 ? 'green' : enrichRate >= 30 ? 'amber' : 'red');
+    setBadge('s-cal',     bookingRate + '% booking rate', bookingRate >= 50 ? 'green' : bookingRate >= 20 ? 'amber' : 'gray');
+    setBadge('s-cron',    d.pendingPartials === 0 ? 'No pending' : d.pendingPartials + ' pending', d.pendingPartials === 0 ? 'green' : 'amber');
+    setBadge('s-aws',     d.awsSynced ? 'Active' : 'Disabled', d.awsSynced ? 'green' : 'red');
+
+    renderAlerts(d);
+    renderFunnel(d.total, d.completed, d.booked, d.disqualified);
+    renderRecentLeads(d.recentLeads);
+    if (d.recentLeads && d.recentLeads.length) renderChart(d.recentLeads);
+
+    document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' }) + ' IST';
+  } catch(e) {
+    document.getElementById('alerts-container').innerHTML = \`
+      <div class="alert-box alert-err"><span class="alert-icon">✕</span><span>Failed to load metrics: \${e.message}</span></div>
+    \`;
+    document.getElementById('last-updated').textContent = 'Error loading';
+  }
+}
+
+load();
+setInterval(load, 60000);
+</script>
+</body>
+</html>`);
+});
 
 /* --------------------------------------------------------
    POST /verify-email
