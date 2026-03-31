@@ -525,7 +525,7 @@ app.get('/monitor/metrics', async (req, res) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   try {
-    const [totals, enrichCount, pendingPartials, noBooking, recent, today] = await Promise.all([
+    const [totals, enrichCount, enrichCoverage, pendingPartials, noBooking, recent, today] = await Promise.all([
       pool.query(`
         SELECT
           COUNT(*)                                             AS total,
@@ -536,6 +536,14 @@ app.get('/monitor/metrics', async (req, res) => {
         FROM leads WHERE ctid >= '(0,1)'
       `),
       pool.query(`SELECT COUNT(*) AS count FROM enrichment_data WHERE ctid >= '(0,1)'`),
+      pool.query(`
+        SELECT
+          COUNT(*) AS total,
+          COUNT(*) FILTER (WHERE enriched_title IS NOT NULL)          AS has_title,
+          COUNT(*) FILTER (WHERE enriched_total_funding IS NOT NULL)  AS has_funding,
+          COUNT(*) FILTER (WHERE enriched_country IS NOT NULL)        AS has_location
+        FROM enrichment_data WHERE ctid >= '(0,1)'
+      `),
       pool.query(`
         SELECT COUNT(*) AS count FROM leads
         WHERE ctid >= '(0,1)'
@@ -555,7 +563,7 @@ app.get('/monitor/metrics', async (req, res) => {
         SELECT session_id, email, company, first_name, last_name,
                completed, booking_uid, disqualified, created_at, page_url
         FROM leads WHERE ctid >= '(0,1)'
-        ORDER BY created_at DESC LIMIT 10
+        ORDER BY created_at DESC LIMIT 50
       `),
       pool.query(`
         SELECT COUNT(*) AS count FROM leads
@@ -565,15 +573,21 @@ app.get('/monitor/metrics', async (req, res) => {
     ]);
 
     const t = totals.rows[0];
-    const total       = parseInt(t.total) || 0;
-    const completed   = parseInt(t.completed) || 0;
-    const booked      = parseInt(t.booked) || 0;
+    const total        = parseInt(t.total) || 0;
+    const completed    = parseInt(t.completed) || 0;
+    const booked       = parseInt(t.booked) || 0;
     const disqualified = parseInt(t.disqualified) || 0;
-    const loopsSent   = parseInt(t.loops_sent) || 0;
-    const enriched    = parseInt(enrichCount.rows[0].count) || 0;
-    const pending     = parseInt(pendingPartials.rows[0].count) || 0;
+    const loopsSent    = parseInt(t.loops_sent) || 0;
+    const enriched     = parseInt(enrichCount.rows[0].count) || 0;
+    const pending      = parseInt(pendingPartials.rows[0].count) || 0;
     const noBookingUid = parseInt(noBooking.rows[0].count) || 0;
-    const todayCount  = parseInt(today.rows[0].count) || 0;
+    const todayCount   = parseInt(today.rows[0].count) || 0;
+
+    const ec = enrichCoverage.rows[0];
+    const ecTotal    = parseInt(ec.total) || 0;
+    const titlePct   = ecTotal ? Math.round(parseInt(ec.has_title) / ecTotal * 100) : 0;
+    const fundingPct = ecTotal ? Math.round(parseInt(ec.has_funding) / ecTotal * 100) : 0;
+    const locPct     = ecTotal ? Math.round(parseInt(ec.has_location) / ecTotal * 100) : 0;
 
     res.json({
       total, completed, booked, disqualified,
@@ -582,12 +596,83 @@ app.get('/monitor/metrics', async (req, res) => {
       noBookingUid,
       todayCount,
       awsSynced: !!awsPool,
+      enrichTitlePct:    titlePct,
+      enrichFundingPct:  fundingPct,
+      enrichLocationPct: locPct,
       recentLeads: recent.rows,
       generatedAt: new Date().toISOString()
     });
   } catch (err) {
     console.error('[/monitor/metrics]', err.message);
     res.status(500).json({ error: 'Metrics query failed', detail: err.message });
+  }
+});
+
+/* --------------------------------------------------------
+   GET /monitor/leads  — paginated leads + enrichment, protected
+-------------------------------------------------------- */
+app.get('/monitor/leads', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+
+  const page     = Math.max(1, parseInt(req.query.page) || 1);
+  const limit    = 25;
+  const offset   = (page - 1) * limit;
+  const stage    = req.query.stage    || 'all';
+  const dateFrom = req.query.dateFrom || null;
+  const dateTo   = req.query.dateTo   || null;
+  const search   = req.query.search   || null;
+
+  let where = `WHERE l.ctid >= '(0,1)'`;
+  const params = [];
+
+  if (stage === 'booked')       where += ` AND l.booking_uid IS NOT NULL`;
+  if (stage === 'completed')    where += ` AND l.completed = true AND l.booking_uid IS NULL`;
+  if (stage === 'step1')        where += ` AND l.completed = false AND l.disqualified = false`;
+  if (stage === 'disqualified') where += ` AND l.disqualified = true`;
+
+  if (dateFrom) { params.push(dateFrom); where += ` AND l.created_at >= $${params.length}::date`; }
+  if (dateTo)   { params.push(dateTo);   where += ` AND l.created_at < ($${params.length}::date + INTERVAL '1 day')`; }
+  if (search)   { params.push(`%${search.toLowerCase()}%`); where += ` AND (LOWER(l.email) LIKE $${params.length} OR LOWER(l.company) LIKE $${params.length} OR LOWER(l.first_name) LIKE $${params.length})`; }
+
+  try {
+    const countResult = await pool.query(`SELECT COUNT(*) AS total FROM leads l ${where}`, params);
+    const total = parseInt(countResult.rows[0].total) || 0;
+
+    params.push(limit, offset);
+    const leadsResult = await pool.query(`
+      SELECT
+        l.session_id, l.email, l.first_name, l.last_name, l.phone,
+        l.company, l.website, l.sell_to, l.hear_about_us,
+        l.completed, l.booking_uid, l.booked_at, l.start_time, l.end_time,
+        l.disqualified, l.disqualified_reason, l.step_reached,
+        l.loops_sent, l.created_at, l.submitted_at, l.page_url,
+        l.utm_source, l.utm_medium, l.utm_campaign, l.referrer, l.prefill_source,
+        l.enriched_title, l.enriched_company_size, l.enriched_industry,
+        l.enriched_linkedin, l.enriched_city, l.enriched_state, l.enriched_country,
+        l.enriched_seniority, l.enriched_departments, l.enriched_email_status,
+        l.enriched_founded_year, l.enriched_annual_revenue, l.enriched_funding_events,
+        l.enriched_alexa_ranking, l.enriched_keywords, l.enriched_org_hq,
+        l.enriched_total_funding, l.enriched_funding_stage,
+        e.enriched_company AS e_company,
+        e.enriched_first_name AS e_first_name, e.enriched_last_name AS e_last_name,
+        e.enriched_phone AS e_phone, e.enriched_at
+      FROM leads l
+      LEFT JOIN enrichment_data e ON e.session_id = l.session_id AND e.ctid >= '(0,1)'
+      ${where}
+      ORDER BY l.created_at DESC
+      LIMIT $${params.length - 1} OFFSET $${params.length}
+    `, params);
+
+    res.json({
+      total,
+      page,
+      pages: Math.ceil(total / limit),
+      leads: leadsResult.rows
+    });
+  } catch (err) {
+    console.error('[/monitor/leads]', err.message);
+    res.status(500).json({ error: 'Query failed', detail: err.message });
   }
 });
 
@@ -611,167 +696,223 @@ app.get('/monitor', (req, res) => {
 <title>Gushwork Form Monitor</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; color: #1a1a1a; font-size: 14px; }
-  .topbar { background: #fff; border-bottom: 1px solid #e5e5e5; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 10; }
-  .topbar-left { display: flex; align-items: center; gap: 12px; }
-  .logo { font-size: 15px; font-weight: 600; color: #1a1a1a; }
-  .api-pill { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid #e5e5e5; background: #fff; color: #666; }
-  .dot { width: 7px; height: 7px; border-radius: 50%; background: #ccc; display: inline-block; }
-  .dot-green { background: #22c55e; }
-  .dot-red { background: #ef4444; }
-  .dot-amber { background: #f59e0b; }
-  .refresh-btn { font-size: 12px; padding: 6px 14px; border-radius: 6px; border: 1px solid #e5e5e5; background: #fff; cursor: pointer; color: #333; }
-  .refresh-btn:hover { background: #f5f5f5; }
-  .page { max-width: 1100px; margin: 0 auto; padding: 24px; }
-  .section-label { font-size: 11px; font-weight: 600; color: #888; text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 10px; }
-  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
-  .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 24px; }
-  .card { background: #fff; border: 1px solid #e5e5e5; border-radius: 10px; padding: 16px 20px; }
-  .metric-card { background: #fff; border: 1px solid #e5e5e5; border-radius: 10px; padding: 16px; }
-  .metric-label { font-size: 12px; color: #888; margin-bottom: 6px; }
-  .metric-value { font-size: 28px; font-weight: 600; color: #1a1a1a; line-height: 1; }
-  .metric-sub { font-size: 11px; color: #aaa; margin-top: 6px; }
-  .step-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #f0f0f0; }
-  .step-row:last-child { border-bottom: none; }
-  .step-name { font-size: 13px; font-weight: 500; color: #1a1a1a; }
-  .step-desc { font-size: 11px; color: #999; margin-top: 2px; }
-  .badge { font-size: 11px; font-weight: 500; padding: 3px 9px; border-radius: 5px; }
-  .badge-green  { background: #f0fdf4; color: #15803d; }
-  .badge-red    { background: #fef2f2; color: #b91c1c; }
-  .badge-amber  { background: #fffbeb; color: #b45309; }
-  .badge-gray   { background: #f5f5f5; color: #666; }
-  .alert-box { border-radius: 8px; padding: 10px 14px; margin-bottom: 8px; font-size: 13px; display: flex; align-items: flex-start; gap: 8px; }
-  .alert-ok   { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
-  .alert-warn { background: #fffbeb; color: #b45309; border: 1px solid #fde68a; }
-  .alert-err  { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
-  .alert-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
-  .funnel-row { margin-bottom: 12px; }
-  .funnel-labels { display: flex; justify-content: space-between; font-size: 12px; color: #666; margin-bottom: 4px; }
-  .funnel-bar { height: 8px; border-radius: 4px; background: #f0f0f0; overflow: hidden; }
-  .funnel-fill { height: 100%; border-radius: 4px; transition: width 0.6s ease; }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th { text-align: left; padding: 8px 10px; font-weight: 500; color: #888; border-bottom: 1px solid #f0f0f0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
-  td { padding: 10px; border-bottom: 1px solid #f9f9f9; color: #333; }
-  tr:last-child td { border-bottom: none; }
-  td.email { font-weight: 500; color: #1a1a1a; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .last-updated { font-size: 11px; color: #aaa; }
-  .chart-wrap { position: relative; width: 100%; height: 200px; margin-top: 16px; }
-  @media (max-width: 700px) {
-    .grid-4 { grid-template-columns: repeat(2, 1fr); }
-    .grid-2 { grid-template-columns: 1fr; }
-  }
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;color:#1a1a1a;font-size:14px;line-height:1.5}
+.topbar{background:#fff;border-bottom:1px solid #e5e5e5;padding:12px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.logo{font-size:15px;font-weight:600;letter-spacing:-0.3px}
+.api-pill{display:flex;align-items:center;gap:6px;font-size:12px;padding:4px 10px;border-radius:999px;border:1px solid #e5e5e5;background:#fff;color:#666}
+.dot{width:7px;height:7px;border-radius:50%;background:#ccc;display:inline-block;flex-shrink:0}
+.dot-green{background:#22c55e}.dot-red{background:#ef4444}.dot-amber{background:#f59e0b}
+.btn{font-size:12px;padding:6px 14px;border-radius:6px;border:1px solid #e5e5e5;background:#fff;cursor:pointer;color:#333;transition:background 0.1s}
+.btn:hover{background:#f5f5f5}
+.btn-primary{background:#1a1a1a;color:#fff;border-color:#1a1a1a}
+.btn-primary:hover{background:#333}
+.page{max-width:1200px;margin:0 auto;padding:24px}
+.sl{font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:10px}
+.grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px}
+.grid-2{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:24px}
+.card{background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:16px 20px}
+.mc{background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:16px}
+.ml{font-size:12px;color:#888;margin-bottom:6px}
+.mv{font-size:28px;font-weight:600;color:#1a1a1a;line-height:1}
+.ms{font-size:11px;color:#aaa;margin-top:6px}
+.step-row{display:flex;align-items:center;justify-content:space-between;padding:11px 0;border-bottom:1px solid #f0f0f0}
+.step-row:last-child{border-bottom:none}
+.sn{font-size:13px;font-weight:500}
+.sd{font-size:11px;color:#999;margin-top:2px}
+.badge{font-size:11px;font-weight:500;padding:3px 9px;border-radius:5px;white-space:nowrap}
+.badge-green{background:#f0fdf4;color:#15803d}
+.badge-red{background:#fef2f2;color:#b91c1c}
+.badge-amber{background:#fffbeb;color:#b45309}
+.badge-gray{background:#f5f5f5;color:#666}
+.badge-blue{background:#eff6ff;color:#1d4ed8}
+.alert-box{border-radius:8px;padding:10px 14px;margin-bottom:8px;font-size:13px;display:flex;align-items:flex-start;gap:8px}
+.alert-ok{background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0}
+.alert-warn{background:#fffbeb;color:#b45309;border:1px solid #fde68a}
+.alert-err{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca}
+.funnel-row{margin-bottom:10px}
+.funnel-labels{display:flex;justify-content:space-between;font-size:12px;color:#666;margin-bottom:4px}
+.funnel-bar{height:7px;border-radius:4px;background:#f0f0f0;overflow:hidden}
+.funnel-fill{height:100%;border-radius:4px;transition:width 0.6s ease}
+.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
+.filters input,.filters select{font-size:13px;padding:7px 10px;border:1px solid #e5e5e5;border-radius:7px;background:#fff;color:#1a1a1a;outline:none}
+.filters input:focus,.filters select:focus{border-color:#999}
+.filters input[type=text]{min-width:200px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;padding:9px 10px;font-weight:500;color:#888;border-bottom:1px solid #e5e5e5;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;white-space:nowrap;cursor:pointer;user-select:none}
+th:hover{color:#333}
+td{padding:10px;border-bottom:1px solid #f5f5f5;color:#333;vertical-align:top}
+tr:hover td{background:#fafafa}
+tr:last-child td{border-bottom:none}
+.td-email{font-weight:500;color:#1a1a1a;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.td-co{max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.td-expand{cursor:pointer;color:#999;font-size:14px;padding:10px 6px;text-align:center}
+.td-expand:hover{color:#333}
+.enrich-row{background:#f9f9ff}
+.enrich-row td{padding:12px 14px;border-bottom:1px solid #eee}
+.enrich-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}
+.ef{background:#fff;border:1px solid #eee;border-radius:6px;padding:8px 10px}
+.ef-label{font-size:10px;font-weight:600;color:#aaa;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:3px}
+.ef-value{font-size:12px;color:#1a1a1a;word-break:break-word}
+.ef-value a{color:#2563eb;text-decoration:none}
+.ef-value a:hover{text-decoration:underline}
+.pagination{display:flex;align-items:center;gap:8px;justify-content:center;padding:16px 0}
+.pag-btn{padding:5px 12px;border:1px solid #e5e5e5;border-radius:6px;background:#fff;cursor:pointer;font-size:12px;color:#333}
+.pag-btn:hover{background:#f5f5f5}
+.pag-btn.active{background:#1a1a1a;color:#fff;border-color:#1a1a1a}
+.pag-btn:disabled{opacity:0.4;cursor:not-allowed}
+.pag-info{font-size:12px;color:#888}
+.chart-wrap{position:relative;width:100%;height:180px}
+.tabs{display:flex;gap:0;border-bottom:1px solid #e5e5e5;margin-bottom:20px}
+.tab{padding:10px 18px;font-size:13px;cursor:pointer;color:#888;border-bottom:2px solid transparent;transition:all 0.1s;font-weight:500}
+.tab:hover{color:#333}
+.tab.active{color:#1a1a1a;border-bottom-color:#1a1a1a}
+.tab-panel{display:none}
+.tab-panel.active{display:block}
+.last-upd{font-size:11px;color:#aaa}
+.no-data{text-align:center;padding:40px;color:#999;font-size:13px}
+@media(max-width:700px){.grid-4{grid-template-columns:repeat(2,1fr)}.grid-2{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
 
 <div class="topbar">
-  <div class="topbar-left">
+  <div style="display:flex;align-items:center;gap:12px">
     <span class="logo">Gushwork — Form Monitor</span>
     <div class="api-pill">
       <span class="dot" id="api-dot"></span>
       <span id="api-status">Checking...</span>
     </div>
   </div>
-  <div style="display:flex;align-items:center;gap:12px;">
-    <span class="last-updated" id="last-updated">—</span>
-    <button class="refresh-btn" onclick="load()">↻ Refresh</button>
+  <div style="display:flex;align-items:center;gap:10px">
+    <span class="last-upd" id="last-updated">—</span>
+    <button class="btn" onclick="loadAll()">↻ Refresh</button>
   </div>
 </div>
 
 <div class="page">
 
-  <div class="section-label" style="margin-top:4px;">Overview</div>
-  <div class="grid-4">
-    <div class="metric-card">
-      <div class="metric-label">Total leads</div>
-      <div class="metric-value" id="m-total">—</div>
-      <div class="metric-sub" id="m-today">— today</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-label">Step 2 completed</div>
-      <div class="metric-value" id="m-completed">—</div>
-      <div class="metric-sub" id="m-completed-pct">of leads</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-label">Calls booked</div>
-      <div class="metric-value" id="m-booked">—</div>
-      <div class="metric-sub" id="m-booked-pct">of completed</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-label">Disqualified</div>
-      <div class="metric-value" id="m-disq">—</div>
-      <div class="metric-sub">B2C / Mixed</div>
-    </div>
+  <div class="tabs">
+    <div class="tab active" onclick="showTab('overview')">Overview</div>
+    <div class="tab" onclick="showTab('leads')">All Leads</div>
+    <div class="tab" onclick="showTab('health')">System Health</div>
   </div>
 
-  <div class="grid-2">
-    <div>
-      <div class="section-label">Alerts</div>
-      <div id="alerts-container">
-        <div class="alert-box alert-gray" style="background:#f5f5f5;color:#666;border:1px solid #e5e5e5;">
-          <span class="alert-icon">○</span> Loading alerts...
-        </div>
+  <!-- OVERVIEW TAB -->
+  <div class="tab-panel active" id="tab-overview">
+
+    <div class="sl">Overview</div>
+    <div class="grid-4">
+      <div class="mc"><div class="ml">Total leads</div><div class="mv" id="m-total">—</div><div class="ms" id="m-today">— today</div></div>
+      <div class="mc"><div class="ml">Step 2 completed</div><div class="mv" id="m-completed">—</div><div class="ms" id="m-cpct">of leads</div></div>
+      <div class="mc"><div class="ml">Calls booked</div><div class="mv" id="m-booked">—</div><div class="ms" id="m-bpct">of completed</div></div>
+      <div class="mc"><div class="ml">Disqualified</div><div class="mv" id="m-disq">—</div><div class="ms">B2C / Mixed</div></div>
+    </div>
+
+    <div class="grid-2">
+      <div>
+        <div class="sl">Alerts</div>
+        <div id="alerts-container"><div class="alert-box" style="background:#f5f5f5;color:#999;border:1px solid #eee">Loading...</div></div>
+      </div>
+      <div>
+        <div class="sl">Conversion funnel</div>
+        <div class="card"><div id="funnel-container">Loading...</div></div>
       </div>
     </div>
-    <div>
-      <div class="section-label">Conversion funnel</div>
-      <div class="card" style="padding:16px;">
-        <div id="funnel-container">Loading...</div>
+
+    <div class="sl">Leads over time</div>
+    <div class="card" style="margin-bottom:24px">
+      <div class="chart-wrap"><canvas id="leadsChart"></canvas></div>
+    </div>
+
+  </div>
+
+  <!-- LEADS TAB -->
+  <div class="tab-panel" id="tab-leads">
+
+    <div class="filters">
+      <input type="text" id="f-search" placeholder="Search email, company..." oninput="debounceLeads()">
+      <select id="f-stage" onchange="loadLeads(1)">
+        <option value="all">All stages</option>
+        <option value="booked">Booked</option>
+        <option value="completed">Completed (no booking)</option>
+        <option value="step1">Step 1 only</option>
+        <option value="disqualified">Disqualified</option>
+      </select>
+      <input type="date" id="f-from" onchange="loadLeads(1)" placeholder="From">
+      <input type="date" id="f-to" onchange="loadLeads(1)" placeholder="To">
+      <button class="btn" onclick="clearFilters()">Clear</button>
+      <span id="leads-count" style="font-size:12px;color:#888;margin-left:4px"></span>
+    </div>
+
+    <div class="card" style="padding:0;overflow:hidden">
+      <div style="overflow-x:auto">
+        <table id="leads-table">
+          <thead>
+            <tr>
+              <th style="width:28px"></th>
+              <th>Email</th>
+              <th>Name</th>
+              <th>Company</th>
+              <th>Sells to</th>
+              <th>Stage</th>
+              <th>Booked</th>
+              <th>Enrichment</th>
+              <th>Created (IST)</th>
+              <th>Source</th>
+            </tr>
+          </thead>
+          <tbody id="leads-tbody">
+            <tr><td colspan="10" class="no-data">Loading leads...</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
+
+    <div class="pagination" id="pagination"></div>
+
   </div>
 
-  <div class="section-label">Step health</div>
-  <div class="card" style="margin-bottom:24px;">
-    <div class="step-row">
-      <div><div class="step-name">API uptime</div><div class="step-desc">/health endpoint responding</div></div>
-      <span class="badge badge-gray" id="s-api">Checking...</span>
-    </div>
-    <div class="step-row">
-      <div><div class="step-name">Step 1 — /partial</div><div class="step-desc">Email verified + lead saved to DB + AWS</div></div>
-      <span class="badge badge-gray" id="s-partial">Checking...</span>
-    </div>
-    <div class="step-row">
-      <div><div class="step-name">Step 2 — /submit</div><div class="step-desc">Lead completed + Slack fired</div></div>
-      <span class="badge badge-gray" id="s-submit">Checking...</span>
-    </div>
-    <div class="step-row">
-      <div><div class="step-name">Apollo enrichment</div><div class="step-desc">Enrichment data saved per lead</div></div>
-      <span class="badge badge-gray" id="s-enrich">Checking...</span>
-    </div>
-    <div class="step-row">
-      <div><div class="step-name">Cal booking confirmation</div><div class="step-desc">Completed leads with booking_uid</div></div>
-      <span class="badge badge-gray" id="s-cal">Checking...</span>
-    </div>
-    <div class="step-row">
-      <div><div class="step-name">Cron — partial recovery</div><div class="step-desc">Leads pending Loops/Slack notification</div></div>
-      <span class="badge badge-gray" id="s-cron">Checking...</span>
-    </div>
-    <div class="step-row">
-      <div><div class="step-name">AWS sync</div><div class="step-desc">gw_form_leads mirror active</div></div>
-      <span class="badge badge-gray" id="s-aws">Checking...</span>
-    </div>
-  </div>
+  <!-- HEALTH TAB -->
+  <div class="tab-panel" id="tab-health">
 
-  <div class="section-label">Recent leads</div>
-  <div class="card" style="margin-bottom:24px;overflow-x:auto;">
-    <div id="recent-leads-container">Loading...</div>
-  </div>
-
-  <div class="section-label">Chart — leads over time</div>
-  <div class="card" style="margin-bottom:24px;">
-    <div class="chart-wrap">
-      <canvas id="leadsChart"></canvas>
+    <div class="sl">Step health</div>
+    <div class="card" style="margin-bottom:24px">
+      <div class="step-row"><div><div class="sn">API uptime</div><div class="sd">/health responding</div></div><span class="badge badge-gray" id="s-api">Checking...</span></div>
+      <div class="step-row"><div><div class="sn">Step 1 — /partial</div><div class="sd">Email + lead saved to Railway + AWS</div></div><span class="badge badge-gray" id="s-partial">Checking...</span></div>
+      <div class="step-row"><div><div class="sn">Step 2 — /submit</div><div class="sd">Lead completed + Slack fired (deduplicated)</div></div><span class="badge badge-gray" id="s-submit">Checking...</span></div>
+      <div class="step-row"><div><div class="sn">Apollo enrichment</div><div class="sd">enrichment_data populated per session</div></div><span class="badge badge-gray" id="s-enrich">Checking...</span></div>
+      <div class="step-row"><div><div class="sn">Cal booking — /booking-confirmed</div><div class="sd">Completed leads with booking_uid captured</div></div><span class="badge badge-gray" id="s-cal">Checking...</span></div>
+      <div class="step-row"><div><div class="sn">Cron — partial recovery</div><div class="sd">Leads awaiting Loops + Slack notification</div></div><span class="badge badge-gray" id="s-cron">Checking...</span></div>
+      <div class="step-row"><div><div class="sn">AWS sync</div><div class="sd">gw_form_leads mirror active</div></div><span class="badge badge-gray" id="s-aws">Checking...</span></div>
+      <div class="step-row"><div><div class="sn">Loops recovery</div><div class="sd">Partial leads pushed to Loops</div></div><span class="badge badge-gray" id="s-loops">Checking...</span></div>
     </div>
+
+    <div class="sl">Enrichment coverage</div>
+    <div class="grid-4" style="margin-bottom:24px">
+      <div class="mc"><div class="ml">Enriched sessions</div><div class="mv" id="h-enriched">—</div><div class="ms">in enrichment_data</div></div>
+      <div class="mc"><div class="ml">With title</div><div class="mv" id="h-title">—</div><div class="ms">% of enriched</div></div>
+      <div class="mc"><div class="ml">With funding data</div><div class="mv" id="h-funding">—</div><div class="ms">% of enriched</div></div>
+      <div class="mc"><div class="ml">With location</div><div class="mv" id="h-location">—</div><div class="ms">% of enriched</div></div>
+    </div>
+
   </div>
 
 </div>
 
 <script>
-const TOKEN_PARAM = '${tokenParam}';
+const TP = '${tokenParam}';
 const API = window.location.origin;
 let leadsChart = null;
+let currentPage = 1;
+let searchTimer = null;
+
+function showTab(name) {
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', ['overview','leads','health'][i] === name));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  if (name === 'leads' && document.getElementById('leads-tbody').textContent.includes('Loading')) loadLeads(1);
+}
 
 function setBadge(id, text, color) {
   const el = document.getElementById(id);
@@ -779,16 +920,13 @@ function setBadge(id, text, color) {
   el.textContent = text;
   el.className = 'badge badge-' + color;
 }
-
-function setMetric(id, val) {
-  const el = document.getElementById(id);
-  if (el) el.textContent = val;
+function set(id, val) { const el = document.getElementById(id); if (el) el.textContent = val; }
+function pct(a, b) { return b ? Math.round(a/b*100) + '%' : '0%'; }
+function ist(ts) {
+  if (!ts) return '—';
+  return new Date(ts).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'short' });
 }
-
-function pct(a, b) {
-  if (!b) return '0%';
-  return Math.round(a / b * 100) + '%';
-}
+function esc(s) { return s ? String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') : ''; }
 
 async function checkApi() {
   try {
@@ -810,174 +948,252 @@ async function checkApi() {
 
 function renderAlerts(d) {
   const alerts = [];
-
-  if (d.pendingPartials > 0) {
-    alerts.push({ type: 'warn', icon: '⚠', msg: d.pendingPartials + ' lead(s) waiting >30 mins — Loops/Slack not yet sent. Cron may be delayed.' });
-  }
-  if (d.noBookingUid > 0) {
-    alerts.push({ type: 'warn', icon: '⚠', msg: d.noBookingUid + ' completed lead(s) have no booking — Cal callback may not be firing reliably.' });
-  }
-  if (!d.awsSynced) {
-    alerts.push({ type: 'err', icon: '✕', msg: 'AWS sync is disabled — AWS_PG_HOST not set in Railway env vars.' });
-  }
-  if (d.enriched < d.total * 0.3 && d.total > 5) {
-    alerts.push({ type: 'warn', icon: '⚠', msg: 'Enrichment rate is low (' + Math.round(d.enriched/d.total*100) + '%) — Apollo may be returning empty responses.' });
-  }
-  if (d.todayCount === 0) {
-    alerts.push({ type: 'warn', icon: '○', msg: 'No new leads in the last 24 hours — check if form is live and accessible.' });
-  }
-
-  if (alerts.length === 0) {
-    alerts.push({ type: 'ok', icon: '✓', msg: 'All systems healthy — no issues detected.' });
-  }
-
-  document.getElementById('alerts-container').innerHTML = alerts.map(a => \`
-    <div class="alert-box alert-\${a.type}">
-      <span class="alert-icon">\${a.icon}</span>
-      <span>\${a.msg}</span>
-    </div>
-  \`).join('');
+  if (d.pendingPartials > 0) alerts.push({ type: 'warn', icon: '⚠', msg: d.pendingPartials + ' lead(s) waiting >30 mins — cron may be delayed or Loops failing.' });
+  if (d.noBookingUid > 0) alerts.push({ type: 'warn', icon: '⚠', msg: d.noBookingUid + ' completed lead(s) with no booking — Cal embed callback not firing for all.' });
+  if (!d.awsSynced) alerts.push({ type: 'err', icon: '✕', msg: 'AWS sync disabled — AWS_PG_HOST not set.' });
+  if (d.total > 5 && d.enriched < d.total * 0.3) alerts.push({ type: 'warn', icon: '⚠', msg: 'Low enrichment rate (' + Math.round(d.enriched/d.total*100) + '%) — Apollo returning empty for many leads.' });
+  if (d.todayCount === 0) alerts.push({ type: 'warn', icon: '○', msg: 'No new leads in the last 24 hours — check form is live and CORS is not blocking.' });
+  if (alerts.length === 0) alerts.push({ type: 'ok', icon: '✓', msg: 'All systems healthy — no issues detected.' });
+  document.getElementById('alerts-container').innerHTML = alerts.map(a =>
+    '<div class="alert-box alert-' + a.type + '"><span>' + a.icon + '</span><span>' + a.msg + '</span></div>'
+  ).join('');
 }
 
 function renderFunnel(total, completed, booked, disq) {
   const steps = [
-    { label: 'Step 1 submitted', val: total, pct: 100, color: '#818cf8' },
+    { label: 'Step 1 submitted', val: total,     pct: 100,                                        color: '#818cf8' },
     { label: 'Step 2 completed', val: completed, pct: total ? Math.round(completed/total*100) : 0, color: '#38bdf8' },
     { label: 'Call booked',      val: booked,    pct: total ? Math.round(booked/total*100) : 0,    color: '#34d399' },
     { label: 'Disqualified',     val: disq,      pct: total ? Math.round(disq/total*100) : 0,      color: '#fb923c' },
   ];
-  document.getElementById('funnel-container').innerHTML = steps.map(s => \`
-    <div class="funnel-row">
-      <div class="funnel-labels">
-        <span>\${s.label}</span>
-        <span style="font-weight:500;color:#1a1a1a;">\${s.val} <span style="color:#aaa;font-weight:400;">(\${s.pct}%)</span></span>
-      </div>
-      <div class="funnel-bar">
-        <div class="funnel-fill" style="width:\${s.pct}%;background:\${s.color};"></div>
-      </div>
-    </div>
-  \`).join('');
-}
-
-function renderRecentLeads(leads) {
-  if (!leads || !leads.length) {
-    document.getElementById('recent-leads-container').innerHTML = '<p style="color:#999;font-size:13px;">No leads found.</p>';
-    return;
-  }
-  document.getElementById('recent-leads-container').innerHTML = \`
-    <table>
-      <thead>
-        <tr>
-          <th>Email</th>
-          <th>Company</th>
-          <th>Status</th>
-          <th>Booked</th>
-          <th>Created (IST)</th>
-        </tr>
-      </thead>
-      <tbody>
-        \${leads.map(l => {
-          const d = new Date(l.created_at);
-          const ist = d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'short' });
-          return \`<tr>
-            <td class="email">\${l.email || '—'}</td>
-            <td>\${l.company || '—'}</td>
-            <td>\${l.completed ? '<span class="badge badge-green">Completed</span>' : '<span class="badge badge-amber">Step 1</span>'}\${l.disqualified ? ' <span class="badge badge-red">Disq</span>' : ''}</td>
-            <td>\${l.booking_uid ? '<span class="badge badge-green">Yes</span>' : '<span class="badge badge-gray">No</span>'}</td>
-            <td style="color:#999;">\${ist}</td>
-          </tr>\`;
-        }).join('')}
-      </tbody>
-    </table>
-  \`;
+  document.getElementById('funnel-container').innerHTML = steps.map(s =>
+    '<div class="funnel-row"><div class="funnel-labels"><span>' + s.label + '</span><span style="font-weight:500;color:#1a1a1a">' + s.val + ' <span style="color:#aaa;font-weight:400">(' + s.pct + '%)</span></span></div>' +
+    '<div class="funnel-bar"><div class="funnel-fill" style="width:' + s.pct + '%;background:' + s.color + '"></div></div></div>'
+  ).join('');
 }
 
 function renderChart(leads) {
   const counts = {};
-  leads.forEach(l => {
-    const d = new Date(l.created_at);
-    const key = d.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric' });
-    counts[key] = (counts[key] || 0) + 1;
+  (leads || []).forEach(l => {
+    const k = new Date(l.created_at).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric' });
+    counts[k] = (counts[k] || 0) + 1;
   });
-  const labels = Object.keys(counts);
-  const data   = Object.values(counts);
-
+  const labels = Object.keys(counts).reverse();
+  const data   = Object.values(counts).reverse();
   if (leadsChart) leadsChart.destroy();
   const ctx = document.getElementById('leadsChart').getContext('2d');
   leadsChart = new Chart(ctx, {
     type: 'bar',
-    data: {
-      labels,
-      datasets: [{
-        label: 'Leads',
-        data,
-        backgroundColor: '#818cf8',
-        borderRadius: 4,
-        borderSkipped: false,
-      }]
-    },
+    data: { labels, datasets: [{ data, backgroundColor: '#818cf8', borderRadius: 4, borderSkipped: false }] },
     options: {
-      responsive: true,
-      maintainAspectRatio: false,
+      responsive: true, maintainAspectRatio: false,
       plugins: { legend: { display: false } },
       scales: {
         y: { beginAtZero: true, ticks: { stepSize: 1, color: '#aaa' }, grid: { color: '#f0f0f0' } },
-        x: { ticks: { color: '#aaa', maxRotation: 45 }, grid: { display: false } }
+        x: { ticks: { color: '#aaa', maxRotation: 45, autoSkip: false }, grid: { display: false } }
       }
     }
   });
 }
 
-async function load() {
+function debounceLeads() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => loadLeads(1), 400);
+}
+
+function clearFilters() {
+  document.getElementById('f-search').value = '';
+  document.getElementById('f-stage').value = 'all';
+  document.getElementById('f-from').value = '';
+  document.getElementById('f-to').value = '';
+  loadLeads(1);
+}
+
+function stageFromLead(l) {
+  if (l.booking_uid)  return '<span class="badge badge-green">Booked</span>';
+  if (l.disqualified) return '<span class="badge badge-red">Disqualified</span>';
+  if (l.completed)    return '<span class="badge badge-blue">Completed</span>';
+  return '<span class="badge badge-amber">Step 1</span>';
+}
+
+function enrichBadge(l) {
+  const hasEnrich = l.enriched_title || l.enriched_company_size || l.enriched_industry || l.e_company;
+  return hasEnrich ? '<span class="badge badge-green">Yes</span>' : '<span class="badge badge-gray">No</span>';
+}
+
+function enrichPanel(l) {
+  const fields = [
+    { label: 'Title',          val: l.enriched_title },
+    { label: 'Seniority',      val: l.enriched_seniority },
+    { label: 'Department',     val: l.enriched_departments },
+    { label: 'Email status',   val: l.enriched_email_status },
+    { label: 'Company',        val: l.e_company || l.company },
+    { label: 'Company size',   val: l.enriched_company_size },
+    { label: 'Industry',       val: l.enriched_industry },
+    { label: 'Founded',        val: l.enriched_founded_year },
+    { label: 'Annual revenue', val: l.enriched_annual_revenue },
+    { label: 'Total funding',  val: l.enriched_total_funding },
+    { label: 'Funding stage',  val: l.enriched_funding_stage },
+    { label: 'Funding events', val: l.enriched_funding_events },
+    { label: 'Alexa rank',     val: l.enriched_alexa_ranking },
+    { label: 'Keywords',       val: l.enriched_keywords },
+    { label: 'Person location',val: [l.enriched_city, l.enriched_state, l.enriched_country].filter(Boolean).join(', ') || null },
+    { label: 'Company HQ',     val: l.enriched_org_hq },
+    { label: 'LinkedIn',       val: l.enriched_linkedin ? '<a href="' + esc(l.enriched_linkedin) + '" target="_blank">' + esc(l.enriched_linkedin) + '</a>' : null, raw: true },
+    { label: 'Phone',          val: l.e_phone || l.phone },
+    { label: 'Website',        val: l.website ? '<a href="' + (l.website.startsWith('http') ? '' : 'https://') + esc(l.website) + '" target="_blank">' + esc(l.website) + '</a>' : null, raw: true },
+    { label: 'Hear about us',  val: l.hear_about_us },
+    { label: 'UTM source',     val: l.utm_source },
+    { label: 'UTM medium',     val: l.utm_medium },
+    { label: 'UTM campaign',   val: l.utm_campaign },
+    { label: 'Referrer',       val: l.referrer },
+    { label: 'Prefill source', val: l.prefill_source },
+    { label: 'Page URL',       val: l.page_url ? '<a href="' + esc(l.page_url) + '" target="_blank">' + esc(l.page_url) + '</a>' : null, raw: true },
+    { label: 'Submitted',      val: ist(l.submitted_at) },
+    { label: 'Booked at',      val: ist(l.booked_at) },
+    { label: 'Booking time',   val: l.start_time ? ist(l.start_time) : null },
+    { label: 'Loops sent',     val: l.loops_sent ? 'Yes' : 'No' },
+    { label: 'Session ID',     val: '<code style="font-size:10px">' + esc(l.session_id) + '</code>', raw: true },
+    { label: 'Enriched at',    val: ist(l.enriched_at) },
+  ];
+  const populated = fields.filter(f => f.val);
+  if (!populated.length) return '<div style="color:#999;font-size:12px;padding:4px 0">No enrichment data available for this lead.</div>';
+  return '<div class="enrich-grid">' + populated.map(f =>
+    '<div class="ef"><div class="ef-label">' + f.label + '</div><div class="ef-value">' + (f.raw ? f.val : esc(f.val)) + '</div></div>'
+  ).join('') + '</div>';
+}
+
+async function loadLeads(page) {
+  currentPage = page || 1;
+  const search = document.getElementById('f-search').value.trim();
+  const stage  = document.getElementById('f-stage').value;
+  const from   = document.getElementById('f-from').value;
+  const to     = document.getElementById('f-to').value;
+
+  let url = API + '/monitor/leads' + TP + (TP ? '&' : '?') + 'page=' + currentPage + '&stage=' + stage;
+  if (search) url += '&search=' + encodeURIComponent(search);
+  if (from)   url += '&dateFrom=' + from;
+  if (to)     url += '&dateTo=' + to;
+
+  document.getElementById('leads-tbody').innerHTML = '<tr><td colspan="10" class="no-data">Loading...</td></tr>';
+
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+
+    set('leads-count', d.total + ' lead' + (d.total !== 1 ? 's' : '') + ' found');
+
+    if (!d.leads.length) {
+      document.getElementById('leads-tbody').innerHTML = '<tr><td colspan="10" class="no-data">No leads match your filters.</td></tr>';
+      document.getElementById('pagination').innerHTML = '';
+      return;
+    }
+
+    document.getElementById('leads-tbody').innerHTML = d.leads.map(l => {
+      const sid = esc(l.session_id);
+      const name = [l.first_name, l.last_name].filter(Boolean).map(esc).join(' ') || '—';
+      const src = l.utm_source ? esc(l.utm_source) + (l.utm_medium ? ' / ' + esc(l.utm_medium) : '') : (l.referrer ? 'referral' : '—');
+      return '<tr>' +
+        '<td class="td-expand" onclick="toggleEnrich(\'' + sid + '\')" title="Show enrichment">▸</td>' +
+        '<td class="td-email" title="' + esc(l.email) + '">' + esc(l.email || '—') + '</td>' +
+        '<td>' + name + '</td>' +
+        '<td class="td-co" title="' + esc(l.company) + '">' + esc(l.company || '—') + '</td>' +
+        '<td>' + esc(l.sell_to || '—') + '</td>' +
+        '<td>' + stageFromLead(l) + '</td>' +
+        '<td>' + (l.booking_uid ? '<span class="badge badge-green">Yes</span>' : '<span class="badge badge-gray">No</span>') + '</td>' +
+        '<td>' + enrichBadge(l) + '</td>' +
+        '<td style="color:#999;white-space:nowrap">' + ist(l.created_at) + '</td>' +
+        '<td style="color:#999;font-size:11px">' + src + '</td>' +
+        '</tr>' +
+        '<tr class="enrich-row" id="enrich-' + sid + '" style="display:none"><td></td><td colspan="9">' + enrichPanel(l) + '</td></tr>';
+    }).join('');
+
+    renderPagination(d.page, d.pages);
+  } catch(e) {
+    document.getElementById('leads-tbody').innerHTML = '<tr><td colspan="10" class="no-data" style="color:#b91c1c">Failed to load leads: ' + esc(e.message) + '</td></tr>';
+  }
+}
+
+function toggleEnrich(sid) {
+  const row = document.getElementById('enrich-' + sid);
+  if (!row) return;
+  const visible = row.style.display !== 'none';
+  row.style.display = visible ? 'none' : 'table-row';
+  const btn = row.previousElementSibling?.querySelector('.td-expand');
+  if (btn) btn.textContent = visible ? '▸' : '▾';
+}
+
+function renderPagination(page, pages) {
+  if (pages <= 1) { document.getElementById('pagination').innerHTML = ''; return; }
+  let html = '';
+  html += '<button class="pag-btn" onclick="loadLeads(' + (page-1) + ')"' + (page <= 1 ? ' disabled' : '') + '>← Prev</button>';
+  const start = Math.max(1, page - 2);
+  const end   = Math.min(pages, page + 2);
+  if (start > 1) html += '<button class="pag-btn" onclick="loadLeads(1)">1</button>' + (start > 2 ? '<span class="pag-info">…</span>' : '');
+  for (let i = start; i <= end; i++) {
+    html += '<button class="pag-btn' + (i === page ? ' active' : '') + '" onclick="loadLeads(' + i + ')">' + i + '</button>';
+  }
+  if (end < pages) html += (end < pages - 1 ? '<span class="pag-info">…</span>' : '') + '<button class="pag-btn" onclick="loadLeads(' + pages + ')">' + pages + '</button>';
+  html += '<button class="pag-btn" onclick="loadLeads(' + (page+1) + ')"' + (page >= pages ? ' disabled' : '') + '>Next →</button>';
+  html += '<span class="pag-info">Page ' + page + ' of ' + pages + '</span>';
+  document.getElementById('pagination').innerHTML = html;
+}
+
+async function loadAll() {
   document.getElementById('last-updated').textContent = 'Refreshing...';
 
   const apiOk = await checkApi();
   if (!apiOk) {
-    document.getElementById('alerts-container').innerHTML = \`
-      <div class="alert-box alert-err"><span class="alert-icon">✕</span><span>API is offline — all form submissions are failing. Check Railway deployment immediately.</span></div>
-    \`;
+    document.getElementById('alerts-container').innerHTML = '<div class="alert-box alert-err"><span>✕</span><span>API offline — all form submissions failing. Check Railway immediately.</span></div>';
+    document.getElementById('last-updated').textContent = 'API offline';
     return;
   }
 
   try {
-    const r = await fetch(API + '/monitor/metrics' + TOKEN_PARAM, { signal: AbortSignal.timeout(10000) });
+    const r = await fetch(API + '/monitor/metrics' + TP, { signal: AbortSignal.timeout(10000) });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
 
-    setMetric('m-total',     d.total);
-    setMetric('m-completed', d.completed);
-    setMetric('m-booked',    d.booked);
-    setMetric('m-disq',      d.disqualified);
-    setMetric('m-today',     d.todayCount + ' today');
-    setMetric('m-completed-pct', pct(d.completed, d.total) + ' of leads');
-    setMetric('m-booked-pct',    pct(d.booked, d.completed) + ' of completed');
+    set('m-total',     d.total);
+    set('m-completed', d.completed);
+    set('m-booked',    d.booked);
+    set('m-disq',      d.disqualified);
+    set('m-today',     d.todayCount + ' today');
+    set('m-cpct',      pct(d.completed, d.total) + ' of leads');
+    set('m-bpct',      pct(d.booked, d.completed) + ' of completed');
 
-    const enrichRate = d.total ? Math.round(d.enriched / d.total * 100) : 0;
-    const bookingRate = d.completed ? Math.round(d.booked / d.completed * 100) : 0;
+    const eRate = d.total ? Math.round(d.enriched / d.total * 100) : 0;
+    const bRate = d.completed ? Math.round(d.booked / d.completed * 100) : 0;
 
     setBadge('s-partial', d.total + ' leads saved', 'green');
-    setBadge('s-submit',  d.completed > 0 ? d.completed + ' completed' : 'No completions yet', d.completed > 0 ? 'green' : 'amber');
-    setBadge('s-enrich',  enrichRate + '% enriched', enrichRate >= 60 ? 'green' : enrichRate >= 30 ? 'amber' : 'red');
-    setBadge('s-cal',     bookingRate + '% booking rate', bookingRate >= 50 ? 'green' : bookingRate >= 20 ? 'amber' : 'gray');
+    setBadge('s-submit',  d.completed > 0 ? d.completed + ' completed' : 'No completions', d.completed > 0 ? 'green' : 'amber');
+    setBadge('s-enrich',  eRate + '% enriched', eRate >= 60 ? 'green' : eRate >= 30 ? 'amber' : 'red');
+    setBadge('s-cal',     bRate + '% booking rate', bRate >= 50 ? 'green' : bRate >= 20 ? 'amber' : 'gray');
     setBadge('s-cron',    d.pendingPartials === 0 ? 'No pending' : d.pendingPartials + ' pending', d.pendingPartials === 0 ? 'green' : 'amber');
     setBadge('s-aws',     d.awsSynced ? 'Active' : 'Disabled', d.awsSynced ? 'green' : 'red');
+    setBadge('s-loops',   d.loopsSent + ' pushed', d.loopsSent > 0 ? 'green' : 'gray');
+
+    set('h-enriched',  d.enriched);
+    set('h-title',     d.enrichTitlePct !== undefined ? d.enrichTitlePct + '%' : '—');
+    set('h-funding',   d.enrichFundingPct !== undefined ? d.enrichFundingPct + '%' : '—');
+    set('h-location',  d.enrichLocationPct !== undefined ? d.enrichLocationPct + '%' : '—');
 
     renderAlerts(d);
     renderFunnel(d.total, d.completed, d.booked, d.disqualified);
-    renderRecentLeads(d.recentLeads);
     if (d.recentLeads && d.recentLeads.length) renderChart(d.recentLeads);
 
     document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' }) + ' IST';
   } catch(e) {
-    document.getElementById('alerts-container').innerHTML = \`
-      <div class="alert-box alert-err"><span class="alert-icon">✕</span><span>Failed to load metrics: \${e.message}</span></div>
-    \`;
-    document.getElementById('last-updated').textContent = 'Error loading';
+    document.getElementById('alerts-container').innerHTML = '<div class="alert-box alert-err"><span>✕</span><span>Failed to load metrics: ' + e.message + '</span></div>';
+    document.getElementById('last-updated').textContent = 'Error';
   }
+
+  if (document.getElementById('tab-leads').classList.contains('active')) loadLeads(currentPage);
 }
 
-load();
-setInterval(load, 60000);
+loadAll();
+setInterval(loadAll, 60000);
 </script>
 </body>
 </html>`);
