@@ -14,7 +14,9 @@ app.set('trust proxy', 1);
 /* --------------------------------------------------------
    SECURITY
 -------------------------------------------------------- */
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: false // disabled so monitor HTML page loads scripts
+}));
 
 /* --------------------------------------------------------
    CORS
@@ -113,6 +115,9 @@ async function initAWSTable() {
         enriched_funding_events TEXT,
         enriched_alexa_ranking  TEXT,
         enriched_keywords       TEXT,
+        enriched_org_hq         TEXT,
+        enriched_total_funding  TEXT,
+        enriched_funding_stage  TEXT,
         disqualified            BOOLEAN DEFAULT FALSE,
         disqualified_reason     TEXT,
         step_reached            INT DEFAULT 1,
@@ -285,19 +290,14 @@ function syncBookingToAWS(session_id, booking_uid, start_time, end_time, event_t
 -------------------------------------------------------- */
 function sendSlack(blocks, fallbackText) {
   const webhookUrl = process.env.SLACK_WEBHOOK_URL;
-  if (!webhookUrl) {
-    console.warn('[Slack] SLACK_WEBHOOK_URL not set — skipping');
-    return;
-  }
+  if (!webhookUrl) { console.warn('[Slack] SLACK_WEBHOOK_URL not set — skipping'); return; }
   const cleanBlocks = Array.isArray(blocks) ? blocks.filter(Boolean) : null;
   const payload = cleanBlocks && cleanBlocks.length > 0
     ? { text: fallbackText || 'Gushwork notification', blocks: cleanBlocks }
     : { text: fallbackText || 'Gushwork notification' };
-
   fetch(webhookUrl, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify(payload)
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
   })
   .then(r => r.text().then(t => console.log(`[Slack] ✅ Sent — status: ${r.status} | response: ${t.substring(0, 50)}`)))
   .catch(err => console.warn('[Slack] ⚠ Failed:', err.message));
@@ -306,32 +306,18 @@ function sendSlack(blocks, fallbackText) {
 /* --------------------------------------------------------
    SLACK BLOCK HELPERS
 -------------------------------------------------------- */
-function bHeader(text) {
-  return { type: 'header', text: { type: 'plain_text', text, emoji: true } };
-}
-function bSection(text) {
-  return { type: 'section', text: { type: 'mrkdwn', text } };
-}
+function bHeader(text) { return { type: 'header', text: { type: 'plain_text', text, emoji: true } }; }
+function bSection(text) { return { type: 'section', text: { type: 'mrkdwn', text } }; }
 function bFields(fields) {
   const filtered = fields.filter(f => f.value);
   if (!filtered.length) return null;
-  return {
-    type: 'section',
-    fields: filtered.map(f => ({
-      type: 'mrkdwn',
-      text: `*${f.label}*\n${f.value}`
-    }))
-  };
+  return { type: 'section', fields: filtered.map(f => ({ type: 'mrkdwn', text: `*${f.label}*\n${f.value}` })) };
 }
 function bDivider() { return { type: 'divider' }; }
-function bContext(text) {
-  return { type: 'context', elements: [{ type: 'mrkdwn', text }] };
-}
+function bContext(text) { return { type: 'context', elements: [{ type: 'mrkdwn', text }] }; }
 
 /* --------------------------------------------------------
    SLACK ENRICHMENT BLOCK BUILDER
-   Shared by slackPartial and slackSubmit
-   Only shows sections that have data
 -------------------------------------------------------- */
 function buildEnrichmentBlocks(blocks, e) {
   const hasPersonInfo = e.enriched_title || e.enriched_seniority || e.enriched_departments || e.enriched_email_status;
@@ -346,7 +332,6 @@ function buildEnrichmentBlocks(blocks, e) {
   blocks.push(bDivider());
   blocks.push(bSection('*🔍 Enrichment*'));
 
-  // Person info
   if (hasPersonInfo) {
     const f = bFields([
       { label: 'Title',        value: e.enriched_title },
@@ -357,7 +342,6 @@ function buildEnrichmentBlocks(blocks, e) {
     if (f) blocks.push(f);
   }
 
-  // Org info
   if (hasOrgInfo) {
     const f = bFields([
       { label: 'Company Size',   value: e.enriched_company_size },
@@ -370,7 +354,6 @@ function buildEnrichmentBlocks(blocks, e) {
     if (f) blocks.push(f);
   }
 
-  // Funding
   if (hasFunding) {
     blocks.push(bDivider());
     const f = bFields([
@@ -381,43 +364,32 @@ function buildEnrichmentBlocks(blocks, e) {
     if (f) blocks.push(f);
   }
 
-  // Person location — only from person object, never org
   if (hasLocation) {
     const location = [e.enriched_city, e.enriched_state, e.enriched_country].filter(Boolean).join(', ');
-    const f = bFields([
-      { label: '📍 Person Location', value: location },
-    ]);
+    const f = bFields([{ label: '📍 Person Location', value: location }]);
     if (f) blocks.push(f);
   }
 
-  // Org HQ — separately labelled
   if (hasOrgHQ) {
-    const f = bFields([
-      { label: '🏢 Company HQ', value: e.enriched_org_hq },
-    ]);
+    const f = bFields([{ label: '🏢 Company HQ', value: e.enriched_org_hq }]);
     if (f) blocks.push(f);
   }
 
-  // LinkedIn
   if (hasLinkedIn) {
-    const f = bFields([
-      { label: 'LinkedIn', value: e.enriched_linkedin },
-    ]);
+    const f = bFields([{ label: 'LinkedIn', value: e.enriched_linkedin }]);
     if (f) blocks.push(f);
   }
 }
 
 /* --------------------------------------------------------
-   SLACK FORMATTER — partial (fired from cron after 30 mins)
+   SLACK FORMATTER — partial
 -------------------------------------------------------- */
 function slackPartial(d) {
   const label    = d.completed ? '⏰ Reached Cal — Did Not Book' : '👻 Dropped at Step 1';
   const disqNote = d.disqualified ? ` • ⚠️ ${d.disqualified_reason || 'Disqualified'}` : '';
   const blocks   = [];
-
   blocks.push(bHeader(label + disqNote));
   blocks.push(bDivider());
-
   const leadFields = bFields([
     { label: '📧 Email',    value: d.email },
     { label: '🎯 Sells to', value: d.sell_to },
@@ -425,9 +397,7 @@ function slackPartial(d) {
     { label: '🌐 Website',  value: d.website },
   ]);
   if (leadFields) blocks.push(leadFields);
-
   buildEnrichmentBlocks(blocks, d);
-
   const hasAttribution = d.utm_source || d.utm_medium || d.utm_campaign || d.utm_content || d.referrer;
   if (hasAttribution) {
     blocks.push(bDivider());
@@ -441,21 +411,18 @@ function slackPartial(d) {
     ]);
     if (f) blocks.push(f);
   }
-
   if (d.page_url) blocks.push(bContext(`📄 ${d.page_url}`));
   sendSlack(blocks, label);
 }
 
 /* --------------------------------------------------------
-   SLACK FORMATTER — submit (step 2 complete)
+   SLACK FORMATTER — submit
 -------------------------------------------------------- */
 function slackSubmit(d) {
   const name   = [d.first_name, d.last_name].filter(Boolean).join(' ');
   const blocks = [];
-
   blocks.push(bHeader('✅ Lead Form Completed'));
   blocks.push(bDivider());
-
   const leadFields = bFields([
     { label: '👤 Name',           value: name },
     { label: '📧 Email',          value: d.email },
@@ -466,9 +433,7 @@ function slackSubmit(d) {
     { label: '💬 Heard about us', value: d.hear_about_us },
   ]);
   if (leadFields) blocks.push(leadFields);
-
   buildEnrichmentBlocks(blocks, d);
-
   const hasAttribution = d.utm_source || d.utm_medium || d.utm_campaign || d.utm_content || d.referrer || d.prefill_source;
   if (hasAttribution) {
     blocks.push(bDivider());
@@ -483,7 +448,6 @@ function slackSubmit(d) {
     ]);
     if (f) blocks.push(f);
   }
-
   if (d.page_url) blocks.push(bContext(`📄 ${d.page_url}`));
   sendSlack(blocks, `✅ Lead Form Completed — ${d.email}`);
 }
@@ -495,7 +459,6 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
   const apiKey = process.env.LOOPS_API_KEY;
   if (!apiKey) { console.warn('[Loops] LOOPS_API_KEY not set — skipping'); return; }
   if (!email) return;
-
   try {
     const upsertRes = await fetch('https://app.loops.so/api/v1/contacts/update', {
       method: 'PUT',
@@ -504,10 +467,7 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
     });
     const upsertText = await upsertRes.text();
     console.log(`[Loops] Upsert ${email} → ${upsertRes.status} | ${upsertText.substring(0, 120)}`);
-  } catch (err) {
-    console.warn('[Loops] Upsert failed (non-blocking):', err.message);
-  }
-
+  } catch (err) { console.warn('[Loops] Upsert failed:', err.message); }
   try {
     const eventRes = await fetch('https://app.loops.so/api/v1/events/send', {
       method: 'POST',
@@ -516,9 +476,7 @@ async function sendLoopsEvent(email, firstName, lastName, company, website) {
     });
     const eventText = await eventRes.text();
     console.log(`[Loops] Event ${email} → ${eventRes.status} | ${eventText.substring(0, 120)}`);
-  } catch (err) {
-    console.warn('[Loops] Event send failed:', err.message);
-  }
+  } catch (err) { console.warn('[Loops] Event send failed:', err.message); }
 }
 
 /* --------------------------------------------------------
@@ -535,9 +493,20 @@ async function cancelLoopsSequence(email) {
     });
     const text = await res.text();
     console.log(`[Loops] Cancel ${email} → ${res.status} | ${text.substring(0, 120)}`);
-  } catch (err) {
-    console.warn('[Loops] Cancel failed:', err.message);
-  }
+  } catch (err) { console.warn('[Loops] Cancel failed:', err.message); }
+}
+
+/* --------------------------------------------------------
+   HELPER — formatRevenue
+-------------------------------------------------------- */
+function formatRevenue(amount) {
+  if (!amount) return null;
+  const n = parseFloat(amount);
+  if (isNaN(n)) return amount.toString();
+  if (n >= 1_000_000_000) return `$${(n / 1_000_000_000).toFixed(1)}B USD`;
+  if (n >= 1_000_000)     return `$${(n / 1_000_000).toFixed(1)}M USD`;
+  if (n >= 1_000)         return `$${(n / 1_000).toFixed(0)}K USD`;
+  return `$${n} USD`;
 }
 
 /* --------------------------------------------------------
@@ -548,18 +517,483 @@ app.get('/health', (req, res) => {
 });
 
 /* --------------------------------------------------------
+   GET /monitor/metrics  — protected by token
+-------------------------------------------------------- */
+app.get('/monitor/metrics', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const [totals, enrichCount, pendingPartials, noBooking, recent, today] = await Promise.all([
+      pool.query(`
+        SELECT
+          COUNT(*)                                             AS total,
+          COUNT(*) FILTER (WHERE completed = true)            AS completed,
+          COUNT(*) FILTER (WHERE booking_uid IS NOT NULL)     AS booked,
+          COUNT(*) FILTER (WHERE disqualified = true)         AS disqualified,
+          COUNT(*) FILTER (WHERE loops_sent = true)           AS loops_sent
+        FROM leads WHERE ctid >= '(0,1)'
+      `),
+      pool.query(`SELECT COUNT(*) AS count FROM enrichment_data WHERE ctid >= '(0,1)'`),
+      pool.query(`
+        SELECT COUNT(*) AS count FROM leads
+        WHERE ctid >= '(0,1)'
+          AND email IS NOT NULL
+          AND disqualified = false
+          AND booking_uid IS NULL
+          AND loops_sent = false
+          AND created_at < NOW() - INTERVAL '30 minutes'
+      `),
+      pool.query(`
+        SELECT COUNT(*) AS count FROM leads
+        WHERE ctid >= '(0,1)'
+          AND completed = true
+          AND booking_uid IS NULL
+      `),
+      pool.query(`
+        SELECT session_id, email, company, first_name, last_name,
+               completed, booking_uid, disqualified, created_at, page_url
+        FROM leads WHERE ctid >= '(0,1)'
+        ORDER BY created_at DESC LIMIT 10
+      `),
+      pool.query(`
+        SELECT COUNT(*) AS count FROM leads
+        WHERE ctid >= '(0,1)'
+          AND created_at >= NOW() - INTERVAL '24 hours'
+      `)
+    ]);
+
+    const t = totals.rows[0];
+    const total       = parseInt(t.total) || 0;
+    const completed   = parseInt(t.completed) || 0;
+    const booked      = parseInt(t.booked) || 0;
+    const disqualified = parseInt(t.disqualified) || 0;
+    const loopsSent   = parseInt(t.loops_sent) || 0;
+    const enriched    = parseInt(enrichCount.rows[0].count) || 0;
+    const pending     = parseInt(pendingPartials.rows[0].count) || 0;
+    const noBookingUid = parseInt(noBooking.rows[0].count) || 0;
+    const todayCount  = parseInt(today.rows[0].count) || 0;
+
+    res.json({
+      total, completed, booked, disqualified,
+      enriched, loopsSent,
+      pendingPartials: pending,
+      noBookingUid,
+      todayCount,
+      awsSynced: !!awsPool,
+      recentLeads: recent.rows,
+      generatedAt: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error('[/monitor/metrics]', err.message);
+    res.status(500).json({ error: 'Metrics query failed', detail: err.message });
+  }
+});
+
+/* --------------------------------------------------------
+   GET /monitor  — full dashboard HTML page
+-------------------------------------------------------- */
+app.get('/monitor', (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) {
+    return res.status(401).send('<h2 style="font-family:sans-serif;padding:2rem">401 — Unauthorized. Add ?token=YOUR_TOKEN to the URL.</h2>');
+  }
+
+  const tokenParam = req.query.token ? `?token=${req.query.token}` : '';
+
+  res.setHeader('Content-Type', 'text/html');
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gushwork Form Monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; color: #1a1a1a; font-size: 14px; }
+  .topbar { background: #fff; border-bottom: 1px solid #e5e5e5; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 10; }
+  .topbar-left { display: flex; align-items: center; gap: 12px; }
+  .logo { font-size: 15px; font-weight: 600; color: #1a1a1a; }
+  .api-pill { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid #e5e5e5; background: #fff; color: #666; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: #ccc; display: inline-block; }
+  .dot-green { background: #22c55e; }
+  .dot-red { background: #ef4444; }
+  .dot-amber { background: #f59e0b; }
+  .refresh-btn { font-size: 12px; padding: 6px 14px; border-radius: 6px; border: 1px solid #e5e5e5; background: #fff; cursor: pointer; color: #333; }
+  .refresh-btn:hover { background: #f5f5f5; }
+  .page { max-width: 1100px; margin: 0 auto; padding: 24px; }
+  .section-label { font-size: 11px; font-weight: 600; color: #888; text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 10px; }
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
+  .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 24px; }
+  .card { background: #fff; border: 1px solid #e5e5e5; border-radius: 10px; padding: 16px 20px; }
+  .metric-card { background: #fff; border: 1px solid #e5e5e5; border-radius: 10px; padding: 16px; }
+  .metric-label { font-size: 12px; color: #888; margin-bottom: 6px; }
+  .metric-value { font-size: 28px; font-weight: 600; color: #1a1a1a; line-height: 1; }
+  .metric-sub { font-size: 11px; color: #aaa; margin-top: 6px; }
+  .step-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #f0f0f0; }
+  .step-row:last-child { border-bottom: none; }
+  .step-name { font-size: 13px; font-weight: 500; color: #1a1a1a; }
+  .step-desc { font-size: 11px; color: #999; margin-top: 2px; }
+  .badge { font-size: 11px; font-weight: 500; padding: 3px 9px; border-radius: 5px; }
+  .badge-green  { background: #f0fdf4; color: #15803d; }
+  .badge-red    { background: #fef2f2; color: #b91c1c; }
+  .badge-amber  { background: #fffbeb; color: #b45309; }
+  .badge-gray   { background: #f5f5f5; color: #666; }
+  .alert-box { border-radius: 8px; padding: 10px 14px; margin-bottom: 8px; font-size: 13px; display: flex; align-items: flex-start; gap: 8px; }
+  .alert-ok   { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+  .alert-warn { background: #fffbeb; color: #b45309; border: 1px solid #fde68a; }
+  .alert-err  { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+  .alert-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
+  .funnel-row { margin-bottom: 12px; }
+  .funnel-labels { display: flex; justify-content: space-between; font-size: 12px; color: #666; margin-bottom: 4px; }
+  .funnel-bar { height: 8px; border-radius: 4px; background: #f0f0f0; overflow: hidden; }
+  .funnel-fill { height: 100%; border-radius: 4px; transition: width 0.6s ease; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; padding: 8px 10px; font-weight: 500; color: #888; border-bottom: 1px solid #f0f0f0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+  td { padding: 10px; border-bottom: 1px solid #f9f9f9; color: #333; }
+  tr:last-child td { border-bottom: none; }
+  td.email { font-weight: 500; color: #1a1a1a; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .last-updated { font-size: 11px; color: #aaa; }
+  .chart-wrap { position: relative; width: 100%; height: 200px; margin-top: 16px; }
+  @media (max-width: 700px) {
+    .grid-4 { grid-template-columns: repeat(2, 1fr); }
+    .grid-2 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-left">
+    <span class="logo">Gushwork — Form Monitor</span>
+    <div class="api-pill">
+      <span class="dot" id="api-dot"></span>
+      <span id="api-status">Checking...</span>
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <span class="last-updated" id="last-updated">—</span>
+    <button class="refresh-btn" onclick="load()">↻ Refresh</button>
+  </div>
+</div>
+
+<div class="page">
+
+  <div class="section-label" style="margin-top:4px;">Overview</div>
+  <div class="grid-4">
+    <div class="metric-card">
+      <div class="metric-label">Total leads</div>
+      <div class="metric-value" id="m-total">—</div>
+      <div class="metric-sub" id="m-today">— today</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Step 2 completed</div>
+      <div class="metric-value" id="m-completed">—</div>
+      <div class="metric-sub" id="m-completed-pct">of leads</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Calls booked</div>
+      <div class="metric-value" id="m-booked">—</div>
+      <div class="metric-sub" id="m-booked-pct">of completed</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Disqualified</div>
+      <div class="metric-value" id="m-disq">—</div>
+      <div class="metric-sub">B2C / Mixed</div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div>
+      <div class="section-label">Alerts</div>
+      <div id="alerts-container">
+        <div class="alert-box alert-gray" style="background:#f5f5f5;color:#666;border:1px solid #e5e5e5;">
+          <span class="alert-icon">○</span> Loading alerts...
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="section-label">Conversion funnel</div>
+      <div class="card" style="padding:16px;">
+        <div id="funnel-container">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-label">Step health</div>
+  <div class="card" style="margin-bottom:24px;">
+    <div class="step-row">
+      <div><div class="step-name">API uptime</div><div class="step-desc">/health endpoint responding</div></div>
+      <span class="badge badge-gray" id="s-api">Checking...</span>
+    </div>
+    <div class="step-row">
+      <div><div class="step-name">Step 1 — /partial</div><div class="step-desc">Email verified + lead saved to DB + AWS</div></div>
+      <span class="badge badge-gray" id="s-partial">Checking...</span>
+    </div>
+    <div class="step-row">
+      <div><div class="step-name">Step 2 — /submit</div><div class="step-desc">Lead completed + Slack fired</div></div>
+      <span class="badge badge-gray" id="s-submit">Checking...</span>
+    </div>
+    <div class="step-row">
+      <div><div class="step-name">Apollo enrichment</div><div class="step-desc">Enrichment data saved per lead</div></div>
+      <span class="badge badge-gray" id="s-enrich">Checking...</span>
+    </div>
+    <div class="step-row">
+      <div><div class="step-name">Cal booking confirmation</div><div class="step-desc">Completed leads with booking_uid</div></div>
+      <span class="badge badge-gray" id="s-cal">Checking...</span>
+    </div>
+    <div class="step-row">
+      <div><div class="step-name">Cron — partial recovery</div><div class="step-desc">Leads pending Loops/Slack notification</div></div>
+      <span class="badge badge-gray" id="s-cron">Checking...</span>
+    </div>
+    <div class="step-row">
+      <div><div class="step-name">AWS sync</div><div class="step-desc">gw_form_leads mirror active</div></div>
+      <span class="badge badge-gray" id="s-aws">Checking...</span>
+    </div>
+  </div>
+
+  <div class="section-label">Recent leads</div>
+  <div class="card" style="margin-bottom:24px;overflow-x:auto;">
+    <div id="recent-leads-container">Loading...</div>
+  </div>
+
+  <div class="section-label">Chart — leads over time</div>
+  <div class="card" style="margin-bottom:24px;">
+    <div class="chart-wrap">
+      <canvas id="leadsChart"></canvas>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const TOKEN_PARAM = '${tokenParam}';
+const API = window.location.origin;
+let leadsChart = null;
+
+function setBadge(id, text, color) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'badge badge-' + color;
+}
+
+function setMetric(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+
+function pct(a, b) {
+  if (!b) return '0%';
+  return Math.round(a / b * 100) + '%';
+}
+
+async function checkApi() {
+  try {
+    const r = await fetch(API + '/health', { signal: AbortSignal.timeout(5000) });
+    if (r.ok) {
+      document.getElementById('api-dot').className = 'dot dot-green';
+      document.getElementById('api-status').textContent = 'API online';
+      setBadge('s-api', 'Online', 'green');
+      return true;
+    }
+    throw new Error('HTTP ' + r.status);
+  } catch(e) {
+    document.getElementById('api-dot').className = 'dot dot-red';
+    document.getElementById('api-status').textContent = 'API offline';
+    setBadge('s-api', 'Offline', 'red');
+    return false;
+  }
+}
+
+function renderAlerts(d) {
+  const alerts = [];
+
+  if (d.pendingPartials > 0) {
+    alerts.push({ type: 'warn', icon: '⚠', msg: d.pendingPartials + ' lead(s) waiting >30 mins — Loops/Slack not yet sent. Cron may be delayed.' });
+  }
+  if (d.noBookingUid > 0) {
+    alerts.push({ type: 'warn', icon: '⚠', msg: d.noBookingUid + ' completed lead(s) have no booking — Cal callback may not be firing reliably.' });
+  }
+  if (!d.awsSynced) {
+    alerts.push({ type: 'err', icon: '✕', msg: 'AWS sync is disabled — AWS_PG_HOST not set in Railway env vars.' });
+  }
+  if (d.enriched < d.total * 0.3 && d.total > 5) {
+    alerts.push({ type: 'warn', icon: '⚠', msg: 'Enrichment rate is low (' + Math.round(d.enriched/d.total*100) + '%) — Apollo may be returning empty responses.' });
+  }
+  if (d.todayCount === 0) {
+    alerts.push({ type: 'warn', icon: '○', msg: 'No new leads in the last 24 hours — check if form is live and accessible.' });
+  }
+
+  if (alerts.length === 0) {
+    alerts.push({ type: 'ok', icon: '✓', msg: 'All systems healthy — no issues detected.' });
+  }
+
+  document.getElementById('alerts-container').innerHTML = alerts.map(a => \`
+    <div class="alert-box alert-\${a.type}">
+      <span class="alert-icon">\${a.icon}</span>
+      <span>\${a.msg}</span>
+    </div>
+  \`).join('');
+}
+
+function renderFunnel(total, completed, booked, disq) {
+  const steps = [
+    { label: 'Step 1 submitted', val: total, pct: 100, color: '#818cf8' },
+    { label: 'Step 2 completed', val: completed, pct: total ? Math.round(completed/total*100) : 0, color: '#38bdf8' },
+    { label: 'Call booked',      val: booked,    pct: total ? Math.round(booked/total*100) : 0,    color: '#34d399' },
+    { label: 'Disqualified',     val: disq,      pct: total ? Math.round(disq/total*100) : 0,      color: '#fb923c' },
+  ];
+  document.getElementById('funnel-container').innerHTML = steps.map(s => \`
+    <div class="funnel-row">
+      <div class="funnel-labels">
+        <span>\${s.label}</span>
+        <span style="font-weight:500;color:#1a1a1a;">\${s.val} <span style="color:#aaa;font-weight:400;">(\${s.pct}%)</span></span>
+      </div>
+      <div class="funnel-bar">
+        <div class="funnel-fill" style="width:\${s.pct}%;background:\${s.color};"></div>
+      </div>
+    </div>
+  \`).join('');
+}
+
+function renderRecentLeads(leads) {
+  if (!leads || !leads.length) {
+    document.getElementById('recent-leads-container').innerHTML = '<p style="color:#999;font-size:13px;">No leads found.</p>';
+    return;
+  }
+  document.getElementById('recent-leads-container').innerHTML = \`
+    <table>
+      <thead>
+        <tr>
+          <th>Email</th>
+          <th>Company</th>
+          <th>Status</th>
+          <th>Booked</th>
+          <th>Created (IST)</th>
+        </tr>
+      </thead>
+      <tbody>
+        \${leads.map(l => {
+          const d = new Date(l.created_at);
+          const ist = d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'short' });
+          return \`<tr>
+            <td class="email">\${l.email || '—'}</td>
+            <td>\${l.company || '—'}</td>
+            <td>\${l.completed ? '<span class="badge badge-green">Completed</span>' : '<span class="badge badge-amber">Step 1</span>'}\${l.disqualified ? ' <span class="badge badge-red">Disq</span>' : ''}</td>
+            <td>\${l.booking_uid ? '<span class="badge badge-green">Yes</span>' : '<span class="badge badge-gray">No</span>'}</td>
+            <td style="color:#999;">\${ist}</td>
+          </tr>\`;
+        }).join('')}
+      </tbody>
+    </table>
+  \`;
+}
+
+function renderChart(leads) {
+  const counts = {};
+  leads.forEach(l => {
+    const d = new Date(l.created_at);
+    const key = d.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric' });
+    counts[key] = (counts[key] || 0) + 1;
+  });
+  const labels = Object.keys(counts);
+  const data   = Object.values(counts);
+
+  if (leadsChart) leadsChart.destroy();
+  const ctx = document.getElementById('leadsChart').getContext('2d');
+  leadsChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Leads',
+        data,
+        backgroundColor: '#818cf8',
+        borderRadius: 4,
+        borderSkipped: false,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { beginAtZero: true, ticks: { stepSize: 1, color: '#aaa' }, grid: { color: '#f0f0f0' } },
+        x: { ticks: { color: '#aaa', maxRotation: 45 }, grid: { display: false } }
+      }
+    }
+  });
+}
+
+async function load() {
+  document.getElementById('last-updated').textContent = 'Refreshing...';
+
+  const apiOk = await checkApi();
+  if (!apiOk) {
+    document.getElementById('alerts-container').innerHTML = \`
+      <div class="alert-box alert-err"><span class="alert-icon">✕</span><span>API is offline — all form submissions are failing. Check Railway deployment immediately.</span></div>
+    \`;
+    return;
+  }
+
+  try {
+    const r = await fetch(API + '/monitor/metrics' + TOKEN_PARAM, { signal: AbortSignal.timeout(10000) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+
+    setMetric('m-total',     d.total);
+    setMetric('m-completed', d.completed);
+    setMetric('m-booked',    d.booked);
+    setMetric('m-disq',      d.disqualified);
+    setMetric('m-today',     d.todayCount + ' today');
+    setMetric('m-completed-pct', pct(d.completed, d.total) + ' of leads');
+    setMetric('m-booked-pct',    pct(d.booked, d.completed) + ' of completed');
+
+    const enrichRate = d.total ? Math.round(d.enriched / d.total * 100) : 0;
+    const bookingRate = d.completed ? Math.round(d.booked / d.completed * 100) : 0;
+
+    setBadge('s-partial', d.total + ' leads saved', 'green');
+    setBadge('s-submit',  d.completed > 0 ? d.completed + ' completed' : 'No completions yet', d.completed > 0 ? 'green' : 'amber');
+    setBadge('s-enrich',  enrichRate + '% enriched', enrichRate >= 60 ? 'green' : enrichRate >= 30 ? 'amber' : 'red');
+    setBadge('s-cal',     bookingRate + '% booking rate', bookingRate >= 50 ? 'green' : bookingRate >= 20 ? 'amber' : 'gray');
+    setBadge('s-cron',    d.pendingPartials === 0 ? 'No pending' : d.pendingPartials + ' pending', d.pendingPartials === 0 ? 'green' : 'amber');
+    setBadge('s-aws',     d.awsSynced ? 'Active' : 'Disabled', d.awsSynced ? 'green' : 'red');
+
+    renderAlerts(d);
+    renderFunnel(d.total, d.completed, d.booked, d.disqualified);
+    renderRecentLeads(d.recentLeads);
+    if (d.recentLeads && d.recentLeads.length) renderChart(d.recentLeads);
+
+    document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' }) + ' IST';
+  } catch(e) {
+    document.getElementById('alerts-container').innerHTML = \`
+      <div class="alert-box alert-err"><span class="alert-icon">✕</span><span>Failed to load metrics: \${e.message}</span></div>
+    \`;
+    document.getElementById('last-updated').textContent = 'Error loading';
+  }
+}
+
+load();
+setInterval(load, 60000);
+</script>
+</body>
+</html>`);
+});
+
+/* --------------------------------------------------------
    POST /verify-email
 -------------------------------------------------------- */
 app.post('/verify-email', async (req, res) => {
   const email = (req.body.email || '').toString().trim().slice(0, 254).toLowerCase();
   if (!email) return res.status(400).json({ valid: false, error: 'email required' });
-
   const apiKey = process.env.ELV_API_KEY;
   if (!apiKey) {
     console.warn('[ELV] ELV_API_KEY not set — skipping, allowing through');
     return res.json({ valid: true, status: 'skipped' });
   }
-
   try {
     const controller = new AbortController();
     const timeout    = setTimeout(() => controller.abort(), 8000);
@@ -584,21 +1018,6 @@ app.post('/verify-email', async (req, res) => {
 });
 
 /* --------------------------------------------------------
-   HELPER — formatRevenue
-   Converts raw USD number to readable string
-   50000000 → $50M | 1200000000 → $1.2B | 500000 → $500K
--------------------------------------------------------- */
-function formatRevenue(amount) {
-  if (!amount) return null;
-  const n = parseFloat(amount);
-  if (isNaN(n)) return amount.toString();
-  if (n >= 1_000_000_000) return `$${(n / 1_000_000_000).toFixed(1)}B USD`;
-  if (n >= 1_000_000)     return `$${(n / 1_000_000).toFixed(1)}M USD`;
-  if (n >= 1_000)         return `$${(n / 1_000).toFixed(0)}K USD`;
-  return `$${n} USD`;
-}
-
-/* --------------------------------------------------------
    POST /session
 -------------------------------------------------------- */
 app.post('/session', async (req, res) => {
@@ -609,12 +1028,10 @@ app.post('/session', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /enrich
-   Now captures all Apollo fields including new ones
 -------------------------------------------------------- */
 app.post('/enrich', async (req, res) => {
   const email      = (req.body.email      || '').toString().trim().slice(0, 254).toLowerCase();
   const session_id = (req.body.session_id || '').toString().trim().slice(0, 100);
-
   if (!email || !session_id) return res.status(400).json({ error: 'email and session_id required' });
 
   const personalDomains = [
@@ -631,11 +1048,7 @@ app.post('/enrich', async (req, res) => {
   try {
     const apolloRes = await fetch('https://api.apollo.io/api/v1/people/match', {
       method: 'POST',
-      headers: {
-        'Content-Type':  'application/json',
-        'Cache-Control': 'no-cache',
-        'X-Api-Key':     process.env.APOLLO_API_KEY
-      },
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache', 'X-Api-Key': process.env.APOLLO_API_KEY },
       body: JSON.stringify({ email, reveal_personal_emails: false, reveal_phone_number: false })
     });
 
@@ -643,56 +1056,39 @@ app.post('/enrich', async (req, res) => {
     const person     = apolloData.person || {};
     const org        = person.organization || {};
 
-    // Extract all fields
+    const city    = person.city    || null;
+    const state   = person.state   || null;
+    const country = person.country || null;
 
-    // Person location — only use person fields, never org
-    // If Apollo doesn't have person city, we just don't show it
-    const city           = person.city    || null;
-    const state          = person.state   || null;
-    const country        = person.country || null;
+    const orgCity    = org.city    || null;
+    const orgState   = org.state   || null;
+    const orgCountry = org.country || null;
+    const orgHQ      = [orgCity, orgState, orgCountry].filter(Boolean).join(', ') || null;
 
-    // Org HQ — separately stored and labelled in Slack
-    const orgCity        = org.city    || null;
-    const orgState       = org.state   || null;
-    const orgCountry     = org.country || null;
-    const orgHQ          = [orgCity, orgState, orgCountry].filter(Boolean).join(', ') || null;
+    const seniority  = person.seniority || null;
+    const deptRaw    = person.departments || person.person_departments || null;
+    const departments = Array.isArray(deptRaw) && deptRaw.length > 0 ? deptRaw.join(', ') : null;
+    const emailStatus = person.email_status || null;
+    const foundedYear = org.founded_year?.toString() || null;
 
-    const seniority      = person.seniority || null;
+    const annualRevenue = org.annual_revenue_printed
+      ? `$${org.annual_revenue_printed} USD`
+      : (org.annual_revenue ? formatRevenue(org.annual_revenue) : null);
 
-    // Departments — Apollo returns as array, empty array = no data
-    const deptRaw     = person.departments || person.person_departments || null;
-    const departments = Array.isArray(deptRaw) && deptRaw.length > 0
-                          ? deptRaw.join(', ')
-                          : null;
+    const totalFunding = org.total_funding_printed ? `$${org.total_funding_printed}` : null;
+    const fundingStage = org.latest_funding_stage || null;
 
-    const emailStatus    = person.email_status                                  || null;
-    const foundedYear    = org.founded_year?.toString()                         || null;
+    const fundingEvents = Array.isArray(org.funding_events) && org.funding_events.length > 0
+      ? org.funding_events.map(f =>
+          [f.date ? f.date.substring(0, 10) : '', f.type || f.series || '', f.amount ? `${f.currency || '$'}${f.amount}` : ''].filter(Boolean).join(' ')
+        ).join(' | ')
+      : null;
 
-    // Use Apollo's pre-formatted revenue string e.g. "1M" → "$1M USD"
-    const annualRevenue  = org.annual_revenue_printed
-                             ? `$${org.annual_revenue_printed} USD`
-                             : (org.annual_revenue ? formatRevenue(org.annual_revenue) : null);
-
-    // Total funding — very useful signal
-    const totalFunding   = org.total_funding_printed
-                             ? `$${org.total_funding_printed}`
-                             : null;
-    const fundingStage   = org.latest_funding_stage || null;
-
-    // Funding events — formatted as readable string
-    const fundingEvents  = Array.isArray(org.funding_events) && org.funding_events.length > 0
-                             ? org.funding_events.map(f =>
-                                 [f.date ? f.date.substring(0, 10) : '', f.type || f.series || '', f.amount ? `${f.currency || '$'}${f.amount}` : ''].filter(Boolean).join(' ')
-                               ).join(' | ')
-                             : null;
-
-    const alexaRanking   = org.alexa_ranking?.toString()                        || null;
-    const keywords       = Array.isArray(org.keywords)
-                             ? org.keywords.slice(0, 8).join(', ')             : (org.keywords || null);
+    const alexaRanking = org.alexa_ranking?.toString() || null;
+    const keywords = Array.isArray(org.keywords) ? org.keywords.slice(0, 8).join(', ') : (org.keywords || null);
 
     console.log(`[/enrich] Apollo — seniority: ${seniority} | dept: ${departments} | revenue: ${annualRevenue} | funding: ${totalFunding} (${fundingStage}) | location: ${city || country || 'n/a'} | org HQ: ${orgHQ}`);
 
-    // Save to enrichment_data
     await pool.query(`
       INSERT INTO enrichment_data
         (session_id, email,
@@ -733,13 +1129,10 @@ app.post('/enrich', async (req, res) => {
         enriched_at             = NOW()
     `, [
       session_id, email,
-      person.first_name                       || null,
-      person.last_name                        || null,
-      person.title                            || null,
-      org.name                                || null,
+      person.first_name || null, person.last_name || null,
+      person.title || null, org.name || null,
       org.estimated_num_employees?.toString() || null,
-      org.industry                            || null,
-      person.linkedin_url                     || null,
+      org.industry || null, person.linkedin_url || null,
       city, state, country,
       seniority, departments, emailStatus,
       foundedYear, annualRevenue,
@@ -748,7 +1141,6 @@ app.post('/enrich', async (req, res) => {
       apolloData
     ]);
 
-    // Also update leads table with new enrichment fields
     await pool.query(`
       UPDATE leads SET
         enriched_city           = $2,
@@ -767,24 +1159,17 @@ app.post('/enrich', async (req, res) => {
         enriched_funding_stage  = $15,
         updated_at              = NOW()
       WHERE session_id = $1
-    `, [
-      session_id,
-      city, state, country,
-      seniority, departments, emailStatus,
-      foundedYear, annualRevenue,
-      fundingEvents, alexaRanking, keywords,
-      orgHQ, totalFunding, fundingStage
-    ]);
+    `, [session_id, city, state, country, seniority, departments, emailStatus, foundedYear, annualRevenue, fundingEvents, alexaRanking, keywords, orgHQ, totalFunding, fundingStage]);
 
     res.json({
-      first_name:   person.first_name                       || '',
-      last_name:    person.last_name                        || '',
-      title:        person.title                            || '',
-      company:      org.name                                || '',
+      first_name:   person.first_name || '',
+      last_name:    person.last_name  || '',
+      title:        person.title      || '',
+      company:      org.name          || '',
       company_size: org.estimated_num_employees?.toString() || '',
-      industry:     org.industry                            || '',
-      linkedin_url: person.linkedin_url                     || '',
-      website:      org.website_url                         || ''
+      industry:     org.industry      || '',
+      linkedin_url: person.linkedin_url || '',
+      website:      org.website_url   || ''
     });
 
   } catch (err) {
@@ -893,7 +1278,6 @@ app.post('/partial', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /submit
-   Slack deduplicated — only fires on first completion
 -------------------------------------------------------- */
 app.post('/submit', async (req, res) => {
   const session_id            = (req.body.session_id          || '').toString().trim().slice(0, 100);
@@ -922,17 +1306,13 @@ app.post('/submit', async (req, res) => {
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
   try {
-    // Check if already completed + fetch ALL enrichment from enrichment_data
-    // This gives Apollo maximum time to have responded before we read the data
     const existing = await pool.query(
-      `SELECT completed FROM leads WHERE session_id = $1`,
-      [session_id]
+      `SELECT completed FROM leads WHERE session_id = $1`, [session_id]
     );
     const alreadyCompleted = existing.rows[0]?.completed === true;
 
     const enrichRow = await pool.query(
-      `SELECT * FROM enrichment_data WHERE session_id = $1`,
-      [session_id]
+      `SELECT * FROM enrichment_data WHERE session_id = $1`, [session_id]
     );
     const enrich = enrichRow.rows[0] || {};
 
@@ -1013,7 +1393,6 @@ app.post('/submit', async (req, res) => {
       disqualified, disqualified_reason, step_reached: 2, completed: true
     });
 
-    // Only fire Slack on FIRST completion
     if (!alreadyCompleted) {
       slackSubmit({
         first_name, last_name, email, phone, company, website,
@@ -1117,10 +1496,8 @@ app.post('/cron/send-partials', async (req, res) => {
     console.log(`[Cron] Found ${leads.length} leads to process`);
 
     for (const lead of leads) {
-      // Fetch enrichment from enrichment_data — most complete source
       const enrichRow = await pool.query(
-        'SELECT * FROM enrichment_data WHERE session_id = $1',
-        [lead.session_id]
+        'SELECT * FROM enrichment_data WHERE session_id = $1', [lead.session_id]
       );
       const enrich = enrichRow.rows[0] || {};
 
