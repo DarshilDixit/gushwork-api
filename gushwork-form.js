@@ -1,5 +1,5 @@
 /* ==========================================================
-   GUSHWORK — MULTI-STEP FORM  v3.5
+   GUSHWORK — MULTI-STEP FORM  v3.6
    Hosted on GitHub — reference via jsDelivr CDN
    https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@main/gushwork-form.js
 
@@ -8,10 +8,11 @@
    - Phone input (Memberstack intl-tel-input)
    - Form logic (validation, enrichment, ELV, Cal, Railway)
 
-   v3.5 changes:
-   - triggerEnrichment now returns a promise so it can be awaited
-   - handleStep1Next awaits enrichment before savePartial
-   - Dashboard always shows enriched name/company from Step 1
+   v3.6 changes:
+   - Removed page-load enrichment in prefillFromURL (saves Apollo credits,
+     prevents orphan enrichment_data rows)
+   - handleStep1Next now saves partial for ALL paths including B2C/Mixed
+   - handleDisqualifiedNext triggers enrichment for B2B-clarified path
 ========================================================== */
 
 /* --------------------------------------------------------
@@ -243,14 +244,13 @@
       formState.prefill_source = p.get('email') ? 'url_param' : 'returning_visitor';
       setHidden('prefill-source', formState.prefill_source);
 
+      /* v3.6: Only apply CACHED enrichment on page load (no API call).
+         Fresh enrichment only fires on Step 1 Next click.
+         This prevents orphan enrichment_data rows and saves Apollo credits. */
       if (isValidEmail(email) && isWorkEmail(email)) {
         const cached = getEnrichmentCache(email);
         if (cached) {
           applyEnrichment(email, cached);
-        } else {
-          setTimeout(() => {
-            enrichEmail(email).then(data => applyEnrichment(email, data));
-          }, 800);
         }
       }
     }
@@ -474,7 +474,6 @@
 
   /* =======================================================
      SECTION 7 — ENRICHMENT
-     v3.5: triggerEnrichment now returns a promise
   ======================================================= */
 
   function getEnrichmentCache(email) {
@@ -554,7 +553,6 @@
     _enrichedForEmail = email;
   }
 
-  /* v3.5: triggerEnrichment returns a promise so handleStep1Next can await it */
   async function triggerEnrichment(email) {
     if (!email || !isValidEmail(email) || !isWorkEmail(email)) return;
     if (email === _enrichedForEmail) return;
@@ -679,8 +677,8 @@
 
   /* =======================================================
      SECTION 9 — STEP HANDLERS
-     v3.5: handleStep1Next now awaits triggerEnrichment
-     so enriched data is saved with /partial
+     v3.6: All paths (B2B, B2C, Mixed) now enrich + save partial.
+     Disqualified→B2B path also triggers enrichment.
   ======================================================= */
 
   async function handleStep1Next() {
@@ -706,14 +704,14 @@
       formState.sell_to = sellTo;
       localStorage.setItem('gw_email', formState.email);
 
-      /* v3.5: await enrichment so formState has name/company before savePartial */
+      /* v3.6: enrich + save for ALL paths (including B2C/Mixed) */
       setLoading('step-1-next', true, 'Loading...');
       await triggerEnrichment(formState.email);
+      await savePartial(1);
 
       if (sellTo === 'B2C' || sellTo === 'Mixed') {
         showStep('step-disqualified');
       } else {
-        await savePartial(1);
         showStep('step-2');
       }
     } finally {
@@ -740,6 +738,8 @@
       } else if (choice === 'b2b') {
         formState.disqualified = false;
         formState.sell_to = 'B2B (clarified from ' + formState.sell_to + ')';
+        /* v3.6: ensure enrichment ran (edge case: cache miss + first attempt failed) */
+        await triggerEnrichment(formState.email);
         await savePartial(1);
         showStep('step-2');
       }
