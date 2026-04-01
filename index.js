@@ -45,7 +45,7 @@ const globalLimiter = rateLimit({
   standardHeaders: true, legacyHeaders: false
 });
 const strictLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, max: 10,
+  windowMs: 60 * 60 * 1000, max: 50,
   message: { error: 'Rate limit exceeded — please try again later.' },
   standardHeaders: true, legacyHeaders: false
 });
