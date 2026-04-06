@@ -1,5 +1,5 @@
 /* ==========================================================
-   GUSHWORK — MULTI-STEP FORM  v3.6
+   GUSHWORK — MULTI-STEP FORM  v3.7
    Hosted on GitHub — reference via jsDelivr CDN
    https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@main/gushwork-form.js
 
@@ -8,11 +8,11 @@
    - Phone input (Memberstack intl-tel-input)
    - Form logic (validation, enrichment, ELV, Cal, Railway)
 
-   v3.6 changes:
-   - Removed page-load enrichment in prefillFromURL (saves Apollo credits,
-     prevents orphan enrichment_data rows)
-   - handleStep1Next now saves partial for ALL paths including B2C/Mixed
-   - handleDisqualifiedNext triggers enrichment for B2B-clarified path
+   v3.7 changes:
+   - Added Meta ads attribution: fbc, fbp, landing_page, utm_term
+   - Captures _fbc/_fbp cookies, builds _fbc from fbclid if missing
+   - landing_page captured on first visit via sessionStorage
+   - utm_term captured from URL params
 ========================================================== */
 
 /* --------------------------------------------------------
@@ -158,12 +158,17 @@
     utm_medium:            '',
     utm_campaign:          '',
     utm_content:           '',
+    utm_term:              '',
     referrer:              '',
     prefill_source:        '',
     enriched_title:        '',
     enriched_company_size: '',
     enriched_industry:     '',
     enriched_linkedin:     '',
+    // Meta ads attribution
+    fbc:                   '',
+    fbp:                   '',
+    landing_page:          '',
     step_reached:          1,
     completed:             false,
     disqualified:          false,
@@ -177,6 +182,11 @@
   /* =======================================================
      SECTION 1 — INITIALISATION
   ======================================================= */
+
+  function getCookie(name) {
+    var match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+    return match ? decodeURIComponent(match[2]) : '';
+  }
 
   function initSession() {
     let sid = sessionStorage.getItem('gw_session_id');
@@ -200,18 +210,49 @@
     formState.utm_medium   = p.get('utm_medium')   || sessionStorage.getItem('gw_utm_medium')   || '';
     formState.utm_campaign = p.get('utm_campaign') || sessionStorage.getItem('gw_utm_campaign') || '';
     formState.utm_content  = p.get('utm_content')  || sessionStorage.getItem('gw_utm_content')  || '';
+    formState.utm_term     = p.get('utm_term')     || sessionStorage.getItem('gw_utm_term')     || '';
     formState.referrer     = document.referrer || '';
 
     if (formState.utm_source)   sessionStorage.setItem('gw_utm_source',   formState.utm_source);
     if (formState.utm_medium)   sessionStorage.setItem('gw_utm_medium',   formState.utm_medium);
     if (formState.utm_campaign) sessionStorage.setItem('gw_utm_campaign', formState.utm_campaign);
     if (formState.utm_content)  sessionStorage.setItem('gw_utm_content',  formState.utm_content);
+    if (formState.utm_term)     sessionStorage.setItem('gw_utm_term',     formState.utm_term);
 
     setHidden('utm-source',   formState.utm_source);
     setHidden('utm-medium',   formState.utm_medium);
     setHidden('utm-campaign', formState.utm_campaign);
     setHidden('utm-content',  formState.utm_content);
+    setHidden('utm-term',     formState.utm_term);
     setHidden('referrer',     formState.referrer);
+  }
+
+  function captureMetaAttribution() {
+    const p = new URLSearchParams(window.location.search);
+
+    // 1. Build _fbc cookie from fbclid if Meta Pixel hasn't set it yet
+    //    Ensures _fbc exists even if Pixel is blocked by ad blockers
+    var fbclid = p.get('fbclid') || '';
+    if (fbclid && !getCookie('_fbc')) {
+      var fbc = 'fb.1.' + Date.now() + '.' + fbclid;
+      document.cookie = '_fbc=' + fbc + ';max-age=7776000;path=/;SameSite=Lax';
+    }
+
+    // 2. Read fbc: cookie first, fall back to building from fbclid
+    var fbcValue = getCookie('_fbc');
+    if (!fbcValue && fbclid) {
+      fbcValue = 'fb.1.' + Date.now() + '.' + fbclid;
+    }
+    formState.fbc = fbcValue || '';
+
+    // 3. Read fbp: always from cookie (set by Meta Pixel)
+    formState.fbp = getCookie('_fbp') || '';
+
+    // 4. Landing page: capture on first pageview, survives navigation
+    if (!sessionStorage.getItem('gw_landing_page')) {
+      sessionStorage.setItem('gw_landing_page', window.location.href);
+    }
+    formState.landing_page = sessionStorage.getItem('gw_landing_page') || '';
   }
 
   function saveSession() {
@@ -244,9 +285,6 @@
       formState.prefill_source = p.get('email') ? 'url_param' : 'returning_visitor';
       setHidden('prefill-source', formState.prefill_source);
 
-      /* v3.6: Only apply CACHED enrichment on page load (no API call).
-         Fresh enrichment only fires on Step 1 Next click.
-         This prevents orphan enrichment_data rows and saves Apollo credits. */
       if (isValidEmail(email) && isWorkEmail(email)) {
         const cached = getEnrichmentCache(email);
         if (cached) {
@@ -677,8 +715,6 @@
 
   /* =======================================================
      SECTION 9 — STEP HANDLERS
-     v3.6: All paths (B2B, B2C, Mixed) now enrich + save partial.
-     Disqualified→B2B path also triggers enrichment.
   ======================================================= */
 
   async function handleStep1Next() {
@@ -704,7 +740,6 @@
       formState.sell_to = sellTo;
       localStorage.setItem('gw_email', formState.email);
 
-      /* v3.6: enrich + save for ALL paths (including B2C/Mixed) */
       setLoading('step-1-next', true, 'Loading...');
       await triggerEnrichment(formState.email);
       await savePartial(1);
@@ -738,7 +773,6 @@
       } else if (choice === 'b2b') {
         formState.disqualified = false;
         formState.sell_to = 'B2B (clarified from ' + formState.sell_to + ')';
-        /* v3.6: ensure enrichment ran (edge case: cache miss + first attempt failed) */
         await triggerEnrichment(formState.email);
         await savePartial(1);
         showStep('step-2');
@@ -850,6 +884,7 @@
 
     initSession();
     captureUTMs();
+    captureMetaAttribution();
     saveSession();
     prefillFromURL();
     initPhone();
@@ -857,7 +892,9 @@
     initEnterKey();
     initCalLoader();
 
-    console.log('[GW] ✅ Form initialised. Session:', formState.session_id, '| Page:', formState.page_url);
+    console.log('[GW] ✅ Form initialised. Session:', formState.session_id, '| Page:', formState.page_url,
+      formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '',
+      formState.fbp ? '| fbp: ' + formState.fbp : '');
   }
 
   if (document.readyState === 'loading') {
