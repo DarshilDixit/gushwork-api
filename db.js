@@ -28,8 +28,13 @@ async function initDB() {
         utm_medium     TEXT,
         utm_campaign   TEXT,
         utm_content    TEXT,
+        utm_term       TEXT,
         referrer       TEXT,
         prefill_source TEXT,
+        -- Meta ads attribution
+        fbc            TEXT,
+        fbp            TEXT,
+        landing_page   TEXT,
         -- Enrichment — person
         enriched_title        TEXT,
         enriched_company_size TEXT,
@@ -133,6 +138,11 @@ async function initDB() {
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS enriched_org_hq TEXT`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS enriched_total_funding TEXT`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS enriched_funding_stage TEXT`,
+      // Meta ads attribution fields
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS fbc TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS fbp TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS landing_page TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS utm_term TEXT`,
       // enrichment_data table new fields
       `ALTER TABLE enrichment_data ADD COLUMN IF NOT EXISTS enriched_city TEXT`,
       `ALTER TABLE enrichment_data ADD COLUMN IF NOT EXISTS enriched_state TEXT`,
