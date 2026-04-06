@@ -1,4 +1,5 @@
 require('dotenv').config();
+const crypto    = require('crypto');
 const express   = require('express');
 const cors      = require('cors');
 const helmet    = require('helmet');
@@ -601,7 +602,6 @@ app.get('/monitor', (req, res) => {
   '<div class="tab" id="t-leads" onclick="showTab(\'leads\')">All Leads</div>' +
   '<div class="tab" id="t-health" onclick="showTab(\'health\')">System Health</div>' +
   '</div>' +
-  // --- OVERVIEW TAB ---
   '<div class="tp act" id="tp-overview">' +
   '<div class="sl">Overview</div>' +
   '<div class="g4">' +
@@ -617,7 +617,6 @@ app.get('/monitor', (req, res) => {
   '<div class="sl">Leads over time</div>' +
   '<div class="card" style="margin-bottom:24px"><div class="cw"><canvas id="lchart"></canvas></div></div>' +
   '</div>' +
-  // --- ALL LEADS TAB ---
   '<div class="tp" id="tp-leads">' +
   '<div class="filters">' +
   '<input type="text" id="fsearch" placeholder="Search email, company..." oninput="debounce()">' +
@@ -632,7 +631,6 @@ app.get('/monitor', (req, res) => {
   '</tr></thead><tbody id="ltbody"><tr><td colspan="10" class="nd">Loading leads...</td></tr></tbody></table></div></div>' +
   '<div class="pg" id="lpag"></div>' +
   '</div>' +
-  // --- SYSTEM HEALTH TAB ---
   '<div class="tp" id="tp-health">' +
   '<div class="sl">Step health</div>' +
   '<div class="card" style="margin-bottom:24px">' +
@@ -666,32 +664,16 @@ app.get('/monitor', (req, res) => {
   'function pct(a,b){return b?Math.round(a/b*100)+"%":"0%";}' +
   'function ist(ts){if(!ts)return"\\u2014";return new Date(ts).toLocaleString("en-IN",{timeZone:"Asia/Kolkata",dateStyle:"short",timeStyle:"short"});}' +
   'function esc(s){if(!s)return"";return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}' +
-
-  // checkApi
   'async function checkApi(){try{var r=await fetch(API+"/health",{signal:AbortSignal.timeout(5000)});if(r.ok){document.getElementById("apidot").className="dot dot-green";document.getElementById("apist").textContent="API online";badge("s-api","Online","bg");return true;}throw new Error("HTTP "+r.status);}catch(e){document.getElementById("apidot").className="dot dot-red";document.getElementById("apist").textContent="API offline";badge("s-api","Offline","br");return false;}}' +
-
-  // renderAlerts
   'function renderAlerts(d){var a=[];if(d.pendingPartials>0)a.push({c:"aw",i:"!",m:d.pendingPartials+" lead(s) waiting >30 mins."});if(d.noBookingUid>0)a.push({c:"aw",i:"!",m:d.noBookingUid+" completed lead(s) with no booking."});if(!d.awsSynced)a.push({c:"ae",i:"x",m:"AWS sync disabled."});if(d.total>5&&d.enriched<d.total*0.3)a.push({c:"aw",i:"!",m:"Low enrichment rate ("+Math.round(d.enriched/d.total*100)+"%)."});if(d.todayCount===0)a.push({c:"aw",i:"o",m:"No new leads in 24 hours."});if(a.length===0)a.push({c:"ao",i:"\\u2713",m:"All systems healthy."});document.getElementById("alerts").innerHTML=a.map(function(x){return"<div class=\\"alertbox "+x.c+"\\"><span>"+x.i+"</span><span>"+x.m+"</span></div>";}).join("");}' +
-
-  // renderFunnel
   'function renderFunnel(t,c,b,d){var steps=[{l:"Step 1 submitted",v:t,p:100,col:"#818cf8"},{l:"Step 2 completed",v:c,p:t?Math.round(c/t*100):0,col:"#38bdf8"},{l:"Call booked",v:b,p:t?Math.round(b/t*100):0,col:"#34d399"},{l:"Disqualified",v:d,p:t?Math.round(d/t*100):0,col:"#fb923c"}];document.getElementById("funnel").innerHTML=steps.map(function(s){return"<div class=\\"fr\\"><div class=\\"fl\\"><span>"+s.l+"</span><span style=\\"font-weight:500\\">"+s.v+" <span style=\\"color:#aaa\\">("+s.p+"%)</span></span></div><div class=\\"fb\\"><div class=\\"ff\\" style=\\"width:"+s.p+"%;background:"+s.col+"\\"></div></div></div>";}).join("");}' +
-
-  // renderChart
   'function renderChart(leads){var counts={};(leads||[]).forEach(function(l){var k=new Date(l.created_at).toLocaleDateString("en-IN",{timeZone:"Asia/Kolkata",month:"short",day:"numeric"});counts[k]=(counts[k]||0)+1;});var labels=Object.keys(counts).reverse(),data=Object.values(counts).reverse();if(lChart)lChart.destroy();var ctx=document.getElementById("lchart").getContext("2d");lChart=new Chart(ctx,{type:"bar",data:{labels:labels,datasets:[{data:data,backgroundColor:"#818cf8",borderRadius:4,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{stepSize:1,color:"#aaa"},grid:{color:"#f0f0f0"}},x:{ticks:{color:"#aaa",maxRotation:45,autoSkip:false},grid:{display:false}}}}});}' +
-
-  // leads tab helpers
   'function stageBadge(l){if(l.booking_uid)return"<span class=\\"badge bg\\">Booked</span>";if(l.disqualified)return"<span class=\\"badge br\\">Disqualified</span>";if(l.completed)return"<span class=\\"badge bb\\">Completed</span>";return"<span class=\\"badge ba\\">Step 1</span>";}' +
   'function enrichBadge(l){return(l.enriched_title||l.enriched_company_size||l.e_company)?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>";}' +
-
-  // enrichPanel
   'function enrichPanel(l){var loc=[l.enriched_city,l.enriched_state,l.enriched_country].filter(Boolean).join(", ");var fields=[{lb:"Title",v:l.enriched_title},{lb:"Seniority",v:l.enriched_seniority},{lb:"Department",v:l.enriched_departments},{lb:"Email status",v:l.enriched_email_status},{lb:"Company",v:l.company||l.e_company},{lb:"Company size",v:l.enriched_company_size},{lb:"Industry",v:l.enriched_industry},{lb:"Founded",v:l.enriched_founded_year},{lb:"Annual revenue",v:l.enriched_annual_revenue},{lb:"Total funding",v:l.enriched_total_funding},{lb:"Funding stage",v:l.enriched_funding_stage},{lb:"Funding events",v:l.enriched_funding_events},{lb:"Alexa rank",v:l.enriched_alexa_ranking},{lb:"Keywords",v:l.enriched_keywords},{lb:"Person location",v:loc||null},{lb:"Company HQ",v:l.enriched_org_hq},{lb:"LinkedIn",v:l.enriched_linkedin,lnk:true},{lb:"Phone",v:l.e_phone||l.phone},{lb:"Website",v:l.website,lnk:true},{lb:"Hear about us",v:l.hear_about_us},{lb:"UTM source",v:l.utm_source},{lb:"UTM medium",v:l.utm_medium},{lb:"UTM campaign",v:l.utm_campaign},{lb:"Referrer",v:l.referrer},{lb:"Prefill",v:l.prefill_source},{lb:"Page URL",v:l.page_url,lnk:true},{lb:"Submitted",v:ist(l.submitted_at)},{lb:"Booked at",v:ist(l.booked_at)},{lb:"Meeting",v:l.start_time?ist(l.start_time):null},{lb:"Loops sent",v:l.loops_sent?"Yes":"No"},{lb:"Session ID",v:l.session_id,mono:true},{lb:"Enriched at",v:ist(l.enriched_at)}].filter(function(f){return f.v;});if(!fields.length)return"<div style=\\"color:#999;font-size:12px\\">No enrichment data.</div>";return"<div class=\\"egrid\\">"+fields.map(function(f){var val=f.lnk&&f.v?"<a href=\\"" +(f.v.startsWith("http")?"":"https://")+esc(f.v)+"\\" target=\\"_blank\\">"+esc(f.v)+"</a>":f.mono?"<code style=\\"font-size:10px\\">"+esc(f.v)+"</code>":esc(f.v);return"<div class=\\"ef\\"><div class=\\"efl\\">"+f.lb+"</div><div class=\\"efv\\">"+val+"</div></div>";}).join("")+"</div>";}' +
-
-  // debounce, clearF, toggleRow
   'function debounce(){clearTimeout(stimer);stimer=setTimeout(function(){loadLeads(1);},400);}' +
   'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("ffrom").value="";document.getElementById("fto").value="";loadLeads(1);}' +
   'function toggleRow(sid){var row=document.getElementById("er-"+sid);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=row.previousElementSibling&&row.previousElementSibling.querySelector(".xbtn");if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";}' +
-
-  // loadLeads
   'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
   'var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"page="+curPage+"&stage="+stage;' +
   'if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;' +
@@ -703,11 +685,7 @@ app.get('/monitor', (req, res) => {
   'return"<tr><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+ist(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
   '"<tr class=\\"erow\\" id=\\"er-"+sid+"\\" style=\\"display:none\\"><td></td><td colspan=\\"9\\">"+enrichPanel(l)+"</td></tr>";}).join("");' +
   'document.getElementById("ltbody").innerHTML=html;renderPag(d.page,d.pages);}catch(e){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
-
-  // renderPag
   'function renderPag(pg,pages){if(pages<=1){document.getElementById("lpag").innerHTML="";return;}var h="";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg-1)+")\\""+(pg<=1?" disabled":"")+">&larr;</button>";var s=Math.max(1,pg-2),e=Math.min(pages,pg+2);if(s>1)h+="<button class=\\"pb\\" onclick=\\"loadLeads(1)\\">1</button>"+(s>2?"<span class=\\"pi\\">&#8230;</span>":"");for(var i=s;i<=e;i++)h+="<button class=\\"pb"+(i===pg?" act":"")+ "\\" onclick=\\"loadLeads("+i+")\\" >"+i+"</button>";if(e<pages)h+=(e<pages-1?"<span class=\\"pi\\">&#8230;</span>":"")+"<button class=\\"pb\\" onclick=\\"loadLeads("+pages+")\\" >"+pages+"</button>";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg+1)+")\\"" +(pg>=pages?" disabled":"")+">&rarr;</button><span class=\\"pi\\">Page "+pg+" of "+pages+"</span>";document.getElementById("lpag").innerHTML=h;}' +
-
-  // loadAll
   'async function loadAll(){set("lupd","Refreshing...");var ok=await checkApi();if(!ok){document.getElementById("alerts").innerHTML="<div class=\\"alertbox ae\\"><span>x</span><span>API offline.</span></div>";set("lupd","API offline");return;}' +
   'try{var r=await fetch(API+"/monitor/metrics"+TP,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
   'set("m-total",d.total);set("m-comp",d.completed);set("m-book",d.booked);set("m-disq",d.disqualified);set("m-today",d.todayCount+" today");set("m-cpct",pct(d.completed,d.total)+" of leads");set("m-bpct",pct(d.booked,d.completed)+" of completed");' +
@@ -797,7 +775,7 @@ app.post('/enrich', async (req, res) => {
 });
 
 /* --------------------------------------------------------
-   POST /partial
+   POST /partial  — with enrichment sync
 -------------------------------------------------------- */
 app.post('/partial', async (req, res) => {
   const session_id=(req.body.session_id||'').toString().trim().slice(0,100), page_url=(req.body.page_url||'').toString().trim().slice(0,500), email=(req.body.email||'').toString().trim().slice(0,254).toLowerCase(), website=(req.body.website||'').toString().trim().slice(0,500), sell_to=(req.body.sell_to||'').toString().trim().slice(0,50), first_name=(req.body.first_name||'').toString().trim().slice(0,100), last_name=(req.body.last_name||'').toString().trim().slice(0,100), phone=(req.body.phone||'').toString().trim().slice(0,30), company=(req.body.company||'').toString().trim().slice(0,200), hear_about_us=(req.body.hear_about_us||'').toString().trim().slice(0,200), utm_source=(req.body.utm_source||'').toString().trim().slice(0,100), utm_medium=(req.body.utm_medium||'').toString().trim().slice(0,100), utm_campaign=(req.body.utm_campaign||'').toString().trim().slice(0,100), utm_content=(req.body.utm_content||'').toString().trim().slice(0,100), referrer=(req.body.referrer||'').toString().trim().slice(0,500), prefill_source=(req.body.prefill_source||'').toString().trim().slice(0,100), enriched_title=(req.body.enriched_title||'').toString().trim().slice(0,200), enriched_company_size=(req.body.enriched_company_size||'').toString().trim().slice(0,50), enriched_industry=(req.body.enriched_industry||'').toString().trim().slice(0,200), enriched_linkedin=(req.body.enriched_linkedin||'').toString().trim().slice(0,500), disqualified=Boolean(req.body.disqualified), disqualified_reason=(req.body.disqualified_reason||'').toString().trim().slice(0,100), step_reached=parseInt(req.body.step_reached)||1;
@@ -808,6 +786,8 @@ app.post('/partial', async (req, res) => {
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,false,NOW())
       ON CONFLICT (session_id) DO UPDATE SET page_url=COALESCE(EXCLUDED.page_url,leads.page_url),email=COALESCE(EXCLUDED.email,leads.email),website=COALESCE(EXCLUDED.website,leads.website),sell_to=COALESCE(EXCLUDED.sell_to,leads.sell_to),first_name=COALESCE(EXCLUDED.first_name,leads.first_name),last_name=COALESCE(EXCLUDED.last_name,leads.last_name),phone=COALESCE(EXCLUDED.phone,leads.phone),company=COALESCE(EXCLUDED.company,leads.company),hear_about_us=COALESCE(EXCLUDED.hear_about_us,leads.hear_about_us),utm_source=COALESCE(EXCLUDED.utm_source,leads.utm_source),utm_medium=COALESCE(EXCLUDED.utm_medium,leads.utm_medium),utm_campaign=COALESCE(EXCLUDED.utm_campaign,leads.utm_campaign),utm_content=COALESCE(EXCLUDED.utm_content,leads.utm_content),referrer=COALESCE(EXCLUDED.referrer,leads.referrer),prefill_source=COALESCE(EXCLUDED.prefill_source,leads.prefill_source),enriched_title=COALESCE(EXCLUDED.enriched_title,leads.enriched_title),enriched_company_size=COALESCE(EXCLUDED.enriched_company_size,leads.enriched_company_size),enriched_industry=COALESCE(EXCLUDED.enriched_industry,leads.enriched_industry),enriched_linkedin=COALESCE(EXCLUDED.enriched_linkedin,leads.enriched_linkedin),disqualified=COALESCE(EXCLUDED.disqualified,leads.disqualified),disqualified_reason=COALESCE(EXCLUDED.disqualified_reason,leads.disqualified_reason),step_reached=GREATEST(EXCLUDED.step_reached,leads.step_reached),updated_at=NOW()
     `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hear_about_us||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,referrer||null,prefill_source||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached]);
+    // Sync enrichment fields from enrichment_data → leads
+    await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/partial] Enrichment sync failed (non-blocking):', err.message));
     syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,referrer,prefill_source,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false});
     console.log(`[/partial] ✅ Saved session ${session_id} | step ${step_reached} | email ${email}`);
     res.json({ ok: true });
@@ -815,7 +795,7 @@ app.post('/partial', async (req, res) => {
 });
 
 /* --------------------------------------------------------
-   POST /submit
+   POST /submit  — with enrichment sync
 -------------------------------------------------------- */
 app.post('/submit', async (req, res) => {
   const session_id=(req.body.session_id||'').toString().trim().slice(0,100), page_url=(req.body.page_url||'').toString().trim().slice(0,500), email=(req.body.email||'').toString().trim().slice(0,254).toLowerCase(), website=(req.body.website||'').toString().trim().slice(0,500), sell_to=(req.body.sell_to||'').toString().trim().slice(0,50), first_name=(req.body.first_name||'').toString().trim().slice(0,100), last_name=(req.body.last_name||'').toString().trim().slice(0,100), phone=(req.body.phone||'').toString().trim().slice(0,30), company=(req.body.company||'').toString().trim().slice(0,200), hear_about_us=(req.body.hear_about_us||'').toString().trim().slice(0,200), utm_source=(req.body.utm_source||'').toString().trim().slice(0,100), utm_medium=(req.body.utm_medium||'').toString().trim().slice(0,100), utm_campaign=(req.body.utm_campaign||'').toString().trim().slice(0,100), utm_content=(req.body.utm_content||'').toString().trim().slice(0,100), referrer=(req.body.referrer||'').toString().trim().slice(0,500), prefill_source=(req.body.prefill_source||'').toString().trim().slice(0,100), enriched_title=(req.body.enriched_title||'').toString().trim().slice(0,200), enriched_company_size=(req.body.enriched_company_size||'').toString().trim().slice(0,50), enriched_industry=(req.body.enriched_industry||'').toString().trim().slice(0,200), enriched_linkedin=(req.body.enriched_linkedin||'').toString().trim().slice(0,500), disqualified=Boolean(req.body.disqualified), disqualified_reason=(req.body.disqualified_reason||'').toString().trim().slice(0,100);
@@ -830,6 +810,8 @@ app.post('/submit', async (req, res) => {
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,2,true,NOW(),NOW())
       ON CONFLICT (session_id) DO UPDATE SET page_url=COALESCE(EXCLUDED.page_url,leads.page_url),email=COALESCE(EXCLUDED.email,leads.email),website=COALESCE(EXCLUDED.website,leads.website),sell_to=COALESCE(EXCLUDED.sell_to,leads.sell_to),first_name=COALESCE(EXCLUDED.first_name,leads.first_name),last_name=COALESCE(EXCLUDED.last_name,leads.last_name),phone=COALESCE(EXCLUDED.phone,leads.phone),company=COALESCE(EXCLUDED.company,leads.company),hear_about_us=COALESCE(EXCLUDED.hear_about_us,leads.hear_about_us),utm_source=COALESCE(EXCLUDED.utm_source,leads.utm_source),utm_medium=COALESCE(EXCLUDED.utm_medium,leads.utm_medium),utm_campaign=COALESCE(EXCLUDED.utm_campaign,leads.utm_campaign),utm_content=COALESCE(EXCLUDED.utm_content,leads.utm_content),referrer=COALESCE(EXCLUDED.referrer,leads.referrer),prefill_source=COALESCE(EXCLUDED.prefill_source,leads.prefill_source),enriched_title=COALESCE(EXCLUDED.enriched_title,leads.enriched_title),enriched_company_size=COALESCE(EXCLUDED.enriched_company_size,leads.enriched_company_size),enriched_industry=COALESCE(EXCLUDED.enriched_industry,leads.enriched_industry),enriched_linkedin=COALESCE(EXCLUDED.enriched_linkedin,leads.enriched_linkedin),disqualified=COALESCE(EXCLUDED.disqualified,leads.disqualified),disqualified_reason=COALESCE(EXCLUDED.disqualified_reason,leads.disqualified_reason),step_reached=2,completed=true,submitted_at=NOW(),updated_at=NOW()
     `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hear_about_us||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,referrer||null,prefill_source||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null]);
+    // Sync enrichment fields from enrichment_data → leads
+    await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/submit] Enrichment sync failed (non-blocking):', err.message));
     syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,referrer,prefill_source,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true});
     if (!alreadyCompleted) {
       slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,utm_source,utm_medium,utm_campaign,utm_content,referrer,prefill_source,page_url});
@@ -840,7 +822,7 @@ app.post('/submit', async (req, res) => {
 });
 
 /* --------------------------------------------------------
-   POST /booking-confirmed
+   POST /booking-confirmed  — browser-side Cal callback (existing)
 -------------------------------------------------------- */
 app.post('/booking-confirmed', async (req, res) => {
   const session_id=(req.body.session_id||'').toString().trim().slice(0,100), booking_uid=(req.body.booking_uid||'').toString().trim().slice(0,100), start_time=req.body.start_time||null, end_time=req.body.end_time||null, event_type=(req.body.event_type||'').toString().trim().slice(0,100);
@@ -854,6 +836,136 @@ app.post('/booking-confirmed', async (req, res) => {
     console.log(`[/booking-confirmed] ✅ Booked: ${booking_uid} | session: ${session_id} | email: ${email}`);
     res.json({ ok: true });
   } catch (err) { console.error('[/booking-confirmed]', err.message); res.status(500).json({ error: 'Booking update failed' }); }
+});
+
+/* --------------------------------------------------------
+   POST /booking-confirmed-webhook  — Cal.com server-side webhook
+   Receives BOOKING_CREATED from Cal.com, matches by attendee email.
+   Creates new lead + enriches if no existing lead found.
+   Fires Slack only for NEW leads not previously in the system.
+-------------------------------------------------------- */
+app.post('/booking-confirmed-webhook', async (req, res) => {
+  // 1. Verify webhook signature
+  const calSecret = process.env.CAL_WEBHOOK_SECRET;
+  if (calSecret) {
+    const signature = req.headers['x-cal-signature-256'] || req.headers['cal-signature'];
+    if (signature) {
+      const expected = crypto.createHmac('sha256', calSecret).update(JSON.stringify(req.body)).digest('hex');
+      if (signature !== expected) {
+        console.warn('[/cal-webhook] ⚠ Invalid signature — rejecting');
+        return res.status(401).json({ error: 'Invalid signature' });
+      }
+    }
+  }
+
+  try {
+    const payload = req.body.payload || req.body;
+    const triggerEvent = req.body.triggerEvent || '';
+
+    if (triggerEvent && triggerEvent !== 'BOOKING_CREATED') {
+      console.log(`[/cal-webhook] Ignoring event: ${triggerEvent}`);
+      return res.json({ ok: true, skipped: true });
+    }
+
+    const attendees = payload.attendees || [];
+    const attendee = attendees[0] || {};
+    const email = (attendee.email || payload.responses?.email?.value || '').toString().trim().toLowerCase();
+    const calName = attendee.name || payload.responses?.name?.value || '';
+    const bookingUid = payload.uid || payload.bookingUid || '';
+    const startTime = payload.startTime || '';
+    const endTime = payload.endTime || '';
+    const eventType = payload.type || payload.eventTypeSlug || '';
+
+    if (!email || !bookingUid) {
+      console.warn('[/cal-webhook] Missing email or booking_uid — skipping');
+      return res.status(400).json({ error: 'email and booking_uid required' });
+    }
+
+    const eventSlug = payload.eventTypeSlug || payload.type || '';
+    if (eventSlug && !eventSlug.toLowerCase().includes('demo')) {
+      console.log(`[/cal-webhook] Skipping non-demo event: ${eventSlug} | email: ${email}`);
+      return res.json({ ok: true, skipped: true, reason: 'non-demo event' });
+    }
+
+    console.log(`[/cal-webhook] Received booking: ${bookingUid} | email: ${email} | name: ${calName} | event: ${eventType}`);
+
+    // 2. Check if lead exists
+    const existingLead = await pool.query('SELECT session_id, email, booking_uid FROM leads WHERE email=$1 ORDER BY created_at DESC LIMIT 1', [email]);
+
+    if (existingLead.rows.length > 0) {
+      const lead = existingLead.rows[0];
+      if (!lead.booking_uid) {
+        await pool.query('UPDATE leads SET booking_uid=$2,start_time=$3,end_time=$4,event_type=$5,booked_at=NOW(),updated_at=NOW() WHERE session_id=$1', [lead.session_id, bookingUid, startTime || null, endTime || null, eventType || null]);
+        syncBookingToAWS(lead.session_id, bookingUid, startTime, endTime, eventType);
+        cancelLoopsSequence(email);
+        console.log(`[/cal-webhook] ✅ Updated existing lead: ${email} | session: ${lead.session_id}`);
+      } else {
+        console.log(`[/cal-webhook] ⏭ Lead already booked: ${email} | existing booking: ${lead.booking_uid}`);
+      }
+      return res.json({ ok: true, action: 'updated_existing' });
+    }
+
+    // 3. No lead — check enrichment_data
+    const enrichRow = await pool.query('SELECT * FROM enrichment_data WHERE email=$1 ORDER BY enriched_at DESC LIMIT 1', [email]);
+    const enrich = enrichRow.rows[0] || {};
+
+    const nameParts = calName.split(' ');
+    const firstName = enrich.enriched_first_name || nameParts[0] || '';
+    const lastName = enrich.enriched_last_name || nameParts.slice(1).join(' ') || '';
+    const company = enrich.enriched_company || '';
+    const webhookSessionId = 'cal-webhook-' + bookingUid;
+
+    // 4. Create new lead
+    await pool.query(`
+      INSERT INTO leads (session_id,email,first_name,last_name,company,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,enriched_city,enriched_state,enriched_country,enriched_seniority,enriched_departments,enriched_email_status,enriched_founded_year,enriched_annual_revenue,enriched_funding_events,enriched_alexa_ranking,enriched_keywords,enriched_org_hq,enriched_total_funding,enriched_funding_stage,step_reached,completed,submitted_at,booking_uid,start_time,end_time,event_type,booked_at,prefill_source,sell_to,updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,2,true,NOW(),$24,$25,$26,$27,NOW(),'cal_webhook','B2B',NOW())
+      ON CONFLICT (session_id) DO NOTHING
+    `, [webhookSessionId, email, firstName||null, lastName||null, company||null, enrich.enriched_title||null, enrich.enriched_company_size||null, enrich.enriched_industry||null, enrich.enriched_linkedin||null, enrich.enriched_city||null, enrich.enriched_state||null, enrich.enriched_country||null, enrich.enriched_seniority||null, enrich.enriched_departments||null, enrich.enriched_email_status||null, enrich.enriched_founded_year||null, enrich.enriched_annual_revenue||null, enrich.enriched_funding_events||null, enrich.enriched_alexa_ranking||null, enrich.enriched_keywords||null, enrich.enriched_org_hq||null, enrich.enriched_total_funding||null, enrich.enriched_funding_stage||null, bookingUid, startTime||null, endTime||null, eventType||null]);
+
+    // 5. Trigger Apollo if no enrichment exists — AWAIT so Slack has full data
+    let enrichData = enrich;
+    if (!enrich.enriched_title) {
+      const personalDomains = ['gmail.com','yahoo.com','hotmail.com','outlook.com','icloud.com','protonmail.com','aol.com','mail.com','yahoo.in','rediffmail.com','ymail.com','live.com','msn.com','me.com','mac.com','googlemail.com'];
+      const domain = email.split('@')[1]?.toLowerCase() || '';
+      if (!personalDomains.includes(domain) && process.env.APOLLO_API_KEY) {
+        console.log(`[/cal-webhook] Awaiting Apollo enrichment for: ${email}`);
+        try {
+          const enrichRes = await fetch(`http://localhost:${PORT}/enrich`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email,session_id:webhookSessionId}) });
+          if (enrichRes.ok) {
+            // Re-read enrichment_data after Apollo saved it
+            const freshEnrich = await pool.query('SELECT * FROM enrichment_data WHERE session_id=$1', [webhookSessionId]);
+            if (freshEnrich.rows[0]) {
+              enrichData = freshEnrich.rows[0];
+              // Update the lead row with fresh enrichment
+              await pool.query(`UPDATE leads SET first_name=COALESCE(leads.first_name,$2),last_name=COALESCE(leads.last_name,$3),company=COALESCE(leads.company,$4),enriched_title=$5,enriched_company_size=$6,enriched_industry=$7,enriched_linkedin=$8,enriched_city=$9,enriched_state=$10,enriched_country=$11,enriched_seniority=$12,enriched_departments=$13,enriched_email_status=$14,enriched_founded_year=$15,enriched_annual_revenue=$16,enriched_funding_events=$17,enriched_alexa_ranking=$18,enriched_keywords=$19,enriched_org_hq=$20,enriched_total_funding=$21,enriched_funding_stage=$22,updated_at=NOW() WHERE session_id=$1`, [webhookSessionId, enrichData.enriched_first_name||null, enrichData.enriched_last_name||null, enrichData.enriched_company||null, enrichData.enriched_title||null, enrichData.enriched_company_size||null, enrichData.enriched_industry||null, enrichData.enriched_linkedin||null, enrichData.enriched_city||null, enrichData.enriched_state||null, enrichData.enriched_country||null, enrichData.enriched_seniority||null, enrichData.enriched_departments||null, enrichData.enriched_email_status||null, enrichData.enriched_founded_year||null, enrichData.enriched_annual_revenue||null, enrichData.enriched_funding_events||null, enrichData.enriched_alexa_ranking||null, enrichData.enriched_keywords||null, enrichData.enriched_org_hq||null, enrichData.enriched_total_funding||null, enrichData.enriched_funding_stage||null]);
+              console.log(`[/cal-webhook] Apollo enrichment applied for: ${email}`);
+            }
+          }
+        } catch (err) { console.warn('[/cal-webhook] Apollo enrichment failed (non-blocking):', err.message); }
+      }
+    }
+
+    // Use enrichData (either original enrich or fresh Apollo data) for Slack + AWS
+    const slackFirstName = enrichData.enriched_first_name || firstName;
+    const slackLastName = enrichData.enriched_last_name || lastName;
+    const slackCompany = enrichData.enriched_company || company;
+
+    // 6. Sync to AWS
+    syncToAWS({ session_id:webhookSessionId, email, first_name:slackFirstName, last_name:slackLastName, company:slackCompany, sell_to:'B2B', completed:true, step_reached:2, enriched_title:enrichData.enriched_title, enriched_company_size:enrichData.enriched_company_size, enriched_industry:enrichData.enriched_industry, enriched_linkedin:enrichData.enriched_linkedin, enriched_city:enrichData.enriched_city, enriched_state:enrichData.enriched_state, enriched_country:enrichData.enriched_country, enriched_seniority:enrichData.enriched_seniority, enriched_departments:enrichData.enriched_departments, enriched_email_status:enrichData.enriched_email_status, enriched_founded_year:enrichData.enriched_founded_year, enriched_annual_revenue:enrichData.enriched_annual_revenue, enriched_funding_events:enrichData.enriched_funding_events, enriched_alexa_ranking:enrichData.enriched_alexa_ranking, enriched_keywords:enrichData.enriched_keywords, enriched_org_hq:enrichData.enriched_org_hq, enriched_total_funding:enrichData.enriched_total_funding, enriched_funding_stage:enrichData.enriched_funding_stage, prefill_source:'cal_webhook' });
+
+    // 7. Slack for NEW lead — now with enrichment data from Apollo
+    slackSubmit({ first_name:slackFirstName, last_name:slackLastName, email, company:slackCompany, sell_to:'B2B', phone:attendee.phone||'', enriched_title:enrichData.enriched_title, enriched_company_size:enrichData.enriched_company_size, enriched_industry:enrichData.enriched_industry, enriched_linkedin:enrichData.enriched_linkedin, enriched_city:enrichData.enriched_city, enriched_state:enrichData.enriched_state, enriched_country:enrichData.enriched_country, enriched_seniority:enrichData.enriched_seniority, enriched_departments:enrichData.enriched_departments, enriched_email_status:enrichData.enriched_email_status, enriched_founded_year:enrichData.enriched_founded_year, enriched_annual_revenue:enrichData.enriched_annual_revenue, enriched_funding_events:enrichData.enriched_funding_events, enriched_alexa_ranking:enrichData.enriched_alexa_ranking, enriched_keywords:enrichData.enriched_keywords, enriched_org_hq:enrichData.enriched_org_hq, enriched_total_funding:enrichData.enriched_total_funding, enriched_funding_stage:enrichData.enriched_funding_stage, prefill_source:'cal_webhook' });
+
+    // 8. Cancel Loops
+    cancelLoopsSequence(email);
+
+    console.log(`[/cal-webhook] ✅ Created new lead: ${email} | session: ${webhookSessionId}`);
+    res.json({ ok: true, action: 'created_new', session_id: webhookSessionId });
+
+  } catch (err) {
+    console.error('[/cal-webhook] Error:', err.message);
+    res.status(500).json({ error: 'Webhook processing failed' });
+  }
 });
 
 /* --------------------------------------------------------
