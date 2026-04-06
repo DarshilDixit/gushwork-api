@@ -6,6 +6,7 @@ const helmet    = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { Pool }  = require('pg');
 const { pool, initDB } = require('./db');
+const { pushToSalesforce, findSFLeadByEmail, updateSFLead } = require('./salesforce');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -831,6 +832,8 @@ app.post('/submit', async (req, res) => {
     syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true});
     if (!alreadyCompleted) {
       slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,utm_source,utm_medium,utm_campaign,utm_content,referrer,prefill_source,page_url});
+      // Push to Salesforce (non-blocking)
+      pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => console.warn('[/submit] SF push failed (non-blocking):', err.message));
       console.log(`[/submit] ✅ Lead completed: ${email} | session: ${session_id}`);
     } else { console.log(`[/submit] ⏭ Slack skipped — already completed: ${email} | session: ${session_id}`); }
     res.json({ ok: true });
@@ -849,6 +852,12 @@ app.post('/booking-confirmed', async (req, res) => {
     const leadRow = await pool.query('SELECT email FROM leads WHERE session_id=$1',[session_id]);
     const email = leadRow.rows[0]?.email;
     if (email) cancelLoopsSequence(email);
+    // Update Salesforce Lead with booking details (non-blocking)
+    if (email) {
+      findSFLeadByEmail(email).then(leadId => {
+        if (leadId) return updateSFLead(leadId, { booking_uid__c: booking_uid, booking_start_time__c: start_time || '', booking_event_type__c: event_type || '', completed__c: true });
+      }).catch(err => console.warn('[/booking-confirmed] SF update failed (non-blocking):', err.message));
+    }
     console.log(`[/booking-confirmed] ✅ Booked: ${booking_uid} | session: ${session_id} | email: ${email}`);
     res.json({ ok: true });
   } catch (err) { console.error('[/booking-confirmed]', err.message); res.status(500).json({ error: 'Booking update failed' }); }
@@ -914,6 +923,10 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
         await pool.query('UPDATE leads SET booking_uid=$2,start_time=$3,end_time=$4,event_type=$5,booked_at=NOW(),updated_at=NOW() WHERE session_id=$1', [lead.session_id, bookingUid, startTime || null, endTime || null, eventType || null]);
         syncBookingToAWS(lead.session_id, bookingUid, startTime, endTime, eventType);
         cancelLoopsSequence(email);
+        // Update Salesforce Lead with booking details (non-blocking)
+        findSFLeadByEmail(email).then(leadId => {
+          if (leadId) return updateSFLead(leadId, { booking_uid__c: bookingUid, booking_start_time__c: startTime || '', booking_event_type__c: eventType || '', completed__c: true });
+        }).catch(err => console.warn('[/cal-webhook] SF update failed (non-blocking):', err.message));
         console.log(`[/cal-webhook] ✅ Updated existing lead: ${email} | session: ${lead.session_id}`);
       } else {
         console.log(`[/cal-webhook] ⏭ Lead already booked: ${email} | existing booking: ${lead.booking_uid}`);
@@ -972,7 +985,10 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
     // 7. Slack for NEW lead — now with enrichment data from Apollo
     slackSubmit({ first_name:slackFirstName, last_name:slackLastName, email, company:slackCompany, sell_to:'B2B', phone:attendee.phone||'', enriched_title:enrichData.enriched_title, enriched_company_size:enrichData.enriched_company_size, enriched_industry:enrichData.enriched_industry, enriched_linkedin:enrichData.enriched_linkedin, enriched_city:enrichData.enriched_city, enriched_state:enrichData.enriched_state, enriched_country:enrichData.enriched_country, enriched_seniority:enrichData.enriched_seniority, enriched_departments:enrichData.enriched_departments, enriched_email_status:enrichData.enriched_email_status, enriched_founded_year:enrichData.enriched_founded_year, enriched_annual_revenue:enrichData.enriched_annual_revenue, enriched_funding_events:enrichData.enriched_funding_events, enriched_alexa_ranking:enrichData.enriched_alexa_ranking, enriched_keywords:enrichData.enriched_keywords, enriched_org_hq:enrichData.enriched_org_hq, enriched_total_funding:enrichData.enriched_total_funding, enriched_funding_stage:enrichData.enriched_funding_stage, prefill_source:'cal_webhook' });
 
-    // 8. Cancel Loops
+    // 8. Push to Salesforce (non-blocking) — new lead, already booked
+    pushToSalesforce({ first_name:slackFirstName, last_name:slackLastName, email, phone:attendee.phone||'', company:slackCompany, sell_to:'B2B', booking_uid:bookingUid, start_time:startTime, event_type:eventType, enriched_title:enrichData.enriched_title, enriched_company_size:enrichData.enriched_company_size, enriched_industry:enrichData.enriched_industry, enriched_linkedin:enrichData.enriched_linkedin, enriched_seniority:enrichData.enriched_seniority, enriched_departments:enrichData.enriched_departments, enriched_city:enrichData.enriched_city, enriched_state:enrichData.enriched_state, enriched_country:enrichData.enriched_country, enriched_annual_revenue:enrichData.enriched_annual_revenue, enriched_total_funding:enrichData.enriched_total_funding, enriched_funding_stage:enrichData.enriched_funding_stage, enriched_founded_year:enrichData.enriched_founded_year, step_reached:2, booked:true }).catch(err => console.warn('[/cal-webhook] SF push failed (non-blocking):', err.message));
+
+    // 9. Cancel Loops
     cancelLoopsSequence(email);
 
     console.log(`[/cal-webhook] ✅ Created new lead: ${email} | session: ${webhookSessionId}`);
