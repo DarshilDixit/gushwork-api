@@ -413,7 +413,14 @@
      SECTION 4 — EMAIL VERIFICATION
   ======================================================= */
 
+  const TEST_EMAILS = ['b@g.ai'];
+
+  function isTestEmail(email) {
+    return TEST_EMAILS.includes(email.toLowerCase());
+  }
+
   async function verifyEmail(email) {
+    if (isTestEmail(email)) { console.log('[GW] Test email — skipping ELV'); return true; }
     if (!isRailwayReady()) return true;
     if (email === _lastVerifiedEmail) return true;
 
@@ -487,6 +494,7 @@
   async function savePartial(step) {
     formState.step_reached = step;
     setHidden('step-reached', step);
+    if (isTestEmail(formState.email)) { console.log('[GW] Test email — skipping savePartial'); return true; }
     if (!isRailwayReady()) return true;
     try {
       const res = await fetch(`${RAILWAY_API_URL}/partial`, {
@@ -500,6 +508,7 @@
   async function submitLead() {
     formState.completed = true;
     setHidden('completed', 'true');
+    if (isTestEmail(formState.email)) { console.log('[GW] Test email — skipping submitLead'); return true; }
     if (!isRailwayReady()) return true;
     try {
       const res = await fetch(`${RAILWAY_API_URL}/submit`, {
@@ -592,6 +601,7 @@
   }
 
   async function triggerEnrichment(email) {
+    if (isTestEmail(email)) { console.log('[GW] Test email — skipping enrichment'); return; }
     if (!email || !isValidEmail(email) || !isWorkEmail(email)) return;
     if (email === _enrichedForEmail) return;
     const cached = getEnrichmentCache(email);
@@ -697,7 +707,7 @@
           console.log('[GW] HubSpot synthetic submit fired');
         }
 
-        if (isRailwayReady()) {
+        if (isRailwayReady() && !isTestEmail(formState.email)) {
           await fetch(`${RAILWAY_API_URL}/booking-confirmed`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
