@@ -27,7 +27,8 @@ async function getSalesforceToken() {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         grant_type: 'password',
-        client_id: '3MVG9CEn_O3jvv0wbMmnXaCPnTMFsUFjbp7dOBBGRUQnEJlsMXVn.2jBv_YhraIGNjWxxJCBOCG_tyMwdem0l',
+        client_id: process.env.SF_CLIENT_ID,
+        client_secret: process.env.SF_CLIENT_SECRET,
         username: process.env.SF_USERNAME,
         password: process.env.SF_PASSWORD + process.env.SF_SECURITY_TOKEN,
       }),
