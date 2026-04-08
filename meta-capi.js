@@ -2,7 +2,7 @@
 // meta-capi.js — Meta Conversions API
 // Active event types, all fired from pushFormEventsToMeta():
 //   Lead         — initial form submitted (called from /submit)
-//   StartTrial   — sell_to includes B2B, fires IN ADDITION to Lead or Schedule
+//   StartTrial   — sell_to includes B2B, fires once with Lead only (not on booking)
 //   Schedule     — demo booked (called from /booking-confirmed-webhook)
 // ============================================================
 
@@ -101,11 +101,10 @@ async function pushFormEventsToMeta(payload, options = {}) {
     events.push('Schedule');
   } else {
     events.push('Lead');
-  }
-
-  // Includes check covers "B2B", "B2B (clarified from Mixed)", "B2B (clarified from B2C)"
-  if (payload.sell_to && payload.sell_to.toUpperCase().includes('B2B')) {
-    events.push('StartTrial');
+    // StartTrial fires only once — on form completion, not on booking
+    if (payload.sell_to && payload.sell_to.toUpperCase().includes('B2B')) {
+      events.push('StartTrial');
+    }
   }
 
   const results = await Promise.allSettled(
