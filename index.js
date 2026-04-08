@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const { Pool }  = require('pg');
 const { pool, initDB } = require('./db');
 const { pushToSalesforce, findSFLeadByEmail, updateSFLead } = require('./salesforce');
+const { pushFormEventsToMeta } = require('./meta-capi');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -834,6 +835,8 @@ app.post('/submit', async (req, res) => {
       slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,utm_source,utm_medium,utm_campaign,utm_content,referrer,prefill_source,page_url});
       // Push to Salesforce (non-blocking)
       pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => console.warn('[/submit] SF push failed (non-blocking):', err.message));
+      // Push to Meta CAPI (non-blocking)
+      pushFormEventsToMeta({session_id,email,phone,first_name,last_name,company,website,sell_to,page_url,fbc,fbp,landing_page,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_seniority:enrich.enriched_seniority,enriched_funding_stage:enrich.enriched_funding_stage}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => console.warn('[/submit] Meta CAPI failed (non-blocking):', err.message));
       console.log(`[/submit] ✅ Lead completed: ${email} | session: ${session_id}`);
     } else { console.log(`[/submit] ⏭ Slack skipped — already completed: ${email} | session: ${session_id}`); }
     res.json({ ok: true });
@@ -857,6 +860,11 @@ app.post('/booking-confirmed', async (req, res) => {
       findSFLeadByEmail(email).then(leadId => {
         if (leadId) return updateSFLead(leadId, { booking_uid__c: booking_uid, booking_start_time__c: start_time || '', booking_event_type__c: event_type || '', completed__c: true });
       }).catch(err => console.warn('[/booking-confirmed] SF update failed (non-blocking):', err.message));
+      // Push to Meta CAPI with full lead data (non-blocking)
+      pool.query('SELECT * FROM leads l LEFT JOIN enrichment_data e ON e.session_id=l.session_id WHERE l.session_id=$1', [session_id]).then(r => {
+        const fullLead = r.rows[0] || {};
+        return pushFormEventsToMeta({...fullLead, booking_uid}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''});
+      }).catch(err => console.warn('[/booking-confirmed] Meta CAPI failed (non-blocking):', err.message));
     }
     console.log(`[/booking-confirmed] ✅ Booked: ${booking_uid} | session: ${session_id} | email: ${email}`);
     res.json({ ok: true });
@@ -927,6 +935,11 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
         findSFLeadByEmail(email).then(leadId => {
           if (leadId) return updateSFLead(leadId, { booking_uid__c: bookingUid, booking_start_time__c: startTime || '', booking_event_type__c: eventType || '', completed__c: true });
         }).catch(err => console.warn('[/cal-webhook] SF update failed (non-blocking):', err.message));
+        // Push to Meta CAPI with full lead data (non-blocking)
+        pool.query('SELECT * FROM leads l LEFT JOIN enrichment_data e ON e.session_id=l.session_id WHERE l.session_id=$1', [lead.session_id]).then(r => {
+          const fullLead = r.rows[0] || {};
+          return pushFormEventsToMeta({...fullLead, booking_uid: bookingUid}, {clientIpAddress:'',clientUserAgent:''});
+        }).catch(err => console.warn('[/cal-webhook] Meta CAPI failed (non-blocking):', err.message));
         console.log(`[/cal-webhook] ✅ Updated existing lead: ${email} | session: ${lead.session_id}`);
       } else {
         console.log(`[/cal-webhook] ⏭ Lead already booked: ${email} | existing booking: ${lead.booking_uid}`);
