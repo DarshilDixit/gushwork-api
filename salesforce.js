@@ -1,7 +1,7 @@
 // ============================================================
-// salesforce.js — Salesforce REST API (Username-Password Auth)
-// No Connected App or External Client App needed.
-// Just your username, password, and security token.
+// salesforce.js — Salesforce REST API (Client Credentials Auth)
+// Uses External Client App — only needs Client ID and Secret.
+// No username, password, or security token needed.
 //
 // Exports:
 //   pushToSalesforce(payload)        — create a new Lead
@@ -26,11 +26,9 @@ async function getSalesforceToken() {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
-        grant_type: 'password',
+        grant_type: 'client_credentials',
         client_id: process.env.SF_CLIENT_ID,
         client_secret: process.env.SF_CLIENT_SECRET,
-        username: process.env.SF_USERNAME,
-        password: process.env.SF_PASSWORD + process.env.SF_SECURITY_TOKEN,
       }),
     }
   );
