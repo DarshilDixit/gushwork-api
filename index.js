@@ -7,7 +7,7 @@ const rateLimit = require('express-rate-limit');
 const { Pool }  = require('pg');
 const { pool, initDB } = require('./db');
 const { pushToSalesforce, findSFLeadByEmail, updateSFLead } = require('./salesforce');
-const { pushFormEventsToMeta } = require('./meta-capi');
+const { pushFormEventsToMeta, pushFormStartedToMeta } = require('./meta-capi');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -834,6 +834,8 @@ app.post('/partial', async (req, res) => {
     // Sync enrichment fields from enrichment_data → leads
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/partial] Enrichment sync failed (non-blocking):', err.message));
     syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false});
+    // Push FormStarted to Meta CAPI for B2B leads (non-blocking, deduped by session)
+    pushFormStartedToMeta({session_id,email,sell_to,page_url,fbc,fbp,landing_page}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => console.warn('[/partial] Meta CAPI FormStarted failed (non-blocking):', err.message));
     console.log(`[/partial] ✅ Saved session ${session_id} | step ${step_reached} | email ${email}`);
     res.json({ ok: true });
   } catch (err) { console.error('[/partial]', err.message); res.status(500).json({ error: 'Partial save failed' }); }
