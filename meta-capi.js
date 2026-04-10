@@ -1,6 +1,7 @@
 // ============================================================
 // meta-capi.js — Meta Conversions API
 // Active event types, all fired from pushFormEventsToMeta():
+//   FormStarted  — B2B lead entered email on Step 1 (called from /partial)
 //   Lead         — initial form submitted (called from /submit)
 //   StartTrial   — sell_to includes B2B, fires once with Lead only (not on booking)
 //   Schedule     — demo booked (called from /booking-confirmed-webhook)
@@ -28,10 +29,16 @@ async function sendEvent(eventName, payload, options = {}) {
     return { success: false, error: 'Missing credentials' };
   }
 
-  const eventData = {
+    // FormStarted uses fixed event_id per session (Meta deduplicates repeated partials)
+    // Other events use random suffix to stay unique
+    const eventId = eventName === 'FormStarted'
+      ? `${eventName}_${payload.session_id || Date.now()}`
+      : `${eventName}_${payload.session_id || Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
+    const eventData = {
     event_name: eventName,
     event_time: Math.floor(Date.now() / 1000),
-    event_id: `${eventName}_${payload.session_id || Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    event_id: eventId,
     event_source_url: payload.page_url || payload.landing_page || '',
     action_source: 'website',
 
@@ -122,4 +129,30 @@ async function pushFormEventsToMeta(payload, options = {}) {
   return results;
 }
 
-module.exports = { pushFormEventsToMeta };
+/**
+ * Send FormStarted event for B2B leads on Step 1 partial.
+ * Only fires for B2B / clarified B2B leads.
+ * Uses fixed event_id per session so Meta deduplicates repeated partials.
+ */
+async function pushFormStartedToMeta(payload, options = {}) {
+  // Only fire for B2B leads
+  if (!payload.sell_to || !payload.sell_to.toUpperCase().includes('B2B')) {
+    return [];
+  }
+
+  const results = await Promise.allSettled([
+    sendEvent('FormStarted', payload, options)
+  ]);
+
+  results.forEach((r, i) => {
+    if (r.status === 'fulfilled') {
+      console.log('[Meta CAPI] [FormStarted]:', r.value);
+    } else {
+      console.error('[Meta CAPI] [FormStarted] failed:', r.reason);
+    }
+  });
+
+  return results;
+}
+
+module.exports = { pushFormEventsToMeta, pushFormStartedToMeta };
