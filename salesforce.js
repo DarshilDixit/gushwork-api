@@ -139,6 +139,7 @@ async function pushToSalesforce(payload) {
         headers: {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
+          'Sforce-Duplicate-Rule-Header': 'allowSave=true',
         },
         body: JSON.stringify(lead),
       }
