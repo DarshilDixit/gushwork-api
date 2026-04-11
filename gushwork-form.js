@@ -1,5 +1,5 @@
 /* ==========================================================
-   GUSHWORK — MULTI-STEP FORM  v3.7
+   GUSHWORK — MULTI-STEP FORM  v3.8  (POPUP VERSION)
    Hosted on GitHub — reference via jsDelivr CDN
    https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@main/gushwork-form.js
 
@@ -8,11 +8,10 @@
    - Phone input (Memberstack intl-tel-input)
    - Form logic (validation, enrichment, ELV, Cal, Railway)
 
-   v3.7 changes:
-   - Added Meta ads attribution: fbc, fbp, landing_page, utm_term
-   - Captures _fbc/_fbp cookies, builds _fbc from fbclid if missing
-   - landing_page captured on first visit via sessionStorage
-   - utm_term captured from URL params
+   v3.8 changes:
+   - FIX: B2C/Mixed leads now marked disqualified:true BEFORE savePartial
+     so bouncing from disqualified screen no longer leaves bad DB state
+   - B2B clarified path fully preserved (disqualified overridden back to false)
 ========================================================== */
 
 /* --------------------------------------------------------
@@ -230,25 +229,19 @@
   function captureMetaAttribution() {
     const p = new URLSearchParams(window.location.search);
 
-    // 1. Build _fbc cookie from fbclid if Meta Pixel hasn't set it yet
-    //    Ensures _fbc exists even if Pixel is blocked by ad blockers
     var fbclid = p.get('fbclid') || '';
     if (fbclid && !getCookie('_fbc')) {
       var fbc = 'fb.1.' + Date.now() + '.' + fbclid;
       document.cookie = '_fbc=' + fbc + ';max-age=7776000;path=/;SameSite=Lax';
     }
 
-    // 2. Read fbc: cookie first, fall back to building from fbclid
     var fbcValue = getCookie('_fbc');
     if (!fbcValue && fbclid) {
       fbcValue = 'fb.1.' + Date.now() + '.' + fbclid;
     }
     formState.fbc = fbcValue || '';
-
-    // 3. Read fbp: always from cookie (set by Meta Pixel)
     formState.fbp = getCookie('_fbp') || '';
 
-    // 4. Landing page: capture on first pageview, survives navigation
     if (!sessionStorage.getItem('gw_landing_page')) {
       sessionStorage.setItem('gw_landing_page', window.location.href);
     }
@@ -287,9 +280,7 @@
 
       if (isValidEmail(email) && isWorkEmail(email)) {
         const cached = getEnrichmentCache(email);
-        if (cached) {
-          applyEnrichment(email, cached);
-        }
+        if (cached) applyEnrichment(email, cached);
       }
     }
 
@@ -750,6 +741,17 @@
       formState.sell_to = sellTo;
       localStorage.setItem('gw_email', formState.email);
 
+      // ---- FIX: Mark disqualified BEFORE savePartial so bouncing from
+      //           the disqualified screen doesn't leave disqualified:false in DB.
+      //           handleDisqualifiedNext('b2b') will override back to false if clarified.
+      if (sellTo === 'B2C' || sellTo === 'Mixed') {
+        formState.disqualified        = true;
+        formState.disqualified_reason = 'b2c_or_mixed';
+      } else {
+        formState.disqualified        = false;
+        formState.disqualified_reason = '';
+      }
+
       setLoading('step-1-next', true, 'Loading...');
       await triggerEnrichment(formState.email);
       await savePartial(1);
@@ -774,15 +776,17 @@
     setLoading('step-disqualified-next', true);
 
     try {
-      formState.disqualified_reason = choice;
-
       if (choice === 'waitlist') {
-        formState.disqualified = true;
+        // Already marked disqualified:true in handleStep1Next — just confirm and save
+        formState.disqualified        = true;
+        formState.disqualified_reason = 'waitlist';
         await savePartial(1);
         showStep('step-disqualified-thanks');
       } else if (choice === 'b2b') {
-        formState.disqualified = false;
-        formState.sell_to = 'B2B (clarified from ' + formState.sell_to + ')';
+        // User clarified they are B2B — override disqualified back to false
+        formState.disqualified        = false;
+        formState.disqualified_reason = 'b2b_clarified';
+        formState.sell_to             = 'B2B (clarified from ' + formState.sell_to + ')';
         await triggerEnrichment(formState.email);
         await savePartial(1);
         showStep('step-2');
@@ -902,7 +906,7 @@
     initEnterKey();
     initCalLoader();
 
-    console.log('[GW] ✅ Form initialised. Session:', formState.session_id, '| Page:', formState.page_url,
+    console.log('[GW] ✅ Form initialised (popup). Session:', formState.session_id, '| Page:', formState.page_url,
       formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '',
       formState.fbp ? '| fbp: ' + formState.fbp : '');
   }
