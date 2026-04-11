@@ -246,7 +246,7 @@ function syncToAWS(data) {
       enriched_org_hq         = COALESCE(EXCLUDED.enriched_org_hq,         gw_form_leads.enriched_org_hq),
       enriched_total_funding  = COALESCE(EXCLUDED.enriched_total_funding,  gw_form_leads.enriched_total_funding),
       enriched_funding_stage  = COALESCE(EXCLUDED.enriched_funding_stage,  gw_form_leads.enriched_funding_stage),
-      disqualified            = COALESCE(EXCLUDED.disqualified,            gw_form_leads.disqualified),
+      disqualified            = EXCLUDED.disqualified,
       disqualified_reason     = COALESCE(EXCLUDED.disqualified_reason,     gw_form_leads.disqualified_reason),
       step_reached            = GREATEST(EXCLUDED.step_reached,            gw_form_leads.step_reached),
       completed               = COALESCE(EXCLUDED.completed,               gw_form_leads.completed),
@@ -273,7 +273,7 @@ function syncToAWS(data) {
     data.enriched_funding_events || null,   data.enriched_alexa_ranking    || null,
     data.enriched_keywords       || null,   data.enriched_org_hq           || null,
     data.enriched_total_funding  || null,   data.enriched_funding_stage    || null,
-    data.disqualified            || false,  data.disqualified_reason       || null,
+    data.disqualified            ?? false,  data.disqualified_reason       || null,
     data.step_reached            || 1,      data.completed                 || false,
     data.completed ? new Date() : null,     data.loops_sent                || false
   ]).then(() => {
@@ -332,10 +332,19 @@ function buildEnrichmentBlocks(blocks, e) {
   if (e.enriched_linkedin) { const f = bFields([{label:'LinkedIn',value:e.enriched_linkedin}]); if(f) blocks.push(f); }
 }
 
+/* --------------------------------------------------------
+   slackPartial — safety net: never fire for disqualified leads
+   Root fix is on the frontend, but this guards against any
+   future bad data reaching the cron.
+-------------------------------------------------------- */
 function slackPartial(d) {
+  // Hard guard — disqualified leads (B2C/Mixed) must never get Slack notifications
+  if (d.disqualified) {
+    console.log(`[Slack] ⏭ Skipping partial notification for disqualified lead: ${d.email}`);
+    return;
+  }
   const label = d.completed ? '⏰ Reached Cal — Did Not Book' : '👻 Dropped at Step 1';
-  const disqNote = d.disqualified ? ` • ⚠️ ${d.disqualified_reason || 'Disqualified'}` : '';
-  const blocks = []; blocks.push(bHeader(label + disqNote)); blocks.push(bDivider());
+  const blocks = []; blocks.push(bHeader(label)); blocks.push(bDivider());
   const lf = bFields([{label:'📧 Email',value:d.email},{label:'🎯 Sells to',value:d.sell_to},{label:'🏢 Company',value:d.company},{label:'🌐 Website',value:d.website}]); if(lf) blocks.push(lf);
   buildEnrichmentBlocks(blocks, d);
   if (d.utm_source||d.utm_medium||d.utm_campaign||d.utm_content||d.referrer) { blocks.push(bDivider()); blocks.push(bSection('*📊 Attribution*')); const src=[d.utm_source,d.utm_medium].filter(Boolean).join(' / '); const f=bFields([{label:'Source',value:src},{label:'Campaign',value:d.utm_campaign},{label:'Content',value:d.utm_content},{label:'Referrer',value:d.referrer}]); if(f) blocks.push(f); }
@@ -354,7 +363,8 @@ function slackSubmit(d) {
 }
 
 /* --------------------------------------------------------
-   GMAIL FOLLOW-UP EMAIL (replaces Loops)
+   FOLLOW-UP EMAIL (replaces Loops)
+   Sends from growth@gushwork.ai via Gmail SMTP
 -------------------------------------------------------- */
 const nodemailer = require('nodemailer');
 
@@ -698,7 +708,6 @@ app.get('/monitor', (req, res) => {
   '</div>' +
   '</div>';
 
-  // --- JAVASCRIPT (all string concatenation, no template literals) ---
   const js = '<script>' +
   'var TP="' + tp + '";' +
   'var API=window.location.origin;' +
@@ -823,20 +832,49 @@ app.post('/enrich', async (req, res) => {
    POST /partial  — with enrichment sync
 -------------------------------------------------------- */
 app.post('/partial', async (req, res) => {
-  const session_id=(req.body.session_id||'').toString().trim().slice(0,100), page_url=(req.body.page_url||'').toString().trim().slice(0,500), email=(req.body.email||'').toString().trim().slice(0,254).toLowerCase(), website=(req.body.website||'').toString().trim().slice(0,500), sell_to=(req.body.sell_to||'').toString().trim().slice(0,50), first_name=(req.body.first_name||'').toString().trim().slice(0,100), last_name=(req.body.last_name||'').toString().trim().slice(0,100), phone=(req.body.phone||'').toString().trim().slice(0,30), company=(req.body.company||'').toString().trim().slice(0,200), hear_about_us=(req.body.hear_about_us||'').toString().trim().slice(0,200), utm_source=(req.body.utm_source||'').toString().trim().slice(0,100), utm_medium=(req.body.utm_medium||'').toString().trim().slice(0,100), utm_campaign=(req.body.utm_campaign||'').toString().trim().slice(0,100), utm_content=(req.body.utm_content||'').toString().trim().slice(0,100), utm_term=(req.body.utm_term||'').toString().trim().slice(0,100), referrer=(req.body.referrer||'').toString().trim().slice(0,500), prefill_source=(req.body.prefill_source||'').toString().trim().slice(0,100), fbc=(req.body.fbc||'').toString().trim().slice(0,500), fbp=(req.body.fbp||'').toString().trim().slice(0,200), landing_page=(req.body.landing_page||'').toString().trim().slice(0,500), enriched_title=(req.body.enriched_title||'').toString().trim().slice(0,200), enriched_company_size=(req.body.enriched_company_size||'').toString().trim().slice(0,50), enriched_industry=(req.body.enriched_industry||'').toString().trim().slice(0,200), enriched_linkedin=(req.body.enriched_linkedin||'').toString().trim().slice(0,500), disqualified=Boolean(req.body.disqualified), disqualified_reason=(req.body.disqualified_reason||'').toString().trim().slice(0,100), step_reached=parseInt(req.body.step_reached)||1;
+  const session_id=(req.body.session_id||'').toString().trim().slice(0,100), page_url=(req.body.page_url||'').toString().trim().slice(0,500), email=(req.body.email||'').toString().trim().slice(0,254).toLowerCase(), website=(req.body.website||'').toString().trim().slice(0,500), sell_to=(req.body.sell_to||'').toString().trim().slice(0,50), first_name=(req.body.first_name||'').toString().trim().slice(0,100), last_name=(req.body.last_name||'').toString().trim().slice(0,100), phone=(req.body.phone||'').toString().trim().slice(0,30), company=(req.body.company||'').toString().trim().slice(0,200), hear_about_us=(req.body.hear_about_us||'').toString().trim().slice(0,200), utm_source=(req.body.utm_source||'').toString().trim().slice(0,100), utm_medium=(req.body.utm_medium||'').toString().trim().slice(0,100), utm_campaign=(req.body.utm_campaign||'').toString().trim().slice(0,100), utm_content=(req.body.utm_content||'').toString().trim().slice(0,100), utm_term=(req.body.utm_term||'').toString().trim().slice(0,100), referrer=(req.body.referrer||'').toString().trim().slice(0,500), prefill_source=(req.body.prefill_source||'').toString().trim().slice(0,100), fbc=(req.body.fbc||'').toString().trim().slice(0,500), fbp=(req.body.fbp||'').toString().trim().slice(0,200), landing_page=(req.body.landing_page||'').toString().trim().slice(0,500), enriched_title=(req.body.enriched_title||'').toString().trim().slice(0,200), enriched_company_size=(req.body.enriched_company_size||'').toString().trim().slice(0,50), enriched_industry=(req.body.enriched_industry||'').toString().trim().slice(0,200), enriched_linkedin=(req.body.enriched_linkedin||'').toString().trim().slice(0,500), disqualified=req.body.disqualified === true || req.body.disqualified === 'true', disqualified_reason=(req.body.disqualified_reason||'').toString().trim().slice(0,100), step_reached=parseInt(req.body.step_reached)||1;
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
   try {
     await pool.query(`
       INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,false,NOW())
-      ON CONFLICT (session_id) DO UPDATE SET page_url=COALESCE(EXCLUDED.page_url,leads.page_url),email=COALESCE(EXCLUDED.email,leads.email),website=COALESCE(EXCLUDED.website,leads.website),sell_to=COALESCE(EXCLUDED.sell_to,leads.sell_to),first_name=COALESCE(EXCLUDED.first_name,leads.first_name),last_name=COALESCE(EXCLUDED.last_name,leads.last_name),phone=COALESCE(EXCLUDED.phone,leads.phone),company=COALESCE(EXCLUDED.company,leads.company),hear_about_us=COALESCE(EXCLUDED.hear_about_us,leads.hear_about_us),utm_source=COALESCE(EXCLUDED.utm_source,leads.utm_source),utm_medium=COALESCE(EXCLUDED.utm_medium,leads.utm_medium),utm_campaign=COALESCE(EXCLUDED.utm_campaign,leads.utm_campaign),utm_content=COALESCE(EXCLUDED.utm_content,leads.utm_content),utm_term=COALESCE(EXCLUDED.utm_term,leads.utm_term),referrer=COALESCE(EXCLUDED.referrer,leads.referrer),prefill_source=COALESCE(EXCLUDED.prefill_source,leads.prefill_source),fbc=COALESCE(EXCLUDED.fbc,leads.fbc),fbp=COALESCE(EXCLUDED.fbp,leads.fbp),landing_page=COALESCE(EXCLUDED.landing_page,leads.landing_page),enriched_title=COALESCE(EXCLUDED.enriched_title,leads.enriched_title),enriched_company_size=COALESCE(EXCLUDED.enriched_company_size,leads.enriched_company_size),enriched_industry=COALESCE(EXCLUDED.enriched_industry,leads.enriched_industry),enriched_linkedin=COALESCE(EXCLUDED.enriched_linkedin,leads.enriched_linkedin),disqualified=COALESCE(EXCLUDED.disqualified,leads.disqualified),disqualified_reason=COALESCE(EXCLUDED.disqualified_reason,leads.disqualified_reason),step_reached=GREATEST(EXCLUDED.step_reached,leads.step_reached),updated_at=NOW()
+      ON CONFLICT (session_id) DO UPDATE SET
+        page_url=COALESCE(EXCLUDED.page_url,leads.page_url),
+        email=COALESCE(EXCLUDED.email,leads.email),
+        website=COALESCE(EXCLUDED.website,leads.website),
+        sell_to=COALESCE(EXCLUDED.sell_to,leads.sell_to),
+        first_name=COALESCE(EXCLUDED.first_name,leads.first_name),
+        last_name=COALESCE(EXCLUDED.last_name,leads.last_name),
+        phone=COALESCE(EXCLUDED.phone,leads.phone),
+        company=COALESCE(EXCLUDED.company,leads.company),
+        hear_about_us=COALESCE(EXCLUDED.hear_about_us,leads.hear_about_us),
+        utm_source=COALESCE(EXCLUDED.utm_source,leads.utm_source),
+        utm_medium=COALESCE(EXCLUDED.utm_medium,leads.utm_medium),
+        utm_campaign=COALESCE(EXCLUDED.utm_campaign,leads.utm_campaign),
+        utm_content=COALESCE(EXCLUDED.utm_content,leads.utm_content),
+        utm_term=COALESCE(EXCLUDED.utm_term,leads.utm_term),
+        referrer=COALESCE(EXCLUDED.referrer,leads.referrer),
+        prefill_source=COALESCE(EXCLUDED.prefill_source,leads.prefill_source),
+        fbc=COALESCE(EXCLUDED.fbc,leads.fbc),
+        fbp=COALESCE(EXCLUDED.fbp,leads.fbp),
+        landing_page=COALESCE(EXCLUDED.landing_page,leads.landing_page),
+        enriched_title=COALESCE(EXCLUDED.enriched_title,leads.enriched_title),
+        enriched_company_size=COALESCE(EXCLUDED.enriched_company_size,leads.enriched_company_size),
+        enriched_industry=COALESCE(EXCLUDED.enriched_industry,leads.enriched_industry),
+        enriched_linkedin=COALESCE(EXCLUDED.enriched_linkedin,leads.enriched_linkedin),
+        disqualified=EXCLUDED.disqualified,
+        disqualified_reason=COALESCE(EXCLUDED.disqualified_reason,leads.disqualified_reason),
+        step_reached=GREATEST(EXCLUDED.step_reached,leads.step_reached),
+        updated_at=NOW()
     `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hear_about_us||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached]);
     // Sync enrichment fields from enrichment_data → leads
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/partial] Enrichment sync failed (non-blocking):', err.message));
     syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false});
-    // Push StartTrial to Meta CAPI for B2B leads (non-blocking, deduped by session)
-    pushStartTrialToMeta({session_id,email,sell_to,page_url,fbc,fbp,landing_page}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => console.warn('[/partial] Meta CAPI StartTrial failed (non-blocking):', err.message));
-    console.log(`[/partial] ✅ Saved session ${session_id} | step ${step_reached} | email ${email}`);
+    // Push StartTrial to Meta CAPI for B2B leads only (non-blocking)
+    if (!disqualified) {
+      pushStartTrialToMeta({session_id,email,sell_to,page_url,fbc,fbp,landing_page}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => console.warn('[/partial] Meta CAPI StartTrial failed (non-blocking):', err.message));
+    }
+    console.log(`[/partial] ✅ Saved session ${session_id} | step ${step_reached} | disqualified: ${disqualified} | email ${email}`);
     res.json({ ok: true });
   } catch (err) { console.error('[/partial]', err.message); res.status(500).json({ error: 'Partial save failed' }); }
 });
@@ -845,7 +883,7 @@ app.post('/partial', async (req, res) => {
    POST /submit  — with enrichment sync
 -------------------------------------------------------- */
 app.post('/submit', async (req, res) => {
-  const session_id=(req.body.session_id||'').toString().trim().slice(0,100), page_url=(req.body.page_url||'').toString().trim().slice(0,500), email=(req.body.email||'').toString().trim().slice(0,254).toLowerCase(), website=(req.body.website||'').toString().trim().slice(0,500), sell_to=(req.body.sell_to||'').toString().trim().slice(0,50), first_name=(req.body.first_name||'').toString().trim().slice(0,100), last_name=(req.body.last_name||'').toString().trim().slice(0,100), phone=(req.body.phone||'').toString().trim().slice(0,30), company=(req.body.company||'').toString().trim().slice(0,200), hear_about_us=(req.body.hear_about_us||'').toString().trim().slice(0,200), utm_source=(req.body.utm_source||'').toString().trim().slice(0,100), utm_medium=(req.body.utm_medium||'').toString().trim().slice(0,100), utm_campaign=(req.body.utm_campaign||'').toString().trim().slice(0,100), utm_content=(req.body.utm_content||'').toString().trim().slice(0,100), utm_term=(req.body.utm_term||'').toString().trim().slice(0,100), referrer=(req.body.referrer||'').toString().trim().slice(0,500), prefill_source=(req.body.prefill_source||'').toString().trim().slice(0,100), fbc=(req.body.fbc||'').toString().trim().slice(0,500), fbp=(req.body.fbp||'').toString().trim().slice(0,200), landing_page=(req.body.landing_page||'').toString().trim().slice(0,500), enriched_title=(req.body.enriched_title||'').toString().trim().slice(0,200), enriched_company_size=(req.body.enriched_company_size||'').toString().trim().slice(0,50), enriched_industry=(req.body.enriched_industry||'').toString().trim().slice(0,200), enriched_linkedin=(req.body.enriched_linkedin||'').toString().trim().slice(0,500), disqualified=Boolean(req.body.disqualified), disqualified_reason=(req.body.disqualified_reason||'').toString().trim().slice(0,100);
+  const session_id=(req.body.session_id||'').toString().trim().slice(0,100), page_url=(req.body.page_url||'').toString().trim().slice(0,500), email=(req.body.email||'').toString().trim().slice(0,254).toLowerCase(), website=(req.body.website||'').toString().trim().slice(0,500), sell_to=(req.body.sell_to||'').toString().trim().slice(0,50), first_name=(req.body.first_name||'').toString().trim().slice(0,100), last_name=(req.body.last_name||'').toString().trim().slice(0,100), phone=(req.body.phone||'').toString().trim().slice(0,30), company=(req.body.company||'').toString().trim().slice(0,200), hear_about_us=(req.body.hear_about_us||'').toString().trim().slice(0,200), utm_source=(req.body.utm_source||'').toString().trim().slice(0,100), utm_medium=(req.body.utm_medium||'').toString().trim().slice(0,100), utm_campaign=(req.body.utm_campaign||'').toString().trim().slice(0,100), utm_content=(req.body.utm_content||'').toString().trim().slice(0,100), utm_term=(req.body.utm_term||'').toString().trim().slice(0,100), referrer=(req.body.referrer||'').toString().trim().slice(0,500), prefill_source=(req.body.prefill_source||'').toString().trim().slice(0,100), fbc=(req.body.fbc||'').toString().trim().slice(0,500), fbp=(req.body.fbp||'').toString().trim().slice(0,200), landing_page=(req.body.landing_page||'').toString().trim().slice(0,500), enriched_title=(req.body.enriched_title||'').toString().trim().slice(0,200), enriched_company_size=(req.body.enriched_company_size||'').toString().trim().slice(0,50), enriched_industry=(req.body.enriched_industry||'').toString().trim().slice(0,200), enriched_linkedin=(req.body.enriched_linkedin||'').toString().trim().slice(0,500), disqualified=req.body.disqualified === true || req.body.disqualified === 'true', disqualified_reason=(req.body.disqualified_reason||'').toString().trim().slice(0,100);
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
   try {
     const existing = await pool.query('SELECT completed FROM leads WHERE session_id=$1',[session_id]);
@@ -855,7 +893,33 @@ app.post('/submit', async (req, res) => {
     await pool.query(`
       INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,2,true,NOW(),NOW())
-      ON CONFLICT (session_id) DO UPDATE SET page_url=COALESCE(EXCLUDED.page_url,leads.page_url),email=COALESCE(EXCLUDED.email,leads.email),website=COALESCE(EXCLUDED.website,leads.website),sell_to=COALESCE(EXCLUDED.sell_to,leads.sell_to),first_name=COALESCE(EXCLUDED.first_name,leads.first_name),last_name=COALESCE(EXCLUDED.last_name,leads.last_name),phone=COALESCE(EXCLUDED.phone,leads.phone),company=COALESCE(EXCLUDED.company,leads.company),hear_about_us=COALESCE(EXCLUDED.hear_about_us,leads.hear_about_us),utm_source=COALESCE(EXCLUDED.utm_source,leads.utm_source),utm_medium=COALESCE(EXCLUDED.utm_medium,leads.utm_medium),utm_campaign=COALESCE(EXCLUDED.utm_campaign,leads.utm_campaign),utm_content=COALESCE(EXCLUDED.utm_content,leads.utm_content),utm_term=COALESCE(EXCLUDED.utm_term,leads.utm_term),referrer=COALESCE(EXCLUDED.referrer,leads.referrer),prefill_source=COALESCE(EXCLUDED.prefill_source,leads.prefill_source),fbc=COALESCE(EXCLUDED.fbc,leads.fbc),fbp=COALESCE(EXCLUDED.fbp,leads.fbp),landing_page=COALESCE(EXCLUDED.landing_page,leads.landing_page),enriched_title=COALESCE(EXCLUDED.enriched_title,leads.enriched_title),enriched_company_size=COALESCE(EXCLUDED.enriched_company_size,leads.enriched_company_size),enriched_industry=COALESCE(EXCLUDED.enriched_industry,leads.enriched_industry),enriched_linkedin=COALESCE(EXCLUDED.enriched_linkedin,leads.enriched_linkedin),disqualified=COALESCE(EXCLUDED.disqualified,leads.disqualified),disqualified_reason=COALESCE(EXCLUDED.disqualified_reason,leads.disqualified_reason),step_reached=2,completed=true,submitted_at=NOW(),updated_at=NOW()
+      ON CONFLICT (session_id) DO UPDATE SET
+        page_url=COALESCE(EXCLUDED.page_url,leads.page_url),
+        email=COALESCE(EXCLUDED.email,leads.email),
+        website=COALESCE(EXCLUDED.website,leads.website),
+        sell_to=COALESCE(EXCLUDED.sell_to,leads.sell_to),
+        first_name=COALESCE(EXCLUDED.first_name,leads.first_name),
+        last_name=COALESCE(EXCLUDED.last_name,leads.last_name),
+        phone=COALESCE(EXCLUDED.phone,leads.phone),
+        company=COALESCE(EXCLUDED.company,leads.company),
+        hear_about_us=COALESCE(EXCLUDED.hear_about_us,leads.hear_about_us),
+        utm_source=COALESCE(EXCLUDED.utm_source,leads.utm_source),
+        utm_medium=COALESCE(EXCLUDED.utm_medium,leads.utm_medium),
+        utm_campaign=COALESCE(EXCLUDED.utm_campaign,leads.utm_campaign),
+        utm_content=COALESCE(EXCLUDED.utm_content,leads.utm_content),
+        utm_term=COALESCE(EXCLUDED.utm_term,leads.utm_term),
+        referrer=COALESCE(EXCLUDED.referrer,leads.referrer),
+        prefill_source=COALESCE(EXCLUDED.prefill_source,leads.prefill_source),
+        fbc=COALESCE(EXCLUDED.fbc,leads.fbc),
+        fbp=COALESCE(EXCLUDED.fbp,leads.fbp),
+        landing_page=COALESCE(EXCLUDED.landing_page,leads.landing_page),
+        enriched_title=COALESCE(EXCLUDED.enriched_title,leads.enriched_title),
+        enriched_company_size=COALESCE(EXCLUDED.enriched_company_size,leads.enriched_company_size),
+        enriched_industry=COALESCE(EXCLUDED.enriched_industry,leads.enriched_industry),
+        enriched_linkedin=COALESCE(EXCLUDED.enriched_linkedin,leads.enriched_linkedin),
+        disqualified=EXCLUDED.disqualified,
+        disqualified_reason=COALESCE(EXCLUDED.disqualified_reason,leads.disqualified_reason),
+        step_reached=2,completed=true,submitted_at=NOW(),updated_at=NOW()
     `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hear_about_us||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null]);
     // Sync enrichment fields from enrichment_data → leads
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/submit] Enrichment sync failed (non-blocking):', err.message));
@@ -873,7 +937,7 @@ app.post('/submit', async (req, res) => {
 });
 
 /* --------------------------------------------------------
-   POST /booking-confirmed  — browser-side Cal callback (existing)
+   POST /booking-confirmed  — browser-side Cal callback
 -------------------------------------------------------- */
 app.post('/booking-confirmed', async (req, res) => {
   const session_id=(req.body.session_id||'').toString().trim().slice(0,100), booking_uid=(req.body.booking_uid||'').toString().trim().slice(0,100), start_time=req.body.start_time||null, end_time=req.body.end_time||null, event_type=(req.body.event_type||'').toString().trim().slice(0,100);
@@ -883,12 +947,10 @@ app.post('/booking-confirmed', async (req, res) => {
     syncBookingToAWS(session_id,booking_uid,start_time,end_time,event_type);
     const leadRow = await pool.query('SELECT email FROM leads WHERE session_id=$1',[session_id]);
     const email = leadRow.rows[0]?.email;
-    // Update Salesforce Lead with booking details (non-blocking)
     if (email) {
       findSFLeadByEmail(email).then(leadId => {
         if (leadId) return updateSFLead(leadId, { booking_uid__c: booking_uid, booking_start_time__c: start_time || '', booking_event_type__c: event_type || '', completed__c: true });
       }).catch(err => console.warn('[/booking-confirmed] SF update failed (non-blocking):', err.message));
-      // Push to Meta CAPI with full lead data (non-blocking)
       pool.query('SELECT * FROM leads l LEFT JOIN enrichment_data e ON e.session_id=l.session_id WHERE l.session_id=$1', [session_id]).then(r => {
         const fullLead = r.rows[0] || {};
         return pushFormEventsToMeta({...fullLead, booking_uid}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''});
@@ -901,12 +963,8 @@ app.post('/booking-confirmed', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /booking-confirmed-webhook  — Cal.com server-side webhook
-   Receives BOOKING_CREATED from Cal.com, matches by attendee email.
-   Creates new lead + enriches if no existing lead found.
-   Fires Slack only for NEW leads not previously in the system.
 -------------------------------------------------------- */
 app.post('/booking-confirmed-webhook', async (req, res) => {
-  // 1. Verify webhook signature
   const calSecret = process.env.CAL_WEBHOOK_SECRET;
   if (calSecret) {
     const signature = req.headers['x-cal-signature-256'] || req.headers['cal-signature'];
@@ -950,7 +1008,6 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
 
     console.log(`[/cal-webhook] Received booking: ${bookingUid} | email: ${email} | name: ${calName} | event: ${eventType}`);
 
-    // 2. Check if lead exists
     const existingLead = await pool.query('SELECT session_id, email, booking_uid FROM leads WHERE email=$1 ORDER BY created_at DESC LIMIT 1', [email]);
 
     if (existingLead.rows.length > 0) {
@@ -958,11 +1015,9 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
       if (!lead.booking_uid) {
         await pool.query('UPDATE leads SET booking_uid=$2,start_time=$3,end_time=$4,event_type=$5,booked_at=NOW(),updated_at=NOW() WHERE session_id=$1', [lead.session_id, bookingUid, startTime || null, endTime || null, eventType || null]);
         syncBookingToAWS(lead.session_id, bookingUid, startTime, endTime, eventType);
-        // Update Salesforce Lead with booking details (non-blocking)
         findSFLeadByEmail(email).then(leadId => {
           if (leadId) return updateSFLead(leadId, { booking_uid__c: bookingUid, booking_start_time__c: startTime || '', booking_event_type__c: eventType || '', completed__c: true });
         }).catch(err => console.warn('[/cal-webhook] SF update failed (non-blocking):', err.message));
-        // Push to Meta CAPI with full lead data (non-blocking)
         pool.query('SELECT * FROM leads l LEFT JOIN enrichment_data e ON e.session_id=l.session_id WHERE l.session_id=$1', [lead.session_id]).then(r => {
           const fullLead = r.rows[0] || {};
           return pushFormEventsToMeta({...fullLead, booking_uid: bookingUid}, {clientIpAddress:'',clientUserAgent:''});
@@ -974,7 +1029,6 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
       return res.json({ ok: true, action: 'updated_existing' });
     }
 
-    // 3. No lead — check enrichment_data
     const enrichRow = await pool.query('SELECT * FROM enrichment_data WHERE email=$1 ORDER BY enriched_at DESC LIMIT 1', [email]);
     const enrich = enrichRow.rows[0] || {};
 
@@ -984,14 +1038,12 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
     const company = enrich.enriched_company || '';
     const webhookSessionId = 'cal-webhook-' + bookingUid;
 
-    // 4. Create new lead
     await pool.query(`
       INSERT INTO leads (session_id,email,first_name,last_name,company,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,enriched_city,enriched_state,enriched_country,enriched_seniority,enriched_departments,enriched_email_status,enriched_founded_year,enriched_annual_revenue,enriched_funding_events,enriched_alexa_ranking,enriched_keywords,enriched_org_hq,enriched_total_funding,enriched_funding_stage,step_reached,completed,submitted_at,booking_uid,start_time,end_time,event_type,booked_at,prefill_source,sell_to,updated_at)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,2,true,NOW(),$24,$25,$26,$27,NOW(),'cal_webhook','B2B',NOW())
       ON CONFLICT (session_id) DO NOTHING
     `, [webhookSessionId, email, firstName||null, lastName||null, company||null, enrich.enriched_title||null, enrich.enriched_company_size||null, enrich.enriched_industry||null, enrich.enriched_linkedin||null, enrich.enriched_city||null, enrich.enriched_state||null, enrich.enriched_country||null, enrich.enriched_seniority||null, enrich.enriched_departments||null, enrich.enriched_email_status||null, enrich.enriched_founded_year||null, enrich.enriched_annual_revenue||null, enrich.enriched_funding_events||null, enrich.enriched_alexa_ranking||null, enrich.enriched_keywords||null, enrich.enriched_org_hq||null, enrich.enriched_total_funding||null, enrich.enriched_funding_stage||null, bookingUid, startTime||null, endTime||null, eventType||null]);
 
-    // 5. Trigger Apollo if no enrichment exists — AWAIT so Slack has full data
     let enrichData = enrich;
     if (!enrich.enriched_title) {
       const personalDomains = ['gmail.com','yahoo.com','hotmail.com','outlook.com','icloud.com','protonmail.com','aol.com','mail.com','yahoo.in','rediffmail.com','ymail.com','live.com','msn.com','me.com','mac.com','googlemail.com'];
@@ -1001,11 +1053,9 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
         try {
           const enrichRes = await fetch(`http://localhost:${PORT}/enrich`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email,session_id:webhookSessionId}) });
           if (enrichRes.ok) {
-            // Re-read enrichment_data after Apollo saved it
             const freshEnrich = await pool.query('SELECT * FROM enrichment_data WHERE session_id=$1', [webhookSessionId]);
             if (freshEnrich.rows[0]) {
               enrichData = freshEnrich.rows[0];
-              // Update the lead row with fresh enrichment
               await pool.query(`UPDATE leads SET first_name=COALESCE(leads.first_name,$2),last_name=COALESCE(leads.last_name,$3),company=COALESCE(leads.company,$4),enriched_title=$5,enriched_company_size=$6,enriched_industry=$7,enriched_linkedin=$8,enriched_city=$9,enriched_state=$10,enriched_country=$11,enriched_seniority=$12,enriched_departments=$13,enriched_email_status=$14,enriched_founded_year=$15,enriched_annual_revenue=$16,enriched_funding_events=$17,enriched_alexa_ranking=$18,enriched_keywords=$19,enriched_org_hq=$20,enriched_total_funding=$21,enriched_funding_stage=$22,updated_at=NOW() WHERE session_id=$1`, [webhookSessionId, enrichData.enriched_first_name||null, enrichData.enriched_last_name||null, enrichData.enriched_company||null, enrichData.enriched_title||null, enrichData.enriched_company_size||null, enrichData.enriched_industry||null, enrichData.enriched_linkedin||null, enrichData.enriched_city||null, enrichData.enriched_state||null, enrichData.enriched_country||null, enrichData.enriched_seniority||null, enrichData.enriched_departments||null, enrichData.enriched_email_status||null, enrichData.enriched_founded_year||null, enrichData.enriched_annual_revenue||null, enrichData.enriched_funding_events||null, enrichData.enriched_alexa_ranking||null, enrichData.enriched_keywords||null, enrichData.enriched_org_hq||null, enrichData.enriched_total_funding||null, enrichData.enriched_funding_stage||null]);
               console.log(`[/cal-webhook] Apollo enrichment applied for: ${email}`);
             }
@@ -1014,18 +1064,14 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
       }
     }
 
-    // Use enrichData (either original enrich or fresh Apollo data) for Slack + AWS
     const slackFirstName = enrichData.enriched_first_name || firstName;
     const slackLastName = enrichData.enriched_last_name || lastName;
     const slackCompany = enrichData.enriched_company || company;
 
-    // 6. Sync to AWS
     syncToAWS({ session_id:webhookSessionId, email, first_name:slackFirstName, last_name:slackLastName, company:slackCompany, sell_to:'B2B', completed:true, step_reached:2, enriched_title:enrichData.enriched_title, enriched_company_size:enrichData.enriched_company_size, enriched_industry:enrichData.enriched_industry, enriched_linkedin:enrichData.enriched_linkedin, enriched_city:enrichData.enriched_city, enriched_state:enrichData.enriched_state, enriched_country:enrichData.enriched_country, enriched_seniority:enrichData.enriched_seniority, enriched_departments:enrichData.enriched_departments, enriched_email_status:enrichData.enriched_email_status, enriched_founded_year:enrichData.enriched_founded_year, enriched_annual_revenue:enrichData.enriched_annual_revenue, enriched_funding_events:enrichData.enriched_funding_events, enriched_alexa_ranking:enrichData.enriched_alexa_ranking, enriched_keywords:enrichData.enriched_keywords, enriched_org_hq:enrichData.enriched_org_hq, enriched_total_funding:enrichData.enriched_total_funding, enriched_funding_stage:enrichData.enriched_funding_stage, prefill_source:'cal_webhook' });
 
-    // 7. Slack for NEW lead — now with enrichment data from Apollo
     slackSubmit({ first_name:slackFirstName, last_name:slackLastName, email, company:slackCompany, sell_to:'B2B', phone:attendee.phone||'', enriched_title:enrichData.enriched_title, enriched_company_size:enrichData.enriched_company_size, enriched_industry:enrichData.enriched_industry, enriched_linkedin:enrichData.enriched_linkedin, enriched_city:enrichData.enriched_city, enriched_state:enrichData.enriched_state, enriched_country:enrichData.enriched_country, enriched_seniority:enrichData.enriched_seniority, enriched_departments:enrichData.enriched_departments, enriched_email_status:enrichData.enriched_email_status, enriched_founded_year:enrichData.enriched_founded_year, enriched_annual_revenue:enrichData.enriched_annual_revenue, enriched_funding_events:enrichData.enriched_funding_events, enriched_alexa_ranking:enrichData.enriched_alexa_ranking, enriched_keywords:enrichData.enriched_keywords, enriched_org_hq:enrichData.enriched_org_hq, enriched_total_funding:enrichData.enriched_total_funding, enriched_funding_stage:enrichData.enriched_funding_stage, prefill_source:'cal_webhook' });
 
-    // 8. Push to Salesforce (non-blocking) — new lead, already booked
     pushToSalesforce({ first_name:slackFirstName, last_name:slackLastName, email, phone:attendee.phone||'', company:slackCompany, sell_to:'B2B', booking_uid:bookingUid, start_time:startTime, event_type:eventType, enriched_title:enrichData.enriched_title, enriched_company_size:enrichData.enriched_company_size, enriched_industry:enrichData.enriched_industry, enriched_linkedin:enrichData.enriched_linkedin, enriched_seniority:enrichData.enriched_seniority, enriched_departments:enrichData.enriched_departments, enriched_city:enrichData.enriched_city, enriched_state:enrichData.enriched_state, enriched_country:enrichData.enriched_country, enriched_annual_revenue:enrichData.enriched_annual_revenue, enriched_total_funding:enrichData.enriched_total_funding, enriched_funding_stage:enrichData.enriched_funding_stage, enriched_founded_year:enrichData.enriched_founded_year, step_reached:2, booked:true }).catch(err => console.warn('[/cal-webhook] SF push failed (non-blocking):', err.message));
 
     console.log(`[/cal-webhook] ✅ Created new lead: ${email} | session: ${webhookSessionId}`);
@@ -1039,23 +1085,85 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /cron/send-partials
+   Finds B2B leads who dropped off without booking and:
+   1. Fires slackPartial notification
+   2. Sends follow-up email via Gmail SMTP
+   3. Marks loops_sent=true so they're never processed again
+
+   Safety nets:
+   - cron query filters disqualified=false at DB level
+   - explicit disqualified guard in loop (belt-and-suspenders)
+   - slackPartial() also guards internally
 -------------------------------------------------------- */
 app.post('/cron/send-partials', async (req, res) => {
   try {
-    const result = await pool.query(`SELECT session_id,email,first_name,last_name,company,website,sell_to,utm_source,utm_medium,utm_campaign,utm_content,referrer,page_url,disqualified,disqualified_reason,completed,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,enriched_city,enriched_state,enriched_country,enriched_seniority,enriched_departments,enriched_email_status,enriched_founded_year,enriched_annual_revenue,enriched_funding_events,enriched_alexa_ranking,enriched_keywords FROM leads WHERE email IS NOT NULL AND disqualified=false AND booking_uid IS NULL AND loops_sent=false AND created_at<NOW()-INTERVAL '30 minutes'`);
+    const result = await pool.query(`
+      SELECT session_id,email,first_name,last_name,company,website,sell_to,
+             utm_source,utm_medium,utm_campaign,utm_content,referrer,page_url,
+             disqualified,disqualified_reason,completed,
+             enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,
+             enriched_city,enriched_state,enriched_country,enriched_seniority,
+             enriched_departments,enriched_email_status,enriched_founded_year,
+             enriched_annual_revenue,enriched_funding_events,enriched_alexa_ranking,
+             enriched_keywords
+      FROM leads
+      WHERE email IS NOT NULL
+        AND disqualified = false
+        AND booking_uid IS NULL
+        AND loops_sent = false
+        AND created_at < NOW() - INTERVAL '30 minutes'
+    `);
     const leads = result.rows;
     console.log(`[Cron] Found ${leads.length} leads to process`);
+
     for (const lead of leads) {
-      const enrichRow = await pool.query('SELECT * FROM enrichment_data WHERE session_id=$1',[lead.session_id]);
+      // Belt-and-suspenders guard — skip any disqualified lead that somehow
+      // passed the WHERE clause (e.g. NULL edge case on older rows)
+      if (lead.disqualified) {
+        console.log(`[Cron] ⏭ Skipping disqualified lead: ${lead.email} — marking done to prevent reprocessing`);
+        await pool.query('UPDATE leads SET loops_sent=true WHERE session_id=$1', [lead.session_id]);
+        if (awsPool) awsPool.query('UPDATE gw_form_leads SET loops_sent=true,updated_at=NOW() WHERE session_id=$1', [lead.session_id]).catch(err => console.warn('[AWS] ⚠ loops_sent sync failed:', err.message));
+        continue;
+      }
+
+      const enrichRow = await pool.query('SELECT * FROM enrichment_data WHERE session_id=$1', [lead.session_id]);
       const enrich = enrichRow.rows[0] || {};
-      slackPartial({...lead,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
+
+      slackPartial({
+        ...lead,
+        enriched_title:          enrich.enriched_title,
+        enriched_company_size:   enrich.enriched_company_size,
+        enriched_industry:       enrich.enriched_industry,
+        enriched_linkedin:       enrich.enriched_linkedin,
+        enriched_city:           enrich.enriched_city,
+        enriched_state:          enrich.enriched_state,
+        enriched_country:        enrich.enriched_country,
+        enriched_seniority:      enrich.enriched_seniority,
+        enriched_departments:    enrich.enriched_departments,
+        enriched_email_status:   enrich.enriched_email_status,
+        enriched_founded_year:   enrich.enriched_founded_year,
+        enriched_annual_revenue: enrich.enriched_annual_revenue,
+        enriched_funding_events: enrich.enriched_funding_events,
+        enriched_alexa_ranking:  enrich.enriched_alexa_ranking,
+        enriched_keywords:       enrich.enriched_keywords,
+        enriched_org_hq:         enrich.enriched_org_hq,
+        enriched_total_funding:  enrich.enriched_total_funding,
+        enriched_funding_stage:  enrich.enriched_funding_stage
+      });
+
       await sendFollowUpEmail(lead.email, lead.first_name);
-      await pool.query('UPDATE leads SET loops_sent=true WHERE session_id=$1',[lead.session_id]);
-      if (awsPool) awsPool.query('UPDATE gw_form_leads SET loops_sent=true,updated_at=NOW() WHERE session_id=$1',[lead.session_id]).catch(err=>console.warn('[AWS] ⚠ loops_sent sync failed:',err.message));
+
+      await pool.query('UPDATE leads SET loops_sent=true WHERE session_id=$1', [lead.session_id]);
+      if (awsPool) awsPool.query('UPDATE gw_form_leads SET loops_sent=true,updated_at=NOW() WHERE session_id=$1', [lead.session_id]).catch(err => console.warn('[AWS] ⚠ loops_sent sync failed:', err.message));
+
       console.log(`[Cron] ✅ Processed partial for ${lead.email} | completed: ${lead.completed}`);
     }
+
     res.json({ ok: true, processed: leads.length });
-  } catch (err) { console.error('[Cron] Error:', err.message); res.status(500).json({ error: 'Cron failed' }); }
+  } catch (err) {
+    console.error('[Cron] Error:', err.message);
+    res.status(500).json({ error: 'Cron failed' });
+  }
 });
 
 /* --------------------------------------------------------
