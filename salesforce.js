@@ -4,7 +4,7 @@
 // Needs Client ID, Client Secret, and Refresh Token.
 //
 // Exports:
-//   pushToSalesforce(payload)        — create a new Lead
+//   pushToSalesforce(payload)        — upsert Lead (create or update by email)
 //   findSFLeadByEmail(email)         — find Lead ID by email
 //   updateSFLead(leadId, fields)     — update existing Lead
 // ============================================================
@@ -101,36 +101,72 @@ const CUSTOM_FIELD_MAP = {
   step_reached: 'step_reached__c',
 };
 
+// Fields that have a max length enforced by SF
+const FIELD_MAX_LENGTHS = {
+  landing_page: 255,
+  utm_campaign: 255,
+  utm_content: 255,
+  utm_term: 255,
+  referrer: 255,
+  page_url: 255,
+  fbc: 255,
+};
+
 /* --------------------------------------------------------
-   pushToSalesforce — Create a new SF Lead
+   buildLeadFields — shared field builder used by create + update
+-------------------------------------------------------- */
+function buildLeadFields(payload) {
+  const lead = {};
+
+  // Map standard fields
+  for (const [srcKey, sfKey] of Object.entries(STANDARD_FIELD_MAP)) {
+    if (payload[srcKey]) lead[sfKey] = String(payload[srcKey]);
+  }
+
+  // Map custom fields, applying max length truncation where needed
+  for (const [srcKey, sfKey] of Object.entries(CUSTOM_FIELD_MAP)) {
+    if (payload[srcKey] !== undefined && payload[srcKey] !== null && payload[srcKey] !== '') {
+      let value = String(payload[srcKey]);
+      if (FIELD_MAX_LENGTHS[srcKey]) {
+        value = value.substring(0, FIELD_MAX_LENGTHS[srcKey]);
+      }
+      lead[sfKey] = value;
+    }
+  }
+
+  return lead;
+}
+
+/* --------------------------------------------------------
+   pushToSalesforce — Upsert SF Lead (create or update by email)
+   - Looks up existing Lead by email first
+   - If found: updates it (no duplicate created)
+   - If not found: creates new Lead
+   This makes it safe even if a separate SF/Cal integration
+   has already created a Lead for this email.
 -------------------------------------------------------- */
 async function pushToSalesforce(payload) {
   try {
-    const { accessToken, instanceUrl } = await getSalesforceToken();
-
-    const lead = {};
-
-    // Map standard fields
-    for (const [srcKey, sfKey] of Object.entries(STANDARD_FIELD_MAP)) {
-      if (payload[srcKey]) lead[sfKey] = String(payload[srcKey]);
-    }
-
-    // Map custom fields
-    for (const [srcKey, sfKey] of Object.entries(CUSTOM_FIELD_MAP)) {
-      if (payload[srcKey] !== undefined && payload[srcKey] !== null && payload[srcKey] !== '') {
-        lead[sfKey] = String(payload[srcKey]);
-      }
-    }
+    const lead = buildLeadFields(payload);
 
     // Salesforce requires Company and LastName — set fallbacks
     if (!lead.Company) lead.Company = '[Not Provided]';
     if (!lead.LastName) lead.LastName = 'Unknown';
 
-    // Set Lead Source
     lead.LeadSource = 'Website';
-
-    // completed__c = false on creation (set to true when booked)
     lead.completed__c = payload.booked === true;
+
+    // Check if a Lead already exists for this email — avoid duplicates
+    const existingLeadId = payload.email ? await findSFLeadByEmail(payload.email) : null;
+
+    if (existingLeadId) {
+      // Lead already exists (ours or from SF team's integration) — update it
+      console.log(`[SF] Lead already exists for ${payload.email} — updating instead of creating`);
+      return await updateSFLead(existingLeadId, lead);
+    }
+
+    // No existing Lead — create new
+    const { accessToken, instanceUrl } = await getSalesforceToken();
 
     const res = await fetch(
       `${instanceUrl}/services/data/v60.0/sobjects/Lead/`,
@@ -201,11 +237,18 @@ async function findSFLeadByEmail(email) {
 /* --------------------------------------------------------
    updateSFLead — Patch an existing SF Lead by ID
    fields = { booking_uid__c: '...', completed__c: true, ... }
+   Also applies max length truncation to any string fields.
 -------------------------------------------------------- */
 async function updateSFLead(leadId, fields) {
   if (!leadId) return { success: false, error: 'No leadId' };
   try {
     const { accessToken, instanceUrl } = await getSalesforceToken();
+
+    // Apply truncation to any landing_page__c or other long fields passed directly
+    const safeFields = { ...fields };
+    if (safeFields['landing_page__c']) {
+      safeFields['landing_page__c'] = safeFields['landing_page__c'].substring(0, 255);
+    }
 
     const res = await fetch(
       `${instanceUrl}/services/data/v60.0/sobjects/Lead/${leadId}`,
@@ -215,7 +258,7 @@ async function updateSFLead(leadId, fields) {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(fields),
+        body: JSON.stringify(safeFields),
       }
     );
 
