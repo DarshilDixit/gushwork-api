@@ -1,17 +1,11 @@
 /* ==========================================================
-   GUSHWORK — MULTI-STEP FORM  v3.8  (POPUP VERSION)
+   GUSHWORK — MULTI-STEP FORM  v3.9  (POPUP VERSION)
    Hosted on GitHub — reference via jsDelivr CDN
    https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@main/gushwork-form.js
 
-   Contains:
-   - Styles (error messages + step 3 full width + Cal embed)
-   - Phone input (Memberstack intl-tel-input)
-   - Form logic (validation, enrichment, ELV, Cal, Railway)
-
-   v3.8 changes:
-   - FIX: B2C/Mixed leads now marked disqualified:true BEFORE savePartial
-     so bouncing from disqualified screen no longer leaves bad DB state
-   - B2B clarified path fully preserved (disqualified overridden back to false)
+   v3.9 changes:
+   - REMOVED: HubSpot synthetic submit on Cal booking (was triggering
+     Webflow form notifications + n8n webhook on every booking)
 ========================================================== */
 
 /* --------------------------------------------------------
@@ -19,21 +13,16 @@
 -------------------------------------------------------- */
 (function injectStyles() {
   const css = `
-    /* Error messages */
     [id$="-error"] {
       display: none;
       color: #e53e3e;
       font-size: 13px;
       margin-top: 4px;
     }
-
-    /* Smooth transition on left panel */
     .cta_testimonial-wrapper {
       transition: opacity 0.4s ease, max-width 0.4s ease, padding 0.4s ease;
       overflow: hidden;
     }
-
-    /* Collapse left panel on step 3 */
     .cta_component.step3-active .cta_testimonial-wrapper {
       opacity:        0;
       max-width:      0 !important;
@@ -44,21 +33,15 @@
       pointer-events: none;
       flex:           0 0 0 !important;
     }
-
-    /* Override grid/flex on parent to let form-holder take full width */
     .cta_component.step3-active {
       display:               flex !important;
       grid-template-columns: none !important;
     }
-
-    /* form-holder takes all remaining space */
     .cta_component.step3-active .form-holder {
       flex:      1 1 100% !important;
       width:     100% !important;
       max-width: 100% !important;
     }
-
-    /* Cal embed fills the space */
     .cta_component.step3-active #my-cal-inline-demo-testing {
       width:  100% !important;
       height: 600px !important;
@@ -130,18 +113,12 @@
 -------------------------------------------------------- */
 (function () {
 
-  /* -------------------------------------------------------
-     ⚙️  CONFIG
-  ------------------------------------------------------- */
   const RAILWAY_API_URL   = 'https://gushwork-api-production.up.railway.app';
   const CAL_NAMESPACE     = 'demo-testing';
   const CAL_LINK          = 'team/gushwork/demo';
   const CAL_ELEMENT       = '#my-cal-inline-demo-testing';
   const ENRICHMENT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-  /* -------------------------------------------------------
-     FORM STATE
-  ------------------------------------------------------- */
   const formState = {
     session_id:            '',
     page_url:              '',
@@ -164,7 +141,6 @@
     enriched_company_size: '',
     enriched_industry:     '',
     enriched_linkedin:     '',
-    // Meta ads attribution
     fbc:                   '',
     fbp:                   '',
     landing_page:          '',
@@ -680,24 +656,6 @@
         if (!data.uid) return;
         console.log('[GW] ✅ Booking confirmed:', data.uid);
 
-        const hsEmail = document.getElementById('email');
-        const hsFirst = document.getElementById('first-name');
-        const hsLast  = document.getElementById('last-name');
-        const hsPhone = document.getElementById('phone');
-        const hsCo    = document.getElementById('company');
-        const hsWeb   = document.getElementById('website');
-        if (hsEmail) hsEmail.value = formState.email;
-        if (hsFirst) hsFirst.value = formState.first_name;
-        if (hsLast)  hsLast.value  = formState.last_name;
-        if (hsPhone) hsPhone.value = formState.phone;
-        if (hsCo)    hsCo.value    = formState.company;
-        if (hsWeb)   hsWeb.value   = formState.website;
-        const form = document.querySelector('form');
-        if (form) {
-          form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-          console.log('[GW] HubSpot synthetic submit fired');
-        }
-
         if (isRailwayReady() && !isTestEmail(formState.email)) {
           await fetch(`${RAILWAY_API_URL}/booking-confirmed`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -741,9 +699,6 @@
       formState.sell_to = sellTo;
       localStorage.setItem('gw_email', formState.email);
 
-      // ---- FIX: Mark disqualified BEFORE savePartial so bouncing from
-      //           the disqualified screen doesn't leave disqualified:false in DB.
-      //           handleDisqualifiedNext('b2b') will override back to false if clarified.
       if (sellTo === 'B2C' || sellTo === 'Mixed') {
         formState.disqualified        = true;
         formState.disqualified_reason = 'b2c_or_mixed';
@@ -777,13 +732,11 @@
 
     try {
       if (choice === 'waitlist') {
-        // Already marked disqualified:true in handleStep1Next — just confirm and save
         formState.disqualified        = true;
         formState.disqualified_reason = 'waitlist';
         await savePartial(1);
         showStep('step-disqualified-thanks');
       } else if (choice === 'b2b') {
-        // User clarified they are B2B — override disqualified back to false
         formState.disqualified        = false;
         formState.disqualified_reason = 'b2b_clarified';
         formState.sell_to             = 'B2B (clarified from ' + formState.sell_to + ')';
