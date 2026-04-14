@@ -321,9 +321,10 @@
     let valid = true;
     const email = getField('email');
 
-    if (!email)                    { showError('email-error', 'Email is required.');                  valid = false; }
-    else if (!isValidEmail(email)) { showError('email-error', 'Please enter a valid email address.'); valid = false; }
-    else                             hideError('email-error');
+  if (!email)                       { showError('email-error', 'Email is required.');                              valid = false; }
+else if (!isValidEmail(email))    { showError('email-error', 'Please enter a valid email address.');             valid = false; }
+else if (!isWorkEmail(email))     { showError('email-error', 'Please use your work email (e.g. you@company.com).'); valid = false; }
+else                                hideError('email-error');
 
     const sellTo =
       document.querySelector('input[name="sell-to"]:checked')?.value ||
