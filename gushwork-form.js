@@ -1,11 +1,15 @@
 /* ==========================================================
-   GUSHWORK — MULTI-STEP FORM  v3.9  (POPUP VERSION)
+   GUSHWORK — MULTI-STEP FORM  v4.1  (POPUP VERSION)
    Hosted on GitHub — reference via jsDelivr CDN
    https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@main/gushwork-form.js
 
-   v3.9 changes:
-   - REMOVED: HubSpot synthetic submit on Cal booking (was triggering
-     Webflow form notifications + n8n webhook on every booking)
+   v4.1 changes:
+   - Added prefillHearAboutUs(): auto-prefill + hide "hear about us"
+     cold_email in utm_source → "email"
+     fb/ig in utm_source OR facebook.com/instagram.com in referrer → "meta"
+     linkedin in utm_source OR linkedin.com in referrer → "linkedin"
+   - Fixed referrer capture: now uses sessionStorage fallback so organic
+     social referrers aren't lost on internal navigation (matches /demo version)
 ========================================================== */
 
 /* --------------------------------------------------------
@@ -186,7 +190,12 @@
     formState.utm_campaign = p.get('utm_campaign') || sessionStorage.getItem('gw_utm_campaign') || '';
     formState.utm_content  = p.get('utm_content')  || sessionStorage.getItem('gw_utm_content')  || '';
     formState.utm_term     = p.get('utm_term')     || sessionStorage.getItem('gw_utm_term')     || '';
-    formState.referrer     = document.referrer || '';
+
+    // Fixed: use sessionStorage fallback so referrer isn't lost on internal navigation
+    const currentReferrer = document.referrer || '';
+    const isExternal = currentReferrer && currentReferrer.indexOf('gushwork.ai') === -1;
+    formState.referrer = isExternal ? currentReferrer : sessionStorage.getItem('gw_referrer') || 'direct';
+    if (isExternal) sessionStorage.setItem('gw_referrer', currentReferrer);
 
     if (formState.utm_source)   sessionStorage.setItem('gw_utm_source',   formState.utm_source);
     if (formState.utm_medium)   sessionStorage.setItem('gw_utm_medium',   formState.utm_medium);
@@ -222,6 +231,36 @@
       sessionStorage.setItem('gw_landing_page', window.location.href);
     }
     formState.landing_page = sessionStorage.getItem('gw_landing_page') || '';
+  }
+
+  function prefillHearAboutUs() {
+    const src = (formState.utm_source || '').toLowerCase();
+    const ref = (formState.referrer   || '').toLowerCase();
+
+    let prefill = '';
+    if (src.includes('cold_email')) {
+      prefill = 'email';
+    } else if (
+      src.includes('fb') || src.includes('ig') ||
+      ref.includes('facebook.com') || ref.includes('instagram.com')
+    ) {
+      prefill = 'meta';
+    } else if (
+      src.includes('linkedin') ||
+      ref.includes('linkedin.com')
+    ) {
+      prefill = 'linkedin';
+    }
+
+    if (prefill) {
+      const input = document.getElementById('hear-about-us');
+      if (input) {
+        input.value = prefill;
+        formState.hear_about_us = prefill;
+        const wrapper = input.closest('.field-wrapper');
+        if (wrapper) wrapper.style.display = 'none';
+      }
+    }
   }
 
   function saveSession() {
@@ -321,10 +360,10 @@
     let valid = true;
     const email = getField('email');
 
-  if (!email)                       { showError('email-error', 'Email is required.');                              valid = false; }
-else if (!isValidEmail(email))    { showError('email-error', 'Please enter a valid email address.');             valid = false; }
-else if (!isWorkEmail(email))     { showError('email-error', 'Please use your work email (e.g. you@company.com).'); valid = false; }
-else                                hideError('email-error');
+    if (!email)                    { showError('email-error', 'Email is required.');                                  valid = false; }
+    else if (!isValidEmail(email)) { showError('email-error', 'Please enter a valid email address.');                 valid = false; }
+    else if (!isWorkEmail(email))  { showError('email-error', 'Please use your work email (e.g. you@company.com).'); valid = false; }
+    else                             hideError('email-error');
 
     const sellTo =
       document.querySelector('input[name="sell-to"]:checked')?.value ||
@@ -359,7 +398,12 @@ else                                hideError('email-error');
     else                             hideError('website-error');
 
     const hearAboutUs = getField('hear-about-us');
-    if (!hearAboutUs) { showError('hear-about-us-error', 'Please let us know how you heard about us.'); valid = false; } else hideError('hear-about-us-error');
+    const hearAboutUsHidden = document.getElementById('hear-about-us')
+      ?.closest('.field-wrapper')?.style.display === 'none';
+    if (!hearAboutUs && !hearAboutUsHidden) {
+      showError('hear-about-us-error', 'Please let us know how you heard about us.');
+      valid = false;
+    } else hideError('hear-about-us-error');
 
     return valid;
   }
@@ -853,6 +897,7 @@ else                                hideError('email-error');
     initSession();
     captureUTMs();
     captureMetaAttribution();
+    prefillHearAboutUs();
     saveSession();
     prefillFromURL();
     initPhone();
