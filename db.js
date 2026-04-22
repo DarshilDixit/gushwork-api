@@ -35,6 +35,7 @@ async function initDB() {
         fbc            TEXT,
         fbp            TEXT,
         landing_page   TEXT,
+        previous_page  TEXT,
         -- Enrichment — person
         enriched_title        TEXT,
         enriched_company_size TEXT,
@@ -143,6 +144,8 @@ async function initDB() {
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS fbp TEXT`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS landing_page TEXT`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS utm_term TEXT`,
+      // Journey tracking — new
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS previous_page TEXT`,
       // enrichment_data table new fields
       `ALTER TABLE enrichment_data ADD COLUMN IF NOT EXISTS enriched_city TEXT`,
       `ALTER TABLE enrichment_data ADD COLUMN IF NOT EXISTS enriched_state TEXT`,
