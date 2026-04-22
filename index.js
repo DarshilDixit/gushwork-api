@@ -353,22 +353,22 @@ function buildJourneyBlocks(blocks, d) {
   if (hasAttribution) {
     const src = [d.utm_source, d.utm_medium].filter(Boolean).join(' / ');
     const f = bFields([
-      { label: 'Source',    value: src              },
-      { label: 'Campaign',  value: d.utm_campaign   },
-      { label: 'Content',   value: d.utm_content    },
-      { label: 'Referrer',  value: d.referrer       },
-      { label: 'Prefill',   value: d.prefill_source },
+      { label: 'Source',   value: src              },
+      { label: 'Campaign', value: d.utm_campaign   },
+      { label: 'Content',  value: d.utm_content    },
+      { label: 'Referrer', value: d.referrer       },
+      { label: 'Prefill',  value: d.prefill_source },
     ]);
     if (f) blocks.push(f);
   }
 
   if (hasJourney) {
-    const f = bFields([
-      { label: '🛬 Landing Page',   value: d.landing_page  },
-      { label: '⬅️ Previous Page',  value: d.previous_page },
-      { label: '📄 Form Page',      value: d.page_url      },
-    ]);
-    if (f) blocks.push(f);
+    const parts = [
+      d.landing_page  ? `🛬 *Landing:* ${d.landing_page}`   : null,
+      d.previous_page ? `⬅️ *Previous:* ${d.previous_page}` : null,
+      d.page_url      ? `📄 *Form:* ${d.page_url}`          : null,
+    ].filter(Boolean).join('\n');
+    blocks.push(bContext(parts));
   }
 }
 
