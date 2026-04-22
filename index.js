@@ -106,6 +106,7 @@ async function initAWSTable() {
         fbc                     TEXT,
         fbp                     TEXT,
         landing_page            TEXT,
+        previous_page           TEXT,
         utm_term                TEXT,
         enriched_title          TEXT,
         enriched_company_size   TEXT,
@@ -174,6 +175,8 @@ async function initAWSTable() {
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS fbp TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS landing_page TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS utm_term TEXT`,
+      // Journey tracking — new
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS previous_page TEXT`,
     ];
 
     for (const sql of migrations) {
@@ -198,7 +201,7 @@ function syncToAWS(data) {
        first_name, last_name, phone, company, hear_about_us,
        utm_source, utm_medium, utm_campaign, utm_content,
        referrer, prefill_source,
-       fbc, fbp, landing_page, utm_term,
+       fbc, fbp, landing_page, previous_page, utm_term,
        enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
        enriched_city, enriched_state, enriched_country,
        enriched_seniority, enriched_departments, enriched_email_status,
@@ -207,14 +210,14 @@ function syncToAWS(data) {
        enriched_org_hq, enriched_total_funding, enriched_funding_stage,
        disqualified, disqualified_reason,
        step_reached, completed, submitted_at, loops_sent, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,NOW())
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,NOW())
     ON CONFLICT (session_id) DO UPDATE SET
       page_url                = COALESCE(EXCLUDED.page_url,                gw_form_leads.page_url),
       email                   = COALESCE(EXCLUDED.email,                   gw_form_leads.email),
       website                 = COALESCE(EXCLUDED.website,                 gw_form_leads.website),
       sell_to                 = COALESCE(EXCLUDED.sell_to,                 gw_form_leads.sell_to),
       first_name              = COALESCE(EXCLUDED.first_name,              gw_form_leads.first_name),
-      last_name               = COALESCE(EXCLUDED.last_name,               gw_form_leads.last_name),
+      last_name               = COALESCE(EXCLUDED.last_name,              gw_form_leads.last_name),
       phone                   = COALESCE(EXCLUDED.phone,                   gw_form_leads.phone),
       company                 = COALESCE(EXCLUDED.company,                 gw_form_leads.company),
       hear_about_us           = COALESCE(EXCLUDED.hear_about_us,           gw_form_leads.hear_about_us),
@@ -227,6 +230,7 @@ function syncToAWS(data) {
       fbc                     = COALESCE(EXCLUDED.fbc,                     gw_form_leads.fbc),
       fbp                     = COALESCE(EXCLUDED.fbp,                     gw_form_leads.fbp),
       landing_page            = COALESCE(EXCLUDED.landing_page,            gw_form_leads.landing_page),
+      previous_page           = COALESCE(EXCLUDED.previous_page,           gw_form_leads.previous_page),
       utm_term                = COALESCE(EXCLUDED.utm_term,                gw_form_leads.utm_term),
       enriched_title          = COALESCE(EXCLUDED.enriched_title,          gw_form_leads.enriched_title),
       enriched_company_size   = COALESCE(EXCLUDED.enriched_company_size,   gw_form_leads.enriched_company_size),
@@ -263,19 +267,20 @@ function syncToAWS(data) {
     data.utm_campaign            || null,   data.utm_content               || null,
     data.referrer                || null,   data.prefill_source            || null,
     data.fbc                     || null,   data.fbp                       || null,
-    data.landing_page            || null,   data.utm_term                  || null,
-    data.enriched_title          || null,   data.enriched_company_size     || null,
-    data.enriched_industry       || null,   data.enriched_linkedin         || null,
-    data.enriched_city           || null,   data.enriched_state            || null,
-    data.enriched_country        || null,   data.enriched_seniority        || null,
-    data.enriched_departments    || null,   data.enriched_email_status     || null,
-    data.enriched_founded_year   || null,   data.enriched_annual_revenue   || null,
-    data.enriched_funding_events || null,   data.enriched_alexa_ranking    || null,
-    data.enriched_keywords       || null,   data.enriched_org_hq           || null,
-    data.enriched_total_funding  || null,   data.enriched_funding_stage    || null,
-    data.disqualified            ?? false,  data.disqualified_reason       || null,
-    data.step_reached            || 1,      data.completed                 || false,
-    data.completed ? new Date() : null,     data.loops_sent                || false
+    data.landing_page            || null,   data.previous_page             || null,
+    data.utm_term                || null,   data.enriched_title            || null,
+    data.enriched_company_size   || null,   data.enriched_industry         || null,
+    data.enriched_linkedin       || null,   data.enriched_city             || null,
+    data.enriched_state          || null,   data.enriched_country          || null,
+    data.enriched_seniority      || null,   data.enriched_departments      || null,
+    data.enriched_email_status   || null,   data.enriched_founded_year     || null,
+    data.enriched_annual_revenue || null,   data.enriched_funding_events   || null,
+    data.enriched_alexa_ranking  || null,   data.enriched_keywords         || null,
+    data.enriched_org_hq         || null,   data.enriched_total_funding    || null,
+    data.enriched_funding_stage  || null,   data.disqualified              ?? false,
+    data.disqualified_reason     || null,   data.step_reached              || 1,
+    data.completed               || false,  data.completed ? new Date() : null,
+    data.loops_sent              || false
   ]).then(() => {
     console.log(`[AWS] ✅ Synced session ${data.session_id}`);
   }).catch(err => {
@@ -307,7 +312,7 @@ function sendSlack(blocks, fallbackText) {
   .then(r => r.text().then(t => console.log(`[Slack] ✅ Sent — status: ${r.status} | response: ${t.substring(0, 50)}`)))
   .catch(err => console.warn('[Slack] ⚠ Failed:', err.message));
 }
-function bHeader(text) { return { type: 'header', text: { type: 'plain_text', text, emoji: true } }; }
+function bHeader(text)  { return { type: 'header', text: { type: 'plain_text', text, emoji: true } }; }
 function bSection(text) { return { type: 'section', text: { type: 'mrkdwn', text } }; }
 function bFields(fields) {
   const filtered = fields.filter(f => f.value);
@@ -325,46 +330,94 @@ function buildEnrichmentBlocks(blocks, e) {
   if (!hasPersonInfo && !hasOrgInfo && !hasFunding && !hasLocation && !e.enriched_org_hq && !e.enriched_linkedin) return;
   blocks.push(bDivider()); blocks.push(bSection('*🔍 Enrichment*'));
   if (hasPersonInfo) { const f = bFields([{label:'Title',value:e.enriched_title},{label:'Seniority',value:e.enriched_seniority},{label:'Department',value:e.enriched_departments},{label:'Email Status',value:e.enriched_email_status}]); if(f) blocks.push(f); }
-  if (hasOrgInfo) { const f = bFields([{label:'Company Size',value:e.enriched_company_size},{label:'Industry',value:e.enriched_industry},{label:'Founded',value:e.enriched_founded_year},{label:'Annual Revenue',value:e.enriched_annual_revenue},{label:'Alexa Rank',value:e.enriched_alexa_ranking},{label:'Keywords',value:e.enriched_keywords}]); if(f) blocks.push(f); }
-  if (hasFunding) { blocks.push(bDivider()); const f = bFields([{label:'💰 Total Funding',value:e.enriched_total_funding},{label:'Funding Stage',value:e.enriched_funding_stage},{label:'Funding Events',value:e.enriched_funding_events}]); if(f) blocks.push(f); }
-  if (hasLocation) { const loc = [e.enriched_city,e.enriched_state,e.enriched_country].filter(Boolean).join(', '); const f = bFields([{label:'📍 Person Location',value:loc}]); if(f) blocks.push(f); }
-  if (e.enriched_org_hq) { const f = bFields([{label:'🏢 Company HQ',value:e.enriched_org_hq}]); if(f) blocks.push(f); }
+  if (hasOrgInfo)    { const f = bFields([{label:'Company Size',value:e.enriched_company_size},{label:'Industry',value:e.enriched_industry},{label:'Founded',value:e.enriched_founded_year},{label:'Annual Revenue',value:e.enriched_annual_revenue},{label:'Alexa Rank',value:e.enriched_alexa_ranking},{label:'Keywords',value:e.enriched_keywords}]); if(f) blocks.push(f); }
+  if (hasFunding)    { blocks.push(bDivider()); const f = bFields([{label:'💰 Total Funding',value:e.enriched_total_funding},{label:'Funding Stage',value:e.enriched_funding_stage},{label:'Funding Events',value:e.enriched_funding_events}]); if(f) blocks.push(f); }
+  if (hasLocation)   { const loc = [e.enriched_city,e.enriched_state,e.enriched_country].filter(Boolean).join(', '); const f = bFields([{label:'📍 Person Location',value:loc}]); if(f) blocks.push(f); }
+  if (e.enriched_org_hq)  { const f = bFields([{label:'🏢 Company HQ',value:e.enriched_org_hq}]); if(f) blocks.push(f); }
   if (e.enriched_linkedin) { const f = bFields([{label:'LinkedIn',value:e.enriched_linkedin}]); if(f) blocks.push(f); }
 }
 
 /* --------------------------------------------------------
+   buildJourneyBlocks — shared attribution + journey block
+   for both slackPartial and slackSubmit
+-------------------------------------------------------- */
+function buildJourneyBlocks(blocks, d) {
+  const hasAttribution = d.utm_source || d.utm_medium || d.utm_campaign || d.utm_content || d.referrer;
+  const hasJourney     = d.landing_page || d.previous_page || d.page_url;
+
+  if (!hasAttribution && !hasJourney) return;
+
+  blocks.push(bDivider());
+  blocks.push(bSection('*📊 Attribution & Journey*'));
+
+  if (hasAttribution) {
+    const src = [d.utm_source, d.utm_medium].filter(Boolean).join(' / ');
+    const f = bFields([
+      { label: 'Source',    value: src              },
+      { label: 'Campaign',  value: d.utm_campaign   },
+      { label: 'Content',   value: d.utm_content    },
+      { label: 'Referrer',  value: d.referrer       },
+      { label: 'Prefill',   value: d.prefill_source },
+    ]);
+    if (f) blocks.push(f);
+  }
+
+  if (hasJourney) {
+    const f = bFields([
+      { label: '🛬 Landing Page',   value: d.landing_page  },
+      { label: '⬅️ Previous Page',  value: d.previous_page },
+      { label: '📄 Form Page',      value: d.page_url      },
+    ]);
+    if (f) blocks.push(f);
+  }
+}
+
+/* --------------------------------------------------------
    slackPartial — safety net: never fire for disqualified leads
-   Root fix is on the frontend, but this guards against any
-   future bad data reaching the cron.
 -------------------------------------------------------- */
 function slackPartial(d) {
-  // Hard guard — disqualified leads (B2C/Mixed) must never get Slack notifications
   if (d.disqualified) {
     console.log(`[Slack] ⏭ Skipping partial notification for disqualified lead: ${d.email}`);
     return;
   }
   const label = d.completed ? '⏰ Reached Cal — Did Not Book' : '👻 Dropped at Step 1';
-  const blocks = []; blocks.push(bHeader(label)); blocks.push(bDivider());
-  const lf = bFields([{label:'📧 Email',value:d.email},{label:'🎯 Sells to',value:d.sell_to},{label:'🏢 Company',value:d.company},{label:'🌐 Website',value:d.website}]); if(lf) blocks.push(lf);
+  const blocks = [];
+  blocks.push(bHeader(label));
+  blocks.push(bDivider());
+  const lf = bFields([
+    { label: '📧 Email',   value: d.email    },
+    { label: '🎯 Sells to', value: d.sell_to },
+    { label: '🏢 Company', value: d.company  },
+    { label: '🌐 Website', value: d.website  },
+  ]);
+  if (lf) blocks.push(lf);
   buildEnrichmentBlocks(blocks, d);
-  if (d.utm_source||d.utm_medium||d.utm_campaign||d.utm_content||d.referrer) { blocks.push(bDivider()); blocks.push(bSection('*📊 Attribution*')); const src=[d.utm_source,d.utm_medium].filter(Boolean).join(' / '); const f=bFields([{label:'Source',value:src},{label:'Campaign',value:d.utm_campaign},{label:'Content',value:d.utm_content},{label:'Referrer',value:d.referrer}]); if(f) blocks.push(f); }
-  if (d.page_url) blocks.push(bContext(`📄 ${d.page_url}`));
+  buildJourneyBlocks(blocks, d);
   sendSlack(blocks, label);
 }
 
 function slackSubmit(d) {
-  const name = [d.first_name,d.last_name].filter(Boolean).join(' ');
-  const blocks = []; blocks.push(bHeader('✅ Lead Form Completed')); blocks.push(bDivider());
-  const lf = bFields([{label:'👤 Name',value:name},{label:'📧 Email',value:d.email},{label:'📞 Phone',value:d.phone},{label:'🏢 Company',value:d.company},{label:'🌐 Website',value:d.website},{label:'🎯 Sells to',value:d.sell_to},{label:'💬 Heard about us',value:d.hear_about_us}]); if(lf) blocks.push(lf);
+  const name = [d.first_name, d.last_name].filter(Boolean).join(' ');
+  const blocks = [];
+  blocks.push(bHeader('✅ Lead Form Completed'));
+  blocks.push(bDivider());
+  const lf = bFields([
+    { label: '👤 Name',             value: name            },
+    { label: '📧 Email',            value: d.email         },
+    { label: '📞 Phone',            value: d.phone         },
+    { label: '🏢 Company',          value: d.company       },
+    { label: '🌐 Website',          value: d.website       },
+    { label: '🎯 Sells to',         value: d.sell_to       },
+    { label: '💬 Heard about us',   value: d.hear_about_us },
+  ]);
+  if (lf) blocks.push(lf);
   buildEnrichmentBlocks(blocks, d);
-  if (d.utm_source||d.utm_medium||d.utm_campaign||d.utm_content||d.referrer||d.prefill_source) { blocks.push(bDivider()); blocks.push(bSection('*📊 Attribution*')); const src=[d.utm_source,d.utm_medium].filter(Boolean).join(' / '); const f=bFields([{label:'Source',value:src},{label:'Campaign',value:d.utm_campaign},{label:'Content',value:d.utm_content},{label:'Referrer',value:d.referrer},{label:'Prefill',value:d.prefill_source}]); if(f) blocks.push(f); }
-  if (d.page_url) blocks.push(bContext(`📄 ${d.page_url}`));
+  buildJourneyBlocks(blocks, d);
   sendSlack(blocks, `✅ Lead Form Completed — ${d.email}`);
 }
 
 /* --------------------------------------------------------
-   FOLLOW-UP EMAIL (replaces Loops)
-   Sends from growth@gushwork.ai via Gmail SMTP
+   FOLLOW-UP EMAIL (Gmail SMTP)
 -------------------------------------------------------- */
 const nodemailer = require('nodemailer');
 
@@ -388,15 +441,15 @@ async function sendFollowUpEmail(email, firstName) {
   }
   if (!email) return;
 
-  const name = firstName || 'there';
+  const name    = firstName || 'there';
   const subject = 'Re: Gushwork Demo';
-  const text = `Hey ${name}, Swapnil from Gushwork here. I saw you filled out the form to book a call with us but didn't end up finding a time to talk.\n\nWere there no available times for you?`;
+  const text    = `Hey ${name}, Swapnil from Gushwork here. I saw you filled out the form to book a call with us but didn't end up finding a time to talk.\n\nWere there no available times for you?`;
 
   try {
     const transport = getGmailTransport();
-    const result = await transport.sendMail({
-      from: `"Swapnil from Gushwork" <${process.env.GMAIL_USER}>`,
-      to: email,
+    const result    = await transport.sendMail({
+      from:    `"Swapnil from Gushwork" <${process.env.GMAIL_USER}>`,
+      to:      email,
       subject,
       text,
     });
@@ -410,8 +463,8 @@ function formatRevenue(amount) {
   if (!amount) return null; const n = parseFloat(amount);
   if (isNaN(n)) return amount.toString();
   if (n >= 1_000_000_000) return `$${(n/1_000_000_000).toFixed(1)}B USD`;
-  if (n >= 1_000_000) return `$${(n/1_000_000).toFixed(1)}M USD`;
-  if (n >= 1_000) return `$${(n/1_000).toFixed(0)}K USD`;
+  if (n >= 1_000_000)     return `$${(n/1_000_000).toFixed(1)}M USD`;
+  if (n >= 1_000)         return `$${(n/1_000).toFixed(0)}K USD`;
   return `$${n} USD`;
 }
 
@@ -498,7 +551,7 @@ app.get('/monitor/leads', async (req, res) => {
   const page   = Math.max(1, parseInt(req.query.page) || 1);
   const limit  = 25;
   const offset = (page - 1) * limit;
-  const stage  = req.query.stage || 'all';
+  const stage    = req.query.stage    || 'all';
   const dateFrom = req.query.dateFrom || null;
   const dateTo   = req.query.dateTo   || null;
   const search   = req.query.search   || null;
@@ -537,8 +590,9 @@ app.get('/monitor/leads', async (req, res) => {
         l.completed, l.booking_uid, l.booked_at, l.start_time, l.end_time,
         l.disqualified, l.disqualified_reason, l.step_reached,
         l.loops_sent, l.created_at, l.submitted_at, l.page_url,
+        l.landing_page, l.previous_page,
         l.utm_source, l.utm_medium, l.utm_campaign, l.utm_term, l.referrer, l.prefill_source,
-        l.fbc, l.fbp, l.landing_page,
+        l.fbc, l.fbp,
         COALESCE(l.enriched_title, e.enriched_title) AS enriched_title,
         COALESCE(l.enriched_company_size, e.enriched_company_size) AS enriched_company_size,
         COALESCE(l.enriched_industry, e.enriched_industry) AS enriched_industry,
@@ -576,8 +630,6 @@ app.get('/monitor/leads', async (req, res) => {
 
 /* --------------------------------------------------------
    GET /monitor  — full dashboard HTML page
-   Uses string concatenation (not template literals) to avoid
-   syntax errors in inline JS
 -------------------------------------------------------- */
 app.get('/monitor', (req, res) => {
   const token = process.env.MONITOR_TOKEN;
@@ -724,7 +776,47 @@ app.get('/monitor', (req, res) => {
   'function renderChart(leads){var counts={};(leads||[]).forEach(function(l){var k=new Date(l.created_at).toLocaleDateString("en-IN",{timeZone:"Asia/Kolkata",month:"short",day:"numeric"});counts[k]=(counts[k]||0)+1;});var labels=Object.keys(counts).reverse(),data=Object.values(counts).reverse();if(lChart)lChart.destroy();var ctx=document.getElementById("lchart").getContext("2d");lChart=new Chart(ctx,{type:"bar",data:{labels:labels,datasets:[{data:data,backgroundColor:"#818cf8",borderRadius:4,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{stepSize:1,color:"#aaa"},grid:{color:"#f0f0f0"}},x:{ticks:{color:"#aaa",maxRotation:45,autoSkip:false},grid:{display:false}}}}});}' +
   'function stageBadge(l){if(l.booking_uid)return"<span class=\\"badge bg\\">Booked</span>";if(l.disqualified)return"<span class=\\"badge br\\">Disqualified</span>";if(l.completed)return"<span class=\\"badge bb\\">Completed</span>";return"<span class=\\"badge ba\\">Step 1</span>";}' +
   'function enrichBadge(l){return(l.enriched_title||l.enriched_company_size||l.e_company)?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>";}' +
-  'function enrichPanel(l){var loc=[l.enriched_city,l.enriched_state,l.enriched_country].filter(Boolean).join(", ");var fields=[{lb:"Title",v:l.enriched_title},{lb:"Seniority",v:l.enriched_seniority},{lb:"Department",v:l.enriched_departments},{lb:"Email status",v:l.enriched_email_status},{lb:"Company",v:l.company||l.e_company},{lb:"Company size",v:l.enriched_company_size},{lb:"Industry",v:l.enriched_industry},{lb:"Founded",v:l.enriched_founded_year},{lb:"Annual revenue",v:l.enriched_annual_revenue},{lb:"Total funding",v:l.enriched_total_funding},{lb:"Funding stage",v:l.enriched_funding_stage},{lb:"Funding events",v:l.enriched_funding_events},{lb:"Alexa rank",v:l.enriched_alexa_ranking},{lb:"Keywords",v:l.enriched_keywords},{lb:"Person location",v:loc||null},{lb:"Company HQ",v:l.enriched_org_hq},{lb:"LinkedIn",v:l.enriched_linkedin,lnk:true},{lb:"Phone",v:l.e_phone||l.phone},{lb:"Website",v:l.website,lnk:true},{lb:"Hear about us",v:l.hear_about_us},{lb:"UTM source",v:l.utm_source},{lb:"UTM medium",v:l.utm_medium},{lb:"UTM campaign",v:l.utm_campaign},{lb:"Referrer",v:l.referrer},{lb:"Prefill",v:l.prefill_source},{lb:"UTM term",v:l.utm_term},{lb:"Landing page",v:l.landing_page,lnk:true},{lb:"Meta fbc",v:l.fbc},{lb:"Meta fbp",v:l.fbp},{lb:"Page URL",v:l.page_url,lnk:true},{lb:"Submitted",v:ist(l.submitted_at)},{lb:"Booked at",v:ist(l.booked_at)},{lb:"Meeting",v:l.start_time?ist(l.start_time):null},{lb:"Email sent",v:l.loops_sent?"Yes":"No"},{lb:"Session ID",v:l.session_id,mono:true},{lb:"Enriched at",v:ist(l.enriched_at)}].filter(function(f){return f.v;});if(!fields.length)return"<div style=\\"color:#999;font-size:12px\\">No enrichment data.</div>";return"<div class=\\"egrid\\">"+fields.map(function(f){var val=f.lnk&&f.v?"<a href=\\"" +(f.v.startsWith("http")?"":"https://")+esc(f.v)+"\\" target=\\"_blank\\">"+esc(f.v)+"</a>":f.mono?"<code style=\\"font-size:10px\\">"+esc(f.v)+"</code>":esc(f.v);return"<div class=\\"ef\\"><div class=\\"efl\\">"+f.lb+"</div><div class=\\"efv\\">"+val+"</div></div>";}).join("")+"</div>";}' +
+  'function enrichPanel(l){var loc=[l.enriched_city,l.enriched_state,l.enriched_country].filter(Boolean).join(", ");var fields=[' +
+  '{lb:"Title",v:l.enriched_title},' +
+  '{lb:"Seniority",v:l.enriched_seniority},' +
+  '{lb:"Department",v:l.enriched_departments},' +
+  '{lb:"Email status",v:l.enriched_email_status},' +
+  '{lb:"Company",v:l.company||l.e_company},' +
+  '{lb:"Company size",v:l.enriched_company_size},' +
+  '{lb:"Industry",v:l.enriched_industry},' +
+  '{lb:"Founded",v:l.enriched_founded_year},' +
+  '{lb:"Annual revenue",v:l.enriched_annual_revenue},' +
+  '{lb:"Total funding",v:l.enriched_total_funding},' +
+  '{lb:"Funding stage",v:l.enriched_funding_stage},' +
+  '{lb:"Funding events",v:l.enriched_funding_events},' +
+  '{lb:"Alexa rank",v:l.enriched_alexa_ranking},' +
+  '{lb:"Keywords",v:l.enriched_keywords},' +
+  '{lb:"Person location",v:loc||null},' +
+  '{lb:"Company HQ",v:l.enriched_org_hq},' +
+  '{lb:"LinkedIn",v:l.enriched_linkedin,lnk:true},' +
+  '{lb:"Phone",v:l.e_phone||l.phone},' +
+  '{lb:"Website",v:l.website,lnk:true},' +
+  '{lb:"Hear about us",v:l.hear_about_us},' +
+  '{lb:"UTM source",v:l.utm_source},' +
+  '{lb:"UTM medium",v:l.utm_medium},' +
+  '{lb:"UTM campaign",v:l.utm_campaign},' +
+  '{lb:"Referrer",v:l.referrer},' +
+  '{lb:"Prefill",v:l.prefill_source},' +
+  '{lb:"UTM term",v:l.utm_term},' +
+  '{lb:"\\uD83D\\uDEEC Landing Page",v:l.landing_page,lnk:true},' +
+  '{lb:"\\u2B05\\uFE0F Previous Page",v:l.previous_page,lnk:true},' +
+  '{lb:"\\uD83D\\uDCC4 Form Page",v:l.page_url,lnk:true},' +
+  '{lb:"Meta fbc",v:l.fbc},' +
+  '{lb:"Meta fbp",v:l.fbp},' +
+  '{lb:"Submitted",v:ist(l.submitted_at)},' +
+  '{lb:"Booked at",v:ist(l.booked_at)},' +
+  '{lb:"Meeting",v:l.start_time?ist(l.start_time):null},' +
+  '{lb:"Email sent",v:l.loops_sent?"Yes":"No"},' +
+  '{lb:"Session ID",v:l.session_id,mono:true},' +
+  '{lb:"Enriched at",v:ist(l.enriched_at)}' +
+  '].filter(function(f){return f.v;});' +
+  'if(!fields.length)return"<div style=\\"color:#999;font-size:12px\\">No enrichment data.</div>";' +
+  'return"<div class=\\"egrid\\">"+fields.map(function(f){var val=f.lnk&&f.v?"<a href=\\""+(f.v.startsWith("http")?"":"https://")+esc(f.v)+"\\" target=\\"_blank\\">"+esc(f.v)+"</a>":f.mono?"<code style=\\"font-size:10px\\">"+esc(f.v)+"</code>":esc(f.v);return"<div class=\\"ef\\"><div class=\\"efl\\">"+f.lb+"</div><div class=\\"efv\\">"+val+"</div></div>";}).join("")+"</div>";}' +
   'function debounce(){clearTimeout(stimer);stimer=setTimeout(function(){loadLeads(1);},400);}' +
   'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("ffrom").value="";document.getElementById("fto").value="";loadLeads(1);}' +
   'function toggleRow(sid){var row=document.getElementById("er-"+sid);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=row.previousElementSibling&&row.previousElementSibling.querySelector(".xbtn");if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";}' +
@@ -767,11 +859,11 @@ app.post('/verify-email', async (req, res) => {
   if (!apiKey) { console.warn('[ELV] ELV_API_KEY not set — skipping, allowing through'); return res.json({ valid: true, status: 'skipped' }); }
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    const url = `https://apps.emaillistverify.com/api/verifyEmail?secret=${apiKey}&email=${encodeURIComponent(email)}`;
-    const response = await fetch(url, { signal: controller.signal });
+    const timeout    = setTimeout(() => controller.abort(), 8000);
+    const url        = `https://apps.emaillistverify.com/api/verifyEmail?secret=${apiKey}&email=${encodeURIComponent(email)}`;
+    const response   = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
-    const text = await response.text();
+    const text   = await response.text();
     const status = text.trim().toLowerCase();
     console.log(`[ELV] ${email} → "${status}"`);
     const allowedStatuses = ['ok', 'catch_all', 'ok_for_all', 'antispam_system', 'accept_all'];
@@ -795,14 +887,14 @@ app.post('/session', async (req, res) => {
    POST /enrich
 -------------------------------------------------------- */
 app.post('/enrich', async (req, res) => {
-  const email = (req.body.email || '').toString().trim().slice(0, 254).toLowerCase();
+  const email      = (req.body.email      || '').toString().trim().slice(0, 254).toLowerCase();
   const session_id = (req.body.session_id || '').toString().trim().slice(0, 100);
   if (!email || !session_id) return res.status(400).json({ error: 'email and session_id required' });
   const personalDomains = ['gmail.com','yahoo.com','hotmail.com','outlook.com','icloud.com','protonmail.com','aol.com','mail.com','yahoo.in','rediffmail.com','ymail.com','live.com','msn.com','me.com','mac.com','googlemail.com'];
   const domain = email.split('@')[1]?.toLowerCase() || '';
   if (personalDomains.includes(domain)) { console.log(`[/enrich] Skipping Apollo for personal email: ${email}`); return res.json({ first_name:'',last_name:'',title:'',company:'',company_size:'',industry:'',linkedin_url:'',website:'' }); }
   try {
-    const apolloRes = await fetch('https://api.apollo.io/api/v1/people/match', { method:'POST', headers:{'Content-Type':'application/json','Cache-Control':'no-cache','X-Api-Key':process.env.APOLLO_API_KEY}, body:JSON.stringify({email,reveal_personal_emails:false,reveal_phone_number:false}) });
+    const apolloRes  = await fetch('https://api.apollo.io/api/v1/people/match', { method:'POST', headers:{'Content-Type':'application/json','Cache-Control':'no-cache','X-Api-Key':process.env.APOLLO_API_KEY}, body:JSON.stringify({email,reveal_personal_emails:false,reveal_phone_number:false}) });
     const apolloData = await apolloRes.json();
     const person = apolloData.person || {}; const org = person.organization || {};
     const city=person.city||null, state=person.state||null, country=person.country||null;
@@ -812,11 +904,11 @@ app.post('/enrich', async (req, res) => {
     const departments = Array.isArray(deptRaw)&&deptRaw.length>0 ? deptRaw.join(', ') : null;
     const emailStatus=person.email_status||null, foundedYear=org.founded_year?.toString()||null;
     const annualRevenue = org.annual_revenue_printed ? `$${org.annual_revenue_printed} USD` : (org.annual_revenue ? formatRevenue(org.annual_revenue) : null);
-    const totalFunding = org.total_funding_printed ? `$${org.total_funding_printed}` : null;
-    const fundingStage = org.latest_funding_stage || null;
+    const totalFunding  = org.total_funding_printed ? `$${org.total_funding_printed}` : null;
+    const fundingStage  = org.latest_funding_stage || null;
     const fundingEvents = Array.isArray(org.funding_events)&&org.funding_events.length>0 ? org.funding_events.map(f=>[f.date?f.date.substring(0,10):'',f.type||f.series||'',f.amount?`${f.currency||'$'}${f.amount}`:''].filter(Boolean).join(' ')).join(' | ') : null;
-    const alexaRanking = org.alexa_ranking?.toString() || null;
-    const keywords = Array.isArray(org.keywords) ? org.keywords.slice(0,8).join(', ') : (org.keywords||null);
+    const alexaRanking  = org.alexa_ranking?.toString() || null;
+    const keywords      = Array.isArray(org.keywords) ? org.keywords.slice(0,8).join(', ') : (org.keywords||null);
     console.log(`[/enrich] Apollo — seniority: ${seniority} | dept: ${departments} | revenue: ${annualRevenue} | funding: ${totalFunding} (${fundingStage}) | location: ${city||country||'n/a'} | org HQ: ${orgHQ}`);
     await pool.query(`
       INSERT INTO enrichment_data (session_id,email,enriched_first_name,enriched_last_name,enriched_title,enriched_company,enriched_company_size,enriched_industry,enriched_linkedin,enriched_city,enriched_state,enriched_country,enriched_seniority,enriched_departments,enriched_email_status,enriched_founded_year,enriched_annual_revenue,enriched_funding_events,enriched_alexa_ranking,enriched_keywords,enriched_org_hq,enriched_total_funding,enriched_funding_stage,raw_response)
@@ -832,48 +924,82 @@ app.post('/enrich', async (req, res) => {
    POST /partial  — with enrichment sync
 -------------------------------------------------------- */
 app.post('/partial', async (req, res) => {
-  const session_id=(req.body.session_id||'').toString().trim().slice(0,100), page_url=(req.body.page_url||'').toString().trim().slice(0,500), email=(req.body.email||'').toString().trim().slice(0,254).toLowerCase(), website=(req.body.website||'').toString().trim().slice(0,500), sell_to=(req.body.sell_to||'').toString().trim().slice(0,50), first_name=(req.body.first_name||'').toString().trim().slice(0,100), last_name=(req.body.last_name||'').toString().trim().slice(0,100), phone=(req.body.phone||'').toString().trim().slice(0,30), company=(req.body.company||'').toString().trim().slice(0,200), hear_about_us=(req.body.hear_about_us||'').toString().trim().slice(0,200), utm_source=(req.body.utm_source||'').toString().trim().slice(0,100), utm_medium=(req.body.utm_medium||'').toString().trim().slice(0,100), utm_campaign=(req.body.utm_campaign||'').toString().trim().slice(0,100), utm_content=(req.body.utm_content||'').toString().trim().slice(0,100), utm_term=(req.body.utm_term||'').toString().trim().slice(0,100), referrer=(req.body.referrer||'').toString().trim().slice(0,500), prefill_source=(req.body.prefill_source||'').toString().trim().slice(0,100), fbc=(req.body.fbc||'').toString().trim().slice(0,500), fbp=(req.body.fbp||'').toString().trim().slice(0,200), landing_page=(req.body.landing_page||'').toString().trim().slice(0,500), enriched_title=(req.body.enriched_title||'').toString().trim().slice(0,200), enriched_company_size=(req.body.enriched_company_size||'').toString().trim().slice(0,50), enriched_industry=(req.body.enriched_industry||'').toString().trim().slice(0,200), enriched_linkedin=(req.body.enriched_linkedin||'').toString().trim().slice(0,500), disqualified=req.body.disqualified === true || req.body.disqualified === 'true', disqualified_reason=(req.body.disqualified_reason||'').toString().trim().slice(0,100), step_reached=parseInt(req.body.step_reached)||1;
+  const session_id         = (req.body.session_id         || '').toString().trim().slice(0, 100);
+  const page_url           = (req.body.page_url           || '').toString().trim().slice(0, 500);
+  const email              = (req.body.email              || '').toString().trim().slice(0, 254).toLowerCase();
+  const website            = (req.body.website            || '').toString().trim().slice(0, 500);
+  const sell_to            = (req.body.sell_to            || '').toString().trim().slice(0, 50);
+  const first_name         = (req.body.first_name         || '').toString().trim().slice(0, 100);
+  const last_name          = (req.body.last_name          || '').toString().trim().slice(0, 100);
+  const phone              = (req.body.phone              || '').toString().trim().slice(0, 30);
+  const company            = (req.body.company            || '').toString().trim().slice(0, 200);
+  const hear_about_us      = (req.body.hear_about_us      || '').toString().trim().slice(0, 200);
+  const utm_source         = (req.body.utm_source         || '').toString().trim().slice(0, 100);
+  const utm_medium         = (req.body.utm_medium         || '').toString().trim().slice(0, 100);
+  const utm_campaign       = (req.body.utm_campaign       || '').toString().trim().slice(0, 100);
+  const utm_content        = (req.body.utm_content        || '').toString().trim().slice(0, 100);
+  const utm_term           = (req.body.utm_term           || '').toString().trim().slice(0, 100);
+  const referrer           = (req.body.referrer           || '').toString().trim().slice(0, 500);
+  const prefill_source     = (req.body.prefill_source     || '').toString().trim().slice(0, 100);
+  const fbc                = (req.body.fbc                || '').toString().trim().slice(0, 500);
+  const fbp                = (req.body.fbp                || '').toString().trim().slice(0, 200);
+  const landing_page       = (req.body.landing_page       || '').toString().trim().slice(0, 500);
+  const previous_page      = (req.body.previous_page      || '').toString().trim().slice(0, 500);
+  const enriched_title     = (req.body.enriched_title     || '').toString().trim().slice(0, 200);
+  const enriched_company_size = (req.body.enriched_company_size || '').toString().trim().slice(0, 50);
+  const enriched_industry  = (req.body.enriched_industry  || '').toString().trim().slice(0, 200);
+  const enriched_linkedin  = (req.body.enriched_linkedin  || '').toString().trim().slice(0, 500);
+  const disqualified       = req.body.disqualified === true || req.body.disqualified === 'true';
+  const disqualified_reason = (req.body.disqualified_reason || '').toString().trim().slice(0, 100);
+  const step_reached       = parseInt(req.body.step_reached) || 1;
+
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
+
   try {
     await pool.query(`
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,false,NOW())
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW())
       ON CONFLICT (session_id) DO UPDATE SET
-        page_url=COALESCE(EXCLUDED.page_url,leads.page_url),
-        email=COALESCE(EXCLUDED.email,leads.email),
-        website=COALESCE(EXCLUDED.website,leads.website),
-        sell_to=COALESCE(EXCLUDED.sell_to,leads.sell_to),
-        first_name=COALESCE(EXCLUDED.first_name,leads.first_name),
-        last_name=COALESCE(EXCLUDED.last_name,leads.last_name),
-        phone=COALESCE(EXCLUDED.phone,leads.phone),
-        company=COALESCE(EXCLUDED.company,leads.company),
-        hear_about_us=COALESCE(EXCLUDED.hear_about_us,leads.hear_about_us),
-        utm_source=COALESCE(EXCLUDED.utm_source,leads.utm_source),
-        utm_medium=COALESCE(EXCLUDED.utm_medium,leads.utm_medium),
-        utm_campaign=COALESCE(EXCLUDED.utm_campaign,leads.utm_campaign),
-        utm_content=COALESCE(EXCLUDED.utm_content,leads.utm_content),
-        utm_term=COALESCE(EXCLUDED.utm_term,leads.utm_term),
-        referrer=COALESCE(EXCLUDED.referrer,leads.referrer),
-        prefill_source=COALESCE(EXCLUDED.prefill_source,leads.prefill_source),
-        fbc=COALESCE(EXCLUDED.fbc,leads.fbc),
-        fbp=COALESCE(EXCLUDED.fbp,leads.fbp),
-        landing_page=COALESCE(EXCLUDED.landing_page,leads.landing_page),
-        enriched_title=COALESCE(EXCLUDED.enriched_title,leads.enriched_title),
-        enriched_company_size=COALESCE(EXCLUDED.enriched_company_size,leads.enriched_company_size),
-        enriched_industry=COALESCE(EXCLUDED.enriched_industry,leads.enriched_industry),
-        enriched_linkedin=COALESCE(EXCLUDED.enriched_linkedin,leads.enriched_linkedin),
-        disqualified=EXCLUDED.disqualified,
-        disqualified_reason=COALESCE(EXCLUDED.disqualified_reason,leads.disqualified_reason),
-        step_reached=GREATEST(EXCLUDED.step_reached,leads.step_reached),
-        updated_at=NOW()
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hear_about_us||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached]);
+        page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
+        email                 = COALESCE(EXCLUDED.email,                 leads.email),
+        website               = COALESCE(EXCLUDED.website,               leads.website),
+        sell_to               = COALESCE(EXCLUDED.sell_to,               leads.sell_to),
+        first_name            = COALESCE(EXCLUDED.first_name,            leads.first_name),
+        last_name             = COALESCE(EXCLUDED.last_name,             leads.last_name),
+        phone                 = COALESCE(EXCLUDED.phone,                 leads.phone),
+        company               = COALESCE(EXCLUDED.company,               leads.company),
+        hear_about_us         = COALESCE(EXCLUDED.hear_about_us,         leads.hear_about_us),
+        utm_source            = COALESCE(EXCLUDED.utm_source,            leads.utm_source),
+        utm_medium            = COALESCE(EXCLUDED.utm_medium,            leads.utm_medium),
+        utm_campaign          = COALESCE(EXCLUDED.utm_campaign,          leads.utm_campaign),
+        utm_content           = COALESCE(EXCLUDED.utm_content,           leads.utm_content),
+        utm_term              = COALESCE(EXCLUDED.utm_term,              leads.utm_term),
+        referrer              = COALESCE(EXCLUDED.referrer,              leads.referrer),
+        prefill_source        = COALESCE(EXCLUDED.prefill_source,        leads.prefill_source),
+        fbc                   = COALESCE(EXCLUDED.fbc,                   leads.fbc),
+        fbp                   = COALESCE(EXCLUDED.fbp,                   leads.fbp),
+        landing_page          = COALESCE(EXCLUDED.landing_page,          leads.landing_page),
+        previous_page         = COALESCE(EXCLUDED.previous_page,         leads.previous_page),
+        enriched_title        = COALESCE(EXCLUDED.enriched_title,        leads.enriched_title),
+        enriched_company_size = COALESCE(EXCLUDED.enriched_company_size, leads.enriched_company_size),
+        enriched_industry     = COALESCE(EXCLUDED.enriched_industry,     leads.enriched_industry),
+        enriched_linkedin     = COALESCE(EXCLUDED.enriched_linkedin,     leads.enriched_linkedin),
+        disqualified          = EXCLUDED.disqualified,
+        disqualified_reason   = COALESCE(EXCLUDED.disqualified_reason,   leads.disqualified_reason),
+        step_reached          = GREATEST(EXCLUDED.step_reached,          leads.step_reached),
+        updated_at            = NOW()
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hear_about_us||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached]);
+
     // Sync enrichment fields from enrichment_data → leads
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/partial] Enrichment sync failed (non-blocking):', err.message));
-    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false});
+
+    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false});
+
     // Push StartTrial to Meta CAPI for B2B leads only (non-blocking)
     if (!disqualified) {
       pushStartTrialToMeta({session_id,email,sell_to,page_url,fbc,fbp,landing_page}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => console.warn('[/partial] Meta CAPI StartTrial failed (non-blocking):', err.message));
     }
+
     console.log(`[/partial] ✅ Saved session ${session_id} | step ${step_reached} | disqualified: ${disqualified} | email ${email}`);
     res.json({ ok: true });
   } catch (err) { console.error('[/partial]', err.message); res.status(500).json({ error: 'Partial save failed' }); }
@@ -883,55 +1009,96 @@ app.post('/partial', async (req, res) => {
    POST /submit  — with enrichment sync
 -------------------------------------------------------- */
 app.post('/submit', async (req, res) => {
-  const session_id=(req.body.session_id||'').toString().trim().slice(0,100), page_url=(req.body.page_url||'').toString().trim().slice(0,500), email=(req.body.email||'').toString().trim().slice(0,254).toLowerCase(), website=(req.body.website||'').toString().trim().slice(0,500), sell_to=(req.body.sell_to||'').toString().trim().slice(0,50), first_name=(req.body.first_name||'').toString().trim().slice(0,100), last_name=(req.body.last_name||'').toString().trim().slice(0,100), phone=(req.body.phone||'').toString().trim().slice(0,30), company=(req.body.company||'').toString().trim().slice(0,200), hear_about_us=(req.body.hear_about_us||'').toString().trim().slice(0,200), utm_source=(req.body.utm_source||'').toString().trim().slice(0,100), utm_medium=(req.body.utm_medium||'').toString().trim().slice(0,100), utm_campaign=(req.body.utm_campaign||'').toString().trim().slice(0,100), utm_content=(req.body.utm_content||'').toString().trim().slice(0,100), utm_term=(req.body.utm_term||'').toString().trim().slice(0,100), referrer=(req.body.referrer||'').toString().trim().slice(0,500), prefill_source=(req.body.prefill_source||'').toString().trim().slice(0,100), fbc=(req.body.fbc||'').toString().trim().slice(0,500), fbp=(req.body.fbp||'').toString().trim().slice(0,200), landing_page=(req.body.landing_page||'').toString().trim().slice(0,500), enriched_title=(req.body.enriched_title||'').toString().trim().slice(0,200), enriched_company_size=(req.body.enriched_company_size||'').toString().trim().slice(0,50), enriched_industry=(req.body.enriched_industry||'').toString().trim().slice(0,200), enriched_linkedin=(req.body.enriched_linkedin||'').toString().trim().slice(0,500), disqualified=req.body.disqualified === true || req.body.disqualified === 'true', disqualified_reason=(req.body.disqualified_reason||'').toString().trim().slice(0,100);
+  const session_id         = (req.body.session_id         || '').toString().trim().slice(0, 100);
+  const page_url           = (req.body.page_url           || '').toString().trim().slice(0, 500);
+  const email              = (req.body.email              || '').toString().trim().slice(0, 254).toLowerCase();
+  const website            = (req.body.website            || '').toString().trim().slice(0, 500);
+  const sell_to            = (req.body.sell_to            || '').toString().trim().slice(0, 50);
+  const first_name         = (req.body.first_name         || '').toString().trim().slice(0, 100);
+  const last_name          = (req.body.last_name          || '').toString().trim().slice(0, 100);
+  const phone              = (req.body.phone              || '').toString().trim().slice(0, 30);
+  const company            = (req.body.company            || '').toString().trim().slice(0, 200);
+  const hear_about_us      = (req.body.hear_about_us      || '').toString().trim().slice(0, 200);
+  const utm_source         = (req.body.utm_source         || '').toString().trim().slice(0, 100);
+  const utm_medium         = (req.body.utm_medium         || '').toString().trim().slice(0, 100);
+  const utm_campaign       = (req.body.utm_campaign       || '').toString().trim().slice(0, 100);
+  const utm_content        = (req.body.utm_content        || '').toString().trim().slice(0, 100);
+  const utm_term           = (req.body.utm_term           || '').toString().trim().slice(0, 100);
+  const referrer           = (req.body.referrer           || '').toString().trim().slice(0, 500);
+  const prefill_source     = (req.body.prefill_source     || '').toString().trim().slice(0, 100);
+  const fbc                = (req.body.fbc                || '').toString().trim().slice(0, 500);
+  const fbp                = (req.body.fbp                || '').toString().trim().slice(0, 200);
+  const landing_page       = (req.body.landing_page       || '').toString().trim().slice(0, 500);
+  const previous_page      = (req.body.previous_page      || '').toString().trim().slice(0, 500);
+  const enriched_title     = (req.body.enriched_title     || '').toString().trim().slice(0, 200);
+  const enriched_company_size = (req.body.enriched_company_size || '').toString().trim().slice(0, 50);
+  const enriched_industry  = (req.body.enriched_industry  || '').toString().trim().slice(0, 200);
+  const enriched_linkedin  = (req.body.enriched_linkedin  || '').toString().trim().slice(0, 500);
+  const disqualified       = req.body.disqualified === true || req.body.disqualified === 'true';
+  const disqualified_reason = (req.body.disqualified_reason || '').toString().trim().slice(0, 100);
+
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
+
   try {
-    const existing = await pool.query('SELECT completed FROM leads WHERE session_id=$1',[session_id]);
+    const existing        = await pool.query('SELECT completed FROM leads WHERE session_id=$1', [session_id]);
     const alreadyCompleted = existing.rows[0]?.completed === true;
-    const enrichRow = await pool.query('SELECT * FROM enrichment_data WHERE session_id=$1',[session_id]);
-    const enrich = enrichRow.rows[0] || {};
+    const enrichRow       = await pool.query('SELECT * FROM enrichment_data WHERE session_id=$1', [session_id]);
+    const enrich          = enrichRow.rows[0] || {};
+
     await pool.query(`
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,2,true,NOW(),NOW())
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW())
       ON CONFLICT (session_id) DO UPDATE SET
-        page_url=COALESCE(EXCLUDED.page_url,leads.page_url),
-        email=COALESCE(EXCLUDED.email,leads.email),
-        website=COALESCE(EXCLUDED.website,leads.website),
-        sell_to=COALESCE(EXCLUDED.sell_to,leads.sell_to),
-        first_name=COALESCE(EXCLUDED.first_name,leads.first_name),
-        last_name=COALESCE(EXCLUDED.last_name,leads.last_name),
-        phone=COALESCE(EXCLUDED.phone,leads.phone),
-        company=COALESCE(EXCLUDED.company,leads.company),
-        hear_about_us=COALESCE(EXCLUDED.hear_about_us,leads.hear_about_us),
-        utm_source=COALESCE(EXCLUDED.utm_source,leads.utm_source),
-        utm_medium=COALESCE(EXCLUDED.utm_medium,leads.utm_medium),
-        utm_campaign=COALESCE(EXCLUDED.utm_campaign,leads.utm_campaign),
-        utm_content=COALESCE(EXCLUDED.utm_content,leads.utm_content),
-        utm_term=COALESCE(EXCLUDED.utm_term,leads.utm_term),
-        referrer=COALESCE(EXCLUDED.referrer,leads.referrer),
-        prefill_source=COALESCE(EXCLUDED.prefill_source,leads.prefill_source),
-        fbc=COALESCE(EXCLUDED.fbc,leads.fbc),
-        fbp=COALESCE(EXCLUDED.fbp,leads.fbp),
-        landing_page=COALESCE(EXCLUDED.landing_page,leads.landing_page),
-        enriched_title=COALESCE(EXCLUDED.enriched_title,leads.enriched_title),
-        enriched_company_size=COALESCE(EXCLUDED.enriched_company_size,leads.enriched_company_size),
-        enriched_industry=COALESCE(EXCLUDED.enriched_industry,leads.enriched_industry),
-        enriched_linkedin=COALESCE(EXCLUDED.enriched_linkedin,leads.enriched_linkedin),
-        disqualified=EXCLUDED.disqualified,
-        disqualified_reason=COALESCE(EXCLUDED.disqualified_reason,leads.disqualified_reason),
-        step_reached=2,completed=true,submitted_at=NOW(),updated_at=NOW()
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hear_about_us||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null]);
+        page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
+        email                 = COALESCE(EXCLUDED.email,                 leads.email),
+        website               = COALESCE(EXCLUDED.website,               leads.website),
+        sell_to               = COALESCE(EXCLUDED.sell_to,               leads.sell_to),
+        first_name            = COALESCE(EXCLUDED.first_name,            leads.first_name),
+        last_name             = COALESCE(EXCLUDED.last_name,             leads.last_name),
+        phone                 = COALESCE(EXCLUDED.phone,                 leads.phone),
+        company               = COALESCE(EXCLUDED.company,               leads.company),
+        hear_about_us         = COALESCE(EXCLUDED.hear_about_us,         leads.hear_about_us),
+        utm_source            = COALESCE(EXCLUDED.utm_source,            leads.utm_source),
+        utm_medium            = COALESCE(EXCLUDED.utm_medium,            leads.utm_medium),
+        utm_campaign          = COALESCE(EXCLUDED.utm_campaign,          leads.utm_campaign),
+        utm_content           = COALESCE(EXCLUDED.utm_content,           leads.utm_content),
+        utm_term              = COALESCE(EXCLUDED.utm_term,              leads.utm_term),
+        referrer              = COALESCE(EXCLUDED.referrer,              leads.referrer),
+        prefill_source        = COALESCE(EXCLUDED.prefill_source,        leads.prefill_source),
+        fbc                   = COALESCE(EXCLUDED.fbc,                   leads.fbc),
+        fbp                   = COALESCE(EXCLUDED.fbp,                   leads.fbp),
+        landing_page          = COALESCE(EXCLUDED.landing_page,          leads.landing_page),
+        previous_page         = COALESCE(EXCLUDED.previous_page,         leads.previous_page),
+        enriched_title        = COALESCE(EXCLUDED.enriched_title,        leads.enriched_title),
+        enriched_company_size = COALESCE(EXCLUDED.enriched_company_size, leads.enriched_company_size),
+        enriched_industry     = COALESCE(EXCLUDED.enriched_industry,     leads.enriched_industry),
+        enriched_linkedin     = COALESCE(EXCLUDED.enriched_linkedin,     leads.enriched_linkedin),
+        disqualified          = EXCLUDED.disqualified,
+        disqualified_reason   = COALESCE(EXCLUDED.disqualified_reason,   leads.disqualified_reason),
+        step_reached          = 2,
+        completed             = true,
+        submitted_at          = NOW(),
+        updated_at            = NOW()
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hear_about_us||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null]);
+
     // Sync enrichment fields from enrichment_data → leads
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/submit] Enrichment sync failed (non-blocking):', err.message));
-    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true});
+
+    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true});
+
     if (!alreadyCompleted) {
-      slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,utm_source,utm_medium,utm_campaign,utm_content,referrer,prefill_source,page_url});
+      slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
+
       // Push to Salesforce (non-blocking)
       pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => console.warn('[/submit] SF push failed (non-blocking):', err.message));
+
       // Push to Meta CAPI (non-blocking)
       pushFormEventsToMeta({session_id,email,phone,first_name,last_name,company,website,sell_to,page_url,fbc,fbp,landing_page,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_seniority:enrich.enriched_seniority,enriched_funding_stage:enrich.enriched_funding_stage}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => console.warn('[/submit] Meta CAPI failed (non-blocking):', err.message));
+
       console.log(`[/submit] ✅ Lead completed: ${email} | session: ${session_id}`);
-    } else { console.log(`[/submit] ⏭ Slack skipped — already completed: ${email} | session: ${session_id}`); }
+    } else {
+      console.log(`[/submit] ⏭ Slack skipped — already completed: ${email} | session: ${session_id}`);
+    }
     res.json({ ok: true });
   } catch (err) { console.error('[/submit]', err.message); res.status(500).json({ error: 'Submit failed' }); }
 });
@@ -940,13 +1107,17 @@ app.post('/submit', async (req, res) => {
    POST /booking-confirmed  — browser-side Cal callback
 -------------------------------------------------------- */
 app.post('/booking-confirmed', async (req, res) => {
-  const session_id=(req.body.session_id||'').toString().trim().slice(0,100), booking_uid=(req.body.booking_uid||'').toString().trim().slice(0,100), start_time=req.body.start_time||null, end_time=req.body.end_time||null, event_type=(req.body.event_type||'').toString().trim().slice(0,100);
-  if (!session_id||!booking_uid) return res.status(400).json({ error: 'session_id and booking_uid required' });
+  const session_id  = (req.body.session_id  || '').toString().trim().slice(0, 100);
+  const booking_uid = (req.body.booking_uid || '').toString().trim().slice(0, 100);
+  const start_time  = req.body.start_time   || null;
+  const end_time    = req.body.end_time     || null;
+  const event_type  = (req.body.event_type  || '').toString().trim().slice(0, 100);
+  if (!session_id || !booking_uid) return res.status(400).json({ error: 'session_id and booking_uid required' });
   try {
     await pool.query('UPDATE leads SET booking_uid=$2,start_time=$3,end_time=$4,event_type=$5,booked_at=NOW(),updated_at=NOW() WHERE session_id=$1', [session_id,booking_uid,start_time,end_time,event_type||null]);
     syncBookingToAWS(session_id,booking_uid,start_time,end_time,event_type);
-    const leadRow = await pool.query('SELECT email FROM leads WHERE session_id=$1',[session_id]);
-    const email = leadRow.rows[0]?.email;
+    const leadRow = await pool.query('SELECT email FROM leads WHERE session_id=$1', [session_id]);
+    const email   = leadRow.rows[0]?.email;
     if (email) {
       findSFLeadByEmail(email).then(leadId => {
         if (leadId) return updateSFLead(leadId, { booking_uid__c: booking_uid, booking_start_time__c: start_time || '', booking_event_type__c: event_type || '', completed__c: true });
@@ -978,7 +1149,7 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
   }
 
   try {
-    const payload = req.body.payload || req.body;
+    const payload      = req.body.payload || req.body;
     const triggerEvent = req.body.triggerEvent || '';
 
     if (triggerEvent && triggerEvent !== 'BOOKING_CREATED') {
@@ -986,14 +1157,14 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
       return res.json({ ok: true, skipped: true });
     }
 
-    const attendees = payload.attendees || [];
-    const attendee = attendees[0] || {};
-    const email = (attendee.email || payload.responses?.email?.value || '').toString().trim().toLowerCase();
-    const calName = attendee.name || payload.responses?.name?.value || '';
+    const attendees  = payload.attendees || [];
+    const attendee   = attendees[0] || {};
+    const email      = (attendee.email || payload.responses?.email?.value || '').toString().trim().toLowerCase();
+    const calName    = attendee.name || payload.responses?.name?.value || '';
     const bookingUid = payload.uid || payload.bookingUid || '';
-    const startTime = payload.startTime || '';
-    const endTime = payload.endTime || '';
-    const eventType = payload.type || payload.eventTypeSlug || '';
+    const startTime  = payload.startTime || '';
+    const endTime    = payload.endTime   || '';
+    const eventType  = payload.type || payload.eventTypeSlug || '';
 
     if (!email || !bookingUid) {
       console.warn('[/cal-webhook] Missing email or booking_uid — skipping');
@@ -1030,12 +1201,12 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
     }
 
     const enrichRow = await pool.query('SELECT * FROM enrichment_data WHERE email=$1 ORDER BY enriched_at DESC LIMIT 1', [email]);
-    const enrich = enrichRow.rows[0] || {};
+    const enrich    = enrichRow.rows[0] || {};
 
-    const nameParts = calName.split(' ');
-    const firstName = enrich.enriched_first_name || nameParts[0] || '';
-    const lastName = enrich.enriched_last_name || nameParts.slice(1).join(' ') || '';
-    const company = enrich.enriched_company || '';
+    const nameParts  = calName.split(' ');
+    const firstName  = enrich.enriched_first_name || nameParts[0] || '';
+    const lastName   = enrich.enriched_last_name  || nameParts.slice(1).join(' ') || '';
+    const company    = enrich.enriched_company || '';
     const webhookSessionId = 'cal-webhook-' + bookingUid;
 
     await pool.query(`
@@ -1065,8 +1236,8 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
     }
 
     const slackFirstName = enrichData.enriched_first_name || firstName;
-    const slackLastName = enrichData.enriched_last_name || lastName;
-    const slackCompany = enrichData.enriched_company || company;
+    const slackLastName  = enrichData.enriched_last_name  || lastName;
+    const slackCompany   = enrichData.enriched_company    || company;
 
     syncToAWS({ session_id:webhookSessionId, email, first_name:slackFirstName, last_name:slackLastName, company:slackCompany, sell_to:'B2B', completed:true, step_reached:2, enriched_title:enrichData.enriched_title, enriched_company_size:enrichData.enriched_company_size, enriched_industry:enrichData.enriched_industry, enriched_linkedin:enrichData.enriched_linkedin, enriched_city:enrichData.enriched_city, enriched_state:enrichData.enriched_state, enriched_country:enrichData.enriched_country, enriched_seniority:enrichData.enriched_seniority, enriched_departments:enrichData.enriched_departments, enriched_email_status:enrichData.enriched_email_status, enriched_founded_year:enrichData.enriched_founded_year, enriched_annual_revenue:enrichData.enriched_annual_revenue, enriched_funding_events:enrichData.enriched_funding_events, enriched_alexa_ranking:enrichData.enriched_alexa_ranking, enriched_keywords:enrichData.enriched_keywords, enriched_org_hq:enrichData.enriched_org_hq, enriched_total_funding:enrichData.enriched_total_funding, enriched_funding_stage:enrichData.enriched_funding_stage, prefill_source:'cal_webhook' });
 
@@ -1085,21 +1256,13 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /cron/send-partials
-   Finds B2B leads who dropped off without booking and:
-   1. Fires slackPartial notification
-   2. Sends follow-up email via Gmail SMTP
-   3. Marks loops_sent=true so they're never processed again
-
-   Safety nets:
-   - cron query filters disqualified=false at DB level
-   - explicit disqualified guard in loop (belt-and-suspenders)
-   - slackPartial() also guards internally
 -------------------------------------------------------- */
 app.post('/cron/send-partials', async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT session_id,email,first_name,last_name,company,website,sell_to,
              utm_source,utm_medium,utm_campaign,utm_content,referrer,page_url,
+             landing_page,previous_page,
              disqualified,disqualified_reason,completed,
              enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,
              enriched_city,enriched_state,enriched_country,enriched_seniority,
@@ -1117,8 +1280,7 @@ app.post('/cron/send-partials', async (req, res) => {
     console.log(`[Cron] Found ${leads.length} leads to process`);
 
     for (const lead of leads) {
-      // Belt-and-suspenders guard — skip any disqualified lead that somehow
-      // passed the WHERE clause (e.g. NULL edge case on older rows)
+      // Belt-and-suspenders guard
       if (lead.disqualified) {
         console.log(`[Cron] ⏭ Skipping disqualified lead: ${lead.email} — marking done to prevent reprocessing`);
         await pool.query('UPDATE leads SET loops_sent=true WHERE session_id=$1', [lead.session_id]);
@@ -1127,7 +1289,7 @@ app.post('/cron/send-partials', async (req, res) => {
       }
 
       const enrichRow = await pool.query('SELECT * FROM enrichment_data WHERE session_id=$1', [lead.session_id]);
-      const enrich = enrichRow.rows[0] || {};
+      const enrich    = enrichRow.rows[0] || {};
 
       slackPartial({
         ...lead,
