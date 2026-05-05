@@ -240,7 +240,7 @@
     let prefill = '';
     if (src.includes('cold_email')) {
       prefill = 'email';
-    } } else if (
+    }  else if (
   src.includes('facebook') || src.includes('fb') ||
   src.includes('instagram') || src.includes('ig') ||
   ref.includes('facebook.com') || ref.includes('instagram.com')
