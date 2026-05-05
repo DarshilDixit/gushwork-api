@@ -234,36 +234,35 @@
   }
 
   function prefillHearAboutUs() {
-    const src = (formState.utm_source || '').toLowerCase();
-    const ref = (formState.referrer   || '').toLowerCase();
+  const src = (formState.utm_source || '').toLowerCase();
+  const ref = (formState.referrer   || '').toLowerCase();
 
-    let prefill = '';
-    if (src.includes('cold_email')) {
-      prefill = 'email';
-    }  else if (
-  src.includes('facebook') || src.includes('fb') ||
-  src.includes('instagram') || src.includes('ig') ||
-  ref.includes('facebook.com') || ref.includes('instagram.com')
-) {
-  prefill = 'meta';
-}
-    } else if (
-      src.includes('linkedin') ||
-      ref.includes('linkedin.com')
-    ) {
-      prefill = 'linkedin';
-    }
+  let prefill = '';
+  if (src.includes('cold_email')) {
+    prefill = 'email';
+  } else if (
+    src.includes('facebook') || src.includes('fb') ||
+    src.includes('instagram') || src.includes('ig') ||
+    ref.includes('facebook.com') || ref.includes('instagram.com')
+  ) {
+    prefill = 'meta';
+  } else if (
+    src.includes('linkedin') ||
+    ref.includes('linkedin.com')
+  ) {
+    prefill = 'linkedin';
+  }
 
-    if (prefill) {
-      const input = document.getElementById('hear-about-us');
-      if (input) {
-        input.value = prefill;
-        formState.hear_about_us = prefill;
-        const wrapper = input.closest('.field-wrapper');
-        if (wrapper) wrapper.style.display = 'none';
-      }
+  if (prefill) {
+    const input = document.getElementById('hear-about-us');
+    if (input) {
+      input.value = prefill;
+      formState.hear_about_us = prefill;
+      const wrapper = input.closest('.field-wrapper');
+      if (wrapper) wrapper.style.display = 'none';
     }
   }
+}
 
   function saveSession() {
     if (!isRailwayReady()) return;
