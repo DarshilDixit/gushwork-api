@@ -240,11 +240,13 @@
     let prefill = '';
     if (src.includes('cold_email')) {
       prefill = 'email';
-    } else if (
-      src.includes('fb') || src.includes('ig') ||
-      ref.includes('facebook.com') || ref.includes('instagram.com')
-    ) {
-      prefill = 'meta';
+    } } else if (
+  src.includes('facebook') || src.includes('fb') ||
+  src.includes('instagram') || src.includes('ig') ||
+  ref.includes('facebook.com') || ref.includes('instagram.com')
+) {
+  prefill = 'meta';
+}
     } else if (
       src.includes('linkedin') ||
       ref.includes('linkedin.com')
