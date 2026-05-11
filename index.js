@@ -175,7 +175,6 @@ async function initAWSTable() {
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS fbp TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS landing_page TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS utm_term TEXT`,
-      // Journey tracking — new
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS previous_page TEXT`,
     ];
 
@@ -337,10 +336,6 @@ function buildEnrichmentBlocks(blocks, e) {
   if (e.enriched_linkedin) { const f = bFields([{label:'LinkedIn',value:e.enriched_linkedin}]); if(f) blocks.push(f); }
 }
 
-/* --------------------------------------------------------
-   buildJourneyBlocks — shared attribution + journey block
-   for both slackPartial and slackSubmit
--------------------------------------------------------- */
 function buildJourneyBlocks(blocks, d) {
   const hasAttribution = d.utm_source || d.utm_medium || d.utm_campaign || d.utm_content || d.referrer;
   const hasJourney     = d.landing_page || d.previous_page || d.page_url;
@@ -498,10 +493,21 @@ app.get('/monitor/metrics', async (req, res) => {
           COUNT(*) FILTER (WHERE enriched_country IS NOT NULL)       AS has_location
         FROM enrichment_data
       `),
+      // ── UPDATED: pendingPartials now uses 2-hour threshold + cross-session booking check
       pool.query(`
-        SELECT COUNT(*) AS count FROM leads
-        WHERE email IS NOT NULL AND disqualified = false AND booking_uid IS NULL
-          AND loops_sent = false AND created_at < NOW() - INTERVAL '30 minutes'
+        SELECT COUNT(*) AS count
+        FROM leads l
+        WHERE l.email IS NOT NULL
+          AND l.disqualified = false
+          AND l.booking_uid IS NULL
+          AND l.loops_sent = false
+          AND l.created_at < NOW() - INTERVAL '2 hours'
+          AND NOT EXISTS (
+            SELECT 1 FROM leads booked
+            WHERE LOWER(booked.email) = LOWER(l.email)
+              AND booked.booking_uid IS NOT NULL
+              AND booked.booked_at >= l.created_at
+          )
       `),
       pool.query(`SELECT COUNT(*) AS count FROM leads WHERE completed = true AND booking_uid IS NULL`),
       pool.query(`
@@ -630,6 +636,7 @@ app.get('/monitor/leads', async (req, res) => {
 
 /* --------------------------------------------------------
    GET /monitor  — full dashboard HTML page
+   UPDATED: alert threshold changed from 30 mins to 2 hours
 -------------------------------------------------------- */
 app.get('/monitor', (req, res) => {
   const token = process.env.MONITOR_TOKEN;
@@ -746,7 +753,8 @@ app.get('/monitor', (req, res) => {
   '<div class="sr"><div><div class="sn">Step 2 &#8212; /submit</div><div class="sd">Lead completed + Slack fired</div></div><span class="badge bx" id="s-submit">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">Apollo enrichment</div><div class="sd">enrichment_data populated per session</div></div><span class="badge bx" id="s-enrich">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">Cal booking</div><div class="sd">Completed leads with booking_uid</div></div><span class="badge bx" id="s-cal">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Cron &#8212; partial recovery</div><div class="sd">Leads awaiting email + Slack</div></div><span class="badge bx" id="s-cron">Checking...</span></div>' +
+  // UPDATED: description reflects new 2-hour threshold
+  '<div class="sr"><div><div class="sn">Cron &#8212; drop-off recovery</div><div class="sd">Leads waiting >2 hours without booking</div></div><span class="badge bx" id="s-cron">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">AWS sync</div><div class="sd">gw_form_leads mirror</div></div><span class="badge bx" id="s-aws">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">Email recovery</div><div class="sd">Follow-up emails sent to partial leads</div></div><span class="badge bx" id="s-loops">Checking...</span></div>' +
   '</div>' +
@@ -771,7 +779,8 @@ app.get('/monitor', (req, res) => {
   'function ist(ts){if(!ts)return"\\u2014";return new Date(ts).toLocaleString("en-IN",{timeZone:"Asia/Kolkata",dateStyle:"short",timeStyle:"short"});}' +
   'function esc(s){if(!s)return"";return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}' +
   'async function checkApi(){try{var r=await fetch(API+"/health",{signal:AbortSignal.timeout(5000)});if(r.ok){document.getElementById("apidot").className="dot dot-green";document.getElementById("apist").textContent="API online";badge("s-api","Online","bg");return true;}throw new Error("HTTP "+r.status);}catch(e){document.getElementById("apidot").className="dot dot-red";document.getElementById("apist").textContent="API offline";badge("s-api","Offline","br");return false;}}' +
-  'function renderAlerts(d){var a=[];if(d.pendingPartials>0)a.push({c:"aw",i:"!",m:d.pendingPartials+" lead(s) waiting >30 mins."});if(d.noBookingUid>0)a.push({c:"aw",i:"!",m:d.noBookingUid+" completed lead(s) with no booking."});if(!d.awsSynced)a.push({c:"ae",i:"x",m:"AWS sync disabled."});if(d.total>5&&d.enriched<d.total*0.3)a.push({c:"aw",i:"!",m:"Low enrichment rate ("+Math.round(d.enriched/d.total*100)+"%)."});if(d.todayCount===0)a.push({c:"aw",i:"o",m:"No new leads in 24 hours."});if(a.length===0)a.push({c:"ao",i:"\\u2713",m:"All systems healthy."});document.getElementById("alerts").innerHTML=a.map(function(x){return"<div class=\\"alertbox "+x.c+"\\"><span>"+x.i+"</span><span>"+x.m+"</span></div>";}).join("");}' +
+  // UPDATED: alert text now says "> 2 hours" instead of "> 30 mins"
+  'function renderAlerts(d){var a=[];if(d.pendingPartials>0)a.push({c:"aw",i:"!",m:d.pendingPartials+" lead(s) waiting >2 hours without booking."});if(d.noBookingUid>0)a.push({c:"aw",i:"!",m:d.noBookingUid+" completed lead(s) with no booking."});if(!d.awsSynced)a.push({c:"ae",i:"x",m:"AWS sync disabled."});if(d.total>5&&d.enriched<d.total*0.3)a.push({c:"aw",i:"!",m:"Low enrichment rate ("+Math.round(d.enriched/d.total*100)+"%)."});if(d.todayCount===0)a.push({c:"aw",i:"o",m:"No new leads in 24 hours."});if(a.length===0)a.push({c:"ao",i:"\\u2713",m:"All systems healthy."});document.getElementById("alerts").innerHTML=a.map(function(x){return"<div class=\\"alertbox "+x.c+"\\"><span>"+x.i+"</span><span>"+x.m+"</span></div>";}).join("");}' +
   'function renderFunnel(t,c,b,d){var steps=[{l:"Step 1 submitted",v:t,p:100,col:"#818cf8"},{l:"Step 2 completed",v:c,p:t?Math.round(c/t*100):0,col:"#38bdf8"},{l:"Call booked",v:b,p:t?Math.round(b/t*100):0,col:"#34d399"},{l:"Disqualified",v:d,p:t?Math.round(d/t*100):0,col:"#fb923c"}];document.getElementById("funnel").innerHTML=steps.map(function(s){return"<div class=\\"fr\\"><div class=\\"fl\\"><span>"+s.l+"</span><span style=\\"font-weight:500\\">"+s.v+" <span style=\\"color:#aaa\\">("+s.p+"%)</span></span></div><div class=\\"fb\\"><div class=\\"ff\\" style=\\"width:"+s.p+"%;background:"+s.col+"\\"></div></div></div>";}).join("");}' +
   'function renderChart(leads){var counts={};(leads||[]).forEach(function(l){var k=new Date(l.created_at).toLocaleDateString("en-IN",{timeZone:"Asia/Kolkata",month:"short",day:"numeric"});counts[k]=(counts[k]||0)+1;});var labels=Object.keys(counts).reverse(),data=Object.values(counts).reverse();if(lChart)lChart.destroy();var ctx=document.getElementById("lchart").getContext("2d");lChart=new Chart(ctx,{type:"bar",data:{labels:labels,datasets:[{data:data,backgroundColor:"#818cf8",borderRadius:4,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{stepSize:1,color:"#aaa"},grid:{color:"#f0f0f0"}},x:{ticks:{color:"#aaa",maxRotation:45,autoSkip:false},grid:{display:false}}}}});}' +
   'function stageBadge(l){if(l.booking_uid)return"<span class=\\"badge bg\\">Booked</span>";if(l.disqualified)return"<span class=\\"badge br\\">Disqualified</span>";if(l.completed)return"<span class=\\"badge bb\\">Completed</span>";return"<span class=\\"badge ba\\">Step 1</span>";}' +
@@ -990,12 +999,10 @@ app.post('/partial', async (req, res) => {
         updated_at            = NOW()
     `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hear_about_us||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached]);
 
-    // Sync enrichment fields from enrichment_data → leads
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/partial] Enrichment sync failed (non-blocking):', err.message));
 
     syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false});
 
-    // Push StartTrial to Meta CAPI for B2B leads only (non-blocking)
     if (!disqualified) {
       pushStartTrialToMeta({session_id,email,sell_to,page_url,fbc,fbp,landing_page}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => console.warn('[/partial] Meta CAPI StartTrial failed (non-blocking):', err.message));
     }
@@ -1081,7 +1088,6 @@ app.post('/submit', async (req, res) => {
         updated_at            = NOW()
     `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hear_about_us||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null]);
 
-    // Sync enrichment fields from enrichment_data → leads
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/submit] Enrichment sync failed (non-blocking):', err.message));
 
     syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true});
@@ -1089,10 +1095,8 @@ app.post('/submit', async (req, res) => {
     if (!alreadyCompleted) {
       slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
 
-      // Push to Salesforce (non-blocking)
       pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => console.warn('[/submit] SF push failed (non-blocking):', err.message));
 
-      // Push to Meta CAPI (non-blocking)
       pushFormEventsToMeta({session_id,email,phone,first_name,last_name,company,website,sell_to,page_url,fbc,fbp,landing_page,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_seniority:enrich.enriched_seniority,enriched_funding_stage:enrich.enriched_funding_stage}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => console.warn('[/submit] Meta CAPI failed (non-blocking):', err.message));
 
       console.log(`[/submit] ✅ Lead completed: ${email} | session: ${session_id}`);
@@ -1256,33 +1260,61 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /cron/send-partials
+   UPDATED:
+   - Interval widened from 30 mins → 2 hours
+   - Cross-session booking check added: skips email + Slack
+     if this email has booked on ANY session after this
+     session's created_at
 -------------------------------------------------------- */
 app.post('/cron/send-partials', async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT session_id,email,first_name,last_name,company,website,sell_to,
-             utm_source,utm_medium,utm_campaign,utm_content,referrer,page_url,
-             landing_page,previous_page,
-             disqualified,disqualified_reason,completed,
-             enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,
-             enriched_city,enriched_state,enriched_country,enriched_seniority,
-             enriched_departments,enriched_email_status,enriched_founded_year,
-             enriched_annual_revenue,enriched_funding_events,enriched_alexa_ranking,
-             enriched_keywords
-      FROM leads
-      WHERE email IS NOT NULL
-        AND disqualified = false
-        AND booking_uid IS NULL
-        AND loops_sent = false
-        AND created_at < NOW() - INTERVAL '30 minutes'
+      SELECT l.session_id, l.email, l.first_name, l.last_name, l.company, l.website, l.sell_to,
+             l.utm_source, l.utm_medium, l.utm_campaign, l.utm_content, l.referrer, l.page_url,
+             l.landing_page, l.previous_page,
+             l.disqualified, l.disqualified_reason, l.completed,
+             l.enriched_title, l.enriched_company_size, l.enriched_industry, l.enriched_linkedin,
+             l.enriched_city, l.enriched_state, l.enriched_country, l.enriched_seniority,
+             l.enriched_departments, l.enriched_email_status, l.enriched_founded_year,
+             l.enriched_annual_revenue, l.enriched_funding_events, l.enriched_alexa_ranking,
+             l.enriched_keywords, l.created_at
+      FROM leads l
+      WHERE l.email IS NOT NULL
+        AND l.disqualified = false
+        AND l.booking_uid IS NULL
+        AND l.loops_sent = false
+        AND l.created_at < NOW() - INTERVAL '2 hours'
+        AND NOT EXISTS (
+          SELECT 1 FROM leads booked
+          WHERE LOWER(booked.email) = LOWER(l.email)
+            AND booked.booking_uid IS NOT NULL
+            AND booked.booked_at >= l.created_at
+        )
     `);
+
     const leads = result.rows;
     console.log(`[Cron] Found ${leads.length} leads to process`);
 
     for (const lead of leads) {
-      // Belt-and-suspenders guard
+      // Belt-and-suspenders: skip disqualified (should never reach here but guard anyway)
       if (lead.disqualified) {
-        console.log(`[Cron] ⏭ Skipping disqualified lead: ${lead.email} — marking done to prevent reprocessing`);
+        console.log(`[Cron] ⏭ Skipping disqualified lead: ${lead.email}`);
+        await pool.query('UPDATE leads SET loops_sent=true WHERE session_id=$1', [lead.session_id]);
+        if (awsPool) awsPool.query('UPDATE gw_form_leads SET loops_sent=true,updated_at=NOW() WHERE session_id=$1', [lead.session_id]).catch(err => console.warn('[AWS] ⚠ loops_sent sync failed:', err.message));
+        continue;
+      }
+
+      // Belt-and-suspenders: re-check booking in case of race condition between query and now
+      const bookedCheck = await pool.query(`
+        SELECT 1 FROM leads
+        WHERE LOWER(email) = LOWER($1)
+          AND booking_uid IS NOT NULL
+          AND booked_at >= $2
+        LIMIT 1
+      `, [lead.email, lead.created_at]);
+
+      if (bookedCheck.rows.length > 0) {
+        console.log(`[Cron] ⏭ Skipping — email booked after drop-off (race guard): ${lead.email}`);
         await pool.query('UPDATE leads SET loops_sent=true WHERE session_id=$1', [lead.session_id]);
         if (awsPool) awsPool.query('UPDATE gw_form_leads SET loops_sent=true,updated_at=NOW() WHERE session_id=$1', [lead.session_id]).catch(err => console.warn('[AWS] ⚠ loops_sent sync failed:', err.message));
         continue;
@@ -1291,6 +1323,7 @@ app.post('/cron/send-partials', async (req, res) => {
       const enrichRow = await pool.query('SELECT * FROM enrichment_data WHERE session_id=$1', [lead.session_id]);
       const enrich    = enrichRow.rows[0] || {};
 
+      // Fire Slack partial notification
       slackPartial({
         ...lead,
         enriched_title:          enrich.enriched_title,
@@ -1313,8 +1346,10 @@ app.post('/cron/send-partials', async (req, res) => {
         enriched_funding_stage:  enrich.enriched_funding_stage
       });
 
+      // Send follow-up email
       await sendFollowUpEmail(lead.email, lead.first_name);
 
+      // Mark as processed so cron never picks this session up again
       await pool.query('UPDATE leads SET loops_sent=true WHERE session_id=$1', [lead.session_id]);
       if (awsPool) awsPool.query('UPDATE gw_form_leads SET loops_sent=true,updated_at=NOW() WHERE session_id=$1', [lead.session_id]).catch(err => console.warn('[AWS] ⚠ loops_sent sync failed:', err.message));
 
