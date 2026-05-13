@@ -649,46 +649,49 @@ app.get('/monitor/sdr', async (req, res) => {
 
   try {
     const result = await pool.query(`
-      SELECT DISTINCT ON (LOWER(l.email))
-        l.email,
-        COALESCE(l.first_name, e.enriched_first_name)                          AS first_name,
-        COALESCE(l.last_name,  e.enriched_last_name)                           AS last_name,
-        l.company,
-        l.website,
-        l.phone,
-        l.sell_to,
-        l.hear_about_us,
-        l.completed,
-        l.step_reached,
-        l.submitted_at,
-        l.created_at,
-        l.utm_source,
-        l.utm_medium,
-        l.utm_campaign,
-        l.referrer,
-        l.landing_page,
-        COALESCE(l.enriched_title,          e.enriched_title)          AS enriched_title,
-        COALESCE(l.enriched_company_size,   e.enriched_company_size)   AS enriched_company_size,
-        COALESCE(l.enriched_industry,       e.enriched_industry)       AS enriched_industry,
-        COALESCE(l.enriched_seniority,      e.enriched_seniority)      AS enriched_seniority,
-        COALESCE(l.enriched_departments,    e.enriched_departments)     AS enriched_departments,
-        COALESCE(l.enriched_linkedin,       e.enriched_linkedin)       AS enriched_linkedin,
-        COALESCE(l.enriched_city,           e.enriched_city)           AS enriched_city,
-        COALESCE(l.enriched_country,        e.enriched_country)        AS enriched_country,
-        COALESCE(l.enriched_annual_revenue, e.enriched_annual_revenue) AS enriched_annual_revenue,
-        COALESCE(l.enriched_total_funding,  e.enriched_total_funding)  AS enriched_total_funding,
-        COALESCE(l.enriched_funding_stage,  e.enriched_funding_stage)  AS enriched_funding_stage
-      FROM leads l
-      LEFT JOIN enrichment_data e ON e.session_id = l.session_id
-      WHERE l.email IS NOT NULL
-        AND l.disqualified = false
-        AND (l.sell_to = 'B2B' OR l.sell_to IS NULL)
-        AND NOT EXISTS (
-          SELECT 1 FROM leads booked
-          WHERE LOWER(booked.email) = LOWER(l.email)
-            AND booked.booking_uid IS NOT NULL
-        )
-      ORDER BY LOWER(l.email), l.created_at DESC
+      SELECT * FROM (
+        SELECT DISTINCT ON (LOWER(l.email))
+          l.email,
+          COALESCE(l.first_name, e.enriched_first_name)                          AS first_name,
+          COALESCE(l.last_name,  e.enriched_last_name)                           AS last_name,
+          l.company,
+          l.website,
+          l.phone,
+          l.sell_to,
+          l.hear_about_us,
+          l.completed,
+          l.step_reached,
+          l.submitted_at,
+          l.created_at,
+          l.utm_source,
+          l.utm_medium,
+          l.utm_campaign,
+          l.referrer,
+          l.landing_page,
+          COALESCE(l.enriched_title,          e.enriched_title)          AS enriched_title,
+          COALESCE(l.enriched_company_size,   e.enriched_company_size)   AS enriched_company_size,
+          COALESCE(l.enriched_industry,       e.enriched_industry)       AS enriched_industry,
+          COALESCE(l.enriched_seniority,      e.enriched_seniority)      AS enriched_seniority,
+          COALESCE(l.enriched_departments,    e.enriched_departments)     AS enriched_departments,
+          COALESCE(l.enriched_linkedin,       e.enriched_linkedin)       AS enriched_linkedin,
+          COALESCE(l.enriched_city,           e.enriched_city)           AS enriched_city,
+          COALESCE(l.enriched_country,        e.enriched_country)        AS enriched_country,
+          COALESCE(l.enriched_annual_revenue, e.enriched_annual_revenue) AS enriched_annual_revenue,
+          COALESCE(l.enriched_total_funding,  e.enriched_total_funding)  AS enriched_total_funding,
+          COALESCE(l.enriched_funding_stage,  e.enriched_funding_stage)  AS enriched_funding_stage
+        FROM leads l
+        LEFT JOIN enrichment_data e ON e.session_id = l.session_id
+        WHERE l.email IS NOT NULL
+          AND l.disqualified = false
+          AND (l.sell_to = 'B2B' OR l.sell_to IS NULL OR l.sell_to = '')
+          AND NOT EXISTS (
+            SELECT 1 FROM leads booked
+            WHERE LOWER(booked.email) = LOWER(l.email)
+              AND booked.booking_uid IS NOT NULL
+          )
+        ORDER BY LOWER(l.email), l.created_at DESC
+      ) deduped
+      ORDER BY created_at DESC
     `);
 
     const leads = result.rows;
@@ -720,6 +723,47 @@ app.get('/monitor/sdr', async (req, res) => {
   } catch (err) {
     console.error('[/monitor/sdr]', err.message);
     res.status(500).json({ error: 'SDR query failed', detail: err.message });
+  }
+});
+
+/* --------------------------------------------------------
+   GET /monitor/duplicates  — emails with multiple sessions
+-------------------------------------------------------- */
+app.get('/monitor/duplicates', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+
+  try {
+    const result = await pool.query(`
+      SELECT
+        l.email,
+        COUNT(*) AS session_count,
+        MAX(CASE WHEN l.booking_uid IS NOT NULL THEN 1 ELSE 0 END) AS has_booking,
+        MAX(CASE WHEN l.completed = true THEN 1 ELSE 0 END) AS has_completed,
+        MIN(l.created_at) AS first_seen,
+        MAX(l.created_at) AS last_seen,
+        json_agg(json_build_object(
+          'session_id', l.session_id,
+          'created_at', l.created_at,
+          'completed',  l.completed,
+          'booking_uid', l.booking_uid,
+          'booked_at',  l.booked_at,
+          'sell_to',    l.sell_to,
+          'step_reached', l.step_reached,
+          'disqualified', l.disqualified,
+          'page_url',   l.page_url
+        ) ORDER BY l.created_at DESC) AS sessions
+      FROM leads l
+      WHERE l.email IS NOT NULL
+      GROUP BY LOWER(l.email), l.email
+      HAVING COUNT(*) > 1
+      ORDER BY COUNT(*) DESC, MAX(l.created_at) DESC
+    `);
+
+    res.json({ total: result.rows.length, leads: result.rows });
+  } catch (err) {
+    console.error('[/monitor/duplicates]', err.message);
+    res.status(500).json({ error: 'Duplicates query failed', detail: err.message });
   }
 });
 
@@ -804,6 +848,7 @@ app.get('/monitor', (req, res) => {
   '<div class="tab act" id="t-overview" onclick="showTab(\'overview\')">Overview</div>' +
   '<div class="tab" id="t-leads" onclick="showTab(\'leads\')">All Leads</div>' +
   '<div class="tab" id="t-sdr" onclick="showTab(\'sdr\')">SDR List</div>' +
+  '<div class="tab" id="t-dupes" onclick="showTab(\'dupes\')" style="color:#aaa">Duplicates</div>' +
   '<div class="tab" id="t-health" onclick="showTab(\'health\')">System Health</div>' +
   '</div>' +
   '<div class="tp act" id="tp-overview">' +
@@ -847,6 +892,15 @@ app.get('/monitor', (req, res) => {
   '<th style="width:30px"></th><th>Email</th><th>Name</th><th>Company</th><th>Title</th><th>Industry</th><th>Company Size</th><th>Stage</th><th>LinkedIn</th><th>Date (IST)</th>' +
   '</tr></thead><tbody id="sdr-tbody"><tr><td colspan="9" class="nd">Loading...</td></tr></tbody></table></div></div>' +
   '</div>' +
+  '<div class="tp" id="tp-dupes">' +
+  '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
+  '<div><div class="sl" style="margin-bottom:2px">Duplicate Sessions</div><div style="font-size:12px;color:#888">Emails that appear in more than one session — sorted by session count</div></div>' +
+  '<span id="dupes-count" style="font-size:12px;color:#888"></span>' +
+  '</div>' +
+  '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
+  '<th style="width:30px"></th><th>Email</th><th>Sessions</th><th>Booked?</th><th>Completed?</th><th>First Seen (IST)</th><th>Last Seen (IST)</th>' +
+  '</tr></thead><tbody id="dupes-tbody"><tr><td colspan="7" class="nd">Loading...</td></tr></tbody></table></div></div>' +
+  '</div>' +
   '<div class="tp" id="tp-health">' +
   '<div class="sl">Step health</div>' +
   '<div class="card" style="margin-bottom:24px">' +
@@ -874,7 +928,7 @@ app.get('/monitor', (req, res) => {
   'var TP="' + tp + '";' +
   'var API=window.location.origin;' +
   'var lChart=null,curPage=1,stimer=null;' +
-  'function showTab(n){["overview","leads","sdr","health"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"&&document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();}' +
+  'function showTab(n){["overview","leads","sdr","dupes","health"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"&&document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();}' +
   'function badge(id,text,cls){var el=document.getElementById(id);if(!el)return;el.textContent=text;el.className="badge "+cls;}' +
   'function set(id,v){var el=document.getElementById(id);if(el)el.textContent=v;}' +
   'function pct(a,b){return b?Math.round(a/b*100)+"%":"0%";}' +
@@ -998,6 +1052,37 @@ app.get('/monitor', (req, res) => {
   '}).join("");' +
   'document.getElementById("sdr-tbody").innerHTML=html;}' +
   'function exportSDR(){window.location.href=API+"/monitor/sdr"+(TP||"?")+(TP?"&":"")+"format=csv";}' +
+  'async function loadDupes(){' +
+  'document.getElementById("dupes-tbody").innerHTML="<tr><td colspan=\\"7\\" class=\\"nd\\">Loading...</td></tr>";' +
+  'try{' +
+  'var r=await fetch(API+"/monitor/duplicates"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(15000)});' +
+  'if(!r.ok)throw new Error("HTTP "+r.status);' +
+  'var d=await r.json();' +
+  'set("dupes-count",d.total+" email"+(d.total!==1?"s":"")+" with multiple sessions");' +
+  'if(!d.leads.length){document.getElementById("dupes-tbody").innerHTML="<tr><td colspan=\\"7\\" class=\\"nd\\">No duplicates found.</td></tr>";return;}' +
+  'var html=d.leads.map(function(l,i){' +
+  'var booked=l.has_booking?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>";' +
+  'var comp=l.has_completed?"<span class=\\"badge bb\\">Yes</span>":"<span class=\\"badge bx\\">No</span>";' +
+  'var sessRows=(l.sessions||[]).map(function(s){' +
+  'var sb=s.booking_uid?"<span class=\\"badge bg\\">Booked</span>":s.disqualified?"<span class=\\"badge br\\">Disqualified</span>":s.completed?"<span class=\\"badge bb\\">Completed</span>":"<span class=\\"badge ba\\">Step "+s.step_reached+"</span>";' +
+  'return"<div style=\\"display:flex;gap:12px;align-items:center;padding:5px 0;border-bottom:1px solid #f5f5f5;font-size:11px;color:#555\\">"+' +
+  '"<span style=\\"color:#aaa;font-family:monospace\\">"+esc(s.session_id.slice(0,16))+"...</span>"+' +
+  '"<span>"+sb+"</span>"+' +
+  '"<span style=\\"color:#aaa\\">"+ist(s.created_at)+"</span>"+' +
+  '"<span style=\\"color:#aaa\\">"+esc(s.page_url||"")+"</span>"+' +
+  '"</div>";}).join("");' +
+  'return"<tr><td class=\\"xbtn\\" id=\\"dupe-xbtn-"+i+"\\" onclick=\\"toggleDupeRow("+i+")\\">&#9658;</td>"+' +
+  '"<td class=\\"te\\">"+esc(l.email)+"</td>"+' +
+  '"<td><span class=\\"badge br\\">"+l.session_count+" sessions</span></td>"+' +
+  '"<td>"+booked+"</td><td>"+comp+"</td>"+' +
+  '"<td style=\\"color:#999;white-space:nowrap\\">"+ist(l.first_seen)+"</td>"+' +
+  '"<td style=\\"color:#999;white-space:nowrap\\">"+ist(l.last_seen)+"</td>"+' +
+  '"</tr>"+' +
+  '"<tr class=\\"erow\\" id=\\"dupe-er-"+i+"\\" style=\\"display:none\\"><td></td><td colspan=\\"6\\"><div style=\\"padding:4px 0\\">"+sessRows+"</div></td></tr>";' +
+  '}).join("");' +
+  'document.getElementById("dupes-tbody").innerHTML=html;' +
+  '}catch(e){document.getElementById("dupes-tbody").innerHTML="<tr><td colspan=\\"7\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
+  'function toggleDupeRow(i){var row=document.getElementById("dupe-er-"+i);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=document.getElementById("dupe-xbtn-"+i);if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";}' +
   'loadAll();setInterval(loadAll,60000);' +
   '<\/script></body></html>';
 
