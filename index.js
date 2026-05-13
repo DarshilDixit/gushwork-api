@@ -509,7 +509,22 @@ app.get('/monitor/metrics', async (req, res) => {
               AND booked.booked_at >= l.created_at
           )
       `),
-      pool.query(`SELECT COUNT(*) AS count FROM leads WHERE completed = true AND booking_uid IS NULL`),
+      pool.query(`
+        SELECT COUNT(*) AS count FROM (
+          SELECT DISTINCT ON (LOWER(email)) email
+          FROM leads
+          WHERE completed = true
+            AND booking_uid IS NULL
+            AND disqualified = false
+            AND sell_to ILIKE 'B2B%'
+            AND NOT EXISTS (
+              SELECT 1 FROM leads booked
+              WHERE LOWER(booked.email) = LOWER(leads.email)
+                AND booked.booking_uid IS NOT NULL
+            )
+          ORDER BY LOWER(email), created_at DESC
+        ) deduped
+      `),
       pool.query(`
         SELECT session_id, email, company, first_name, last_name,
                completed, booking_uid, disqualified, created_at, page_url
@@ -683,7 +698,7 @@ app.get('/monitor/sdr', async (req, res) => {
         LEFT JOIN enrichment_data e ON e.session_id = l.session_id
         WHERE l.email IS NOT NULL
           AND l.disqualified = false
-          AND (l.sell_to = 'B2B' OR l.sell_to IS NULL OR l.sell_to = '')
+          AND l.sell_to ILIKE 'B2B%'
           AND NOT EXISTS (
             SELECT 1 FROM leads booked
             WHERE LOWER(booked.email) = LOWER(l.email)
@@ -936,7 +951,7 @@ app.get('/monitor', (req, res) => {
   'function esc(s){if(!s)return"";return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}' +
   'async function checkApi(){try{var r=await fetch(API+"/health",{signal:AbortSignal.timeout(5000)});if(r.ok){document.getElementById("apidot").className="dot dot-green";document.getElementById("apist").textContent="API online";badge("s-api","Online","bg");return true;}throw new Error("HTTP "+r.status);}catch(e){document.getElementById("apidot").className="dot dot-red";document.getElementById("apist").textContent="API offline";badge("s-api","Offline","br");return false;}}' +
   // UPDATED: alert text now says "> 2 hours" instead of "> 30 mins"
-  'function renderAlerts(d){var a=[];if(d.pendingPartials>0)a.push({c:"aw",i:"!",m:d.pendingPartials+" lead(s) waiting >2 hours without booking."});if(d.noBookingUid>0)a.push({c:"aw",i:"!",m:d.noBookingUid+" completed lead(s) with no booking."});if(!d.awsSynced)a.push({c:"ae",i:"x",m:"AWS sync disabled."});if(d.total>5&&d.enriched<d.total*0.3)a.push({c:"aw",i:"!",m:"Low enrichment rate ("+Math.round(d.enriched/d.total*100)+"%)."});if(d.todayCount===0)a.push({c:"aw",i:"o",m:"No new leads in 24 hours."});if(a.length===0)a.push({c:"ao",i:"\\u2713",m:"All systems healthy."});document.getElementById("alerts").innerHTML=a.map(function(x){return"<div class=\\"alertbox "+x.c+"\\"><span>"+x.i+"</span><span>"+x.m+"</span></div>";}).join("");}' +
+  'function renderAlerts(d){var a=[];if(d.pendingPartials>0)a.push({c:"aw",i:"!",m:d.pendingPartials+" lead(s) waiting >2 hours without booking."});if(d.noBookingUid>0)a.push({c:"aw",i:"!",m:d.noBookingUid+" B2B lead(s) completed form but not booked — check SDR List."});if(!d.awsSynced)a.push({c:"ae",i:"x",m:"AWS sync disabled."});if(d.total>5&&d.enriched<d.total*0.3)a.push({c:"aw",i:"!",m:"Low enrichment rate ("+Math.round(d.enriched/d.total*100)+"%)."});if(d.todayCount===0)a.push({c:"aw",i:"o",m:"No new leads in 24 hours."});if(a.length===0)a.push({c:"ao",i:"\\u2713",m:"All systems healthy."});document.getElementById("alerts").innerHTML=a.map(function(x){return"<div class=\\"alertbox "+x.c+"\\"><span>"+x.i+"</span><span>"+x.m+"</span></div>";}).join("");}' +
   'function renderFunnel(t,c,b,d){var steps=[{l:"Step 1 submitted",v:t,p:100,col:"#818cf8"},{l:"Step 2 completed",v:c,p:t?Math.round(c/t*100):0,col:"#38bdf8"},{l:"Call booked",v:b,p:t?Math.round(b/t*100):0,col:"#34d399"},{l:"Disqualified",v:d,p:t?Math.round(d/t*100):0,col:"#fb923c"}];document.getElementById("funnel").innerHTML=steps.map(function(s){return"<div class=\\"fr\\"><div class=\\"fl\\"><span>"+s.l+"</span><span style=\\"font-weight:500\\">"+s.v+" <span style=\\"color:#aaa\\">("+s.p+"%)</span></span></div><div class=\\"fb\\"><div class=\\"ff\\" style=\\"width:"+s.p+"%;background:"+s.col+"\\"></div></div></div>";}).join("");}' +
   'function renderChart(leads){var counts={};(leads||[]).forEach(function(l){var k=new Date(l.created_at).toLocaleDateString("en-IN",{timeZone:"Asia/Kolkata",month:"short",day:"numeric"});counts[k]=(counts[k]||0)+1;});var labels=Object.keys(counts).reverse(),data=Object.values(counts).reverse();if(lChart)lChart.destroy();var ctx=document.getElementById("lchart").getContext("2d");lChart=new Chart(ctx,{type:"bar",data:{labels:labels,datasets:[{data:data,backgroundColor:"#818cf8",borderRadius:4,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{stepSize:1,color:"#aaa"},grid:{color:"#f0f0f0"}},x:{ticks:{color:"#aaa",maxRotation:45,autoSkip:false},grid:{display:false}}}}});}' +
   'function stageBadge(l){if(l.booking_uid)return"<span class=\\"badge bg\\">Booked</span>";if(l.disqualified)return"<span class=\\"badge br\\">Disqualified</span>";if(l.completed)return"<span class=\\"badge bb\\">Completed</span>";return"<span class=\\"badge ba\\">Step 1</span>";}' +
