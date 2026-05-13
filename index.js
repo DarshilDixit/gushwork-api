@@ -635,6 +635,95 @@ app.get('/monitor/leads', async (req, res) => {
 });
 
 /* --------------------------------------------------------
+   GET /monitor/sdr  — email-deduped unbooked qualified leads
+   Includes: B2B leads who never booked on ANY session
+   - completed form (step 2) OR dropped at step 1 but qualified (sell_to = B2B)
+   - deduped by email — one row per person, most recent session wins
+   - CSV export supported via ?format=csv
+-------------------------------------------------------- */
+app.get('/monitor/sdr', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+
+  const format = req.query.format || 'json';
+
+  try {
+    const result = await pool.query(`
+      SELECT DISTINCT ON (LOWER(l.email))
+        l.email,
+        COALESCE(l.first_name, e.enriched_first_name)                          AS first_name,
+        COALESCE(l.last_name,  e.enriched_last_name)                           AS last_name,
+        l.company,
+        l.website,
+        l.phone,
+        l.sell_to,
+        l.hear_about_us,
+        l.completed,
+        l.step_reached,
+        l.submitted_at,
+        l.created_at,
+        l.utm_source,
+        l.utm_medium,
+        l.utm_campaign,
+        l.referrer,
+        l.landing_page,
+        COALESCE(l.enriched_title,          e.enriched_title)          AS enriched_title,
+        COALESCE(l.enriched_company_size,   e.enriched_company_size)   AS enriched_company_size,
+        COALESCE(l.enriched_industry,       e.enriched_industry)       AS enriched_industry,
+        COALESCE(l.enriched_seniority,      e.enriched_seniority)      AS enriched_seniority,
+        COALESCE(l.enriched_departments,    e.enriched_departments)     AS enriched_departments,
+        COALESCE(l.enriched_linkedin,       e.enriched_linkedin)       AS enriched_linkedin,
+        COALESCE(l.enriched_city,           e.enriched_city)           AS enriched_city,
+        COALESCE(l.enriched_country,        e.enriched_country)        AS enriched_country,
+        COALESCE(l.enriched_annual_revenue, e.enriched_annual_revenue) AS enriched_annual_revenue,
+        COALESCE(l.enriched_total_funding,  e.enriched_total_funding)  AS enriched_total_funding,
+        COALESCE(l.enriched_funding_stage,  e.enriched_funding_stage)  AS enriched_funding_stage
+      FROM leads l
+      LEFT JOIN enrichment_data e ON e.session_id = l.session_id
+      WHERE l.email IS NOT NULL
+        AND l.disqualified = false
+        AND (l.sell_to = 'B2B' OR l.sell_to IS NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM leads booked
+          WHERE LOWER(booked.email) = LOWER(l.email)
+            AND booked.booking_uid IS NOT NULL
+        )
+      ORDER BY LOWER(l.email), l.created_at DESC
+    `);
+
+    const leads = result.rows;
+
+    if (format === 'csv') {
+      const cols = [
+        'email','first_name','last_name','company','website','phone','sell_to',
+        'hear_about_us','completed','step_reached','submitted_at','created_at',
+        'utm_source','utm_medium','utm_campaign','referrer','landing_page',
+        'enriched_title','enriched_company_size','enriched_industry','enriched_seniority',
+        'enriched_departments','enriched_linkedin','enriched_city','enriched_country',
+        'enriched_annual_revenue','enriched_total_funding','enriched_funding_stage'
+      ];
+      const escape = v => {
+        if (v === null || v === undefined) return '';
+        const s = String(v);
+        return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g,'""')}"` : s;
+      };
+      const csv = [
+        cols.join(','),
+        ...leads.map(r => cols.map(c => escape(r[c])).join(','))
+      ].join('\n');
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="sdr-list-${new Date().toISOString().slice(0,10)}.csv"`);
+      return res.send(csv);
+    }
+
+    res.json({ total: leads.length, leads });
+  } catch (err) {
+    console.error('[/monitor/sdr]', err.message);
+    res.status(500).json({ error: 'SDR query failed', detail: err.message });
+  }
+});
+
+/* --------------------------------------------------------
    GET /monitor  — full dashboard HTML page
    UPDATED: alert threshold changed from 30 mins to 2 hours
 -------------------------------------------------------- */
@@ -714,6 +803,7 @@ app.get('/monitor', (req, res) => {
   '<div class="tabs">' +
   '<div class="tab act" id="t-overview" onclick="showTab(\'overview\')">Overview</div>' +
   '<div class="tab" id="t-leads" onclick="showTab(\'leads\')">All Leads</div>' +
+  '<div class="tab" id="t-sdr" onclick="showTab(\'sdr\')">SDR List</div>' +
   '<div class="tab" id="t-health" onclick="showTab(\'health\')">System Health</div>' +
   '</div>' +
   '<div class="tp act" id="tp-overview">' +
@@ -745,6 +835,18 @@ app.get('/monitor', (req, res) => {
   '</tr></thead><tbody id="ltbody"><tr><td colspan="10" class="nd">Loading leads...</td></tr></tbody></table></div></div>' +
   '<div class="pg" id="lpag"></div>' +
   '</div>' +
+  '<div class="tp" id="tp-sdr">' +
+  '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
+  '<div><div class="sl" style="margin-bottom:2px">SDR List</div><div style="font-size:12px;color:#888">Qualified B2B leads who have never booked a call — deduped by email</div></div>' +
+  '<div style="display:flex;gap:8px;align-items:center">' +
+  '<input type="text" id="sdr-search" placeholder="Search email, company..." oninput="sdrDebounce()" style="font-size:13px;padding:7px 10px;border:1px solid #e5e5e5;border-radius:7px;background:#fff;color:#1a1a1a;outline:none;min-width:220px">' +
+  '<span id="sdr-count" style="font-size:12px;color:#888"></span>' +
+  '<button class="btn" onclick="exportSDR()" style="background:#1a1a1a;color:#fff;border-color:#1a1a1a">&#8595; Export CSV</button>' +
+  '</div></div>' +
+  '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
+  '<th style="width:30px"></th><th>Email</th><th>Name</th><th>Company</th><th>Title</th><th>Industry</th><th>Company Size</th><th>Stage</th><th>LinkedIn</th><th>Date (IST)</th>' +
+  '</tr></thead><tbody id="sdr-tbody"><tr><td colspan="9" class="nd">Loading...</td></tr></tbody></table></div></div>' +
+  '</div>' +
   '<div class="tp" id="tp-health">' +
   '<div class="sl">Step health</div>' +
   '<div class="card" style="margin-bottom:24px">' +
@@ -772,7 +874,7 @@ app.get('/monitor', (req, res) => {
   'var TP="' + tp + '";' +
   'var API=window.location.origin;' +
   'var lChart=null,curPage=1,stimer=null;' +
-  'function showTab(n){["overview","leads","health"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"&&document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}' +
+  'function showTab(n){["overview","leads","sdr","health"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"&&document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();}' +
   'function badge(id,text,cls){var el=document.getElementById(id);if(!el)return;el.textContent=text;el.className="badge "+cls;}' +
   'function set(id,v){var el=document.getElementById(id);if(el)el.textContent=v;}' +
   'function pct(a,b){return b?Math.round(a/b*100)+"%":"0%";}' +
@@ -851,6 +953,51 @@ app.get('/monitor', (req, res) => {
   'set("lupd","Updated "+new Date().toLocaleTimeString("en-IN",{timeZone:"Asia/Kolkata"})+" IST");' +
   '}catch(e){document.getElementById("alerts").innerHTML="<div class=\\"alertbox ae\\"><span>x</span><span>Failed: "+esc(e.message)+"</span></div>";set("lupd","Error");}' +
   'if(document.getElementById("tp-leads").classList.contains("act"))loadLeads(curPage);}' +
+  'var sdrData=[],sdrTimer=null;' +
+  'function sdrDebounce(){clearTimeout(sdrTimer);sdrTimer=setTimeout(function(){renderSDRTable(sdrData);},300);}' +
+  'async function loadSDR(){' +
+  'document.getElementById("sdr-tbody").innerHTML="<tr><td colspan=\\"9\\" class=\\"nd\\">Loading...</td></tr>";' +
+  'try{' +
+  'var r=await fetch(API+"/monitor/sdr"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(15000)});' +
+  'if(!r.ok)throw new Error("HTTP "+r.status);' +
+  'var d=await r.json();' +
+  'sdrData=d.leads||[];' +
+  'renderSDRTable(sdrData);' +
+  '}catch(e){document.getElementById("sdr-tbody").innerHTML="<tr><td colspan=\\"9\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
+  'function sdrPanel(l){' +
+  'var fields=[' +
+  '{lb:"📞 Phone",v:l.phone},' +
+  '{lb:"💬 Heard about us",v:l.hear_about_us},' +
+  '{lb:"🌐 Website",v:l.website,lnk:true},' +
+  '{lb:"Source",v:l.utm_source?([l.utm_source,l.utm_medium].filter(Boolean).join(" / ")):null},' +
+  '{lb:"Campaign",v:l.utm_campaign},' +
+  '{lb:"Referrer",v:l.referrer},' +
+  '{lb:"🛬 Landing Page",v:l.landing_page,lnk:true},' +
+  '{lb:"Seniority",v:l.enriched_seniority},' +
+  '{lb:"Department",v:l.enriched_departments},' +
+  '{lb:"Location",v:l.enriched_city&&l.enriched_country?l.enriched_city+", "+l.enriched_country:l.enriched_country||null},' +
+  '{lb:"Annual Revenue",v:l.enriched_annual_revenue},' +
+  '{lb:"Total Funding",v:l.enriched_total_funding},' +
+  '{lb:"Funding Stage",v:l.enriched_funding_stage},' +
+  '{lb:"Submitted",v:ist(l.submitted_at)},' +
+  '].filter(function(f){return f.v;});' +
+  'if(!fields.length)return"<div style=\\"color:#999;font-size:12px\\">No additional details.</div>";' +
+  'return"<div class=\\"egrid\\">"+fields.map(function(f){var val=f.lnk&&f.v?"<a href=\\""+(f.v.startsWith("http")?"":"https://")+esc(f.v)+"\\" target=\\"_blank\\">"+esc(f.v)+"</a>":esc(f.v);return"<div class=\\"ef\\"><div class=\\"efl\\">"+f.lb+"</div><div class=\\"efv\\">"+val+"</div></div>";}).join("")+"</div>";}' +
+  'function toggleSDRRow(idx){var row=document.getElementById("sdr-er-"+idx);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=document.getElementById("sdr-xbtn-"+idx);if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";}' +
+  'function renderSDRTable(allLeads){' +
+  'var q=(document.getElementById("sdr-search")||{}).value||"";' +
+  'var leads=q?allLeads.filter(function(l){var s=q.toLowerCase();return(l.email||"").toLowerCase().includes(s)||(l.company||"").toLowerCase().includes(s)||(l.first_name||"").toLowerCase().includes(s)||(l.enriched_industry||"").toLowerCase().includes(s);}):allLeads;' +
+  'set("sdr-count",leads.length+" lead"+(leads.length!==1?"s":""));' +
+  'if(!leads.length){document.getElementById("sdr-tbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\">No leads found.</td></tr>";return;}' +
+  'var html=leads.map(function(l,i){' +
+  'var name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\\u2014";' +
+  'var stage=l.completed?"<span class=\\"badge bb\\">Completed</span>":"<span class=\\"badge ba\\">Step 1</span>";' +
+  'var li=l.enriched_linkedin?"<a href=\\""+esc(l.enriched_linkedin)+"\\" target=\\"_blank\\" style=\\"color:#2563eb;text-decoration:none\\">View</a>":"\\u2014";' +
+  'return"<tr><td class=\\"xbtn\\" id=\\"sdr-xbtn-"+i+"\\" onclick=\\"toggleSDRRow("+i+")\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td style=\\"color:#555\\">"+esc(l.enriched_title||"\\u2014")+"</td><td>"+esc(l.enriched_industry||"\\u2014")+"</td><td>"+esc(l.enriched_company_size||"\\u2014")+"</td><td>"+stage+"</td><td>"+li+"</td><td style=\\"color:#999;white-space:nowrap\\">"+ist(l.created_at)+"</td></tr>"' +
+  '+"<tr class=\\"erow\\" id=\\"sdr-er-"+i+"\\" style=\\"display:none\\"><td></td><td colspan=\\"9\\">"+sdrPanel(l)+"</td></tr>";' +
+  '}).join("");' +
+  'document.getElementById("sdr-tbody").innerHTML=html;}' +
+  'function exportSDR(){window.location.href=API+"/monitor/sdr"+(TP||"?")+(TP?"&":"")+"format=csv";}' +
   'loadAll();setInterval(loadAll,60000);' +
   '<\/script></body></html>';
 
