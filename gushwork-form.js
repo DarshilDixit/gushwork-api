@@ -702,6 +702,13 @@
         if (!data.uid) return;
         console.log('[GW] ✅ Booking confirmed:', data.uid);
 
+         // GTM — Demo Booked (skip for test emails)
+if (!isTestEmail(formState.email)) {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({ event: 'gw_demo_booked' });
+  console.log('[GW] ✅ GTM Demo Booked event pushed');
+}
+
         if (isRailwayReady() && !isTestEmail(formState.email)) {
           await fetch(`${RAILWAY_API_URL}/booking-confirmed`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -813,6 +820,12 @@
       formState.hear_about_us = getField('hear-about-us');
 
       await submitLead();
+       // GTM — Form Submitted (skip for test emails)
+if (!isTestEmail(formState.email)) {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({ event: 'gw_form_submitted' });
+  console.log('[GW] ✅ GTM Form Submitted event pushed');
+}
 
       showStep('step-3');
       resetCalEmbed();
