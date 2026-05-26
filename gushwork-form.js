@@ -233,7 +233,7 @@
     formState.landing_page = sessionStorage.getItem('gw_landing_page') || '';
   }
 
-  function prefillHearAboutUs() {
+function prefillHearAboutUs() {
   const src = (formState.utm_source || '').toLowerCase();
   const ref = (formState.referrer   || '').toLowerCase();
 
@@ -251,6 +251,12 @@
     ref.includes('linkedin.com')
   ) {
     prefill = 'linkedin';
+  } else if (
+    src.includes('google') &&
+    (formState.utm_medium.toLowerCase().includes('cpc') ||
+     formState.utm_medium.toLowerCase().includes('paid'))
+  ) {
+    prefill = 'Google Ads';
   }
 
   if (prefill) {
