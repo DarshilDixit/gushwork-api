@@ -563,7 +563,51 @@ app.get('/monitor/metrics', async (req, res) => {
 });
 
 /* --------------------------------------------------------
+   GET /monitor/duplicates  — emails with multiple sessions
+-------------------------------------------------------- */
+app.get('/monitor/duplicates', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+
+  try {
+    const result = await pool.query(`
+      SELECT
+        l.email,
+        COUNT(*) AS session_count,
+        MAX(CASE WHEN l.booking_uid IS NOT NULL THEN 1 ELSE 0 END) AS has_booking,
+        MAX(CASE WHEN l.completed = true THEN 1 ELSE 0 END) AS has_completed,
+        MIN(l.created_at) AS first_seen,
+        MAX(l.created_at) AS last_seen,
+        json_agg(json_build_object(
+          'session_id', l.session_id,
+          'created_at', l.created_at,
+          'completed',  l.completed,
+          'booking_uid', l.booking_uid,
+          'booked_at',  l.booked_at,
+          'sell_to',    l.sell_to,
+          'step_reached', l.step_reached,
+          'disqualified', l.disqualified,
+          'page_url',   l.page_url
+        ) ORDER BY l.created_at DESC) AS sessions
+      FROM leads l
+      WHERE l.email IS NOT NULL
+      GROUP BY LOWER(l.email), l.email
+      HAVING COUNT(*) > 1
+      ORDER BY COUNT(*) DESC, MAX(l.created_at) DESC
+    `);
+
+    res.json({ total: result.rows.length, leads: result.rows });
+  } catch (err) {
+    console.error('[/monitor/duplicates]', err.message);
+    res.status(500).json({ error: 'Duplicates query failed', detail: err.message });
+  }
+});
+
+/* --------------------------------------------------------
    GET /monitor/leads  — paginated leads + enrichment
+   UPDATED: added Sell-to / Source (utm_source) / Enrichment /
+            Heard-about-us filters, sortable columns, and CSV
+            export (?format=csv). Form flow untouched.
 -------------------------------------------------------- */
 app.get('/monitor/leads', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
@@ -572,10 +616,27 @@ app.get('/monitor/leads', async (req, res) => {
   const page   = Math.max(1, parseInt(req.query.page) || 1);
   const limit  = 25;
   const offset = (page - 1) * limit;
-  const stage    = req.query.stage    || 'all';
-  const dateFrom = req.query.dateFrom || null;
-  const dateTo   = req.query.dateTo   || null;
-  const search   = req.query.search   || null;
+  const stage      = req.query.stage      || 'all';
+  const dateFrom   = req.query.dateFrom   || null;
+  const dateTo     = req.query.dateTo     || null;
+  const search     = req.query.search     || null;
+  const sellTo     = req.query.sellTo     || null;
+  const utmSource  = req.query.utmSource  || null;
+  const hearAbout  = req.query.hearAbout  || null;
+  const enrichment = req.query.enrichment || null;   // 'yes' | 'no'
+  const format     = req.query.format     || 'json'; // 'json' | 'csv'
+
+  // Sort whitelist — only known columns/directions are ever interpolated.
+  const sortMap = {
+    created_at: 'l.created_at',
+    email:      'l.email',
+    name:       'l.first_name',
+    company:    'l.company',
+    sell_to:    'l.sell_to'
+  };
+  const sortCol = sortMap[req.query.sort] || 'l.created_at';
+  const sortDir = (req.query.dir === 'asc') ? 'ASC' : 'DESC';
+  const orderBy = `ORDER BY ${sortCol} ${sortDir} NULLS LAST, l.created_at DESC`;
 
   let conditions = [];
   const params = [];
@@ -584,6 +645,18 @@ app.get('/monitor/leads', async (req, res) => {
   if (stage === 'completed')    conditions.push('l.completed = true AND l.booking_uid IS NULL');
   if (stage === 'step1')        conditions.push('l.completed = false AND l.disqualified = false');
   if (stage === 'disqualified') conditions.push('l.disqualified = true');
+
+  if (sellTo)    { params.push(sellTo);    conditions.push(`l.sell_to = $${params.length}`); }
+  if (utmSource) { params.push(utmSource); conditions.push(`l.utm_source = $${params.length}`); }
+  if (hearAbout) { params.push(`%${hearAbout.toLowerCase()}%`); conditions.push(`LOWER(COALESCE(l.hear_about_us,'')) LIKE $${params.length}`); }
+
+  // Enrichment yes/no mirrors the dashboard's "Enrichment" badge logic.
+  if (enrichment === 'yes') {
+    conditions.push(`(l.enriched_title IS NOT NULL OR l.enriched_company_size IS NOT NULL OR EXISTS (SELECT 1 FROM enrichment_data ee WHERE ee.session_id = l.session_id AND (ee.enriched_title IS NOT NULL OR ee.enriched_company_size IS NOT NULL OR ee.enriched_company IS NOT NULL)))`);
+  }
+  if (enrichment === 'no') {
+    conditions.push(`(l.enriched_title IS NULL AND l.enriched_company_size IS NULL AND NOT EXISTS (SELECT 1 FROM enrichment_data ee WHERE ee.session_id = l.session_id AND (ee.enriched_title IS NOT NULL OR ee.enriched_company_size IS NOT NULL OR ee.enriched_company IS NOT NULL)))`);
+  }
 
   if (dateFrom) { params.push(dateFrom); conditions.push(`l.created_at >= $${params.length}::date`); }
   if (dateTo)   { params.push(dateTo);   conditions.push(`l.created_at < ($${params.length}::date + INTERVAL '1 day')`); }
@@ -595,7 +668,69 @@ app.get('/monitor/leads', async (req, res) => {
 
   const whereClause = conditions.length > 0 ? 'AND ' + conditions.join(' AND ') : '';
 
+  const baseSelect = `
+    SELECT
+      l.session_id, l.email, l.first_name, l.last_name, l.phone,
+      l.company, l.website, l.sell_to, l.hear_about_us,
+      l.completed, l.booking_uid, l.booked_at, l.start_time, l.end_time,
+      l.disqualified, l.disqualified_reason, l.step_reached,
+      l.loops_sent, l.created_at, l.submitted_at, l.page_url,
+      l.landing_page, l.previous_page,
+      l.utm_source, l.utm_medium, l.utm_campaign, l.utm_term, l.referrer, l.prefill_source,
+      l.fbc, l.fbp,
+      COALESCE(l.enriched_title, e.enriched_title) AS enriched_title,
+      COALESCE(l.enriched_company_size, e.enriched_company_size) AS enriched_company_size,
+      COALESCE(l.enriched_industry, e.enriched_industry) AS enriched_industry,
+      COALESCE(l.enriched_linkedin, e.enriched_linkedin) AS enriched_linkedin,
+      COALESCE(l.enriched_city, e.enriched_city) AS enriched_city,
+      COALESCE(l.enriched_state, e.enriched_state) AS enriched_state,
+      COALESCE(l.enriched_country, e.enriched_country) AS enriched_country,
+      COALESCE(l.enriched_seniority, e.enriched_seniority) AS enriched_seniority,
+      COALESCE(l.enriched_departments, e.enriched_departments) AS enriched_departments,
+      COALESCE(l.enriched_email_status, e.enriched_email_status) AS enriched_email_status,
+      COALESCE(l.enriched_founded_year, e.enriched_founded_year) AS enriched_founded_year,
+      COALESCE(l.enriched_annual_revenue, e.enriched_annual_revenue) AS enriched_annual_revenue,
+      COALESCE(l.enriched_funding_events, e.enriched_funding_events) AS enriched_funding_events,
+      COALESCE(l.enriched_alexa_ranking, e.enriched_alexa_ranking) AS enriched_alexa_ranking,
+      COALESCE(l.enriched_keywords, e.enriched_keywords) AS enriched_keywords,
+      COALESCE(l.enriched_org_hq, e.enriched_org_hq) AS enriched_org_hq,
+      COALESCE(l.enriched_total_funding, e.enriched_total_funding) AS enriched_total_funding,
+      COALESCE(l.enriched_funding_stage, e.enriched_funding_stage) AS enriched_funding_stage,
+      e.enriched_company AS e_company,
+      e.enriched_first_name AS e_first_name, e.enriched_last_name AS e_last_name,
+      e.enriched_phone AS e_phone, e.enriched_at
+    FROM leads l
+    LEFT JOIN enrichment_data e ON e.session_id = l.session_id
+    WHERE true ${whereClause}
+  `;
+
   try {
+    // ── CSV export: same filters + sort, no pagination
+    if (format === 'csv') {
+      const allRows = await pool.query(baseSelect + ` ${orderBy}`, params);
+      const cols = [
+        'email','first_name','last_name','company','website','phone','sell_to','hear_about_us',
+        'completed','booking_uid','disqualified','step_reached','created_at','submitted_at','booked_at',
+        'utm_source','utm_medium','utm_campaign','utm_term','referrer','prefill_source',
+        'landing_page','previous_page','page_url',
+        'enriched_title','enriched_company_size','enriched_industry','enriched_seniority','enriched_departments',
+        'enriched_linkedin','enriched_city','enriched_state','enriched_country',
+        'enriched_annual_revenue','enriched_total_funding','enriched_funding_stage'
+      ];
+      const escape = v => {
+        if (v === null || v === undefined) return '';
+        const s = String(v);
+        return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g,'""')}"` : s;
+      };
+      const csv = [
+        cols.join(','),
+        ...allRows.rows.map(r => cols.map(c => escape(r[c])).join(','))
+      ].join('\n');
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="leads-${new Date().toISOString().slice(0,10)}.csv"`);
+      return res.send(csv);
+    }
+
     const countResult = await pool.query(
       `SELECT COUNT(*) AS total FROM leads l WHERE true ${whereClause}`, params
     );
@@ -604,48 +739,37 @@ app.get('/monitor/leads', async (req, res) => {
     const limitParam  = params.length + 1;
     const offsetParam = params.length + 2;
 
-    const leadsResult = await pool.query(`
-      SELECT
-        l.session_id, l.email, l.first_name, l.last_name, l.phone,
-        l.company, l.website, l.sell_to, l.hear_about_us,
-        l.completed, l.booking_uid, l.booked_at, l.start_time, l.end_time,
-        l.disqualified, l.disqualified_reason, l.step_reached,
-        l.loops_sent, l.created_at, l.submitted_at, l.page_url,
-        l.landing_page, l.previous_page,
-        l.utm_source, l.utm_medium, l.utm_campaign, l.utm_term, l.referrer, l.prefill_source,
-        l.fbc, l.fbp,
-        COALESCE(l.enriched_title, e.enriched_title) AS enriched_title,
-        COALESCE(l.enriched_company_size, e.enriched_company_size) AS enriched_company_size,
-        COALESCE(l.enriched_industry, e.enriched_industry) AS enriched_industry,
-        COALESCE(l.enriched_linkedin, e.enriched_linkedin) AS enriched_linkedin,
-        COALESCE(l.enriched_city, e.enriched_city) AS enriched_city,
-        COALESCE(l.enriched_state, e.enriched_state) AS enriched_state,
-        COALESCE(l.enriched_country, e.enriched_country) AS enriched_country,
-        COALESCE(l.enriched_seniority, e.enriched_seniority) AS enriched_seniority,
-        COALESCE(l.enriched_departments, e.enriched_departments) AS enriched_departments,
-        COALESCE(l.enriched_email_status, e.enriched_email_status) AS enriched_email_status,
-        COALESCE(l.enriched_founded_year, e.enriched_founded_year) AS enriched_founded_year,
-        COALESCE(l.enriched_annual_revenue, e.enriched_annual_revenue) AS enriched_annual_revenue,
-        COALESCE(l.enriched_funding_events, e.enriched_funding_events) AS enriched_funding_events,
-        COALESCE(l.enriched_alexa_ranking, e.enriched_alexa_ranking) AS enriched_alexa_ranking,
-        COALESCE(l.enriched_keywords, e.enriched_keywords) AS enriched_keywords,
-        COALESCE(l.enriched_org_hq, e.enriched_org_hq) AS enriched_org_hq,
-        COALESCE(l.enriched_total_funding, e.enriched_total_funding) AS enriched_total_funding,
-        COALESCE(l.enriched_funding_stage, e.enriched_funding_stage) AS enriched_funding_stage,
-        e.enriched_company AS e_company,
-        e.enriched_first_name AS e_first_name, e.enriched_last_name AS e_last_name,
-        e.enriched_phone AS e_phone, e.enriched_at
-      FROM leads l
-      LEFT JOIN enrichment_data e ON e.session_id = l.session_id
-      WHERE true ${whereClause}
-      ORDER BY l.created_at DESC
-      LIMIT $${limitParam} OFFSET $${offsetParam}
-    `, [...params, limit, offset]);
+    const leadsResult = await pool.query(
+      baseSelect + ` ${orderBy} LIMIT $${limitParam} OFFSET $${offsetParam}`,
+      [...params, limit, offset]
+    );
 
     res.json({ total, page, pages: Math.ceil(total / limit), leads: leadsResult.rows });
   } catch (err) {
     console.error('[/monitor/leads]', err.message);
     res.status(500).json({ error: 'Query failed', detail: err.message });
+  }
+});
+
+/* --------------------------------------------------------
+   GET /monitor/filter-options  — distinct values for filters
+   Powers the Source dropdown + Heard-about-us autocomplete.
+-------------------------------------------------------- */
+app.get('/monitor/filter-options', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const [hearRows, sourceRows] = await Promise.all([
+      pool.query(`SELECT hear_about_us AS v, COUNT(*) AS c FROM leads WHERE hear_about_us IS NOT NULL AND hear_about_us <> '' GROUP BY hear_about_us ORDER BY c DESC, hear_about_us ASC LIMIT 100`),
+      pool.query(`SELECT utm_source AS v, COUNT(*) AS c FROM leads WHERE utm_source IS NOT NULL AND utm_source <> '' GROUP BY utm_source ORDER BY c DESC, utm_source ASC LIMIT 100`)
+    ]);
+    res.json({
+      hearAbout: hearRows.rows.map(r => r.v),
+      utmSource: sourceRows.rows.map(r => r.v)
+    });
+  } catch (err) {
+    console.error('[/monitor/filter-options]', err.message);
+    res.status(500).json({ error: 'Filter options query failed', detail: err.message });
   }
 });
 
@@ -742,49 +866,11 @@ app.get('/monitor/sdr', async (req, res) => {
 });
 
 /* --------------------------------------------------------
-   GET /monitor/duplicates  — emails with multiple sessions
--------------------------------------------------------- */
-app.get('/monitor/duplicates', async (req, res) => {
-  const token = process.env.MONITOR_TOKEN;
-  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
-
-  try {
-    const result = await pool.query(`
-      SELECT
-        l.email,
-        COUNT(*) AS session_count,
-        MAX(CASE WHEN l.booking_uid IS NOT NULL THEN 1 ELSE 0 END) AS has_booking,
-        MAX(CASE WHEN l.completed = true THEN 1 ELSE 0 END) AS has_completed,
-        MIN(l.created_at) AS first_seen,
-        MAX(l.created_at) AS last_seen,
-        json_agg(json_build_object(
-          'session_id', l.session_id,
-          'created_at', l.created_at,
-          'completed',  l.completed,
-          'booking_uid', l.booking_uid,
-          'booked_at',  l.booked_at,
-          'sell_to',    l.sell_to,
-          'step_reached', l.step_reached,
-          'disqualified', l.disqualified,
-          'page_url',   l.page_url
-        ) ORDER BY l.created_at DESC) AS sessions
-      FROM leads l
-      WHERE l.email IS NOT NULL
-      GROUP BY LOWER(l.email), l.email
-      HAVING COUNT(*) > 1
-      ORDER BY COUNT(*) DESC, MAX(l.created_at) DESC
-    `);
-
-    res.json({ total: result.rows.length, leads: result.rows });
-  } catch (err) {
-    console.error('[/monitor/duplicates]', err.message);
-    res.status(500).json({ error: 'Duplicates query failed', detail: err.message });
-  }
-});
-
-/* --------------------------------------------------------
    GET /monitor  — full dashboard HTML page
    UPDATED: alert threshold changed from 30 mins to 2 hours
+   UPDATED: All Leads tab now has Sell-to / Source / Enrichment /
+            Heard-about-us filters, date presets, sortable columns,
+            and CSV export.
 -------------------------------------------------------- */
 app.get('/monitor', (req, res) => {
   const token = process.env.MONITOR_TOKEN;
@@ -828,6 +914,7 @@ app.get('/monitor', (req, res) => {
   '.filters input,.filters select{font-size:13px;padding:7px 10px;border:1px solid #e5e5e5;border-radius:7px;background:#fff;color:#1a1a1a;outline:none}' +
   '.filters input:focus,.filters select:focus{border-color:#999}' +
   '.filters input[type=text]{min-width:200px}' +
+  '.sortable{cursor:pointer;user-select:none}.sortable:hover{color:#555}.sar{font-size:10px;color:#bbb;margin-left:2px}' +
   'table{width:100%;border-collapse:collapse;font-size:12px}' +
   'th{text-align:left;padding:9px 10px;font-weight:500;color:#888;border-bottom:1px solid #e5e5e5;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;white-space:nowrap}' +
   'td{padding:10px;border-bottom:1px solid #f5f5f5;color:#333;vertical-align:top}' +
@@ -885,13 +972,27 @@ app.get('/monitor', (req, res) => {
   '<div class="filters">' +
   '<input type="text" id="fsearch" placeholder="Search email, company..." oninput="debounce()">' +
   '<select id="fstage" onchange="loadLeads(1)"><option value="all">All stages</option><option value="booked">Booked</option><option value="completed">Completed (no booking)</option><option value="step1">Step 1 only</option><option value="disqualified">Disqualified</option></select>' +
-  '<input type="date" id="ffrom" onchange="loadLeads(1)">' +
-  '<input type="date" id="fto" onchange="loadLeads(1)">' +
+  '<select id="fsellto" onchange="loadLeads(1)"><option value="all">All sell-to</option><option value="B2B">B2B</option><option value="B2B (clarified from B2C)">B2B (clarified from B2C)</option><option value="B2B (clarified from Mixed)">B2B (clarified from Mixed)</option><option value="B2C">B2C</option></select>' +
+  '<select id="fsource" onchange="loadLeads(1)"><option value="all">All sources</option></select>' +
+  '<select id="fenrich" onchange="loadLeads(1)"><option value="all">Enrichment: all</option><option value="yes">Enriched</option><option value="no">Not enriched</option></select>' +
+  '<input type="text" id="fhear" list="hearlist" placeholder="Heard about us..." oninput="debounce()" style="min-width:170px">' +
+  '<datalist id="hearlist"></datalist>' +
+  '<select id="fpreset" onchange="datePreset(this.value)"><option value="">Any date</option><option value="today">Today</option><option value="7d">Last 7 days</option><option value="30d">Last 30 days</option></select>' +
+  '<input type="date" id="ffrom" onchange="dateManual()">' +
+  '<input type="date" id="fto" onchange="dateManual()">' +
   '<button class="btn" onclick="clearF()">Clear</button>' +
+  '<button class="btn" onclick="exportLeads()" style="background:#1a1a1a;color:#fff;border-color:#1a1a1a">&#8595; Export CSV</button>' +
   '<span id="lcount" style="font-size:12px;color:#888"></span>' +
   '</div>' +
   '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
-  '<th style="width:30px"></th><th>Email</th><th>Name</th><th>Company</th><th>Sells to</th><th>Stage</th><th>Booked</th><th>Enrichment</th><th>Created (IST)</th><th>Source</th>' +
+  '<th style="width:30px"></th>' +
+  '<th class="sortable" onclick="sortBy(\'email\')">Email <span class="sar" id="sar-email"></span></th>' +
+  '<th class="sortable" onclick="sortBy(\'name\')">Name <span class="sar" id="sar-name"></span></th>' +
+  '<th class="sortable" onclick="sortBy(\'company\')">Company <span class="sar" id="sar-company"></span></th>' +
+  '<th class="sortable" onclick="sortBy(\'sell_to\')">Sells to <span class="sar" id="sar-sell_to"></span></th>' +
+  '<th>Stage</th><th>Booked</th><th>Enrichment</th>' +
+  '<th class="sortable" onclick="sortBy(\'created_at\')">Created (IST) <span class="sar" id="sar-created_at"></span></th>' +
+  '<th>Source</th>' +
   '</tr></thead><tbody id="ltbody"><tr><td colspan="10" class="nd">Loading leads...</td></tr></tbody></table></div></div>' +
   '<div class="pg" id="lpag"></div>' +
   '</div>' +
@@ -924,7 +1025,6 @@ app.get('/monitor', (req, res) => {
   '<div class="sr"><div><div class="sn">Step 2 &#8212; /submit</div><div class="sd">Lead completed + Slack fired</div></div><span class="badge bx" id="s-submit">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">Apollo enrichment</div><div class="sd">enrichment_data populated per session</div></div><span class="badge bx" id="s-enrich">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">Cal booking</div><div class="sd">Completed leads with booking_uid</div></div><span class="badge bx" id="s-cal">Checking...</span></div>' +
-  // UPDATED: description reflects new 2-hour threshold
   '<div class="sr"><div><div class="sn">Cron &#8212; drop-off recovery</div><div class="sd">Leads waiting >2 hours without booking</div></div><span class="badge bx" id="s-cron">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">AWS sync</div><div class="sd">gw_form_leads mirror</div></div><span class="badge bx" id="s-aws">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">Email recovery</div><div class="sd">Follow-up emails sent to partial leads</div></div><span class="badge bx" id="s-loops">Checking...</span></div>' +
@@ -942,15 +1042,14 @@ app.get('/monitor', (req, res) => {
   const js = '<script>' +
   'var TP="' + tp + '";' +
   'var API=window.location.origin;' +
-  'var lChart=null,curPage=1,stimer=null;' +
-  'function showTab(n){["overview","leads","sdr","dupes","health"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"&&document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();}' +
+  'var lChart=null,curPage=1,stimer=null,curSort="created_at",curDir="desc",filterOptsLoaded=false;' +
+  'function showTab(n){["overview","leads","sdr","dupes","health"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();}' +
   'function badge(id,text,cls){var el=document.getElementById(id);if(!el)return;el.textContent=text;el.className="badge "+cls;}' +
   'function set(id,v){var el=document.getElementById(id);if(el)el.textContent=v;}' +
   'function pct(a,b){return b?Math.round(a/b*100)+"%":"0%";}' +
   'function ist(ts){if(!ts)return"\\u2014";return new Date(ts).toLocaleString("en-IN",{timeZone:"Asia/Kolkata",dateStyle:"short",timeStyle:"short"});}' +
   'function esc(s){if(!s)return"";return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}' +
   'async function checkApi(){try{var r=await fetch(API+"/health",{signal:AbortSignal.timeout(5000)});if(r.ok){document.getElementById("apidot").className="dot dot-green";document.getElementById("apist").textContent="API online";badge("s-api","Online","bg");return true;}throw new Error("HTTP "+r.status);}catch(e){document.getElementById("apidot").className="dot dot-red";document.getElementById("apist").textContent="API offline";badge("s-api","Offline","br");return false;}}' +
-  // UPDATED: alert text now says "> 2 hours" instead of "> 30 mins"
   'function renderAlerts(d){var a=[];if(d.pendingPartials>0)a.push({c:"aw",i:"!",m:d.pendingPartials+" lead(s) waiting >2 hours without booking."});if(d.noBookingUid>0)a.push({c:"aw",i:"!",m:d.noBookingUid+" B2B lead(s) completed form but not booked — check SDR List."});if(!d.awsSynced)a.push({c:"ae",i:"x",m:"AWS sync disabled."});if(d.total>5&&d.enriched<d.total*0.3)a.push({c:"aw",i:"!",m:"Low enrichment rate ("+Math.round(d.enriched/d.total*100)+"%)."});if(d.todayCount===0)a.push({c:"aw",i:"o",m:"No new leads in 24 hours."});if(a.length===0)a.push({c:"ao",i:"\\u2713",m:"All systems healthy."});document.getElementById("alerts").innerHTML=a.map(function(x){return"<div class=\\"alertbox "+x.c+"\\"><span>"+x.i+"</span><span>"+x.m+"</span></div>";}).join("");}' +
   'function renderFunnel(t,c,b,d){var steps=[{l:"Step 1 submitted",v:t,p:100,col:"#818cf8"},{l:"Step 2 completed",v:c,p:t?Math.round(c/t*100):0,col:"#38bdf8"},{l:"Call booked",v:b,p:t?Math.round(b/t*100):0,col:"#34d399"},{l:"Disqualified",v:d,p:t?Math.round(d/t*100):0,col:"#fb923c"}];document.getElementById("funnel").innerHTML=steps.map(function(s){return"<div class=\\"fr\\"><div class=\\"fl\\"><span>"+s.l+"</span><span style=\\"font-weight:500\\">"+s.v+" <span style=\\"color:#aaa\\">("+s.p+"%)</span></span></div><div class=\\"fb\\"><div class=\\"ff\\" style=\\"width:"+s.p+"%;background:"+s.col+"\\"></div></div></div>";}).join("");}' +
   'function renderChart(leads){var counts={};(leads||[]).forEach(function(l){var k=new Date(l.created_at).toLocaleDateString("en-IN",{timeZone:"Asia/Kolkata",month:"short",day:"numeric"});counts[k]=(counts[k]||0)+1;});var labels=Object.keys(counts).reverse(),data=Object.values(counts).reverse();if(lChart)lChart.destroy();var ctx=document.getElementById("lchart").getContext("2d");lChart=new Chart(ctx,{type:"bar",data:{labels:labels,datasets:[{data:data,backgroundColor:"#818cf8",borderRadius:4,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{stepSize:1,color:"#aaa"},grid:{color:"#f0f0f0"}},x:{ticks:{color:"#aaa",maxRotation:45,autoSkip:false},grid:{display:false}}}}});}' +
@@ -998,11 +1097,17 @@ app.get('/monitor', (req, res) => {
   'if(!fields.length)return"<div style=\\"color:#999;font-size:12px\\">No enrichment data.</div>";' +
   'return"<div class=\\"egrid\\">"+fields.map(function(f){var val=f.lnk&&f.v?"<a href=\\""+(f.v.startsWith("http")?"":"https://")+esc(f.v)+"\\" target=\\"_blank\\">"+esc(f.v)+"</a>":f.mono?"<code style=\\"font-size:10px\\">"+esc(f.v)+"</code>":esc(f.v);return"<div class=\\"ef\\"><div class=\\"efl\\">"+f.lb+"</div><div class=\\"efv\\">"+val+"</div></div>";}).join("")+"</div>";}' +
   'function debounce(){clearTimeout(stimer);stimer=setTimeout(function(){loadLeads(1);},400);}' +
-  'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("ffrom").value="";document.getElementById("fto").value="";loadLeads(1);}' +
+  'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("fsellto").value="all";document.getElementById("fsource").value="all";document.getElementById("fenrich").value="all";document.getElementById("fhear").value="";document.getElementById("fpreset").value="";document.getElementById("ffrom").value="";document.getElementById("fto").value="";curSort="created_at";curDir="desc";renderSortArrows();loadLeads(1);}' +
+  'function renderSortArrows(){["email","name","company","sell_to","created_at"].forEach(function(c){var el=document.getElementById("sar-"+c);if(el)el.textContent=(curSort===c)?(curDir==="asc"?"\\u25B2":"\\u25BC"):"";});}' +
+  'function sortBy(c){if(curSort===c){curDir=(curDir==="asc")?"desc":"asc";}else{curSort=c;curDir=(c==="created_at")?"desc":"asc";}renderSortArrows();loadLeads(1);}' +
+  'function datePreset(v){var ff=document.getElementById("ffrom"),ft=document.getElementById("fto");if(!v){loadLeads(1);return;}function fmt(d){var y=d.getFullYear(),m=("0"+(d.getMonth()+1)).slice(-2),da=("0"+d.getDate()).slice(-2);return y+"-"+m+"-"+da;}var now=new Date(),to=fmt(now),from=to;if(v==="7d"){var d=new Date(now);d.setDate(d.getDate()-6);from=fmt(d);}else if(v==="30d"){var d2=new Date(now);d2.setDate(d2.getDate()-29);from=fmt(d2);}ff.value=from;ft.value=to;loadLeads(1);}' +
+  'function dateManual(){var p=document.getElementById("fpreset");if(p)p.value="";loadLeads(1);}' +
+  'function exportLeads(){var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,hear=document.getElementById("fhear").value.trim(),from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"format=csv&stage="+stage+"&sort="+curSort+"&dir="+curDir;if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;window.location.href=url;}' +
+  'async function loadFilterOptions(){if(filterOptsLoaded)return;try{var r=await fetch(API+"/monitor/filter-options"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(10000)});if(!r.ok)return;var d=await r.json();var sel=document.getElementById("fsource");if(sel&&d.utmSource){d.utmSource.forEach(function(v){var o=document.createElement("option");o.value=v;o.textContent=v;sel.appendChild(o);});}var dl=document.getElementById("hearlist");if(dl&&d.hearAbout){dl.innerHTML=d.hearAbout.map(function(v){return"<option value=\\""+esc(v)+"\\"></option>";}).join("");}filterOptsLoaded=true;}catch(e){}}' +
   'function toggleRow(sid){var row=document.getElementById("er-"+sid);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=row.previousElementSibling&&row.previousElementSibling.querySelector(".xbtn");if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";}' +
-  'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
-  'var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"page="+curPage+"&stage="+stage;' +
-  'if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;' +
+  'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,hear=document.getElementById("fhear").value.trim(),from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
+  'var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"page="+curPage+"&stage="+stage+"&sort="+curSort+"&dir="+curDir;' +
+  'if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;' +
   'document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\">Loading...</td></tr>";' +
   'try{var r=await fetch(url,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
   'set("lcount",d.total+" lead"+(d.total!==1?"s":"")+" found");' +
@@ -1098,7 +1203,7 @@ app.get('/monitor', (req, res) => {
   'document.getElementById("dupes-tbody").innerHTML=html;' +
   '}catch(e){document.getElementById("dupes-tbody").innerHTML="<tr><td colspan=\\"7\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function toggleDupeRow(i){var row=document.getElementById("dupe-er-"+i);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=document.getElementById("dupe-xbtn-"+i);if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";}' +
-  'loadAll();setInterval(loadAll,60000);' +
+  'renderSortArrows();loadAll();setInterval(loadAll,60000);' +
   '<\/script></body></html>';
 
   res.setHeader('Content-Type', 'text/html');
