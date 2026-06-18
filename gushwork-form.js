@@ -1,15 +1,13 @@
 /* ==========================================================
-   GUSHWORK — MULTI-STEP FORM  v4.1  (POPUP VERSION)
+   GUSHWORK — MULTI-STEP FORM  v4.2  (POPUP VERSION)
    Hosted on GitHub — reference via jsDelivr CDN
    https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@main/gushwork-form.js
 
-   v4.1 changes:
-   - Added prefillHearAboutUs(): auto-prefill + hide "hear about us"
-     cold_email in utm_source → "email"
-     fb/ig in utm_source OR facebook.com/instagram.com in referrer → "meta"
-     linkedin in utm_source OR linkedin.com in referrer → "linkedin"
-   - Fixed referrer capture: now uses sessionStorage fallback so organic
-     social referrers aren't lost on internal navigation (matches /demo version)
+ 4.2 changes:
+- Updated prefillHearAboutUs(): Facebook/Instagram now split by platform
+  and type (Paid vs UGC) instead of generic 'meta'
+- UGC includes creator name from utm_campaign
+- Referrer-based Facebook/Instagram traffic maps to (Paid)
 ========================================================== */
 
 /* --------------------------------------------------------
@@ -236,26 +234,32 @@
 function prefillHearAboutUs() {
   const src = (formState.utm_source || '').toLowerCase();
   const ref = (formState.referrer   || '').toLowerCase();
+  const medium = (formState.utm_medium || '').toLowerCase();
+
+  const isFacebook  = src.includes('facebook') || src.includes('fb');
+  const isInstagram = src.includes('instagram') || src.includes('ig');
+  const isUGC       = medium.includes('ugc');
+
+  // Capitalise creator name from utm_campaign
+  const creatorRaw = (formState.utm_campaign || '').trim();
+  const creator    = creatorRaw
+    ? creatorRaw.charAt(0).toUpperCase() + creatorRaw.slice(1).toLowerCase()
+    : '';
 
   let prefill = '';
   if (src.includes('cold_email')) {
     prefill = 'email';
-  } else if (
-    src.includes('facebook') || src.includes('fb') ||
-    src.includes('instagram') || src.includes('ig') ||
-    ref.includes('facebook.com') || ref.includes('instagram.com')
-  ) {
-    prefill = 'meta';
-  } else if (
-    src.includes('linkedin') ||
-    ref.includes('linkedin.com')
-  ) {
+  } else if (isFacebook && isUGC) {
+    prefill = 'Facebook (UGC)' + (creator ? ' — ' + creator : '');
+  } else if (isInstagram && isUGC) {
+    prefill = 'Instagram (UGC)' + (creator ? ' — ' + creator : '');
+  } else if (isFacebook || ref.includes('facebook.com')) {
+    prefill = 'Facebook (Paid)';
+  } else if (isInstagram || ref.includes('instagram.com')) {
+    prefill = 'Instagram (Paid)';
+  } else if (src.includes('linkedin') || ref.includes('linkedin.com')) {
     prefill = 'linkedin';
-  } else if (
-    src.includes('google') &&
-    (formState.utm_medium.toLowerCase().includes('cpc') ||
-     formState.utm_medium.toLowerCase().includes('paid'))
-  ) {
+  } else if (src.includes('google') && (medium.includes('cpc') || medium.includes('paid'))) {
     prefill = 'Google Ads';
   }
 
