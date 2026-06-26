@@ -1,15 +1,20 @@
 /* ==========================================================
-   GUSHWORK — MULTI-STEP FORM  v4.3  (POPUP VERSION)
+   GUSHWORK — MULTI-STEP FORM  v4.4  (POPUP VERSION)
    Hosted on GitHub — reference via jsDelivr CDN
    https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@main/gushwork-form.js
+
+ 4.4 changes (on top of 4.3):
+- injectStyles(): removed position:fixed from .iti--container — it broke
+  desktop visibility. intl-tel-input positions via getBoundingClientRect()
+  + scrollY/scrollX (document coords), so fixed shifted dropdown off-screen
+  by the full scroll offset. Only z-index overridden (999999999999999).
 
  4.3 changes (on top of 4.2):
 - initPhoneInputs(): added dropdownContainer: document.body to fix
   country-list dropdown clipping/z-index on mobile (popup stacking context)
 - initPhoneInputs(): added initialCountry: 'us' so US is shown by default
   before the ipinfo.io lookup fires and sets the real detected country
-- injectStyles(): added .iti--container z-index rule to ensure the
-  body-appended dropdown floats above all other elements on mobile
+- injectStyles(): added .iti--container z-index rule
 
  4.2 changes:
 - Updated prefillHearAboutUs(): Facebook/Instagram now split by platform
@@ -59,11 +64,14 @@
 
     /* ---- Phone dropdown z-index fix (mobile / popup) ----
        When dropdownContainer: document.body is set, intl-tel-input
-       appends the country list as .iti--container directly on <body>.
-       This rule ensures it floats above every other stacking context. */
+       appends .iti--container to <body> and positions it via JS using
+       getBoundingClientRect() + scrollY/scrollX — i.e. position: absolute
+       document coordinates. Do NOT override position here; the library
+       sets it inline and overriding with fixed shifts the dropdown by
+       the full scroll offset, making it invisible on desktop.
+       Only set z-index so it floats above the popup/modal. */
     .iti--container {
-      z-index: 9999 !important;
-      position: fixed !important;
+      z-index: 999999999999999 !important;
     }
     /* Smooth touch-scroll inside the country list on iOS */
     .iti__country-list {
