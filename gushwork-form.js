@@ -1,7 +1,15 @@
 /* ==========================================================
-   GUSHWORK — MULTI-STEP FORM  v4.2  (POPUP VERSION)
+   GUSHWORK — MULTI-STEP FORM  v4.3  (POPUP VERSION)
    Hosted on GitHub — reference via jsDelivr CDN
    https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@main/gushwork-form.js
+
+ 4.3 changes (on top of 4.2):
+- initPhoneInputs(): added dropdownContainer: document.body to fix
+  country-list dropdown clipping/z-index on mobile (popup stacking context)
+- initPhoneInputs(): added initialCountry: 'us' so US is shown by default
+  before the ipinfo.io lookup fires and sets the real detected country
+- injectStyles(): added .iti--container z-index rule to ensure the
+  body-appended dropdown floats above all other elements on mobile
 
  4.2 changes:
 - Updated prefillHearAboutUs(): Facebook/Instagram now split by platform
@@ -48,6 +56,19 @@
       width:  100% !important;
       height: 600px !important;
     }
+
+    /* ---- Phone dropdown z-index fix (mobile / popup) ----
+       When dropdownContainer: document.body is set, intl-tel-input
+       appends the country list as .iti--container directly on <body>.
+       This rule ensures it floats above every other stacking context. */
+    .iti--container {
+      z-index: 9999 !important;
+      position: fixed !important;
+    }
+    /* Smooth touch-scroll inside the country list on iOS */
+    .iti__country-list {
+      -webkit-overflow-scrolling: touch;
+    }
   `;
   const style = document.createElement('style');
   style.textContent = css;
@@ -86,13 +107,18 @@
       var input = this;
       var preferredCountries = $(input).attr('ms-code-phone-number').split(',');
       var iti = window.intlTelInput(input, {
-        preferredCountries: preferredCountries,
+        preferredCountries:  preferredCountries,
+        initialCountry:      'us',           // Show US by default before IP lookup
+        dropdownContainer:   document.body,  // Fix: renders outside popup stacking context
         utilsScript: 'https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/utils.js'
       });
       input._iti = iti;
 
+      // IP-based country detection — overwrites the 'us' default with actual country
       $.get('https://ipinfo.io', function(response) {
-        iti.setCountry(response.country);
+        if (response && response.country) {
+          iti.setCountry(response.country.toLowerCase());
+        }
       }, 'jsonp');
 
       input.addEventListener('change', function() {
