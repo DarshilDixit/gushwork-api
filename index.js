@@ -1717,25 +1717,34 @@ app.post('/cron/send-partials', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /booking-confirmed-webhook-rh  — RevenueHero server-side webhook
-   [DEBUG MODE] — logs all headers/body to discover correct
-   signature header name. Rejection is commented out for now.
+   [SAFE DEBUG MODE] — signature format corrected to match RH's
+   actual header: "t=<timestamp>, sha256=<hash>"
+   Logs match/mismatch but does NOT reject yet — confirm one
+   more clean test before flipping to hard rejection.
 -------------------------------------------------------- */
 app.post('/booking-confirmed-webhook-rh', async (req, res) => {
-  // TEMPORARY DEBUG — remove these 2 lines once signature header is confirmed
-  console.log('[/rh-webhook] 🔍 ALL HEADERS:', JSON.stringify(req.headers));
-  console.log('[/rh-webhook] 🔍 RAW BODY:', JSON.stringify(req.body));
-
   const rhSecret = process.env.RH_WEBHOOK_SECRET;
+
   if (rhSecret) {
-    const signature = req.headers['x-rh-signature'] || req.headers['x-revenuehero-signature'];
-    if (signature) {
-      const expected = crypto.createHmac('sha256', rhSecret).update(JSON.stringify(req.body)).digest('hex');
-      if (signature !== expected) {
-        console.warn('[/rh-webhook] ⚠ Invalid signature — logging but NOT rejecting (debug mode)');
-        // return res.status(401).json({ error: 'Invalid signature' });  ← re-enable once header is confirmed
+    const sigHeader = req.headers['x-rh-signature'] || '';
+    const match = sigHeader.match(/t=(\d+),\s*sha256=([a-f0-9]+)/);
+
+    if (match) {
+      const timestamp     = match[1];
+      const receivedHash  = match[2];
+      const signedPayload = `${timestamp}.${JSON.stringify(req.body)}`;
+      const expectedHash  = crypto.createHmac('sha256', rhSecret).update(signedPayload).digest('hex');
+
+      if (receivedHash === expectedHash) {
+        console.log('[/rh-webhook] ✅ Signature MATCHED');
+      } else {
+        console.warn('[/rh-webhook] ⚠ Signature MISMATCH — logging but NOT rejecting (debug mode)');
+        console.warn('[/rh-webhook]    expected:', expectedHash);
+        console.warn('[/rh-webhook]    received:', receivedHash);
+        // return res.status(401).json({ error: 'Invalid signature' });  ← re-enable once confirmed MATCHED
       }
     } else {
-      console.warn('[/rh-webhook] ⚠ No signature header found under expected names');
+      console.warn('[/rh-webhook] ⚠ Signature header missing or unrecognized format:', sigHeader);
     }
   }
 
@@ -1813,6 +1822,25 @@ app.post('/booking-confirmed-webhook-rh', async (req, res) => {
     console.error('[/rh-webhook] Error:', err.message);
     res.status(500).json({ error: 'Webhook processing failed' });
   }
+});
+
+/* --------------------------------------------------------
+   TEMPORARY — POST /rh-debug-log
+   Logs the raw browser-side MEETING_BOOKED event to Railway,
+   tagged with session_id, so we can confirm with certainty
+   whether this event fires in setEmbedTarget inline mode.
+   Fires UNCONDITIONALLY — even for test emails — so nothing
+   gets silently swallowed during this diagnostic pass.
+   Remove once confirmed either way.
+-------------------------------------------------------- */
+app.post('/rh-debug-log', (req, res) => {
+  console.log('[RH DEBUG] ════════════════════════════════════');
+  console.log('[RH DEBUG] session_id:', req.body.session_id || 'none');
+  console.log('[RH DEBUG] email:', req.body.email || 'none');
+  console.log('[RH DEBUG] timestamp:', new Date().toISOString());
+  console.log('[RH DEBUG] raw_event:', JSON.stringify(req.body.raw_event || req.body));
+  console.log('[RH DEBUG] ════════════════════════════════════');
+  res.json({ ok: true });
 });
 
 /* --------------------------------------------------------
