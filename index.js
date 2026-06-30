@@ -37,6 +37,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type']
 }));
 
+app.use('/booking-confirmed-webhook-rh', express.raw({ type: 'application/json' }));
 app.use(express.json({ limit: '10kb' }));
 
 /* --------------------------------------------------------
@@ -1717,14 +1718,34 @@ app.post('/cron/send-partials', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /booking-confirmed-webhook-rh  — RevenueHero server-side webhook
-   [SAFE DEBUG MODE] — signature format corrected to match RH's
-   actual header: "t=<timestamp>, sha256=<hash>"
-   Logs match/mismatch but does NOT reject yet — confirm one
-   more clean test before flipping to hard rejection.
--------------------------------------------------------- */
-app.post('/booking-confirmed-webhook-rh', async (req, res) => {
-  const rhSecret = process.env.RH_WEBHOOK_SECRET;
 
+   Signature format confirmed by RH support:
+   header = "t=<timestamp>, sha256=<hash>"
+   hash   = HMAC-SHA256(raw_body, secret)  — timestamp is NOT
+            part of the signed payload, ignore it for hashing.
+
+   Verbose logging added throughout to match existing production
+   logging style (Cal webhook, /submit, /partial etc.) — every
+   meaningful step writes a line to Railway so this can always
+   be verified/debugged without needing browser console access.
+-------------------------------------------------------- */
+
+// Add this BEFORE your other app.use(express.json(...)) calls,
+// so this specific route gets the raw body instead of pre-parsed JSON
+
+app.post('/booking-confirmed-webhook-rh', async (req, res) => {
+  console.log('[/rh-webhook] ── Incoming request ──');
+
+  const rawBody = req.body.toString('utf8'); // raw bytes, exactly as RH sent them
+  let payload;
+  try {
+    payload = JSON.parse(rawBody);
+  } catch (err) {
+    console.error('[/rh-webhook] ❌ Failed to parse raw body:', err.message);
+    return res.status(400).json({ error: 'Invalid JSON' });
+  }
+
+  const rhSecret = process.env.RH_WEBHOOK_SECRET;
   if (rhSecret) {
     const sigHeader = req.headers['x-rh-signature'] || '';
     const match = sigHeader.match(/t=(\d+),\s*sha256=([a-f0-9]+)/);
@@ -1732,27 +1753,30 @@ app.post('/booking-confirmed-webhook-rh', async (req, res) => {
     if (match) {
       const timestamp     = match[1];
       const receivedHash  = match[2];
-      const signedPayload = `${timestamp}.${JSON.stringify(req.body)}`;
-      const expectedHash  = crypto.createHmac('sha256', rhSecret).update(signedPayload).digest('hex');
+      const expectedHash  = crypto.createHmac('sha256', rhSecret).update(rawBody).digest('hex');
 
-      if (receivedHash === expectedHash) {
-        console.log('[/rh-webhook] ✅ Signature MATCHED');
-      } else {
-        console.warn('[/rh-webhook] ⚠ Signature MISMATCH — logging but NOT rejecting (debug mode)');
-        console.warn('[/rh-webhook]    expected:', expectedHash);
-        console.warn('[/rh-webhook]    received:', receivedHash);
-        // return res.status(401).json({ error: 'Invalid signature' });  ← re-enable once confirmed MATCHED
+      console.log(`[/rh-webhook] 🔐 Signature check — timestamp: ${timestamp}`);
+      console.log(`[/rh-webhook] 🔐 expected: ${expectedHash}`);
+      console.log(`[/rh-webhook] 🔐 received: ${receivedHash}`);
+
+      if (receivedHash !== expectedHash) {
+        console.warn('[/rh-webhook] ⚠ Signature MISMATCH — rejecting');
+        return res.status(401).json({ error: 'Invalid signature' });
       }
+      console.log('[/rh-webhook] ✅ Signature verified — proceeding');
     } else {
-      console.warn('[/rh-webhook] ⚠ Signature header missing or unrecognized format:', sigHeader);
+      console.warn('[/rh-webhook] ⚠ Signature header missing or unrecognized format:', sigHeader, '— rejecting');
+      return res.status(401).json({ error: 'Malformed signature header' });
     }
+  } else {
+    console.warn('[/rh-webhook] ⚠ RH_WEBHOOK_SECRET not set — skipping signature check entirely');
   }
 
   try {
-    const payload = req.body;
+    console.log('[/rh-webhook] 📦 Payload id:', payload.id, '| prospect email:', payload.prospect?.email, '| status:', payload.status, '| meeting_type:', payload.meeting_type_name);
 
     if (!payload.id || !payload.prospect?.email) {
-      console.log('[/rh-webhook] No meeting payload or email — skipping');
+      console.log('[/rh-webhook] ⏭ No meeting payload or email — skipping');
       return res.json({ ok: true, skipped: true });
     }
 
@@ -1764,46 +1788,57 @@ app.post('/booking-confirmed-webhook-rh', async (req, res) => {
     const status     = payload.status || '';
 
     if (!email || !bookingUid) {
-      console.warn('[/rh-webhook] Missing email or booking_uid — skipping');
+      console.warn('[/rh-webhook] ⚠ Missing email or booking_uid — skipping');
       return res.status(400).json({ error: 'email and booking_uid required' });
     }
 
     if (status === 'cancelled') {
-      console.log(`[/rh-webhook] Skipping cancelled meeting: ${bookingUid} | email: ${email}`);
+      console.log(`[/rh-webhook] ⏭ Skipping cancelled meeting: ${bookingUid} | email: ${email}`);
       return res.json({ ok: true, skipped: true, reason: 'cancelled' });
     }
 
-    console.log(`[/rh-webhook] Received booking: ${bookingUid} | email: ${email} | name: ${rhName} | event: ${eventType}`);
+    console.log(`[/rh-webhook] 📨 Received booking: ${bookingUid} | email: ${email} | name: ${rhName} | event: ${eventType} | meeting_time: ${startTime}`);
 
     const existingLead = await pool.query('SELECT session_id, email, booking_uid FROM leads WHERE email=$1 ORDER BY created_at DESC LIMIT 1', [email]);
+    console.log(`[/rh-webhook] 🔎 Existing lead lookup for ${email}: ${existingLead.rows.length > 0 ? 'FOUND (session ' + existingLead.rows[0].session_id + ')' : 'NOT FOUND'}`);
 
     if (existingLead.rows.length > 0) {
       const lead = existingLead.rows[0];
       if (!lead.booking_uid) {
+        console.log(`[/rh-webhook] ✏️ No existing booking_uid on this lead — writing booking_uid: ${bookingUid}`);
         await pool.query('UPDATE leads SET booking_uid=$2,start_time=$3,event_type=$4,booked_at=NOW(),updated_at=NOW() WHERE session_id=$1', [lead.session_id, bookingUid, startTime || null, eventType || null]);
         syncBookingToAWS(lead.session_id, bookingUid, startTime, null, eventType);
+
         findSFLeadByEmail(email).then(leadId => {
+          console.log(`[/rh-webhook] 🔗 SF lookup for ${email}: ${leadId ? 'Found ' + leadId : 'Not found'}`);
           if (leadId) return updateSFLead(leadId, { booking_uid__c: bookingUid, booking_start_time__c: startTime || '', booking_event_type__c: eventType || '', completed__c: true });
-        }).catch(err => console.warn('[/rh-webhook] SF update failed (non-blocking):', err.message));
+        }).catch(err => console.warn('[/rh-webhook] ⚠ SF update failed (non-blocking):', err.message));
+
         pool.query('SELECT * FROM leads l LEFT JOIN enrichment_data e ON e.session_id=l.session_id WHERE l.session_id=$1', [lead.session_id]).then(r => {
           const fullLead = r.rows[0] || {};
           return pushFormEventsToMeta({...fullLead, booking_uid: bookingUid}, {clientIpAddress:'',clientUserAgent:''});
-        }).catch(err => console.warn('[/rh-webhook] Meta CAPI failed (non-blocking):', err.message));
-        console.log(`[/rh-webhook] ✅ Updated existing lead: ${email} | session: ${lead.session_id}`);
+        }).catch(err => console.warn('[/rh-webhook] ⚠ Meta CAPI failed (non-blocking):', err.message));
+
+        console.log(`[/rh-webhook] ✅ Updated existing lead: ${email} | session: ${lead.session_id} | booking_uid: ${bookingUid}`);
       } else {
-        console.log(`[/rh-webhook] ⏭ Lead already booked: ${email} | existing booking: ${lead.booking_uid}`);
+        console.log(`[/rh-webhook] ⏭ Lead already booked: ${email} | existing booking: ${lead.booking_uid} — skipping (dedup)`);
       }
       return res.json({ ok: true, action: 'updated_existing' });
     }
 
+    console.log(`[/rh-webhook] ⚠ No existing session found for ${email} — falling into safety-net "create new" branch`);
+
     const enrichRow = await pool.query('SELECT * FROM enrichment_data WHERE email=$1 ORDER BY enriched_at DESC LIMIT 1', [email]);
     const enrich    = enrichRow.rows[0] || {};
+    console.log(`[/rh-webhook] 🔎 Enrichment lookup for ${email}: ${enrichRow.rows.length > 0 ? 'FOUND' : 'NOT FOUND'}`);
 
     const nameParts  = rhName.split(' ');
     const firstName  = enrich.enriched_first_name || nameParts[0] || '';
     const lastName   = enrich.enriched_last_name  || nameParts.slice(1).join(' ') || '';
     const company    = enrich.enriched_company || '';
-    const webhookSessionId = crypto.randomUUID(); // fixed — must be valid UUID per db.js schema
+    const webhookSessionId = crypto.randomUUID(); // must be valid UUID per db.js schema
+
+    console.log(`[/rh-webhook] 🆕 Creating fallback lead — session_id: ${webhookSessionId} | name: ${firstName} ${lastName} | company: ${company}`);
 
     await pool.query(`
       INSERT INTO leads (session_id,email,first_name,last_name,company,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,enriched_city,enriched_state,enriched_country,enriched_seniority,enriched_departments,enriched_email_status,enriched_founded_year,enriched_annual_revenue,enriched_funding_events,enriched_alexa_ranking,enriched_keywords,enriched_org_hq,enriched_total_funding,enriched_funding_stage,step_reached,completed,submitted_at,booking_uid,start_time,event_type,booked_at,prefill_source,sell_to,updated_at)
@@ -1813,34 +1848,15 @@ app.post('/booking-confirmed-webhook-rh', async (req, res) => {
 
     syncToAWS({ session_id:webhookSessionId, email, first_name:firstName, last_name:lastName, company, sell_to:'B2B', completed:true, step_reached:2, prefill_source:'rh_webhook' });
     slackSubmit({ first_name:firstName, last_name:lastName, email, company, sell_to:'B2B', prefill_source:'rh_webhook' });
-    pushToSalesforce({ first_name:firstName, last_name:lastName, email, company, sell_to:'B2B', booking_uid:bookingUid, start_time:startTime, event_type:eventType, step_reached:2, booked:true }).catch(err => console.warn('[/rh-webhook] SF push failed (non-blocking):', err.message));
+    pushToSalesforce({ first_name:firstName, last_name:lastName, email, company, sell_to:'B2B', booking_uid:bookingUid, start_time:startTime, event_type:eventType, step_reached:2, booked:true }).catch(err => console.warn('[/rh-webhook] ⚠ SF push failed (non-blocking):', err.message));
 
     console.log(`[/rh-webhook] ✅ Created new lead (fallback): ${email} | session: ${webhookSessionId}`);
     res.json({ ok: true, action: 'created_new', session_id: webhookSessionId });
 
   } catch (err) {
-    console.error('[/rh-webhook] Error:', err.message);
+    console.error('[/rh-webhook] ❌ Error:', err.message);
     res.status(500).json({ error: 'Webhook processing failed' });
   }
-});
-
-/* --------------------------------------------------------
-   TEMPORARY — POST /rh-debug-log
-   Logs the raw browser-side MEETING_BOOKED event to Railway,
-   tagged with session_id, so we can confirm with certainty
-   whether this event fires in setEmbedTarget inline mode.
-   Fires UNCONDITIONALLY — even for test emails — so nothing
-   gets silently swallowed during this diagnostic pass.
-   Remove once confirmed either way.
--------------------------------------------------------- */
-app.post('/rh-debug-log', (req, res) => {
-  console.log('[RH DEBUG] ════════════════════════════════════');
-  console.log('[RH DEBUG] session_id:', req.body.session_id || 'none');
-  console.log('[RH DEBUG] email:', req.body.email || 'none');
-  console.log('[RH DEBUG] timestamp:', new Date().toISOString());
-  console.log('[RH DEBUG] raw_event:', JSON.stringify(req.body.raw_event || req.body));
-  console.log('[RH DEBUG] ════════════════════════════════════');
-  res.json({ ok: true });
 });
 
 /* --------------------------------------------------------
