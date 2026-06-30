@@ -1717,25 +1717,30 @@ app.post('/cron/send-partials', async (req, res) => {
 
 /* --------------------------------------------------------
    POST /booking-confirmed-webhook-rh  — RevenueHero server-side webhook
+   [DEBUG MODE] — logs all headers/body to discover correct
+   signature header name. Rejection is commented out for now.
 -------------------------------------------------------- */
 app.post('/booking-confirmed-webhook-rh', async (req, res) => {
+  // TEMPORARY DEBUG — remove these 2 lines once signature header is confirmed
+  console.log('[/rh-webhook] 🔍 ALL HEADERS:', JSON.stringify(req.headers));
+  console.log('[/rh-webhook] 🔍 RAW BODY:', JSON.stringify(req.body));
+
   const rhSecret = process.env.RH_WEBHOOK_SECRET;
   if (rhSecret) {
     const signature = req.headers['x-rh-signature'] || req.headers['x-revenuehero-signature'];
     if (signature) {
       const expected = crypto.createHmac('sha256', rhSecret).update(JSON.stringify(req.body)).digest('hex');
       if (signature !== expected) {
-        console.warn('[/rh-webhook] ⚠ Invalid signature — rejecting');
-        return res.status(401).json({ error: 'Invalid signature' });
+        console.warn('[/rh-webhook] ⚠ Invalid signature — logging but NOT rejecting (debug mode)');
+        // return res.status(401).json({ error: 'Invalid signature' });  ← re-enable once header is confirmed
       }
     } else {
-      console.warn('[/rh-webhook] ⚠ No signature header found on request — proceeding unverified for now');
+      console.warn('[/rh-webhook] ⚠ No signature header found under expected names');
     }
   }
 
   try {
     const payload = req.body;
-    console.log('[/rh-webhook] Raw payload received:', JSON.stringify(payload).substring(0, 500));
 
     if (!payload.id || !payload.prospect?.email) {
       console.log('[/rh-webhook] No meeting payload or email — skipping');
@@ -1782,7 +1787,6 @@ app.post('/booking-confirmed-webhook-rh', async (req, res) => {
       return res.json({ ok: true, action: 'updated_existing' });
     }
 
-    // Safety net fallback — create new lead if somehow no session exists
     const enrichRow = await pool.query('SELECT * FROM enrichment_data WHERE email=$1 ORDER BY enriched_at DESC LIMIT 1', [email]);
     const enrich    = enrichRow.rows[0] || {};
 
@@ -1790,7 +1794,7 @@ app.post('/booking-confirmed-webhook-rh', async (req, res) => {
     const firstName  = enrich.enriched_first_name || nameParts[0] || '';
     const lastName   = enrich.enriched_last_name  || nameParts.slice(1).join(' ') || '';
     const company    = enrich.enriched_company || '';
-    const webhookSessionId = crypto.randomUUID(); // fixed — must be valid UUID
+    const webhookSessionId = crypto.randomUUID(); // fixed — must be valid UUID per db.js schema
 
     await pool.query(`
       INSERT INTO leads (session_id,email,first_name,last_name,company,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,enriched_city,enriched_state,enriched_country,enriched_seniority,enriched_departments,enriched_email_status,enriched_founded_year,enriched_annual_revenue,enriched_funding_events,enriched_alexa_ranking,enriched_keywords,enriched_org_hq,enriched_total_funding,enriched_funding_stage,step_reached,completed,submitted_at,booking_uid,start_time,event_type,booked_at,prefill_source,sell_to,updated_at)
@@ -1809,6 +1813,17 @@ app.post('/booking-confirmed-webhook-rh', async (req, res) => {
     console.error('[/rh-webhook] Error:', err.message);
     res.status(500).json({ error: 'Webhook processing failed' });
   }
+});
+
+/* --------------------------------------------------------
+   TEMPORARY — POST /rh-debug-log
+   Logs the browser-side MEETING_BOOKED event to Railway so
+   we can confirm it fires without depending on browser console
+   surviving the post-booking redirect. Remove once confirmed.
+-------------------------------------------------------- */
+app.post('/rh-debug-log', (req, res) => {
+  console.log('[RH DEBUG] 🔍 Browser event received:', JSON.stringify(req.body));
+  res.json({ ok: true });
 });
 
 /* --------------------------------------------------------
