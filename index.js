@@ -1461,7 +1461,17 @@ app.post('/submit', async (req, res) => {
 });
 
 /* --------------------------------------------------------
-   POST /booking-confirmed  — browser-side Cal callback
+   POST /booking-confirmed  — browser-side Cal/RH callback
+
+   UPDATED: added dedup check before writing — previously this
+   route would unconditionally overwrite booking_uid every time
+   it was called, with no guard against the case where the
+   server-side webhook (Cal or RH) had already written the
+   booking moments earlier. That race condition caused duplicate
+   Meta CAPI Schedule events, duplicate Salesforce updates, and
+   duplicate AWS syncs for the same real booking. Now matches
+   the same "only write if not already set" guard already used
+   in /booking-confirmed-webhook and /booking-confirmed-webhook-rh.
 -------------------------------------------------------- */
 app.post('/booking-confirmed', async (req, res) => {
   const session_id  = (req.body.session_id  || '').toString().trim().slice(0, 100);
@@ -1470,7 +1480,16 @@ app.post('/booking-confirmed', async (req, res) => {
   const end_time    = req.body.end_time     || null;
   const event_type  = (req.body.event_type  || '').toString().trim().slice(0, 100);
   if (!session_id || !booking_uid) return res.status(400).json({ error: 'session_id and booking_uid required' });
+
   try {
+    // ── Dedup guard — check if a webhook already wrote this booking ──
+    const existing = await pool.query('SELECT booking_uid FROM leads WHERE session_id=$1', [session_id]);
+
+    if (existing.rows[0]?.booking_uid) {
+      console.log(`[/booking-confirmed] ⏭ Booking already recorded for session ${session_id} (booking_uid: ${existing.rows[0].booking_uid}) — skipping duplicate write`);
+      return res.json({ ok: true, skipped: true, reason: 'already_booked' });
+    }
+
     await pool.query('UPDATE leads SET booking_uid=$2,start_time=$3,end_time=$4,event_type=$5,booked_at=NOW(),updated_at=NOW() WHERE session_id=$1', [session_id,booking_uid,start_time,end_time,event_type||null]);
     syncBookingToAWS(session_id,booking_uid,start_time,end_time,event_type);
     const leadRow = await pool.query('SELECT email FROM leads WHERE session_id=$1', [session_id]);
