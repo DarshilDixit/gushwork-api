@@ -1798,6 +1798,12 @@ app.post('/booking-confirmed-webhook-rh', async (req, res) => {
       console.log('[/rh-webhook] ⏭ No meeting payload or email — skipping');
       return res.json({ ok: true, skipped: true });
     }
+     // Only process bookings from the inbound website router
+// All other routers (outbound, AI SDR etc.) are ignored here
+if (payload.router_name && payload.router_name !== 'Inbound Router - Website') {
+  console.log(`[/rh-webhook] ⏭ Skipping — router: ${payload.router_name} (not inbound website router)`);
+  return res.json({ ok: true, skipped: true, reason: 'non_website_router' });
+}
 
     const email      = (payload.prospect.email || '').toString().trim().toLowerCase();
     const rhName     = payload.prospect.name || '';
