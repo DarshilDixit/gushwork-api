@@ -1536,6 +1536,12 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
     const attendees  = payload.attendees || [];
     const attendee   = attendees[0] || {};
     const email      = (attendee.email || payload.responses?.email?.value || '').toString().trim().toLowerCase();
+      // Skip test emails — mirrors form.js guard
+    const TEST_EMAILS_CAL = ['b@g.ai'];
+    if (TEST_EMAILS_CAL.includes(email)) {
+      console.log(`[/cal-webhook] ⏭ Test email — skipping all processing`);
+      return res.json({ ok: true, skipped: true, reason: 'test_email' });
+    }
     const calName    = attendee.name || payload.responses?.name?.value || '';
     const bookingUid = payload.uid || payload.bookingUid || '';
     const startTime  = payload.startTime || '';
@@ -1806,6 +1812,12 @@ if (payload.router_name && payload.router_name !== 'Inbound Router - Website') {
 }
 
     const email      = (payload.prospect.email || '').toString().trim().toLowerCase();
+        // Skip test emails — mirrors form.js guard
+    const TEST_EMAILS_RH = ['b@g.ai'];
+    if (TEST_EMAILS_RH.includes(email)) {
+      console.log(`[/rh-webhook] ⏭ Test email — skipping all processing`);
+      return res.json({ ok: true, skipped: true, reason: 'test_email' });
+    }
     const rhName     = payload.prospect.name || '';
     const bookingUid = payload.id || '';
     const startTime  = payload.meeting_time || '';
