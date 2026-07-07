@@ -4,6 +4,13 @@
 //   StartTrial   — B2B lead entered email on Step 1 (called from /partial)
 //   Lead         — form completed (called from /submit)
 //   Schedule     — demo booked (called from /booking-confirmed-webhook)
+//
+// UPDATED: phone (ph) is now normalized to digits-only before
+// hashing, per Meta's user_data spec — country code included,
+// no '+', spaces, dashes, or parentheses. Handles any inbound
+// format: E.164 (+916388639290), spaced (+91 63886 39290),
+// or legacy DB rows. Without this, hashes never match Meta's
+// user graph and ph contributes nothing to match quality.
 // ============================================================
 
 const crypto = require('crypto');
@@ -14,6 +21,19 @@ function sha256(value) {
     .createHash('sha256')
     .update(value.trim().toLowerCase())
     .digest('hex');
+}
+
+/**
+ * Normalize phone to Meta's required format before hashing:
+ * digits only, including country code — no +, spaces, or symbols.
+ * "+91 63886 39290" → "916388639290"
+ * "+916388639290"   → "916388639290"
+ * Returns undefined for empty/garbage values so the key gets cleaned.
+ */
+function normalizePhone(value) {
+  if (!value) return undefined;
+  const digits = value.toString().replace(/\D/g, '');
+  return digits.length > 0 ? digits : undefined;
 }
 
 /**
@@ -43,7 +63,7 @@ async function sendEvent(eventName, payload, options = {}) {
 
     user_data: {
       em: sha256(payload.email),
-      ph: sha256(payload.phone),
+      ph: sha256(normalizePhone(payload.phone)),
       fn: sha256(payload.first_name),
       ln: sha256(payload.last_name),
       ct: sha256(payload.enriched_city),
