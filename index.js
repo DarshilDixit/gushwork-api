@@ -866,24 +866,6 @@ app.get('/monitor/sdr', async (req, res) => {
   }
 });
 
-// TEMPORARY — SF backfill (remove after use)
-const { runBackfill } = require('./backfill-sf');
-app.get('/admin/backfill-sf', async (req, res) => {
-  if (!process.env.BACKFILL_KEY || req.query.key !== process.env.BACKFILL_KEY) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
-  try {
-    const report = await runBackfill(pool, {
-      dry: req.query.dry === '1',
-      from: req.query.from,
-      to: req.query.to,
-    });
-    res.json(report);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 /* --------------------------------------------------------
    GET /monitor  — full dashboard HTML page
    UPDATED: alert threshold changed from 30 mins to 2 hours
