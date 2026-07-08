@@ -277,4 +277,4 @@ async function updateSFLead(leadId, fields) {
   }
 }
 
-module.exports = { pushToSalesforce, findSFLeadByEmail, updateSFLead };
+module.exports = { pushToSalesforce, findSFLeadByEmail, updateSFLead, getSalesforceToken };
