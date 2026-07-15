@@ -1228,8 +1228,12 @@ app.post('/verify-email', async (req, res) => {
     const text   = await response.text();
     const status = text.trim().toLowerCase();
     console.log(`[ELV] ${email} → "${status}"`);
-    const allowedStatuses = ['ok', 'catch_all', 'ok_for_all', 'antispam_system', 'accept_all'];
-    const valid = allowedStatuses.includes(status);
+    // Block ONLY on definitive failures. Transport/inconclusive statuses
+    // (smtp_protocol, smtp_error, greylisted, unknown, etc.) FAIL OPEN —
+    // "ELV couldn't check" must never be treated as "email is invalid".
+    // (2026-07: ELV returned smtp_protocol for ALL Gmail, blocking real leads.)
+    const blockedStatuses = ['error', 'invalid', 'unknown_email', 'email_disabled', 'domain_error', 'dead_server', 'syntax_error', 'disposable', 'spamtrap'];
+    const valid = !blockedStatuses.includes(status);
     if (!valid) console.log(`[ELV] BLOCKED ${email} — status: "${status}"`);
     res.json({ valid, status });
   } catch (err) {
