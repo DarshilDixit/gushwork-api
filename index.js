@@ -14,16 +14,10 @@ const PORT = process.env.PORT || 3000;
 
 app.set('trust proxy', 1);
 
-/* --------------------------------------------------------
-   SECURITY
--------------------------------------------------------- */
 app.use(helmet({
-  contentSecurityPolicy: false // disabled so monitor HTML page loads scripts
+  contentSecurityPolicy: false
 }));
 
-/* --------------------------------------------------------
-   CORS
--------------------------------------------------------- */
 const allowedOrigins = (process.env.ALLOWED_ORIGIN || '')
   .split(',').map(o => o.trim()).filter(Boolean);
 
@@ -40,9 +34,6 @@ app.use(cors({
 app.use('/booking-confirmed-webhook-rh', express.raw({ type: 'application/json' }));
 app.use(express.json({ limit: '10kb' }));
 
-/* --------------------------------------------------------
-   RATE LIMITING
--------------------------------------------------------- */
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, max: 100,
   message: { error: 'Too many requests — please try again later.' },
@@ -53,13 +44,19 @@ const strictLimiter = rateLimit({
   message: { error: 'Rate limit exceeded — please try again later.' },
   standardHeaders: true, legacyHeaders: false
 });
-app.use(globalLimiter);
+// UPDATED (2026-07): global limiter scoped to public-facing form
+// endpoints only. Previously applied to ALL routes, which meant the
+// monitor dashboard's own auto-refresh (multiple endpoints/min) tripped
+// the 100-req/15-min limit and caused the recurring "dashboard not
+// loading" error. /monitor/* is now exempt; webhooks are protected by
+// HMAC signatures, not rate limits.
+app.use('/partial',           globalLimiter);
+app.use('/submit',            globalLimiter);
+app.use('/session',           globalLimiter);
+app.use('/booking-confirmed', globalLimiter);
 app.use('/verify-email', strictLimiter);
 app.use('/enrich',       strictLimiter);
 
-/* --------------------------------------------------------
-   AWS RDS POOL
--------------------------------------------------------- */
 let awsPool = null;
 
 if (process.env.AWS_PG_HOST) {
@@ -79,9 +76,6 @@ if (process.env.AWS_PG_HOST) {
   console.warn('[AWS] AWS_PG_HOST not set — AWS sync disabled');
 }
 
-/* --------------------------------------------------------
-   AWS HELPER — initAWSTable
--------------------------------------------------------- */
 async function initAWSTable() {
   if (!awsPool) return;
   try {
@@ -189,9 +183,6 @@ async function initAWSTable() {
   }
 }
 
-/* --------------------------------------------------------
-   AWS HELPER — syncToAWS
--------------------------------------------------------- */
 function syncToAWS(data) {
   if (!awsPool) return;
   awsPool.query(`
@@ -253,7 +244,7 @@ function syncToAWS(data) {
       disqualified            = EXCLUDED.disqualified,
       disqualified_reason     = COALESCE(EXCLUDED.disqualified_reason,     gw_form_leads.disqualified_reason),
       step_reached            = GREATEST(EXCLUDED.step_reached,            gw_form_leads.step_reached),
-      completed               = COALESCE(EXCLUDED.completed,               gw_form_leads.completed),
+      completed               = (COALESCE(gw_form_leads.completed, false) OR COALESCE(EXCLUDED.completed, false)),
       submitted_at            = COALESCE(EXCLUDED.submitted_at,            gw_form_leads.submitted_at),
       loops_sent              = COALESCE(EXCLUDED.loops_sent,              gw_form_leads.loops_sent),
       updated_at              = NOW()
@@ -298,9 +289,6 @@ function syncBookingToAWS(session_id, booking_uid, start_time, end_time, event_t
   .catch(err => console.warn(`[AWS] ⚠ Booking sync failed:`, err.message));
 }
 
-/* --------------------------------------------------------
-   SLACK HELPERS
--------------------------------------------------------- */
 function sendSlack(blocks, fallbackText) {
   const webhookUrl = process.env.SLACK_WEBHOOK_URL;
   if (!webhookUrl) { console.warn('[Slack] SLACK_WEBHOOK_URL not set — skipping'); return; }
@@ -368,15 +356,12 @@ function buildJourneyBlocks(blocks, d) {
   }
 }
 
-/* --------------------------------------------------------
-   slackPartial — safety net: never fire for disqualified leads
--------------------------------------------------------- */
 function slackPartial(d) {
   if (d.disqualified) {
     console.log(`[Slack] ⏭ Skipping partial notification for disqualified lead: ${d.email}`);
     return;
   }
-  const label = d.completed ? '⏰ Reached Cal — Did Not Book' : '👻 Dropped at Step 1';
+  const label = d.completed ? '⏰ Completed Form — Did Not Book' : '👻 Dropped at Step 1';
   const blocks = [];
   blocks.push(bHeader(label));
   blocks.push(bDivider());
@@ -412,9 +397,6 @@ function slackSubmit(d) {
   sendSlack(blocks, `✅ Lead Form Completed — ${d.email}`);
 }
 
-/* --------------------------------------------------------
-   FOLLOW-UP EMAIL (Gmail SMTP)
--------------------------------------------------------- */
 const nodemailer = require('nodemailer');
 
 let _gmailTransport = null;
@@ -466,24 +448,56 @@ function formatRevenue(amount) {
 
 app.get('/health', (req, res) => { res.json({ status: 'ok', timestamp: new Date().toISOString() }); });
 
-/* --------------------------------------------------------
-   GET /monitor/metrics  — protected by token
--------------------------------------------------------- */
 app.get('/monitor/metrics', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   try {
-    const [totals, enrichCount, enrichCoverage, pendingPartials, noBooking, recent, today] = await Promise.all([
+    const [totals, people, recovered, byDay, enrichCount, enrichCoverage, pendingPartials, noBooking, recent, today] = await Promise.all([
       pool.query(`
         SELECT
-          COUNT(*)                                          AS total,
-          COUNT(*) FILTER (WHERE completed = true)          AS completed,
-          COUNT(*) FILTER (WHERE booking_uid IS NOT NULL)   AS booked,
-          COUNT(*) FILTER (WHERE disqualified = true)       AS disqualified,
-          COUNT(*) FILTER (WHERE loops_sent = true)         AS loops_sent
+          COUNT(*)                                                          AS total,
+          COUNT(*) FILTER (WHERE completed = true)                          AS completed,
+          COUNT(*) FILTER (WHERE booking_uid IS NOT NULL)                   AS booked,
+          COUNT(*) FILTER (WHERE disqualified = true)                       AS disqualified,
+          COUNT(*) FILTER (WHERE loops_sent = true)                         AS loops_sent,
+          COUNT(*) FILTER (WHERE completed = true AND booking_uid IS NULL)  AS completed_no_booking_sessions
         FROM leads
+      `),
+      pool.query(`
+        SELECT
+          COUNT(DISTINCT LOWER(email))                                        AS people_total,
+          COUNT(DISTINCT LOWER(email)) FILTER (WHERE completed = true)        AS people_completed,
+          COUNT(DISTINCT LOWER(email)) FILTER (WHERE booking_uid IS NOT NULL) AS people_booked,
+          COUNT(DISTINCT LOWER(email)) FILTER (WHERE disqualified = true)     AS people_disqualified
+        FROM leads
+        WHERE email IS NOT NULL
+      `),
+      pool.query(`
+        SELECT COUNT(*) AS recovered FROM (
+          SELECT LOWER(l.email) AS em
+          FROM leads l
+          WHERE l.email IS NOT NULL
+            AND l.completed = true
+            AND l.booking_uid IS NULL
+            AND EXISTS (
+              SELECT 1 FROM leads b
+              WHERE LOWER(b.email) = LOWER(l.email)
+                AND b.booking_uid IS NOT NULL
+                AND COALESCE(b.booked_at, b.created_at) >= l.created_at
+            )
+          GROUP BY LOWER(l.email)
+        ) x
+      `),
+      pool.query(`
+        SELECT to_char(created_at AT TIME ZONE 'Asia/Kolkata', 'Mon DD') AS day_label,
+               date_trunc('day', created_at AT TIME ZONE 'Asia/Kolkata') AS day,
+               COUNT(*) AS count
+        FROM leads
+        WHERE created_at >= NOW() - INTERVAL '14 days'
+        GROUP BY 1, 2
+        ORDER BY 2 ASC
       `),
       pool.query(`SELECT COUNT(*) AS count FROM enrichment_data`),
       pool.query(`
@@ -494,7 +508,6 @@ app.get('/monitor/metrics', async (req, res) => {
           COUNT(*) FILTER (WHERE enriched_country IS NOT NULL)       AS has_location
         FROM enrichment_data
       `),
-      // ── UPDATED: pendingPartials now uses 2-hour threshold + cross-session booking check
       pool.query(`
         SELECT COUNT(*) AS count
         FROM leads l
@@ -540,6 +553,17 @@ app.get('/monitor/metrics', async (req, res) => {
     const booked       = parseInt(t.booked) || 0;
     const disqualified = parseInt(t.disqualified) || 0;
     const loopsSent    = parseInt(t.loops_sent) || 0;
+    const completedNoBookingSessions = parseInt(t.completed_no_booking_sessions) || 0;
+
+    const p = people.rows[0];
+    const peopleTotal        = parseInt(p.people_total) || 0;
+    const peopleCompleted    = parseInt(p.people_completed) || 0;
+    const peopleBooked       = parseInt(p.people_booked) || 0;
+    const peopleDisqualified = parseInt(p.people_disqualified) || 0;
+
+    const recoveredBookings = parseInt(recovered.rows[0].recovered) || 0;
+    const leadsByDay        = byDay.rows.map(r => ({ day_label: r.day_label, count: parseInt(r.count) || 0 }));
+
     const enriched     = parseInt(enrichCount.rows[0].count) || 0;
     const pending      = parseInt(pendingPartials.rows[0].count) || 0;
     const noBookingUid = parseInt(noBooking.rows[0].count) || 0;
@@ -555,6 +579,11 @@ app.get('/monitor/metrics', async (req, res) => {
       total, completed, booked, disqualified, enriched, loopsSent,
       pendingPartials: pending, noBookingUid, todayCount, awsSynced: !!awsPool,
       enrichTitlePct: titlePct, enrichFundingPct: fundingPct, enrichLocationPct: locPct,
+      completedNoBookingSessions,
+      peopleTotal, peopleCompleted, peopleBooked, peopleDisqualified,
+      peopleNoBooking: noBookingUid,
+      recoveredBookings,
+      leadsByDay,
       recentLeads: recent.rows, generatedAt: new Date().toISOString()
     });
   } catch (err) {
@@ -563,9 +592,6 @@ app.get('/monitor/metrics', async (req, res) => {
   }
 });
 
-/* --------------------------------------------------------
-   GET /monitor/duplicates  — emails with multiple sessions
--------------------------------------------------------- */
 app.get('/monitor/duplicates', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
@@ -604,12 +630,6 @@ app.get('/monitor/duplicates', async (req, res) => {
   }
 });
 
-/* --------------------------------------------------------
-   GET /monitor/leads  — paginated leads + enrichment
-   UPDATED: added Sell-to / Source (utm_source) / Enrichment /
-            Heard-about-us filters, sortable columns, and CSV
-            export (?format=csv). Form flow untouched.
--------------------------------------------------------- */
 app.get('/monitor/leads', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
@@ -624,10 +644,9 @@ app.get('/monitor/leads', async (req, res) => {
   const sellTo     = req.query.sellTo     || null;
   const utmSource  = req.query.utmSource  || null;
   const hearAbout  = req.query.hearAbout  || null;
-  const enrichment = req.query.enrichment || null;   // 'yes' | 'no'
-  const format     = req.query.format     || 'json'; // 'json' | 'csv'
+  const enrichment = req.query.enrichment || null;
+  const format     = req.query.format     || 'json';
 
-  // Sort whitelist — only known columns/directions are ever interpolated.
   const sortMap = {
     created_at: 'l.created_at',
     email:      'l.email',
@@ -651,7 +670,6 @@ app.get('/monitor/leads', async (req, res) => {
   if (utmSource) { params.push(utmSource); conditions.push(`l.utm_source = $${params.length}`); }
   if (hearAbout) { params.push(`%${hearAbout.toLowerCase()}%`); conditions.push(`LOWER(COALESCE(l.hear_about_us,'')) LIKE $${params.length}`); }
 
-  // Enrichment yes/no mirrors the dashboard's "Enrichment" badge logic.
   if (enrichment === 'yes') {
     conditions.push(`(l.enriched_title IS NOT NULL OR l.enriched_company_size IS NOT NULL OR EXISTS (SELECT 1 FROM enrichment_data ee WHERE ee.session_id = l.session_id AND (ee.enriched_title IS NOT NULL OR ee.enriched_company_size IS NOT NULL OR ee.enriched_company IS NOT NULL)))`);
   }
@@ -706,7 +724,6 @@ app.get('/monitor/leads', async (req, res) => {
   `;
 
   try {
-    // ── CSV export: same filters + sort, no pagination
     if (format === 'csv') {
       const allRows = await pool.query(baseSelect + ` ${orderBy}`, params);
       const cols = [
@@ -752,10 +769,6 @@ app.get('/monitor/leads', async (req, res) => {
   }
 });
 
-/* --------------------------------------------------------
-   GET /monitor/filter-options  — distinct values for filters
-   Powers the Source dropdown + Heard-about-us autocomplete.
--------------------------------------------------------- */
 app.get('/monitor/filter-options', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
@@ -774,13 +787,6 @@ app.get('/monitor/filter-options', async (req, res) => {
   }
 });
 
-/* --------------------------------------------------------
-   GET /monitor/sdr  — email-deduped unbooked qualified leads
-   Includes: B2B leads who never booked on ANY session
-   - completed form (step 2) OR dropped at step 1 but qualified (sell_to = B2B)
-   - deduped by email — one row per person, most recent session wins
-   - CSV export supported via ?format=csv
--------------------------------------------------------- */
 app.get('/monitor/sdr', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
@@ -866,13 +872,6 @@ app.get('/monitor/sdr', async (req, res) => {
   }
 });
 
-/* --------------------------------------------------------
-   GET /monitor  — full dashboard HTML page
-   UPDATED: alert threshold changed from 30 mins to 2 hours
-   UPDATED: All Leads tab now has Sell-to / Source / Enrichment /
-            Heard-about-us filters, date presets, sortable columns,
-            and CSV export.
--------------------------------------------------------- */
 app.get('/monitor', (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) {
@@ -895,13 +894,14 @@ app.get('/monitor', (req, res) => {
   '.btn:hover{background:#f5f5f5}' +
   '.page{max-width:1200px;margin:0 auto;padding:24px}' +
   '.sl{font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:10px}' +
-  '.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px}' +
+  '.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:12px}' +
   '.g2{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:24px}' +
   '.card{background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:16px 20px}' +
-  '.mc{background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:16px}' +
+  '.mc{background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:16px;cursor:default}' +
   '.ml{font-size:12px;color:#888;margin-bottom:6px}' +
   '.mv{font-size:28px;font-weight:600;color:#1a1a1a;line-height:1}' +
   '.ms{font-size:11px;color:#aaa;margin-top:6px}' +
+  '.recon{font-size:11px;color:#999;margin:0 2px 24px 2px}' +
   '.sr{display:flex;align-items:center;justify-content:space-between;padding:11px 0;border-bottom:1px solid #f0f0f0}' +
   '.sr:last-child{border-bottom:none}' +
   '.sn{font-size:13px;font-weight:500}.sd{font-size:11px;color:#999;margin-top:2px}' +
@@ -955,18 +955,25 @@ app.get('/monitor', (req, res) => {
   '<div class="tab" id="t-health" onclick="showTab(\'health\')">System Health</div>' +
   '</div>' +
   '<div class="tp act" id="tp-overview">' +
-  '<div class="sl">Overview</div>' +
+  '<div class="sl">Overview &#8212; people (headline) &#183; sessions (small print)</div>' +
   '<div class="g4">' +
-  '<div class="mc"><div class="ml">Total leads</div><div class="mv" id="m-total">&#8212;</div><div class="ms" id="m-today">&#8212; today</div></div>' +
-  '<div class="mc"><div class="ml">Step 2 completed</div><div class="mv" id="m-comp">&#8212;</div><div class="ms" id="m-cpct">of leads</div></div>' +
-  '<div class="mc"><div class="ml">Calls booked</div><div class="mv" id="m-book">&#8212;</div><div class="ms" id="m-bpct">of completed</div></div>' +
-  '<div class="mc"><div class="ml">Disqualified</div><div class="mv" id="m-disq">&#8212;</div><div class="ms">B2C / Mixed</div></div>' +
+  '<div class="mc" title="People = distinct email addresses ever captured. Sessions = individual form visits; one person can have several."><div class="ml">Total people</div><div class="mv" id="m-total">&#8212;</div><div class="ms" id="m-totals">&#8212;</div></div>' +
+  '<div class="mc" title="People whose form reached Step 2 (completed) on at least one of their sessions."><div class="ml">People completed</div><div class="mv" id="m-comp">&#8212;</div><div class="ms" id="m-cpct">&#8212;</div></div>' +
+  '<div class="mc" title="People with a booking on at least one of their sessions."><div class="ml">People booked</div><div class="mv" id="m-book">&#8212;</div><div class="ms" id="m-bpct">&#8212;</div></div>' +
+  '<div class="mc" title="People marked disqualified (B2C / Mixed) on at least one session."><div class="ml">Disqualified</div><div class="mv" id="m-disq">&#8212;</div><div class="ms" id="m-dsq">B2C / Mixed</div></div>' +
   '</div>' +
+  '<div class="g4">' +
+  '<div class="mc" title="Distinct qualified B2B people who completed the form but have NO booking on ANY of their sessions. This is exactly the SDR List."><div class="ml">No booking yet (SDR)</div><div class="mv" id="m-nb">&#8212;</div><div class="ms" id="m-nbs">&#8212;</div></div>' +
+  '<div class="mc" title="People who completed the form without booking, and later booked on another session &#8212; your follow-up emails / prefill links / SDR nudges working."><div class="ml">Recovered bookings</div><div class="mv" id="m-rec">&#8212;</div><div class="ms">booked on a later session</div></div>' +
+  '<div class="mc" title="Sessions older than 2 hours with no booking (and no booking on any other session of that email) that the recovery cron has not processed yet."><div class="ml">Pending recovery</div><div class="mv" id="m-pend">&#8212;</div><div class="ms">&gt;2h, awaiting follow-up</div></div>' +
+  '<div class="mc" title="Sessions where the drop-off recovery email has been sent (loops_sent = true)."><div class="ml">Recovery emails sent</div><div class="mv" id="m-mail">&#8212;</div><div class="ms">follow-ups dispatched</div></div>' +
+  '</div>' +
+  '<div class="recon" id="recon">&#8212;</div>' +
   '<div class="g2">' +
   '<div><div class="sl">Alerts</div><div id="alerts"><div class="alertbox" style="background:#f5f5f5;color:#999;border:1px solid #eee">Loading...</div></div></div>' +
-  '<div><div class="sl">Conversion funnel</div><div class="card"><div id="funnel">Loading...</div></div></div>' +
+  '<div><div class="sl">Conversion funnel (people)</div><div class="card"><div id="funnel">Loading...</div></div></div>' +
   '</div>' +
-  '<div class="sl">Leads over time</div>' +
+  '<div class="sl">Form sessions per day &#8212; last 14 days (IST)</div>' +
   '<div class="card" style="margin-bottom:24px"><div class="cw"><canvas id="lchart"></canvas></div></div>' +
   '</div>' +
   '<div class="tp" id="tp-leads">' +
@@ -999,7 +1006,7 @@ app.get('/monitor', (req, res) => {
   '</div>' +
   '<div class="tp" id="tp-sdr">' +
   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
-  '<div><div class="sl" style="margin-bottom:2px">SDR List</div><div style="font-size:12px;color:#888">Qualified B2B leads who have never booked a call — deduped by email</div></div>' +
+  '<div><div class="sl" style="margin-bottom:2px">SDR List</div><div style="font-size:12px;color:#888">Qualified B2B leads who have never booked a call &#8212; deduped by email</div></div>' +
   '<div style="display:flex;gap:8px;align-items:center">' +
   '<input type="text" id="sdr-search" placeholder="Search email, company..." oninput="sdrDebounce()" style="font-size:13px;padding:7px 10px;border:1px solid #e5e5e5;border-radius:7px;background:#fff;color:#1a1a1a;outline:none;min-width:220px">' +
   '<span id="sdr-count" style="font-size:12px;color:#888"></span>' +
@@ -1011,7 +1018,7 @@ app.get('/monitor', (req, res) => {
   '</div>' +
   '<div class="tp" id="tp-dupes">' +
   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
-  '<div><div class="sl" style="margin-bottom:2px">Duplicate Sessions</div><div style="font-size:12px;color:#888">Emails that appear in more than one session — sorted by session count</div></div>' +
+  '<div><div class="sl" style="margin-bottom:2px">Duplicate Sessions</div><div style="font-size:12px;color:#888">Emails that appear in more than one session &#8212; sorted by session count</div></div>' +
   '<span id="dupes-count" style="font-size:12px;color:#888"></span>' +
   '</div>' +
   '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
@@ -1025,8 +1032,8 @@ app.get('/monitor', (req, res) => {
   '<div class="sr"><div><div class="sn">Step 1 &#8212; /partial</div><div class="sd">Email + lead saved to Railway + AWS</div></div><span class="badge bx" id="s-partial">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">Step 2 &#8212; /submit</div><div class="sd">Lead completed + Slack fired</div></div><span class="badge bx" id="s-submit">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">Apollo enrichment</div><div class="sd">enrichment_data populated per session</div></div><span class="badge bx" id="s-enrich">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Cal booking</div><div class="sd">Completed leads with booking_uid</div></div><span class="badge bx" id="s-cal">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Cron &#8212; drop-off recovery</div><div class="sd">Leads waiting >2 hours without booking</div></div><span class="badge bx" id="s-cron">Checking...</span></div>' +
+  '<div class="sr"><div><div class="sn">Booking &#8212; RevenueHero</div><div class="sd">People booked / people completed</div></div><span class="badge bx" id="s-cal">Checking...</span></div>' +
+  '<div class="sr"><div><div class="sn">Cron &#8212; drop-off recovery</div><div class="sd">Leads waiting &gt;2 hours without booking</div></div><span class="badge bx" id="s-cron">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">AWS sync</div><div class="sd">gw_form_leads mirror</div></div><span class="badge bx" id="s-aws">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">Email recovery</div><div class="sd">Follow-up emails sent to partial leads</div></div><span class="badge bx" id="s-loops">Checking...</span></div>' +
   '</div>' +
@@ -1051,9 +1058,9 @@ app.get('/monitor', (req, res) => {
   'function ist(ts){if(!ts)return"\\u2014";return new Date(ts).toLocaleString("en-IN",{timeZone:"Asia/Kolkata",dateStyle:"short",timeStyle:"short"});}' +
   'function esc(s){if(!s)return"";return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}' +
   'async function checkApi(){try{var r=await fetch(API+"/health",{signal:AbortSignal.timeout(5000)});if(r.ok){document.getElementById("apidot").className="dot dot-green";document.getElementById("apist").textContent="API online";badge("s-api","Online","bg");return true;}throw new Error("HTTP "+r.status);}catch(e){document.getElementById("apidot").className="dot dot-red";document.getElementById("apist").textContent="API offline";badge("s-api","Offline","br");return false;}}' +
-  'function renderAlerts(d){var a=[];if(d.pendingPartials>0)a.push({c:"aw",i:"!",m:d.pendingPartials+" lead(s) waiting >2 hours without booking."});if(d.noBookingUid>0)a.push({c:"aw",i:"!",m:d.noBookingUid+" B2B lead(s) completed form but not booked — check SDR List."});if(!d.awsSynced)a.push({c:"ae",i:"x",m:"AWS sync disabled."});if(d.total>5&&d.enriched<d.total*0.3)a.push({c:"aw",i:"!",m:"Low enrichment rate ("+Math.round(d.enriched/d.total*100)+"%)."});if(d.todayCount===0)a.push({c:"aw",i:"o",m:"No new leads in 24 hours."});if(a.length===0)a.push({c:"ao",i:"\\u2713",m:"All systems healthy."});document.getElementById("alerts").innerHTML=a.map(function(x){return"<div class=\\"alertbox "+x.c+"\\"><span>"+x.i+"</span><span>"+x.m+"</span></div>";}).join("");}' +
-  'function renderFunnel(t,c,b,d){var steps=[{l:"Step 1 submitted",v:t,p:100,col:"#818cf8"},{l:"Step 2 completed",v:c,p:t?Math.round(c/t*100):0,col:"#38bdf8"},{l:"Call booked",v:b,p:t?Math.round(b/t*100):0,col:"#34d399"},{l:"Disqualified",v:d,p:t?Math.round(d/t*100):0,col:"#fb923c"}];document.getElementById("funnel").innerHTML=steps.map(function(s){return"<div class=\\"fr\\"><div class=\\"fl\\"><span>"+s.l+"</span><span style=\\"font-weight:500\\">"+s.v+" <span style=\\"color:#aaa\\">("+s.p+"%)</span></span></div><div class=\\"fb\\"><div class=\\"ff\\" style=\\"width:"+s.p+"%;background:"+s.col+"\\"></div></div></div>";}).join("");}' +
-  'function renderChart(leads){var counts={};(leads||[]).forEach(function(l){var k=new Date(l.created_at).toLocaleDateString("en-IN",{timeZone:"Asia/Kolkata",month:"short",day:"numeric"});counts[k]=(counts[k]||0)+1;});var labels=Object.keys(counts).reverse(),data=Object.values(counts).reverse();if(lChart)lChart.destroy();var ctx=document.getElementById("lchart").getContext("2d");lChart=new Chart(ctx,{type:"bar",data:{labels:labels,datasets:[{data:data,backgroundColor:"#818cf8",borderRadius:4,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{stepSize:1,color:"#aaa"},grid:{color:"#f0f0f0"}},x:{ticks:{color:"#aaa",maxRotation:45,autoSkip:false},grid:{display:false}}}}});}' +
+  'function renderAlerts(d){var a=[];if(d.pendingPartials>0)a.push({c:"aw",i:"!",m:d.pendingPartials+" session(s) waiting >2 hours without booking \\u2014 recovery cron will pick them up."});if(d.noBookingUid>0)a.push({c:"aw",i:"!",m:d.noBookingUid+" people (deduped, qualified B2B) completed the form but have no booking on any session \\u2014 see SDR List."});if(!d.awsSynced)a.push({c:"ae",i:"x",m:"AWS sync disabled."});if(d.total>5&&d.enriched<d.total*0.3)a.push({c:"aw",i:"!",m:"Low enrichment rate ("+Math.round(d.enriched/d.total*100)+"% of sessions)."});if(d.todayCount===0)a.push({c:"aw",i:"o",m:"No new sessions in the last 24 hours."});if(a.length===0)a.push({c:"ao",i:"\\u2713",m:"All systems healthy."});document.getElementById("alerts").innerHTML=a.map(function(x){return"<div class=\\"alertbox "+x.c+"\\"><span>"+x.i+"</span><span>"+x.m+"</span></div>";}).join("");}' +
+  'function renderFunnel(t,c,b,d){var steps=[{l:"People entered (Step 1)",v:t,p:100,col:"#818cf8"},{l:"People completed (Step 2)",v:c,p:t?Math.round(c/t*100):0,col:"#38bdf8"},{l:"People booked",v:b,p:t?Math.round(b/t*100):0,col:"#34d399"},{l:"People disqualified",v:d,p:t?Math.round(d/t*100):0,col:"#fb923c"}];document.getElementById("funnel").innerHTML=steps.map(function(s){return"<div class=\\"fr\\"><div class=\\"fl\\"><span>"+s.l+"</span><span style=\\"font-weight:500\\">"+s.v+" <span style=\\"color:#aaa\\">("+s.p+"%)</span></span></div><div class=\\"fb\\"><div class=\\"ff\\" style=\\"width:"+s.p+"%;background:"+s.col+"\\"></div></div></div>";}).join("");}' +
+  'function renderChart(rows){var labels=(rows||[]).map(function(r){return r.day_label;}),data=(rows||[]).map(function(r){return parseInt(r.count)||0;});if(lChart)lChart.destroy();var ctx=document.getElementById("lchart").getContext("2d");lChart=new Chart(ctx,{type:"bar",data:{labels:labels,datasets:[{data:data,backgroundColor:"#818cf8",borderRadius:4,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{stepSize:1,color:"#aaa"},grid:{color:"#f0f0f0"}},x:{ticks:{color:"#aaa",maxRotation:45,autoSkip:false},grid:{display:false}}}}});}' +
   'function stageBadge(l){if(l.booking_uid)return"<span class=\\"badge bg\\">Booked</span>";if(l.disqualified)return"<span class=\\"badge br\\">Disqualified</span>";if(l.completed)return"<span class=\\"badge bb\\">Completed</span>";return"<span class=\\"badge ba\\">Step 1</span>";}' +
   'function enrichBadge(l){return(l.enriched_title||l.enriched_company_size||l.e_company)?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>";}' +
   'function enrichPanel(l){var loc=[l.enriched_city,l.enriched_state,l.enriched_country].filter(Boolean).join(", ");var fields=[' +
@@ -1120,11 +1127,17 @@ app.get('/monitor', (req, res) => {
   'function renderPag(pg,pages){if(pages<=1){document.getElementById("lpag").innerHTML="";return;}var h="";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg-1)+")\\""+(pg<=1?" disabled":"")+">&larr;</button>";var s=Math.max(1,pg-2),e=Math.min(pages,pg+2);if(s>1)h+="<button class=\\"pb\\" onclick=\\"loadLeads(1)\\">1</button>"+(s>2?"<span class=\\"pi\\">&#8230;</span>":"");for(var i=s;i<=e;i++)h+="<button class=\\"pb"+(i===pg?" act":"")+ "\\" onclick=\\"loadLeads("+i+")\\" >"+i+"</button>";if(e<pages)h+=(e<pages-1?"<span class=\\"pi\\">&#8230;</span>":"")+"<button class=\\"pb\\" onclick=\\"loadLeads("+pages+")\\" >"+pages+"</button>";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg+1)+")\\"" +(pg>=pages?" disabled":"")+">&rarr;</button><span class=\\"pi\\">Page "+pg+" of "+pages+"</span>";document.getElementById("lpag").innerHTML=h;}' +
   'async function loadAll(){set("lupd","Refreshing...");var ok=await checkApi();if(!ok){document.getElementById("alerts").innerHTML="<div class=\\"alertbox ae\\"><span>x</span><span>API offline.</span></div>";set("lupd","API offline");return;}' +
   'try{var r=await fetch(API+"/monitor/metrics"+TP,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
-  'set("m-total",d.total);set("m-comp",d.completed);set("m-book",d.booked);set("m-disq",d.disqualified);set("m-today",d.todayCount+" today");set("m-cpct",pct(d.completed,d.total)+" of leads");set("m-bpct",pct(d.booked,d.completed)+" of completed");' +
-  'var er=d.total?Math.round(d.enriched/d.total*100):0,br=d.completed?Math.round(d.booked/d.completed*100):0;' +
-  'badge("s-partial",d.total+" leads saved","bg");badge("s-submit",d.completed>0?d.completed+" completed":"No completions",d.completed>0?"bg":"ba");badge("s-enrich",er+"% enriched",er>=60?"bg":er>=30?"ba":"br");badge("s-cal",br+"% booking rate",br>=50?"bg":br>=20?"ba":"bx");badge("s-cron",d.pendingPartials===0?"No pending":d.pendingPartials+" pending",d.pendingPartials===0?"bg":"ba");badge("s-aws",d.awsSynced?"Active":"Disabled",d.awsSynced?"bg":"br");badge("s-loops",d.loopsSent+" emails sent",d.loopsSent>0?"bg":"bx");' +
+  'set("m-total",d.peopleTotal);set("m-totals",d.total+" sessions \\u00B7 "+d.todayCount+" in last 24h");' +
+  'set("m-comp",d.peopleCompleted);set("m-cpct",pct(d.peopleCompleted,d.peopleTotal)+" of people \\u00B7 "+d.completed+" sessions");' +
+  'set("m-book",d.peopleBooked);set("m-bpct",pct(d.peopleBooked,d.peopleCompleted)+" of completed \\u00B7 "+d.booked+" sessions");' +
+  'set("m-disq",d.peopleDisqualified);set("m-dsq","B2C / Mixed \\u00B7 "+d.disqualified+" sessions");' +
+  'set("m-nb",d.peopleNoBooking);set("m-nbs",d.completedNoBookingSessions+" completed sessions w/o booking");' +
+  'set("m-rec",d.recoveredBookings);set("m-pend",d.pendingPartials);set("m-mail",d.loopsSent);' +
+  'set("recon","Sessions = form visits \\u00B7 People = distinct emails. "+d.completedNoBookingSessions+" completed sessions without a booking \\u2192 "+d.noBookingUid+" actionable people after dedup, cross-session bookings & B2B filter.");' +
+  'var er=d.total?Math.round(d.enriched/d.total*100):0,brP=d.peopleCompleted?Math.round(d.peopleBooked/d.peopleCompleted*100):0;' +
+  'badge("s-partial",d.total+" sessions saved","bg");badge("s-submit",d.completed>0?d.completed+" completed sessions":"No completions",d.completed>0?"bg":"ba");badge("s-enrich",er+"% enriched",er>=60?"bg":er>=30?"ba":"br");badge("s-cal",brP+"% booking rate (people)",brP>=50?"bg":brP>=20?"ba":"bx");badge("s-cron",d.pendingPartials===0?"No pending":d.pendingPartials+" pending",d.pendingPartials===0?"bg":"ba");badge("s-aws",d.awsSynced?"Active":"Disabled",d.awsSynced?"bg":"br");badge("s-loops",d.loopsSent+" emails sent",d.loopsSent>0?"bg":"bx");' +
   'set("h-enr",d.enriched);set("h-tit",d.enrichTitlePct!==undefined?d.enrichTitlePct+"%":"\\u2014");set("h-fun",d.enrichFundingPct!==undefined?d.enrichFundingPct+"%":"\\u2014");set("h-loc",d.enrichLocationPct!==undefined?d.enrichLocationPct+"%":"\\u2014");' +
-  'renderAlerts(d);renderFunnel(d.total,d.completed,d.booked,d.disqualified);if(d.recentLeads&&d.recentLeads.length)renderChart(d.recentLeads);' +
+  'renderAlerts(d);renderFunnel(d.peopleTotal,d.peopleCompleted,d.peopleBooked,d.peopleDisqualified);renderChart(d.leadsByDay||[]);' +
   'set("lupd","Updated "+new Date().toLocaleTimeString("en-IN",{timeZone:"Asia/Kolkata"})+" IST");' +
   '}catch(e){document.getElementById("alerts").innerHTML="<div class=\\"alertbox ae\\"><span>x</span><span>Failed: "+esc(e.message)+"</span></div>";set("lupd","Error");}' +
   'if(document.getElementById("tp-leads").classList.contains("act"))loadLeads(curPage);}' +
@@ -1141,13 +1154,13 @@ app.get('/monitor', (req, res) => {
   '}catch(e){document.getElementById("sdr-tbody").innerHTML="<tr><td colspan=\\"9\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function sdrPanel(l){' +
   'var fields=[' +
-  '{lb:"📞 Phone",v:l.phone},' +
-  '{lb:"💬 Heard about us",v:l.hear_about_us},' +
-  '{lb:"🌐 Website",v:l.website,lnk:true},' +
+  '{lb:"\\uD83D\\uDCDE Phone",v:l.phone},' +
+  '{lb:"\\uD83D\\uDCAC Heard about us",v:l.hear_about_us},' +
+  '{lb:"\\uD83C\\uDF10 Website",v:l.website,lnk:true},' +
   '{lb:"Source",v:l.utm_source?([l.utm_source,l.utm_medium].filter(Boolean).join(" / ")):null},' +
   '{lb:"Campaign",v:l.utm_campaign},' +
   '{lb:"Referrer",v:l.referrer},' +
-  '{lb:"🛬 Landing Page",v:l.landing_page,lnk:true},' +
+  '{lb:"\\uD83D\\uDEEC Landing Page",v:l.landing_page,lnk:true},' +
   '{lb:"Seniority",v:l.enriched_seniority},' +
   '{lb:"Department",v:l.enriched_departments},' +
   '{lb:"Location",v:l.enriched_city&&l.enriched_country?l.enriched_city+", "+l.enriched_country:l.enriched_country||null},' +
@@ -1211,9 +1224,6 @@ app.get('/monitor', (req, res) => {
   res.send(html + js);
 });
 
-/* --------------------------------------------------------
-   POST /verify-email
--------------------------------------------------------- */
 app.post('/verify-email', async (req, res) => {
   const email = (req.body.email || '').toString().trim().slice(0, 254).toLowerCase();
   if (!email) return res.status(400).json({ valid: false, error: 'email required' });
@@ -1228,10 +1238,6 @@ app.post('/verify-email', async (req, res) => {
     const text   = await response.text();
     const status = text.trim().toLowerCase();
     console.log(`[ELV] ${email} → "${status}"`);
-    // Block ONLY on definitive failures. Transport/inconclusive statuses
-    // (smtp_protocol, smtp_error, greylisted, unknown, etc.) FAIL OPEN —
-    // "ELV couldn't check" must never be treated as "email is invalid".
-    // (2026-07: ELV returned smtp_protocol for ALL Gmail, blocking real leads.)
     const blockedStatuses = ['error', 'invalid', 'unknown_email', 'email_disabled', 'domain_error', 'dead_server', 'syntax_error', 'disposable', 'spamtrap'];
     const valid = !blockedStatuses.includes(status);
     if (!valid) console.log(`[ELV] BLOCKED ${email} — status: "${status}"`);
@@ -1249,9 +1255,6 @@ app.post('/session', async (req, res) => {
   res.json({ ok: true });
 });
 
-/* --------------------------------------------------------
-   POST /enrich
--------------------------------------------------------- */
 app.post('/enrich', async (req, res) => {
   const email      = (req.body.email      || '').toString().trim().slice(0, 254).toLowerCase();
   const session_id = (req.body.session_id || '').toString().trim().slice(0, 100);
@@ -1286,9 +1289,6 @@ app.post('/enrich', async (req, res) => {
   } catch (err) { console.error('[/enrich] Error:', err.message, err.detail||''); res.json({ first_name:'',last_name:'',title:'',company:'',company_size:'',industry:'',linkedin_url:'',website:'' }); }
 });
 
-/* --------------------------------------------------------
-   POST /partial  — with enrichment sync
--------------------------------------------------------- */
 app.post('/partial', async (req, res) => {
   const session_id         = (req.body.session_id         || '').toString().trim().slice(0, 100);
   const page_url           = (req.body.page_url           || '').toString().trim().slice(0, 500);
@@ -1369,9 +1369,6 @@ app.post('/partial', async (req, res) => {
   } catch (err) { console.error('[/partial]', err.message); res.status(500).json({ error: 'Partial save failed' }); }
 });
 
-/* --------------------------------------------------------
-   POST /submit  — with enrichment sync
--------------------------------------------------------- */
 app.post('/submit', async (req, res) => {
   const session_id         = (req.body.session_id         || '').toString().trim().slice(0, 100);
   const page_url           = (req.body.page_url           || '').toString().trim().slice(0, 500);
@@ -1464,19 +1461,6 @@ app.post('/submit', async (req, res) => {
   } catch (err) { console.error('[/submit]', err.message); res.status(500).json({ error: 'Submit failed' }); }
 });
 
-/* --------------------------------------------------------
-   POST /booking-confirmed  — browser-side Cal/RH callback
-
-   UPDATED: added dedup check before writing — previously this
-   route would unconditionally overwrite booking_uid every time
-   it was called, with no guard against the case where the
-   server-side webhook (Cal or RH) had already written the
-   booking moments earlier. That race condition caused duplicate
-   Meta CAPI Schedule events, duplicate Salesforce updates, and
-   duplicate AWS syncs for the same real booking. Now matches
-   the same "only write if not already set" guard already used
-   in /booking-confirmed-webhook and /booking-confirmed-webhook-rh.
--------------------------------------------------------- */
 app.post('/booking-confirmed', async (req, res) => {
   const session_id  = (req.body.session_id  || '').toString().trim().slice(0, 100);
   const booking_uid = (req.body.booking_uid || '').toString().trim().slice(0, 100);
@@ -1486,7 +1470,6 @@ app.post('/booking-confirmed', async (req, res) => {
   if (!session_id || !booking_uid) return res.status(400).json({ error: 'session_id and booking_uid required' });
 
   try {
-    // ── Dedup guard — check if a webhook already wrote this booking ──
     const existing = await pool.query('SELECT booking_uid FROM leads WHERE session_id=$1', [session_id]);
 
     if (existing.rows[0]?.booking_uid) {
@@ -1494,7 +1477,7 @@ app.post('/booking-confirmed', async (req, res) => {
       return res.json({ ok: true, skipped: true, reason: 'already_booked' });
     }
 
-    await pool.query('UPDATE leads SET booking_uid=$2,start_time=$3,end_time=$4,event_type=$5,booked_at=NOW(),updated_at=NOW() WHERE session_id=$1', [session_id,booking_uid,start_time,end_time,event_type||null]);
+    await pool.query('UPDATE leads SET booking_uid=$2,start_time=$3,end_time=$4,event_type=$5,completed=true,booked_at=NOW(),updated_at=NOW() WHERE session_id=$1', [session_id,booking_uid,start_time,end_time,event_type||null]);
     syncBookingToAWS(session_id,booking_uid,start_time,end_time,event_type);
     const leadRow = await pool.query('SELECT email FROM leads WHERE session_id=$1', [session_id]);
     const email   = leadRow.rows[0]?.email;
@@ -1512,9 +1495,6 @@ app.post('/booking-confirmed', async (req, res) => {
   } catch (err) { console.error('[/booking-confirmed]', err.message); res.status(500).json({ error: 'Booking update failed' }); }
 });
 
-/* --------------------------------------------------------
-   POST /booking-confirmed-webhook  — Cal.com server-side webhook
--------------------------------------------------------- */
 app.post('/booking-confirmed-webhook', async (req, res) => {
   const calSecret = process.env.CAL_WEBHOOK_SECRET;
   if (calSecret) {
@@ -1540,7 +1520,6 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
     const attendees  = payload.attendees || [];
     const attendee   = attendees[0] || {};
     const email      = (attendee.email || payload.responses?.email?.value || '').toString().trim().toLowerCase();
-      // Skip test emails — mirrors form.js guard
     const TEST_EMAILS_CAL = ['b@g.ai'];
     if (TEST_EMAILS_CAL.includes(email)) {
       console.log(`[/cal-webhook] ⏭ Test email — skipping all processing`);
@@ -1565,12 +1544,12 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
 
     console.log(`[/cal-webhook] Received booking: ${bookingUid} | email: ${email} | name: ${calName} | event: ${eventType}`);
 
-    const existingLead = await pool.query('SELECT session_id, email, booking_uid FROM leads WHERE email=$1 ORDER BY created_at DESC LIMIT 1', [email]);
+    const existingLead = await pool.query('SELECT session_id, email, booking_uid FROM leads WHERE LOWER(email)=LOWER($1) ORDER BY created_at DESC LIMIT 1', [email]);
 
     if (existingLead.rows.length > 0) {
       const lead = existingLead.rows[0];
       if (!lead.booking_uid) {
-        await pool.query('UPDATE leads SET booking_uid=$2,start_time=$3,end_time=$4,event_type=$5,booked_at=NOW(),updated_at=NOW() WHERE session_id=$1', [lead.session_id, bookingUid, startTime || null, endTime || null, eventType || null]);
+        await pool.query('UPDATE leads SET booking_uid=$2,start_time=$3,end_time=$4,event_type=$5,completed=true,booked_at=NOW(),updated_at=NOW() WHERE session_id=$1', [lead.session_id, bookingUid, startTime || null, endTime || null, eventType || null]);
         syncBookingToAWS(lead.session_id, bookingUid, startTime, endTime, eventType);
         findSFLeadByEmail(email).then(leadId => {
           if (leadId) return updateSFLead(leadId, { booking_uid__c: bookingUid, booking_start_time__c: startTime || '', booking_event_type__c: eventType || '', completed__c: true });
@@ -1586,7 +1565,7 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
       return res.json({ ok: true, action: 'updated_existing' });
     }
 
-    const enrichRow = await pool.query('SELECT * FROM enrichment_data WHERE email=$1 ORDER BY enriched_at DESC LIMIT 1', [email]);
+    const enrichRow = await pool.query('SELECT * FROM enrichment_data WHERE LOWER(email)=LOWER($1) ORDER BY enriched_at DESC LIMIT 1', [email]);
     const enrich    = enrichRow.rows[0] || {};
 
     const nameParts  = calName.split(' ');
@@ -1640,14 +1619,6 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
   }
 });
 
-/* --------------------------------------------------------
-   POST /cron/send-partials
-   UPDATED:
-   - Interval widened from 30 mins → 2 hours
-   - Cross-session booking check added: skips email + Slack
-     if this email has booked on ANY session after this
-     session's created_at
--------------------------------------------------------- */
 app.post('/cron/send-partials', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -1678,7 +1649,6 @@ app.post('/cron/send-partials', async (req, res) => {
     console.log(`[Cron] Found ${leads.length} leads to process`);
 
     for (const lead of leads) {
-      // Belt-and-suspenders: skip disqualified (should never reach here but guard anyway)
       if (lead.disqualified) {
         console.log(`[Cron] ⏭ Skipping disqualified lead: ${lead.email}`);
         await pool.query('UPDATE leads SET loops_sent=true WHERE session_id=$1', [lead.session_id]);
@@ -1686,7 +1656,6 @@ app.post('/cron/send-partials', async (req, res) => {
         continue;
       }
 
-      // Belt-and-suspenders: re-check booking in case of race condition between query and now
       const bookedCheck = await pool.query(`
         SELECT 1 FROM leads
         WHERE LOWER(email) = LOWER($1)
@@ -1705,7 +1674,6 @@ app.post('/cron/send-partials', async (req, res) => {
       const enrichRow = await pool.query('SELECT * FROM enrichment_data WHERE session_id=$1', [lead.session_id]);
       const enrich    = enrichRow.rows[0] || {};
 
-      // Fire Slack partial notification
       slackPartial({
         ...lead,
         enriched_title:          enrich.enriched_title,
@@ -1728,10 +1696,8 @@ app.post('/cron/send-partials', async (req, res) => {
         enriched_funding_stage:  enrich.enriched_funding_stage
       });
 
-      // Send follow-up email
       await sendFollowUpEmail(lead.email, lead.first_name);
 
-      // Mark as processed so cron never picks this session up again
       await pool.query('UPDATE leads SET loops_sent=true WHERE session_id=$1', [lead.session_id]);
       if (awsPool) awsPool.query('UPDATE gw_form_leads SET loops_sent=true,updated_at=NOW() WHERE session_id=$1', [lead.session_id]).catch(err => console.warn('[AWS] ⚠ loops_sent sync failed:', err.message));
 
@@ -1745,27 +1711,10 @@ app.post('/cron/send-partials', async (req, res) => {
   }
 });
 
-/* --------------------------------------------------------
-   POST /booking-confirmed-webhook-rh  — RevenueHero server-side webhook
-
-   Signature format confirmed by RH support:
-   header = "t=<timestamp>, sha256=<hash>"
-   hash   = HMAC-SHA256(raw_body, secret)  — timestamp is NOT
-            part of the signed payload, ignore it for hashing.
-
-   Verbose logging added throughout to match existing production
-   logging style (Cal webhook, /submit, /partial etc.) — every
-   meaningful step writes a line to Railway so this can always
-   be verified/debugged without needing browser console access.
--------------------------------------------------------- */
-
-// Add this BEFORE your other app.use(express.json(...)) calls,
-// so this specific route gets the raw body instead of pre-parsed JSON
-
 app.post('/booking-confirmed-webhook-rh', async (req, res) => {
   console.log('[/rh-webhook] ── Incoming request ──');
 
-  const rawBody = req.body.toString('utf8'); // raw bytes, exactly as RH sent them
+  const rawBody = req.body.toString('utf8');
   let payload;
   try {
     payload = JSON.parse(rawBody);
@@ -1808,15 +1757,12 @@ app.post('/booking-confirmed-webhook-rh', async (req, res) => {
       console.log('[/rh-webhook] ⏭ No meeting payload or email — skipping');
       return res.json({ ok: true, skipped: true });
     }
-     // Only process bookings from the inbound website router
-// All other routers (outbound, AI SDR etc.) are ignored here
 if (payload.router_name && payload.router_name !== 'Inbound Router - Website') {
   console.log(`[/rh-webhook] ⏭ Skipping — router: ${payload.router_name} (not inbound website router)`);
   return res.json({ ok: true, skipped: true, reason: 'non_website_router' });
 }
 
     const email      = (payload.prospect.email || '').toString().trim().toLowerCase();
-        // Skip test emails — mirrors form.js guard
     const TEST_EMAILS_RH = ['b@g.ai'];
     if (TEST_EMAILS_RH.includes(email)) {
       console.log(`[/rh-webhook] ⏭ Test email — skipping all processing`);
@@ -1840,14 +1786,14 @@ if (payload.router_name && payload.router_name !== 'Inbound Router - Website') {
 
     console.log(`[/rh-webhook] 📨 Received booking: ${bookingUid} | email: ${email} | name: ${rhName} | event: ${eventType} | meeting_time: ${startTime}`);
 
-    const existingLead = await pool.query('SELECT session_id, email, booking_uid FROM leads WHERE email=$1 ORDER BY created_at DESC LIMIT 1', [email]);
+    const existingLead = await pool.query('SELECT session_id, email, booking_uid FROM leads WHERE LOWER(email)=LOWER($1) ORDER BY created_at DESC LIMIT 1', [email]);
     console.log(`[/rh-webhook] 🔎 Existing lead lookup for ${email}: ${existingLead.rows.length > 0 ? 'FOUND (session ' + existingLead.rows[0].session_id + ')' : 'NOT FOUND'}`);
 
     if (existingLead.rows.length > 0) {
       const lead = existingLead.rows[0];
       if (!lead.booking_uid) {
         console.log(`[/rh-webhook] ✏️ No existing booking_uid on this lead — writing booking_uid: ${bookingUid}`);
-        await pool.query('UPDATE leads SET booking_uid=$2,start_time=$3,event_type=$4,booked_at=NOW(),updated_at=NOW() WHERE session_id=$1', [lead.session_id, bookingUid, startTime || null, eventType || null]);
+        await pool.query('UPDATE leads SET booking_uid=$2,start_time=$3,event_type=$4,completed=true,booked_at=NOW(),updated_at=NOW() WHERE session_id=$1', [lead.session_id, bookingUid, startTime || null, eventType || null]);
         syncBookingToAWS(lead.session_id, bookingUid, startTime, null, eventType);
 
         findSFLeadByEmail(email).then(leadId => {
@@ -1869,7 +1815,7 @@ if (payload.router_name && payload.router_name !== 'Inbound Router - Website') {
 
     console.log(`[/rh-webhook] ⚠ No existing session found for ${email} — falling into safety-net "create new" branch`);
 
-    const enrichRow = await pool.query('SELECT * FROM enrichment_data WHERE email=$1 ORDER BY enriched_at DESC LIMIT 1', [email]);
+    const enrichRow = await pool.query('SELECT * FROM enrichment_data WHERE LOWER(email)=LOWER($1) ORDER BY enriched_at DESC LIMIT 1', [email]);
     const enrich    = enrichRow.rows[0] || {};
     console.log(`[/rh-webhook] 🔎 Enrichment lookup for ${email}: ${enrichRow.rows.length > 0 ? 'FOUND' : 'NOT FOUND'}`);
 
@@ -1877,7 +1823,7 @@ if (payload.router_name && payload.router_name !== 'Inbound Router - Website') {
     const firstName  = enrich.enriched_first_name || nameParts[0] || '';
     const lastName   = enrich.enriched_last_name  || nameParts.slice(1).join(' ') || '';
     const company    = enrich.enriched_company || '';
-    const webhookSessionId = crypto.randomUUID(); // must be valid UUID per db.js schema
+    const webhookSessionId = crypto.randomUUID();
 
     console.log(`[/rh-webhook] 🆕 Creating fallback lead — session_id: ${webhookSessionId} | name: ${firstName} ${lastName} | company: ${company}`);
 
@@ -1900,20 +1846,6 @@ if (payload.router_name && payload.router_name !== 'Inbound Router - Website') {
   }
 });
 
-/* --------------------------------------------------------
-   TEMPORARY — POST /rh-debug-log
-   Logs the browser-side MEETING_BOOKED event to Railway so
-   we can confirm it fires without depending on browser console
-   surviving the post-booking redirect. Remove once confirmed.
--------------------------------------------------------- */
-app.post('/rh-debug-log', (req, res) => {
-  console.log('[RH DEBUG] 🔍 Browser event received:', JSON.stringify(req.body));
-  res.json({ ok: true });
-});
-
-/* --------------------------------------------------------
-   START
--------------------------------------------------------- */
 async function start() {
   try {
     await initDB();
