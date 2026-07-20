@@ -12,6 +12,10 @@ const { pushFormEventsToMeta, pushStartTrialToMeta } = require('./meta-capi');
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
+// Free/personal mailbox domains — shared by /enrich, webhook enrichment,
+// and the /partial StartTrial gate (Meta CAPI fires for business emails only)
+const FREE_EMAIL_DOMAINS = ['gmail.com','yahoo.com','hotmail.com','outlook.com','icloud.com','protonmail.com','aol.com','mail.com','yahoo.in','rediffmail.com','ymail.com','live.com','msn.com','me.com','mac.com','googlemail.com'];
+
 app.set('trust proxy', 1);
 
 app.use((req, res, next) => {
@@ -1264,7 +1268,7 @@ app.post('/enrich', async (req, res) => {
   const email      = (req.body.email      || '').toString().trim().slice(0, 254).toLowerCase();
   const session_id = (req.body.session_id || '').toString().trim().slice(0, 100);
   if (!email || !session_id) return res.status(400).json({ error: 'email and session_id required' });
-  const personalDomains = ['gmail.com','yahoo.com','hotmail.com','outlook.com','icloud.com','protonmail.com','aol.com','mail.com','yahoo.in','rediffmail.com','ymail.com','live.com','msn.com','me.com','mac.com','googlemail.com'];
+  const personalDomains = FREE_EMAIL_DOMAINS;
   const domain = email.split('@')[1]?.toLowerCase() || '';
   if (personalDomains.includes(domain)) { console.log(`[/enrich] Skipping Apollo for personal email: ${email}`); return res.json({ first_name:'',last_name:'',title:'',company:'',company_size:'',industry:'',linkedin_url:'',website:'' }); }
   try {
@@ -1365,8 +1369,15 @@ app.post('/partial', async (req, res) => {
 
     syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false});
 
-    if (!disqualified) {
+    // StartTrial fires ONLY for qualified (B2B) leads on BUSINESS emails —
+    // free-mailbox leads (gmail/yahoo/...) are skipped so Meta optimises
+    // on higher-intent signals. Email is already lowercased at parse time
+    // and already ELV-verified by the form before /partial is called.
+    const isBusinessEmail = !!email && !FREE_EMAIL_DOMAINS.includes(email.split('@')[1] || '');
+    if (!disqualified && isBusinessEmail) {
       pushStartTrialToMeta({session_id,email,sell_to,page_url,fbc,fbp,landing_page}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => console.warn('[/partial] Meta CAPI StartTrial failed (non-blocking):', err.message));
+    } else if (!disqualified) {
+      console.log(`[/partial] ⏭ StartTrial skipped — free email domain: ${email}`);
     }
 
     console.log(`[/partial] ✅ Saved session ${session_id} | step ${step_reached} | disqualified: ${disqualified} | email ${email}`);
@@ -1587,7 +1598,7 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
 
     let enrichData = enrich;
     if (!enrich.enriched_title) {
-      const personalDomains = ['gmail.com','yahoo.com','hotmail.com','outlook.com','icloud.com','protonmail.com','aol.com','mail.com','yahoo.in','rediffmail.com','ymail.com','live.com','msn.com','me.com','mac.com','googlemail.com'];
+      const personalDomains = FREE_EMAIL_DOMAINS;
       const domain = email.split('@')[1]?.toLowerCase() || '';
       if (!personalDomains.includes(domain) && process.env.APOLLO_API_KEY) {
         console.log(`[/cal-webhook] Awaiting Apollo enrichment for: ${email}`);
