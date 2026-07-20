@@ -1243,7 +1243,7 @@ app.post('/verify-email', async (req, res) => {
     const text   = await response.text();
     const status = text.trim().toLowerCase();
     console.log(`[ELV] ${email} → "${status}"`);
-    const blockedStatuses = ['error', 'invalid', 'unknown_email', 'email_disabled', 'domain_error', 'dead_server', 'syntax_error', 'disposable', 'spamtrap'];
+    const blockedStatuses = ['error', 'invalid', 'unknown_email', 'email_disabled', 'domain_error', 'dead_server', 'syntax_error', 'disposable', 'spamtrap', 'invalid_mx'];
     const valid = !blockedStatuses.includes(status);
     if (!valid) console.log(`[ELV] BLOCKED ${email} — status: "${status}"`);
     res.json({ valid, status });
