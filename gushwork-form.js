@@ -754,7 +754,36 @@
 
     // Verdicts safe to cache — decisive, email-independent DNS results.
     // Transient/indeterminate outcomes must be re-checked next time.
-    const CACHEABLE_REASONS = ['nxdomain', 'parked', 'parked_ns', 'resolved', 'mx_only'];
+    const CACHEABLE_REASONS = ['nxdomain', 'parked', 'parked_ns', 'resolved', 'mx_only', 'for_sale_lander'];
+
+    // Stage 2 — server-level content check (v4.9.5). DNS/IP/NS alone can't
+    // see PAGE CONTENT, so marketplace landers on shared CDN IPs (Atom,
+    // GoDaddy Auctions, Sedo) slip through stage 1 as "resolved" — the
+    // real test.com case. Only called when stage 1 found a genuinely live
+    // domain (reason === 'resolved'); skipped for mx_only/indeterminate/
+    // test-email, since there's either nothing to scan or nothing to gain.
+    // Same fail-open contract as everything else: any backend hiccup,
+    // timeout, or bot-wall passes the lead through rather than blocking it.
+    async function verifyWebsiteContent(rawValue) {
+      if (!isRailwayReady()) return { ok: true, reason: 'skipped_no_backend' };
+      try {
+        const controller = new AbortController();
+        const t = setTimeout(() => controller.abort(), 7000);
+        const res = await fetch(`${RAILWAY_API_URL}/verify-website`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({ website: rawValue }),
+        });
+        clearTimeout(t);
+        if (!res.ok) return { ok: true, reason: 'backend_error' };
+        const data = await res.json();
+        return { ok: data.ok !== false, reason: data.reason || 'checked' };
+      } catch (err) {
+        console.warn('[GW] Website content check failed — allowing through:', err && err.message);
+        return { ok: true, reason: 'fetch_error' };
+      }
+    }
 
     function checkWebsite(rawValue) {
       // Cached + deduped wrapper (blur prewarm and Next click share
@@ -769,6 +798,15 @@
       if (_websiteVerdicts.has(domain)) return Promise.resolve(_websiteVerdicts.get(domain));
       if (_websiteInFlight.has(domain)) return _websiteInFlight.get(domain);
       const p = verifyWebsiteDomain(domain)
+        .then(async (v) => {
+          // Only worth a content probe when stage 1 found a real, live
+          // website — mx_only/nxdomain/parked/indeterminate need no scan
+          if (v.reason === 'resolved' && !isTestEmail(getField('email'))) {
+            const cv = await verifyWebsiteContent(rawValue);
+            if (!cv.ok) return { ok: false, reason: 'for_sale_lander', msg: "This doesn't appear to be a live company website. Please check the URL." };
+          }
+          return v;
+        })
         .then((v) => {
           if (CACHEABLE_REASONS.indexOf(v.reason) !== -1) _websiteVerdicts.set(domain, v);
           return v;
@@ -1408,7 +1446,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v4.9.4 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
+      console.log('[GW] ✅ Form initialised v4.9.5 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
