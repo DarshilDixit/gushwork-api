@@ -142,6 +142,10 @@
     const RAILWAY_API_URL = 'https://gushwork-api-production.up.railway.app';
     const RH_ROUTER_ID = '6138';
     const ENRICHMENT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+    // TEMPORARY (per team decision, July 2026): website check still runs
+    // and still shows the red error, but no longer blocks progression.
+    // Flip to true to restore blocking — no other code changes needed.
+    const WEBSITE_CHECK_BLOCKING = false;
 
     const formState = {
       session_id: '',
@@ -173,6 +177,8 @@
       completed: false,
       disqualified: false,
       disqualified_reason: '',
+      website_check_failed: false,
+      website_check_reason: '',
     };
 
     let _enrichedForEmail = '';
@@ -1222,10 +1228,19 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
         // is a cache hit and the button barely flickers
         if (!isTestEmail(getField('email'))) {
           const wv = await checkWebsite(getField('website'));
+          formState.website_check_failed = !wv.ok;
+          formState.website_check_reason = wv.reason || (wv.ok ? 'ok' : 'unknown');
           if (!wv.ok) {
             showError('website-error', wv.msg);
-            return; // finally-block resets the button
+            // WEBSITE_CHECK_BLOCKING=false (temporary, team decision): the
+            // red error still shows, but the lead is allowed to continue.
+            // formState.website_check_failed rides along to Railway, which
+            // suppresses Meta CAPI and flags it for Slack/monitor.
+            if (WEBSITE_CHECK_BLOCKING) return; // finally-block resets the button
           }
+        } else {
+          formState.website_check_failed = false;
+          formState.website_check_reason = 'test_email_skipped';
         }
         setLoading('step-2-next', true, 'Please wait...');
 
@@ -1446,7 +1461,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v4.9.6 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
+      console.log('[GW] ✅ Form initialised v4.9.7 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
