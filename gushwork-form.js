@@ -1,4 +1,4 @@
- /* ==========================================================
+/* ==========================================================
   GUSHWORK — MULTI-STEP FORM  v4.9  (/demo PAGE VERSION - thru github/jsdlivr)
 
   /* --------------------------------------------------------
@@ -379,6 +379,27 @@
     // Shared with SECTION 3C (website check) — keep one source of truth
     const PERSONAL_EMAIL_DOMAINS = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com', 'protonmail.com', 'aol.com', 'mail.com', 'yahoo.in', 'rediffmail.com', 'ymail.com', 'live.com', 'msn.com', 'me.com', 'mac.com', 'googlemail.com'];
 
+    // ── Junk-text plausibility gate (v4.9.4) ──────────────────────────
+    // Catches single-character / repeated-character / obvious-placeholder
+    // input on free-text fields (email local-part, company, hear-about-us).
+    // Deliberately conservative: only blocks near-certain junk so real
+    // short names ("Jo", "Tes") and real functional mailboxes
+    // (info@, sales@, support@) are never touched.
+    function isRepeatedChar(v) {
+      return /^(.)\1*$/.test(v);
+    }
+    function isJunkText(value, junkWords) {
+      const v = (value || '').trim();
+      if (v.length < 2) return true; // single character — never a real name/word
+      if (isRepeatedChar(v)) return true; // "aaaa", "xx" etc.
+      return junkWords.has(v.toLowerCase());
+    }
+    const JUNK_WORDS_GENERIC = new Set(['test', 'testing', 'asdf', 'asdfg', 'asdfgh', 'qwerty', 'qwertyuiop', 'xxx', 'xxxx', 'none', 'na', 'n/a', 'sample', 'example', 'abc', 'abcd', 'foo', 'bar', 'foobar', 'placeholder', 'fake', 'dummy', 'temp', 'temporary', 'delete', 'notreal']);
+    const JUNK_WORDS_COMPANY = new Set([...JUNK_WORDS_GENERIC, 'company', 'business name', 'yourcompany']);
+    // Deliberately does NOT include info/sales/support/contact/hello/admin/hr —
+    // all common, legitimate functional business mailboxes.
+    const JUNK_WORDS_EMAIL_LOCAL = new Set(['test', 'testing', 'asdf', 'asdfg', 'asdfgh', 'qwerty', 'qwertyuiop', 'xxx', 'xxxx', 'none', 'na', 'sample', 'example', 'foo', 'bar', 'foobar', 'placeholder', 'fake', 'dummy', 'temp', 'delete', 'notreal', 'abc', 'abcd', '123456', '12345', '111111', '000000']);
+
     function isWorkEmail(email) {
       return !PERSONAL_EMAIL_DOMAINS.includes(email.split('@')[1]?.toLowerCase() || '');
     }
@@ -401,6 +422,9 @@
         valid = false;
       } else if (!isValidEmail(email)) {
         showError('email-error', 'Please enter a valid email address.');
+        valid = false;
+      } else if (isJunkText(email.split('@')[0], JUNK_WORDS_EMAIL_LOCAL)) {
+        showError('email-error', "This doesn't look like a real email address. Please double-check.");
         valid = false;
       } else hideError('email-error');
 
@@ -433,6 +457,9 @@
       if (!company) {
         showError('company-error', 'Company name is required.');
         valid = false;
+      } else if (isJunkText(company, JUNK_WORDS_COMPANY)) {
+        showError('company-error', 'Please enter your actual company name.');
+        valid = false;
       } else hideError('company-error');
 
       const website = getField('website');
@@ -456,6 +483,11 @@
       const hearAboutUs = getField('hear-about-us');
       const hearAboutUsHidden = document.getElementById('hear-about-us')?.closest('.field-wrapper')?.style.display === 'none';
       if (!hearAboutUs && !hearAboutUsHidden) {
+        showError('hear-about-us-error', 'Please let us know how you heard about us.');
+        valid = false;
+      } else if (!hearAboutUsHidden && isJunkText(hearAboutUs, JUNK_WORDS_GENERIC)) {
+        // Only checked when visible/manually typed — prefilled hidden
+        // values (e.g. "Facebook (Paid)", "Referral - x") are trusted.
         showError('hear-about-us-error', 'Please let us know how you heard about us.');
         valid = false;
       } else hideError('hear-about-us-error');
@@ -551,7 +583,7 @@
     // HugeDomains) but also by some real retail customers → block only
     // when the domain ALSO has no MX records. A genuine company domain
     // virtually always has email; a sale lander never does.
-    const PARKING_NS_SOFT = ['namebrightdns.com'];
+    const PARKING_NS_SOFT = ['namebrightdns.com', 'safesecureweb.com'];
 
     function extractWebsiteDomain(raw) {
       try {
@@ -572,6 +604,47 @@
     function domainsMatch(a, b) {
       if (!a || !b) return false;
       return a === b || a.endsWith('.' + b) || b.endsWith('.' + a);
+    }
+
+    /* =======================================================
+    SECTION 3E — EMAIL/WEBSITE DOMAIN MISMATCH NUDGE (v4.9.4)
+    Non-blocking, orange, same visual language as the email pro-tip.
+    Some real leads genuinely enter a different domain than their
+    email (agencies filing for a client, subsidiary emails vs a
+    parent brand's site) — so this only ever NUDGES, never blocks.
+    Element is created dynamically; no Webflow HTML change needed.
+    Vacates automatically for the red existence-check error via
+    showError()'s hook below.
+    ======================================================= */
+
+    function ensureWebsiteMismatchTip() {
+      let tip = document.getElementById('website-mismatch-protip');
+      if (tip) return tip;
+      const websiteInput = document.getElementById('website');
+      if (!websiteInput) return null;
+      tip = document.createElement('div');
+      tip.id = 'website-mismatch-protip';
+      tip.style.cssText = 'display:none;align-items:flex-start;gap:4px;color:#FF6A00;font-size:12px;font-weight:500;line-height:1.4;margin-top:4px;';
+      tip.innerHTML = '<img src="https://cdn.prod.website-files.com/65c292289fb0ea1ff3a84bd3/6a573b62ef8929dda9d988f1_WarningCircle.svg" style="width:14px;height:14px;display:block;margin-top:1px;flex-shrink:0;" alt="">' + "<span>This website doesn't match your email domain — just confirming that's correct.</span>";
+      const errEl = document.getElementById('website-error');
+      if (errEl && errEl.parentNode) errEl.parentNode.insertBefore(tip, errEl.nextSibling);
+      else websiteInput.insertAdjacentElement('afterend', tip);
+      return tip;
+    }
+
+    function hideWebsiteMismatchTip() {
+      const tip = document.getElementById('website-mismatch-protip');
+      if (tip) tip.style.display = 'none';
+    }
+
+    function updateWebsiteMismatchTip() {
+      const tip = ensureWebsiteMismatchTip();
+      if (!tip) return;
+      const websiteDomain = extractWebsiteDomain(getField('website'));
+      const eDomain = emailDomainOf(getField('email'));
+      const errVisible = document.getElementById('website-error')?.style.display === 'block';
+      const showNudge = !errVisible && websiteDomain && eDomain && !PERSONAL_EMAIL_DOMAINS.includes(eDomain) && !domainsMatch(websiteDomain, eDomain);
+      tip.style.display = showNudge ? 'flex' : 'none';
     }
 
     async function dohQuery(name, type) {
@@ -712,18 +785,34 @@
       if (!el) return;
 
       // Editing the field clears a stale verdict error immediately
-      el.addEventListener('input', () => hideError('website-error'));
+      el.addEventListener('input', () => {
+        hideError('website-error');
+        updateWebsiteMismatchTip();
+      });
 
       // Blur — prewarm the cache and surface the error early so the
       // lead fixes it before ever clicking Next
       el.addEventListener('blur', async () => {
+        updateWebsiteMismatchTip();
         const val = el.value.trim();
         if (!val || !isValidURL(val)) return; // required/format errors shown on Next
         if (isTestEmail(getField('email'))) return;
         const v = await checkWebsite(val);
         // Only show if the field still holds the value we checked
-        if (!v.ok && el.value.trim() === val) showError('website-error', v.msg);
+        if (!v.ok && el.value.trim() === val) {
+          showError('website-error', v.msg);
+        } else {
+          updateWebsiteMismatchTip(); // re-evaluate now the block cleared
+        }
       });
+
+      // Email can be edited after the website field is already filled
+      // (e.g. via back button) — keep the nudge in sync either way
+      const emailInput = document.getElementById('email');
+      if (emailInput) {
+        emailInput.addEventListener('blur', updateWebsiteMismatchTip);
+        emailInput.addEventListener('input', updateWebsiteMismatchTip);
+      }
     }
 
     /* =======================================================
@@ -1265,6 +1354,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       const el = document.getElementById(id);
       if (!el) return;
       if (id === 'email-error') hideProTip(); // error takes the slot + border
+      if (id === 'website-error') hideWebsiteMismatchTip(); // error takes the slot
       el.textContent = msg;
       el.style.display = 'block';
       const input = document.getElementById(ERROR_INPUT_MAP[id]);
@@ -1318,7 +1408,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v4.9.2 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
+      console.log('[GW] ✅ Form initialised v4.9.4 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
