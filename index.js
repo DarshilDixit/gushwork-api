@@ -65,6 +65,7 @@ app.use('/session',           globalLimiter);
 app.use('/booking-confirmed', globalLimiter);
 app.use('/verify-email', strictLimiter);
 app.use('/enrich',       strictLimiter);
+app.use('/verify-website', strictLimiter);
 
 let awsPool = null;
 
@@ -1257,6 +1258,73 @@ app.post('/verify-email', async (req, res) => {
     res.json({ valid: true, status: 'error_fallback' });
   }
 });
+
+// ── /verify-website — server-level for-sale/parked-lander content check ──
+// Free, no external API: fetches the entered URL and scans the rendered
+// HTML for domain-marketplace phrasing (Atom, HugeDomains, Sedo, GoDaddy
+// Auctions, etc all use near-identical wording). Complements form.js's
+// client-side DNS/IP/NS checks, which can't see PAGE CONTENT and so miss
+// marketplace landers fronted by shared CDN IPs (test.com/Atom was the
+// real case that exposed this). Same fail-open philosophy as ELV: any
+// timeout, block, redirect loop, or bot-challenge response passes through
+// rather than risk rejecting a real company's site.
+const FOR_SALE_PHRASES = ['domain is for sale', 'domain name is for sale', 'this domain may be for sale', 'buy this domain', 'make an offer', 'this domain is available', 'domain for sale', 'inquire about this domain', 'this web page is parked', 'premium domain for sale', 'purchase this domain', 'domain broker', 'this domain is not configured'];
+
+// Blocks requests aimed at internal/private infrastructure so this route
+// can't be used as an SSRF pivot into Railway's own network.
+function isPrivateOrLocalHost(hostname) {
+  const h = hostname.toLowerCase();
+  if (h === 'localhost' || h.endsWith('.local') || h.endsWith('.internal')) return true;
+  const ipMatch = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipMatch) {
+    const [a, b] = ipMatch.slice(1).map(Number);
+    if (a === 10 || a === 127 || a === 0) return true;
+    if (a === 169 && b === 254) return true; // link-local / cloud metadata
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+  }
+  return false;
+}
+
+app.post('/verify-website', async (req, res) => {
+  const raw = (req.body.website || '').toString().trim().slice(0, 300);
+  if (!raw) return res.status(400).json({ ok: true, reason: 'empty' }); // fail open, form's own required-check owns this
+  let url;
+  try {
+    url = new URL(raw.startsWith('http') ? raw : 'https://' + raw);
+  } catch {
+    return res.json({ ok: true, reason: 'unparseable' }); // format errors are the browser's job
+  }
+  if (!['http:', 'https:'].includes(url.protocol) || isPrivateOrLocalHost(url.hostname)) {
+    return res.json({ ok: true, reason: 'skipped_unsafe_target' }); // never fetch internal/local targets; fail open
+  }
+  try {
+    const controller = new AbortController();
+    const timeout    = setTimeout(() => controller.abort(), 6000);
+    const response    = await fetch(url.toString(), {
+      signal: controller.signal,
+      redirect: 'follow',
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; GushworkFormBot/1.0)' },
+    });
+    clearTimeout(timeout);
+    if (!response.ok) { console.log(`[verify-website] ${url.hostname} → HTTP ${response.status} — failing open`); return res.json({ ok: true, reason: 'http_' + response.status }); }
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.includes('html')) return res.json({ ok: true, reason: 'non_html' }); // fail open — not a page we can scan
+    const html = (await response.text()).slice(0, 50000).toLowerCase(); // cap read size
+    const hit = FOR_SALE_PHRASES.find((p) => html.includes(p));
+    if (hit) {
+      console.log(`[verify-website] BLOCKED ${url.hostname} — matched for-sale phrase: "${hit}"`);
+      return res.json({ ok: false, reason: 'for_sale_lander', matched: hit });
+    }
+    res.json({ ok: true, reason: 'content_clean' });
+  } catch (err) {
+    if (err.name === 'AbortError') console.warn(`[verify-website] Timeout for ${url.hostname} — failing open`);
+    else console.warn('[verify-website] Error:', err.message, '— failing open');
+    res.json({ ok: true, reason: 'fetch_error' }); // never block on our own network/bot-wall failure
+  }
+});
+
+
 
 app.post('/session', async (req, res) => {
   const session_id = (req.body.session_id || '').toString().trim().slice(0, 100);
