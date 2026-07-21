@@ -625,7 +625,7 @@
       tip = document.createElement('div');
       tip.id = 'website-mismatch-protip';
       tip.style.cssText = 'display:none;align-items:flex-start;gap:4px;color:#FF6A00;font-size:12px;font-weight:500;line-height:1.4;margin-top:4px;';
-      tip.innerHTML = '<img src="https://cdn.prod.website-files.com/65c292289fb0ea1ff3a84bd3/6a573b62ef8929dda9d988f1_WarningCircle.svg" style="width:14px;height:14px;display:block;margin-top:1px;flex-shrink:0;" alt="">' + "<span>This website doesn't match your email domain — just confirming that's correct.</span>";
+      tip.innerHTML = '<img src="https://cdn.prod.website-files.com/65c292289fb0ea1ff3a84bd3/6a573b62ef8929dda9d988f1_WarningCircle.svg" style="width:14px;height:14px;display:block;margin-top:1px;flex-shrink:0;" alt="">' + "<span>Doesn't match your email domain — just checking.</span>";
       const errEl = document.getElementById('website-error');
       if (errEl && errEl.parentNode) errEl.parentNode.insertBefore(tip, errEl.nextSibling);
       else websiteInput.insertAdjacentElement('afterend', tip);
