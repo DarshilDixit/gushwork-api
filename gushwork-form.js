@@ -423,7 +423,7 @@
       } else if (!isValidEmail(email)) {
         showError('email-error', 'Please enter a valid email address.');
         valid = false;
-      } else if (isJunkText(email.split('@')[0], JUNK_WORDS_EMAIL_LOCAL)) {
+      } else if (!isTestEmail(email) && isJunkText(email.split('@')[0], JUNK_WORDS_EMAIL_LOCAL)) {
         showError('email-error', "This doesn't look like a real email address. Please double-check.");
         valid = false;
       } else hideError('email-error');
@@ -1446,7 +1446,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v4.9.5 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
+      console.log('[GW] ✅ Form initialised v4.9.6 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
