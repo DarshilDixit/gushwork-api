@@ -566,6 +566,22 @@
     // when the lead's email domain matches (real @google.com passes).
     const BRAND_DOMAINS = ['google.com', 'youtube.com', 'facebook.com', 'fb.com', 'instagram.com', 'linkedin.com', 'twitter.com', 'x.com', 'amazon.com', 'amazon.in', 'microsoft.com', 'apple.com', 'netflix.com', 'wikipedia.org', 'whatsapp.com', 'tiktok.com', 'reddit.com', 'openai.com', 'chatgpt.com', 'flipkart.com', 'gushwork.ai'];
 
+    // Subset of BRAND_DOMAINS where a specific PATH is a legitimate stand-in
+    // company site — solo professionals / small businesses without their
+    // own domain commonly link a real profile/page (e.g. a lawyer's
+    // linkedin.com/in/username). A bare domain (no path) is still the
+    // lazy-fake pattern and stays blocked exactly as before.
+    const SOCIAL_PROFILE_DOMAINS = ['linkedin.com', 'facebook.com', 'fb.com', 'instagram.com', 'twitter.com', 'x.com', 'youtube.com', 'tiktok.com'];
+
+    function getUrlPathname(raw) {
+      try {
+        const u = new URL(raw.startsWith('http') ? raw : 'https://' + raw);
+        return u.pathname || '/';
+      } catch {
+        return '/';
+      }
+    }
+
     // Known registrar parking / domain-for-sale IP ranges.
     // 3-octet entries are prefix matches; full IPs are exact.
     const PARKING_IP_PREFIXES = [
@@ -679,7 +695,7 @@
       return ((json && json.Answer) || []).filter((r) => r.type === 1).map((r) => r.data);
     }
 
-    function localWebsiteVerdict(domain) {
+    function localWebsiteVerdict(domain, rawValue) {
       // Email-dependent checks — must run FRESH on every call and must
       // never be cached: the correct verdict changes when the lead goes
       // back and edits their email (e.g. google.com is wrong for a
@@ -689,6 +705,13 @@
       // 1. Free mailbox providers are never a company website
       if (PERSONAL_EMAIL_DOMAINS.includes(domain)) {
         return { ok: false, reason: 'mailbox_domain', msg: "Please enter your company's website — not an email provider." };
+      }
+
+      // 1b. Social/profile domains WITH a real path — pass immediately,
+      // tagged informationally (not a failure). No DNS check needed
+      // either: linkedin.com etc. are obviously real, live domains.
+      if (SOCIAL_PROFILE_DOMAINS.includes(domain) && getUrlPathname(rawValue).length > 1) {
+        return { ok: true, reason: 'social_profile_url' };
       }
 
       // 2. Brand domains — valid only when the email domain matches
@@ -798,7 +821,7 @@
       if (!domain) return Promise.resolve({ ok: true, reason: 'unparseable' }); // format errors are validateStep2's job
 
       // Email-dependent checks first, fresh every time, never cached
-      const local = localWebsiteVerdict(domain);
+      const local = localWebsiteVerdict(domain, rawValue);
       if (local) return Promise.resolve(local);
 
       if (_websiteVerdicts.has(domain)) return Promise.resolve(_websiteVerdicts.get(domain));
@@ -1461,7 +1484,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v4.9.7 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
+      console.log('[GW] ✅ Form initialised v4.9.8 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
