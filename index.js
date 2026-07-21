@@ -405,6 +405,9 @@ function slackSubmit(d) {
   if (d.website_check_failed) {
     const wf = bFields([{ label: '⚠️ Website check', value: d.website_check_reason || 'failed' }]);
     if (wf) blocks.push(wf);
+  } else if (d.website_check_reason === 'social_profile_url') {
+    const sf = bFields([{ label: '🔗 Website', value: 'Social profile (no company site)' }]);
+    if (sf) blocks.push(sf);
   }
   buildEnrichmentBlocks(blocks, d);
   buildJourneyBlocks(blocks, d);
@@ -693,6 +696,7 @@ app.get('/monitor/leads', async (req, res) => {
   }
   if (websiteCheck === 'failed') conditions.push(`l.website_check_failed IS TRUE`);
   if (websiteCheck === 'passed') conditions.push(`l.website_check_failed IS NOT TRUE`); // covers false AND null (pre-migration rows)
+  if (websiteCheck === 'social') conditions.push(`l.website_check_reason = 'social_profile_url'`);
 
   if (dateFrom) { params.push(dateFrom); conditions.push(`l.created_at >= $${params.length}::date`); }
   if (dateTo)   { params.push(dateTo);   conditions.push(`l.created_at < ($${params.length}::date + INTERVAL '1 day')`); }
@@ -1003,7 +1007,7 @@ app.get('/monitor', (req, res) => {
   '<select id="fsellto" onchange="loadLeads(1)"><option value="all">All sell-to</option><option value="B2B">B2B</option><option value="B2B (clarified from B2C)">B2B (clarified from B2C)</option><option value="B2B (clarified from Mixed)">B2B (clarified from Mixed)</option><option value="B2C">B2C</option></select>' +
   '<select id="fsource" onchange="loadLeads(1)"><option value="all">All sources</option></select>' +
   '<select id="fenrich" onchange="loadLeads(1)"><option value="all">Enrichment: all</option><option value="yes">Enriched</option><option value="no">Not enriched</option></select>' +
-  '<select id="fwebsitecheck" onchange="loadLeads(1)"><option value="all">Website check: all</option><option value="failed">Failed</option><option value="passed">Passed</option></select>' +
+  '<select id="fwebsitecheck" onchange="loadLeads(1)"><option value="all">Website check: all</option><option value="failed">Failed</option><option value="passed">Passed</option><option value="social">Social profile</option></select>' +
   '<input type="text" id="fhear" list="hearlist" placeholder="Heard about us..." oninput="debounce()" style="min-width:170px">' +
   '<datalist id="hearlist"></datalist>' +
   '<select id="fpreset" onchange="datePreset(this.value)"><option value="">Any date</option><option value="today">Today</option><option value="7d">Last 7 days</option><option value="30d">Last 30 days</option></select>' +
@@ -1105,6 +1109,7 @@ app.get('/monitor', (req, res) => {
   '{lb:"Phone",v:l.e_phone||l.phone},' +
   '{lb:"Website",v:l.website,lnk:true},' +
   '{lb:"\\u26A0\\uFE0F Website check",v:l.website_check_failed?("Failed"+(l.website_check_reason?" ("+l.website_check_reason+")":"")):null},' +
+  '{lb:"\\uD83D\\uDD17 Website type",v:(!l.website_check_failed&&l.website_check_reason==="social_profile_url")?"Social profile (no company site)":null},' +
   '{lb:"Hear about us",v:l.hear_about_us},' +
   '{lb:"UTM source",v:l.utm_source},' +
   '{lb:"UTM medium",v:l.utm_medium},' +
@@ -1143,7 +1148,7 @@ app.get('/monitor', (req, res) => {
   'set("lcount",d.total+" lead"+(d.total!==1?"s":"")+" found");' +
   'if(!d.leads.length){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\">No leads match your filters.</td></tr>";document.getElementById("lpag").innerHTML="";return;}' +
   'var html=d.leads.map(function(l){var sid=esc(l.session_id),name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\\u2014",src=l.utm_source?esc(l.utm_source)+(l.utm_medium?" / "+esc(l.utm_medium):""):(l.referrer?"referral":"\\u2014");' +
-  'return"<tr><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":"")+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+ist(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
+  'return"<tr><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+ist(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
   '"<tr class=\\"erow\\" id=\\"er-"+sid+"\\" style=\\"display:none\\"><td></td><td colspan=\\"9\\">"+enrichPanel(l)+"</td></tr>";}).join("");' +
   'document.getElementById("ltbody").innerHTML=html;renderPag(d.page,d.pages);}catch(e){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function renderPag(pg,pages){if(pages<=1){document.getElementById("lpag").innerHTML="";return;}var h="";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg-1)+")\\""+(pg<=1?" disabled":"")+">&larr;</button>";var s=Math.max(1,pg-2),e=Math.min(pages,pg+2);if(s>1)h+="<button class=\\"pb\\" onclick=\\"loadLeads(1)\\">1</button>"+(s>2?"<span class=\\"pi\\">&#8230;</span>":"");for(var i=s;i<=e;i++)h+="<button class=\\"pb"+(i===pg?" act":"")+ "\\" onclick=\\"loadLeads("+i+")\\" >"+i+"</button>";if(e<pages)h+=(e<pages-1?"<span class=\\"pi\\">&#8230;</span>":"")+"<button class=\\"pb\\" onclick=\\"loadLeads("+pages+")\\" >"+pages+"</button>";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg+1)+")\\"" +(pg>=pages?" disabled":"")+">&rarr;</button><span class=\\"pi\\">Page "+pg+" of "+pages+"</span>";document.getElementById("lpag").innerHTML=h;}' +
