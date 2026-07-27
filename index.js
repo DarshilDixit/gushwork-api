@@ -320,6 +320,80 @@ function bFields(fields) {
 function bDivider() { return { type: 'divider' }; }
 function bContext(text) { return { type: 'context', elements: [{ type: 'mrkdwn', text }] }; }
 
+/* ─────────────────────────────────────────────────────────────────
+   OPS ALERTING
+   Generic on purpose: ELV is the first consumer, but Apollo, Meta
+   CAPI, Salesforce, AWS sync and the cron can each be wired in with
+   a one-line alertOps() call in their existing catch blocks.
+
+   Routing (per team decision): Slack gets EVERY alert; email gets
+   CRITICAL only, so the inbox stays meaningful.
+
+   Cooldowns are in-memory and keyed per source+title, so a flapping
+   dependency can't spam either channel. They reset on redeploy —
+   fine for monitoring, and worth knowing: a freshly deployed
+   instance starts with a clean slate. Multiple instances would each
+   keep their own window.
+   ───────────────────────────────────────────────────────────────── */
+
+const ALERT_COOLDOWN_MS   = { critical: 3 * 60 * 60 * 1000, warning: 60 * 60 * 1000 };
+const ALERT_EMAIL_TO      = ['darshil.dixit@gushwork.ai', 'darshil@darshildixit.com'];
+const _alertLastSent      = new Map(); // `${severity}:${source}:${title}` -> ms
+
+function sendOpsSlack(blocks, fallbackText) {
+  // Falls back to the main webhook if the alerts one isn't configured,
+  // so alerts are never silently lost just because an env var is missing.
+  const webhookUrl = process.env.SLACK_ALERTS_WEBHOOK_URL || process.env.SLACK_WEBHOOK_URL;
+  if (!webhookUrl) { console.warn('[alertOps] No Slack webhook configured — alert not sent'); return; }
+  const cleanBlocks = Array.isArray(blocks) ? blocks.filter(Boolean) : null;
+  const payload = cleanBlocks && cleanBlocks.length > 0
+    ? { text: fallbackText || 'Gushwork alert', blocks: cleanBlocks }
+    : { text: fallbackText || 'Gushwork alert' };
+  fetch(webhookUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+    .then(r => console.log(`[alertOps] ✅ Slack sent — status: ${r.status}`))
+    .catch(err => console.warn('[alertOps] ⚠ Slack failed:', err.message));
+}
+
+async function sendAlertEmail(subject, details) {
+  if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
+    console.warn('[alertOps] GMAIL credentials not set — alert email skipped');
+    return;
+  }
+  const lines = Object.entries(details || {}).map(([k, v]) => `${k}: ${v ?? '—'}`).join('\n');
+  try {
+    const transport = getGmailTransport();
+    const result = await transport.sendMail({
+      from:    `"Gushwork Alerts" <${process.env.GMAIL_USER}>`,
+      to:      ALERT_EMAIL_TO.join(', '),
+      subject,
+      text:    `${subject}\n\n${lines}\n\nTime: ${new Date().toISOString()}`,
+    });
+    console.log(`[alertOps] ✅ Alert email sent | messageId: ${result.messageId}`);
+  } catch (err) {
+    console.warn('[alertOps] ⚠ Alert email failed:', err.message);
+  }
+}
+
+function alertOps(severity, source, title, details) {
+  const sev  = severity === 'critical' ? 'critical' : 'warning';
+  const key  = `${sev}:${source}:${title}`;
+  const now  = Date.now();
+  const last = _alertLastSent.get(key) || 0;
+  if (now - last < ALERT_COOLDOWN_MS[sev]) return; // inside cooldown — stay quiet
+  _alertLastSent.set(key, now);
+
+  const icon = sev === 'critical' ? '🚨' : '⚠️';
+  const heading = `${icon} ${source} — ${title}`;
+  const blocks = [bHeader(heading), bDivider()];
+  const f = bFields(Object.entries(details || {}).map(([label, value]) => ({ label, value: value == null ? '' : String(value) })));
+  if (f) blocks.push(f);
+  blocks.push(bContext(`Severity: *${sev}* · ${new Date().toISOString()}`));
+  sendOpsSlack(blocks, heading);
+
+  if (sev === 'critical') sendAlertEmail(heading, details).catch(() => {});
+  console.log(`[alertOps] ${icon} ${source} — ${title}`);
+}
+
 function buildEnrichmentBlocks(blocks, e) {
   const hasPersonInfo = e.enriched_title || e.enriched_seniority || e.enriched_departments || e.enriched_email_status;
   const hasOrgInfo    = e.enriched_company_size || e.enriched_industry || e.enriched_founded_year || e.enriched_annual_revenue || e.enriched_alexa_ranking || e.enriched_keywords;
@@ -663,6 +737,7 @@ app.get('/monitor/leads', async (req, res) => {
   const hearAbout  = req.query.hearAbout  || null;
   const enrichment = req.query.enrichment || null;
   const websiteCheck = req.query.websiteCheck || 'all';
+  const repeatAttempts = req.query.repeatAttempts || 'all';
   const format     = req.query.format     || 'json';
 
   const sortMap = {
@@ -684,7 +759,10 @@ app.get('/monitor/leads', async (req, res) => {
   if (stage === 'step1')        conditions.push('l.completed = false AND l.disqualified = false');
   if (stage === 'disqualified') conditions.push('l.disqualified = true');
 
-  if (sellTo)    { params.push(sellTo);    conditions.push(`l.sell_to = $${params.length}`); }
+  if (sellTo === '__clarified') {
+    // any lead that flipped B2C/Mixed -> B2B at the disqualified step
+    conditions.push(`l.sell_to LIKE 'B2B (clarified from%'`);
+  } else if (sellTo) { params.push(sellTo);    conditions.push(`l.sell_to = $${params.length}`); }
   if (utmSource) { params.push(utmSource); conditions.push(`l.utm_source = $${params.length}`); }
   if (hearAbout) { params.push(`%${hearAbout.toLowerCase()}%`); conditions.push(`LOWER(COALESCE(l.hear_about_us,'')) LIKE $${params.length}`); }
 
@@ -697,6 +775,8 @@ app.get('/monitor/leads', async (req, res) => {
   if (websiteCheck === 'failed') conditions.push(`l.website_check_failed IS TRUE`);
   if (websiteCheck === 'passed') conditions.push(`l.website_check_failed IS NOT TRUE`); // covers false AND null (pre-migration rows)
   if (websiteCheck === 'social') conditions.push(`l.website_check_reason = 'social_profile_url'`);
+  if (repeatAttempts === 'yes') conditions.push(`EXISTS (SELECT 1 FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at)`);
+  if (repeatAttempts === 'no')  conditions.push(`NOT EXISTS (SELECT 1 FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at)`);
 
   if (dateFrom) { params.push(dateFrom); conditions.push(`l.created_at >= $${params.length}::date`); }
   if (dateTo)   { params.push(dateTo);   conditions.push(`l.created_at < ($${params.length}::date + INTERVAL '1 day')`); }
@@ -716,6 +796,8 @@ app.get('/monitor/leads', async (req, res) => {
       l.disqualified, l.disqualified_reason, l.step_reached,
       l.loops_sent, l.created_at, l.submitted_at, l.page_url,
       l.landing_page, l.previous_page, l.website_check_failed, l.website_check_reason,
+      (SELECT COUNT(*) FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at) AS prior_attempts,
+      (SELECT COUNT(*) FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at AND pa.disqualified IS TRUE) AS prior_disqualified,
       l.utm_source, l.utm_medium, l.utm_campaign, l.utm_term, l.referrer, l.prefill_source,
       l.fbc, l.fbp,
       COALESCE(l.enriched_title, e.enriched_title) AS enriched_title,
@@ -751,7 +833,7 @@ app.get('/monitor/leads', async (req, res) => {
         'email','first_name','last_name','company','website','phone','sell_to','hear_about_us',
         'completed','booking_uid','disqualified','step_reached','created_at','submitted_at','booked_at',
         'utm_source','utm_medium','utm_campaign','utm_term','referrer','prefill_source',
-        'landing_page','previous_page','page_url','website_check_failed','website_check_reason',
+        'landing_page','previous_page','page_url','website_check_failed','website_check_reason','prior_attempts','prior_disqualified',
         'enriched_title','enriched_company_size','enriched_industry','enriched_seniority','enriched_departments',
         'enriched_linkedin','enriched_city','enriched_state','enriched_country',
         'enriched_annual_revenue','enriched_total_funding','enriched_funding_stage'
@@ -1004,10 +1086,11 @@ app.get('/monitor', (req, res) => {
   '<div class="filters">' +
   '<input type="text" id="fsearch" placeholder="Search email, company..." oninput="debounce()">' +
   '<select id="fstage" onchange="loadLeads(1)"><option value="all">All stages</option><option value="booked">Booked</option><option value="completed">Completed (no booking)</option><option value="step1">Step 1 only</option><option value="disqualified">Disqualified</option></select>' +
-  '<select id="fsellto" onchange="loadLeads(1)"><option value="all">All sell-to</option><option value="B2B">B2B</option><option value="B2B (clarified from B2C)">B2B (clarified from B2C)</option><option value="B2B (clarified from Mixed)">B2B (clarified from Mixed)</option><option value="B2C">B2C</option></select>' +
+  '<select id="fsellto" onchange="loadLeads(1)"><option value="all">All sell-to</option><option value="B2B">B2B</option><option value="B2B (clarified from B2C)">B2B (clarified from B2C)</option><option value="B2B (clarified from Mixed)">B2B (clarified from Mixed)</option><option value="B2C">B2C</option><option value="Mixed">Mixed</option><option value="__clarified">Clarified (any)</option></select>' +
   '<select id="fsource" onchange="loadLeads(1)"><option value="all">All sources</option></select>' +
   '<select id="fenrich" onchange="loadLeads(1)"><option value="all">Enrichment: all</option><option value="yes">Enriched</option><option value="no">Not enriched</option></select>' +
   '<select id="fwebsitecheck" onchange="loadLeads(1)"><option value="all">Website check: all</option><option value="failed">Failed</option><option value="passed">Passed</option><option value="social">Social profile</option></select>' +
+  '<select id="frepeat" onchange="loadLeads(1)"><option value="all">Attempts: all</option><option value="yes">Repeat only</option><option value="no">First-time only</option></select>' +
   '<input type="text" id="fhear" list="hearlist" placeholder="Heard about us..." oninput="debounce()" style="min-width:170px">' +
   '<datalist id="hearlist"></datalist>' +
   '<select id="fpreset" onchange="datePreset(this.value)"><option value="">Any date</option><option value="today">Today</option><option value="7d">Last 7 days</option><option value="30d">Last 30 days</option></select>' +
@@ -1110,6 +1193,7 @@ app.get('/monitor', (req, res) => {
   '{lb:"Website",v:l.website,lnk:true},' +
   '{lb:"\\u26A0\\uFE0F Website check",v:l.website_check_failed?("Failed"+(l.website_check_reason?" ("+l.website_check_reason+")":"")):null},' +
   '{lb:"\\uD83D\\uDD17 Website type",v:(!l.website_check_failed&&l.website_check_reason==="social_profile_url")?"Social profile (no company site)":null},' +
+  '{lb:"\\uD83D\\uDD01 Attempts",v:(Number(l.prior_attempts)>0)?("Attempt "+(Number(l.prior_attempts)+1)+" \\u2014 "+l.prior_attempts+" prior"+(Number(l.prior_disqualified)>0?", "+l.prior_disqualified+" disqualified":"")):null},' +
   '{lb:"Hear about us",v:l.hear_about_us},' +
   '{lb:"UTM source",v:l.utm_source},' +
   '{lb:"UTM medium",v:l.utm_medium},' +
@@ -1132,17 +1216,17 @@ app.get('/monitor', (req, res) => {
   'if(!fields.length)return"<div style=\\"color:#999;font-size:12px\\">No enrichment data.</div>";' +
   'return"<div class=\\"egrid\\">"+fields.map(function(f){var val=f.lnk&&f.v?"<a href=\\""+(f.v.startsWith("http")?"":"https://")+esc(f.v)+"\\" target=\\"_blank\\">"+esc(f.v)+"</a>":f.mono?"<code style=\\"font-size:10px\\">"+esc(f.v)+"</code>":esc(f.v);return"<div class=\\"ef\\"><div class=\\"efl\\">"+f.lb+"</div><div class=\\"efv\\">"+val+"</div></div>";}).join("")+"</div>";}' +
   'function debounce(){clearTimeout(stimer);stimer=setTimeout(function(){loadLeads(1);},400);}' +
-  'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("fsellto").value="all";document.getElementById("fsource").value="all";document.getElementById("fenrich").value="all";document.getElementById("fwebsitecheck").value="all";document.getElementById("fhear").value="";document.getElementById("fpreset").value="";document.getElementById("ffrom").value="";document.getElementById("fto").value="";curSort="created_at";curDir="desc";renderSortArrows();loadLeads(1);}' +
+  'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("fsellto").value="all";document.getElementById("fsource").value="all";document.getElementById("fenrich").value="all";document.getElementById("fwebsitecheck").value="all";document.getElementById("frepeat").value="all";document.getElementById("fhear").value="";document.getElementById("fpreset").value="";document.getElementById("ffrom").value="";document.getElementById("fto").value="";curSort="created_at";curDir="desc";renderSortArrows();loadLeads(1);}' +
   'function renderSortArrows(){["email","name","company","sell_to","created_at"].forEach(function(c){var el=document.getElementById("sar-"+c);if(el)el.textContent=(curSort===c)?(curDir==="asc"?"\\u25B2":"\\u25BC"):"";});}' +
   'function sortBy(c){if(curSort===c){curDir=(curDir==="asc")?"desc":"asc";}else{curSort=c;curDir=(c==="created_at")?"desc":"asc";}renderSortArrows();loadLeads(1);}' +
   'function datePreset(v){var ff=document.getElementById("ffrom"),ft=document.getElementById("fto");if(!v){loadLeads(1);return;}function fmt(d){var y=d.getFullYear(),m=("0"+(d.getMonth()+1)).slice(-2),da=("0"+d.getDate()).slice(-2);return y+"-"+m+"-"+da;}var now=new Date(),to=fmt(now),from=to;if(v==="7d"){var d=new Date(now);d.setDate(d.getDate()-6);from=fmt(d);}else if(v==="30d"){var d2=new Date(now);d2.setDate(d2.getDate()-29);from=fmt(d2);}ff.value=from;ft.value=to;loadLeads(1);}' +
   'function dateManual(){var p=document.getElementById("fpreset");if(p)p.value="";loadLeads(1);}' +
-  'function exportLeads(){var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,hear=document.getElementById("fhear").value.trim(),from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"format=csv&stage="+stage+"&sort="+curSort+"&dir="+curDir;if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;window.location.href=url;}' +
+  'function exportLeads(){var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"format=csv&stage="+stage+"&sort="+curSort+"&dir="+curDir;if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;window.location.href=url;}' +
   'async function loadFilterOptions(){if(filterOptsLoaded)return;try{var r=await fetch(API+"/monitor/filter-options"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(10000)});if(!r.ok)return;var d=await r.json();var sel=document.getElementById("fsource");if(sel&&d.utmSource){d.utmSource.forEach(function(v){var o=document.createElement("option");o.value=v;o.textContent=v;sel.appendChild(o);});}var dl=document.getElementById("hearlist");if(dl&&d.hearAbout){dl.innerHTML=d.hearAbout.map(function(v){return"<option value=\\""+esc(v)+"\\"></option>";}).join("");}filterOptsLoaded=true;}catch(e){}}' +
   'function toggleRow(sid){var row=document.getElementById("er-"+sid);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=row.previousElementSibling&&row.previousElementSibling.querySelector(".xbtn");if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";}' +
-  'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,hear=document.getElementById("fhear").value.trim(),from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
+  'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
   'var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"page="+curPage+"&stage="+stage+"&sort="+curSort+"&dir="+curDir;' +
-  'if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;' +
+  'if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;' +
   'document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\">Loading...</td></tr>";' +
   'try{var r=await fetch(url,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
   'set("lcount",d.total+" lead"+(d.total!==1?"s":"")+" found");' +
@@ -1251,27 +1335,97 @@ app.get('/monitor', (req, res) => {
   res.send(html + js);
 });
 
+/* ── ELV health tracking ───────────────────────────────────────────
+   Purely observational: NOTHING here changes which emails get blocked.
+   blockedStatuses is untouched. This only makes ELV failures visible,
+   because today a rejected API key returns a JSON error body that
+   matches no blocked status — so verification silently switches off
+   and every email sails through unverified with no signal at all.
+
+   Individual inconclusive results are normal (Gmail routinely refuses
+   verification probes — that's the smtp_protocol case), so those are
+   never alerted on individually; only a sustained RATE trips an alert.
+   ───────────────────────────────────────────────────────────────── */
+
+// Statuses ELV is known to return. Anything outside this set gets
+// surfaced rather than silently treated as a pass.
+const ELV_KNOWN_STATUSES = ['ok', 'invalid', 'invalid_mx', 'accept_all', 'ok_for_all', 'disposable', 'role', 'email_disabled', 'dead_server', 'unknown', 'smtp_protocol', 'unknown_email', 'domain_error', 'syntax_error', 'spamtrap', 'error'];
+// Outcomes that mean "we learned nothing" — the degradation signal.
+const ELV_INDETERMINATE  = ['smtp_protocol', 'unknown', 'error', 'http_error', 'timeout', 'network_error', 'skipped'];
+const ELV_WINDOW_SIZE       = 20;
+const ELV_DEGRADED_RATE     = 0.4; // 8 of 20 inconclusive
+const _elvWindow = [];
+
+function recordElvOutcome(status) {
+  _elvWindow.push(ELV_INDETERMINATE.includes(status) ? 'indeterminate' : 'definitive');
+  if (_elvWindow.length > ELV_WINDOW_SIZE) _elvWindow.shift();
+  if (_elvWindow.length < ELV_WINDOW_SIZE) return; // wait for a full window
+  const bad = _elvWindow.filter(o => o === 'indeterminate').length;
+  if (bad / _elvWindow.length >= ELV_DEGRADED_RATE) {
+    alertOps('warning', 'ELV', 'Verification degraded', {
+      'Inconclusive': `${bad} of last ${_elvWindow.length} checks`,
+      'Impact': 'Leads are passing without email verification',
+      'Action': 'Check ELV status/credits — no leads are being blocked',
+    });
+  }
+}
+
+const ELV_HTTP_MEANING = { 401: 'API key rejected', 402: 'Credits exhausted', 403: 'Access forbidden', 429: 'Rate limited' };
+
 app.post('/verify-email', async (req, res) => {
   const email = (req.body.email || '').toString().trim().slice(0, 254).toLowerCase();
   if (!email) return res.status(400).json({ valid: false, error: 'email required' });
   const apiKey = process.env.ELV_API_KEY;
-  if (!apiKey) { console.warn('[ELV] ELV_API_KEY not set — skipping, allowing through'); return res.json({ valid: true, status: 'skipped' }); }
+  if (!apiKey) {
+    console.warn('[ELV] ELV_API_KEY not set — skipping, allowing through');
+    alertOps('critical', 'ELV', 'API key not configured', { 'Impact': 'All emails passing unverified' });
+    recordElvOutcome('skipped');
+    return res.json({ valid: true, status: 'skipped' });
+  }
   try {
     const controller = new AbortController();
     const timeout    = setTimeout(() => controller.abort(), 8000);
     const url        = `https://apps.emaillistverify.com/api/verifyEmail?secret=${apiKey}&email=${encodeURIComponent(email)}`;
     const response   = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
+
+    // Non-200 means the CHECK failed, not that the email is bad. Fail open
+    // (as before) but loudly — this is the silent-failure hole.
+    if (!response.ok) {
+      const meaning  = ELV_HTTP_MEANING[response.status] || `HTTP ${response.status}`;
+      const severity = [401, 402, 403].includes(response.status) ? 'critical' : 'warning';
+      console.warn(`[ELV] ⚠ HTTP ${response.status} (${meaning}) — failing open`);
+      alertOps(severity, 'ELV', meaning, {
+        'HTTP status': response.status,
+        'Impact': 'Emails are passing unverified',
+        'Action': severity === 'critical' ? 'Renew key / top up credits in ELV dashboard' : 'Monitor — may self-resolve',
+      });
+      recordElvOutcome('http_error');
+      return res.json({ valid: true, status: 'http_error' });
+    }
+
     const text   = await response.text();
     const status = text.trim().toLowerCase();
     console.log(`[ELV] ${email} → "${status}"`);
+
+    if (!ELV_KNOWN_STATUSES.includes(status)) {
+      console.warn(`[ELV] ⚠ Unrecognised status "${status.substring(0, 60)}" — treating as pass`);
+      alertOps('warning', 'ELV', 'Unrecognised status', {
+        'Status': status.substring(0, 100),
+        'Impact': 'Treated as a pass — review whether it should block',
+      });
+    }
+
     const blockedStatuses = ['error', 'invalid', 'unknown_email', 'email_disabled', 'domain_error', 'dead_server', 'syntax_error', 'disposable', 'spamtrap', 'invalid_mx'];
     const valid = !blockedStatuses.includes(status);
     if (!valid) console.log(`[ELV] BLOCKED ${email} — status: "${status}"`);
+    recordElvOutcome(status);
     res.json({ valid, status });
   } catch (err) {
-    if (err.name === 'AbortError') console.warn(`[ELV] Timeout for ${email} — failing open`);
+    const isTimeout = err.name === 'AbortError';
+    if (isTimeout) console.warn(`[ELV] Timeout for ${email} — failing open`);
     else console.warn('[ELV] Error:', err.message, '— failing open');
+    recordElvOutcome(isTimeout ? 'timeout' : 'network_error');
     res.json({ valid: true, status: 'error_fallback' });
   }
 });
@@ -1285,7 +1439,7 @@ app.post('/verify-email', async (req, res) => {
 // real case that exposed this). Same fail-open philosophy as ELV: any
 // timeout, block, redirect loop, or bot-challenge response passes through
 // rather than risk rejecting a real company's site.
-const FOR_SALE_PHRASES = ['domain is for sale', 'domain name is for sale', 'this domain may be for sale', 'buy this domain', 'make an offer', 'this domain is available', 'domain for sale', 'inquire about this domain', 'this web page is parked', 'premium domain for sale', 'purchase this domain', 'domain broker', 'this domain is not configured'];
+const FOR_SALE_PHRASES = ['domain is for sale', 'domain name is for sale', 'this domain may be for sale', 'buy this domain', 'make an offer', 'this domain is available', 'domain for sale', 'inquire about this domain', 'this web page is parked', 'premium domain for sale', 'purchase this domain', 'domain broker', 'this domain is not configured', 'parked domain name', 'hostinger dns system'];
 
 // Blocks requests aimed at internal/private infrastructure so this route
 // can't be used as an SSRF pivot into Railway's own network.
@@ -1303,6 +1457,30 @@ function isPrivateOrLocalHost(hostname) {
   return false;
 }
 
+// One attempt at a candidate URL. Returns the Response (response.url is the
+// final, redirect-resolved URL — free from fetch's own redirect following).
+// Throws on hard failure or on our own timeout (distinguished by err.name).
+async function attemptFetch(urlString, timeoutMs) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(urlString, {
+      signal: controller.signal,
+      redirect: 'follow',
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; GushworkFormBot/1.0)' },
+    });
+    clearTimeout(t);
+    return response;
+  } catch (err) {
+    clearTimeout(t);
+    throw err;
+  }
+}
+
+function flipWww(hostname) {
+  return hostname.toLowerCase().startsWith('www.') ? hostname.slice(4) : 'www.' + hostname;
+}
+
 app.post('/verify-website', async (req, res) => {
   const raw = (req.body.website || '').toString().trim().slice(0, 300);
   if (!raw) return res.status(400).json({ ok: true, reason: 'empty' }); // fail open, form's own required-check owns this
@@ -1315,30 +1493,54 @@ app.post('/verify-website', async (req, res) => {
   if (!['http:', 'https:'].includes(url.protocol) || isPrivateOrLocalHost(url.hostname)) {
     return res.json({ ok: true, reason: 'skipped_unsafe_target' }); // never fetch internal/local targets; fail open
   }
-  try {
-    const controller = new AbortController();
-    const timeout    = setTimeout(() => controller.abort(), 6000);
-    const response    = await fetch(url.toString(), {
-      signal: controller.signal,
-      redirect: 'follow',
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; GushworkFormBot/1.0)' },
-    });
-    clearTimeout(timeout);
-    if (!response.ok) { console.log(`[verify-website] ${url.hostname} → HTTP ${response.status} — failing open`); return res.json({ ok: true, reason: 'http_' + response.status }); }
-    const contentType = response.headers.get('content-type') || '';
-    if (!contentType.includes('html')) return res.json({ ok: true, reason: 'non_html' }); // fail open — not a page we can scan
-    const html = (await response.text()).slice(0, 50000).toLowerCase(); // cap read size
-    const hit = FOR_SALE_PHRASES.find((p) => html.includes(p));
-    if (hit) {
-      console.log(`[verify-website] BLOCKED ${url.hostname} — matched for-sale phrase: "${hit}"`);
-      return res.json({ ok: false, reason: 'for_sale_lander', matched: hit });
+
+  // Fallback ladder: as-typed -> www/bare flip (same protocol) -> http downgrade.
+  // A hard connection failure (DNS/refused/TLS) is fast, so trying the next
+  // candidate is cheap. OUR OWN timeout means the site is just slow, not
+  // wrong — we stop immediately rather than compounding wait time on what's
+  // likely the same latency again.
+  const candidates = [
+    { u: url.toString(), timeout: 9000 },
+    { u: `${url.protocol}//${flipWww(url.hostname)}${url.pathname}${url.search}`, timeout: 5000 },
+    { u: `http://${url.hostname}${url.pathname}${url.search}`, timeout: 5000 },
+  ];
+
+  let response = null;
+  for (const c of candidates) {
+    try {
+      response = await attemptFetch(c.u, c.timeout);
+      break; // got a real HTTP response (any status) — stop the ladder
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        console.warn(`[verify-website] Timeout for ${c.u} — failing open`);
+        return res.json({ ok: true, reason: 'timeout' });
+      }
+      console.warn(`[verify-website] Connection failed for ${c.u} (${err.message}) — trying next candidate`);
     }
-    res.json({ ok: true, reason: 'content_clean' });
-  } catch (err) {
-    if (err.name === 'AbortError') console.warn(`[verify-website] Timeout for ${url.hostname} — failing open`);
-    else console.warn('[verify-website] Error:', err.message, '— failing open');
-    res.json({ ok: true, reason: 'fetch_error' }); // never block on our own network/bot-wall failure
   }
+
+  if (!response) {
+    console.warn(`[verify-website] All candidates unreachable for ${url.hostname} — failing open`);
+    return res.json({ ok: true, reason: 'unreachable' });
+  }
+
+  // fetch() resolves response.url to the FINAL address after following
+  // every redirect — this is the one reliable URL, captured for free.
+  const canonical_url = response.url || undefined;
+
+  if (!response.ok) {
+    console.log(`[verify-website] ${url.hostname} → HTTP ${response.status} — failing open`);
+    return res.json({ ok: true, reason: 'http_' + response.status, canonical_url });
+  }
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.includes('html')) return res.json({ ok: true, reason: 'non_html', canonical_url }); // fail open — not a page we can scan
+  const html = (await response.text()).slice(0, 50000).toLowerCase(); // cap read size
+  const hit = FOR_SALE_PHRASES.find((p) => html.includes(p));
+  if (hit) {
+    console.log(`[verify-website] BLOCKED ${url.hostname} — matched for-sale phrase: "${hit}"`);
+    return res.json({ ok: false, reason: 'for_sale_lander', matched: hit, canonical_url });
+  }
+  res.json({ ok: true, reason: 'content_clean', canonical_url });
 });
 
 
