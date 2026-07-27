@@ -410,12 +410,45 @@
       return !PERSONAL_EMAIL_DOMAINS.includes(email.split('@')[1]?.toLowerCase() || '');
     }
 
+    // Requires a REAL TLD, not merely "contains a dot somewhere".
+    // The old `hostname.includes('.')` accepted www.malbecgrillcom because
+    // the `www.` supplied the only dot — a real lead's typo then got
+    // misfiled as a fake domain downstream. Strip www. first, then demand
+    // at least two labels with a final alphabetic label of 2+ chars.
+    // Also rejects raw IPs, `localhost`, and bare single-label hosts.
+    // (Trade-off: the literal domain `www.com` would be rejected. Nobody
+    // submits that as a company site, and stripping conditionally would
+    // reopen the malbecgrillcom hole.)
     function isValidURL(url) {
       try {
         const u = new URL(url.startsWith('http') ? url : 'https://' + url);
-        return u.hostname.includes('.');
+        const bare = u.hostname.replace(/\.$/, '').replace(/^www\./i, '');
+        return /^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/i.test(bare);
       } catch {
         return false;
+      }
+    }
+
+    // Missing-dot typo recovery: malbecgrillcom -> malbecgrill.com.
+    // Only 3+ char TLDs, so we never produce silly suggestions like
+    // mumbai -> mumb.ai. Returns '' when there's nothing confident to say.
+    const TYPO_TLDS = ['online', 'store', 'tech', 'site', 'info', 'com', 'net', 'org', 'biz', 'app', 'dev', 'xyz'];
+
+    function suggestUrlFix(raw) {
+      try {
+        const u = new URL(raw.startsWith('http') ? raw : 'https://' + raw);
+        const host = u.hostname.replace(/\.$/, '').replace(/^www\./i, '').toLowerCase();
+        if (host.includes('.')) return ''; // has a dot already — different problem
+        // longest first so "online" wins over "in"-style shorter matches
+        const sorted = TYPO_TLDS.slice().sort((a, b) => b.length - a.length);
+        for (const tld of sorted) {
+          if (host.length > tld.length + 1 && host.endsWith(tld)) {
+            return host.slice(0, host.length - tld.length) + '.' + tld;
+          }
+        }
+        return '';
+      } catch {
+        return '';
       }
     }
 
@@ -473,7 +506,8 @@
         showError('website-error', 'Website URL is required.');
         valid = false;
       } else if (!isValidURL(website)) {
-        showError('website-error', 'Please enter a valid URL (e.g. acme.com).');
+        const suggestion = suggestUrlFix(website);
+        showError('website-error', suggestion ? 'Did you mean ' + suggestion + '?' : 'Please enter a valid URL (e.g. acme.com).');
         valid = false;
       } else hideError('website-error');
 
@@ -599,7 +633,7 @@
 
     // Nameservers used ONLY for parking / domain-sale landers → always block.
     // Match is suffix-based, so ns1.sedoparking.com etc. all hit.
-    const PARKING_NS_STRICT = ['sedoparking.com', 'parkingcrew.net', 'bodis.com', 'above.com', 'parklogic.com', 'uniregistrymarket.link', 'afternic.com', 'dan.com'];
+    const PARKING_NS_STRICT = ['sedoparking.com', 'parkingcrew.net', 'bodis.com', 'above.com', 'parklogic.com', 'uniregistrymarket.link', 'afternic.com', 'dan.com', 'dns-parking.com'];
 
     // Registrar DNS heavily used for for-sale inventory (NameBright =
     // HugeDomains) but also by some real retail customers → block only
@@ -797,7 +831,12 @@
       if (!isRailwayReady()) return { ok: true, reason: 'skipped_no_backend' };
       try {
         const controller = new AbortController();
-        const t = setTimeout(() => controller.abort(), 7000);
+        // Bumped from 7s: the backend's own fallback ladder (as-typed ->
+        // www/bare flip -> http downgrade) can legitimately take longer,
+        // especially when the first candidate is a slow-but-real redirect
+        // chain (e.g. www.site.com -> site.com). Must exceed the backend's
+        // own worst-case budget or we'd abort before it finishes.
+        const t = setTimeout(() => controller.abort(), 15000);
         const res = await fetch(`${RAILWAY_API_URL}/verify-website`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -807,7 +846,7 @@
         clearTimeout(t);
         if (!res.ok) return { ok: true, reason: 'backend_error' };
         const data = await res.json();
-        return { ok: data.ok !== false, reason: data.reason || 'checked' };
+        return { ok: data.ok !== false, reason: data.reason || 'checked', canonical_url: data.canonical_url || null };
       } catch (err) {
         console.warn('[GW] Website content check failed — allowing through:', err && err.message);
         return { ok: true, reason: 'fetch_error' };
@@ -833,6 +872,10 @@
           if (v.reason === 'resolved' && !isTestEmail(getField('email'))) {
             const cv = await verifyWebsiteContent(rawValue);
             if (!cv.ok) return { ok: false, reason: 'for_sale_lander', msg: "This doesn't appear to be a live company website. Please check the URL." };
+            // Carry the redirect-resolved canonical URL forward when the
+            // backend found one — the domain-match safety net (skip if it
+            // points somewhere unrelated) is applied at the point of use.
+            if (cv.canonical_url) return { ...v, canonical_url: cv.canonical_url };
           }
           return v;
         })
@@ -862,7 +905,15 @@
       el.addEventListener('blur', async () => {
         updateWebsiteMismatchTip();
         const val = el.value.trim();
-        if (!val || !isValidURL(val)) return; // required/format errors shown on Next
+        if (!val) return; // required-field nagging stays on Next
+        if (!isValidURL(val)) {
+          // Surface a CONFIDENT typo correction early, while they're still
+          // in the field. Stay quiet for a generic malformed URL — that
+          // would just nag someone mid-edit; Next still catches it.
+          const suggestion = suggestUrlFix(val);
+          if (suggestion) showError('website-error', 'Did you mean ' + suggestion + '?');
+          return; // never DNS-check a malformed domain
+        }
         if (isTestEmail(getField('email'))) return;
         const v = await checkWebsite(val);
         // Only show if the field still holds the value we checked
@@ -1249,10 +1300,21 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
         // ── Website existence check (SECTION 3C) ──────────
         // Usually already resolved by the blur prewarm, so this
         // is a cache hit and the button barely flickers
+        let canonicalWebsite = null;
         if (!isTestEmail(getField('email'))) {
           const wv = await checkWebsite(getField('website'));
           formState.website_check_failed = !wv.ok;
           formState.website_check_reason = wv.reason || (wv.ok ? 'ok' : 'unknown');
+          // Safety net: only trust the resolved canonical URL if it's
+          // recognizably the SAME domain (www/bare, subdomain) as typed —
+          // never silently store wherever an unrelated redirect landed.
+          if (wv.canonical_url) {
+            try {
+              const canonicalHost = extractWebsiteDomain(wv.canonical_url);
+              const typedHost = extractWebsiteDomain(getField('website'));
+              if (domainsMatch(canonicalHost, typedHost)) canonicalWebsite = wv.canonical_url;
+            } catch {}
+          }
           if (!wv.ok) {
             showError('website-error', wv.msg);
             // WEBSITE_CHECK_BLOCKING=false (temporary, team decision): the
@@ -1271,6 +1333,10 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
         formState.last_name = getField('last-name');
         formState.company = getField('company');
         formState.website = getField('website');
+        // One reliable URL downstream: if the site redirected (e.g. www ->
+        // bare, http -> https), store the actual resolved address instead
+        // of whatever the lead happened to type.
+        if (canonicalWebsite) formState.website = canonicalWebsite;
         formState.hear_about_us = getField('hear-about-us');
 
         // Phone (optional) — E.164, no spaces (+916388639290);
@@ -1484,7 +1550,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v4.9.8 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
+      console.log('[GW] ✅ Form initialised v4.10.1 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
