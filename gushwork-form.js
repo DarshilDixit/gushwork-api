@@ -1,5 +1,5 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v4.10  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v4.12.0  (/demo PAGE VERSION - thru github/jsdlivr)
 
   /* --------------------------------------------------------
   INJECT STYLES
@@ -511,9 +511,18 @@
         valid = false;
       } else hideError('website-error');
 
-      // ── Phone — OPTIONAL: only validate when the user typed something ──
-      const phoneEl = document.getElementById('phone');
-      if (phoneEl && phoneEl.value.trim() !== '' && phoneEl._iti && typeof phoneEl._iti.isValidNumber === 'function') {
+      // ── Phone — REQUIRED for free-mailbox leads, optional otherwise ──
+      // Free-mail leads are funnelled to SDR calling (JustCall campaign), so a
+      // reachable number is the whole point. Business-email leads keep it
+      // optional, as before. Test emails are exempt like every other check.
+      const phoneEl    = document.getElementById('phone');
+      const phoneEmail = getField('email') || formState.email || '';
+      const phoneRequired = !!phoneEmail && isValidEmail(phoneEmail) && !isWorkEmail(phoneEmail) && !isTestEmail(phoneEmail);
+      const phoneVal   = phoneEl ? phoneEl.value.trim() : '';
+      if (phoneEl && phoneRequired && phoneVal === '') {
+        showError('phone-error', 'Phone number is required so our team can reach you.');
+        valid = false;
+      } else if (phoneEl && phoneVal !== '' && phoneEl._iti && typeof phoneEl._iti.isValidNumber === 'function') {
         if (!phoneEl._iti.isValidNumber()) {
           showError('phone-error', 'Please enter a valid phone number.');
           valid = false;
@@ -629,11 +638,17 @@
       '199.59.242.', // Bodis
       '199.59.243.', // Bodis
       '208.91.197.', // Confluence Networks parking
+      '216.198.79.1', // Hostinger 'website not configured' placeholder (exact IP)
     ];
 
     // Nameservers used ONLY for parking / domain-sale landers → always block.
     // Match is suffix-based, so ns1.sedoparking.com etc. all hit.
-    const PARKING_NS_STRICT = ['sedoparking.com', 'parkingcrew.net', 'bodis.com', 'above.com', 'parklogic.com', 'uniregistrymarket.link', 'afternic.com', 'dan.com', 'dns-parking.com'];
+    const PARKING_NS_STRICT = ['sedoparking.com', 'parkingcrew.net', 'bodis.com', 'above.com', 'parklogic.com', 'uniregistrymarket.link', 'afternic.com', 'dan.com'];
+    // NOTE: dns-parking.com was briefly here (v4.9.10) and REMOVED in v4.11.0.
+    // It is Hostinger's nameserver hostname for ALL customers, live sites
+    // included (processwithbryant.com: real site + Google Workspace MX, was
+    // wrongly flagged). Hostinger placeholder pages are caught by the
+    // server-side content check instead, which reads the actual page.
 
     // Registrar DNS heavily used for for-sale inventory (NameBright =
     // HugeDomains) but also by some real retail customers → block only
@@ -1550,7 +1565,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v4.10.1 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
+      console.log('[GW] ✅ Form initialised v4.12.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
