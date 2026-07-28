@@ -285,7 +285,7 @@ function syncToAWS(data) {
   ]).then(() => {
     console.log(`[AWS] ✅ Synced session ${data.session_id}`);
   }).catch(err => {
-    console.warn(`[AWS] ⚠ Sync failed for ${data.session_id}:`, err.message);
+    console.warn(`[AWS] ⚠ Sync failed for ${data.session_id}:`, err.message); recordFailure('AWS sync', data.session_id, err.message);
   });
 }
 
@@ -296,19 +296,19 @@ function syncBookingToAWS(session_id, booking_uid, start_time, end_time, event_t
     WHERE session_id = $1
   `, [session_id, booking_uid, start_time || null, end_time || null, event_type || null])
   .then(() => console.log(`[AWS] ✅ Booking synced for session ${session_id}`))
-  .catch(err => console.warn(`[AWS] ⚠ Booking sync failed:`, err.message));
+  .catch(err => { console.warn(`[AWS] ⚠ Booking sync failed:`, err.message); recordFailure('AWS sync', 'booking sync', err.message); });
 }
 
 function sendSlack(blocks, fallbackText) {
   const webhookUrl = process.env.SLACK_WEBHOOK_URL;
-  if (!webhookUrl) { console.warn('[Slack] SLACK_WEBHOOK_URL not set — skipping'); return; }
+  if (!webhookUrl) { console.warn('[Slack] SLACK_WEBHOOK_URL not set — skipping'); alertSlackBroken('SLACK_WEBHOOK_URL is not configured'); return; }
   const cleanBlocks = Array.isArray(blocks) ? blocks.filter(Boolean) : null;
   const payload = cleanBlocks && cleanBlocks.length > 0
     ? { text: fallbackText || 'Gushwork notification', blocks: cleanBlocks }
     : { text: fallbackText || 'Gushwork notification' };
   fetch(webhookUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
   .then(r => r.text().then(t => console.log(`[Slack] ✅ Sent — status: ${r.status} | response: ${t.substring(0, 50)}`)))
-  .catch(err => console.warn('[Slack] ⚠ Failed:', err.message));
+  .catch(err => { console.warn('[Slack] ⚠ Failed:', err.message); alertSlackBroken(err.message); });
 }
 function bHeader(text)  { return { type: 'header', text: { type: 'plain_text', text, emoji: true } }; }
 function bSection(text) { return { type: 'section', text: { type: 'mrkdwn', text } }; }
@@ -335,6 +335,37 @@ function bContext(text) { return { type: 'context', elements: [{ type: 'mrkdwn',
    instance starts with a clean slate. Multiple instances would each
    keep their own window.
    ───────────────────────────────────────────────────────────────── */
+
+/* ── Website verification gate for Meta CAPI ────────────────────────
+   Per team decision: Meta events fire ONLY when the website check
+   definitively PASSED. Anything else — failed, parked, nonexistent,
+   DNS unreachable, or simply "we couldn't check" — suppresses Meta.
+
+   Previously only website_check_failed===true suppressed, so the
+   indeterminate cases (DNS timeout / SERVFAIL / backend hiccup) fired
+   Meta and looked identical to a clean lead. prestigelending.com hit
+   exactly that path: its nameservers never answered, so we failed
+   open, and the lead reached Meta with no flag anywhere.
+
+   NULL/absent reason means the lead predates this field — those still
+   fire, so we never retroactively suppress historic leads.
+   ─────────────────────────────────────────────────────────────────── */
+const WEBSITE_VERIFIED_REASONS = ['resolved', 'mx_only', 'social_profile_url', 'content_clean', 'test_email_skipped', 'ok'];
+
+function isWebsiteVerified(row) {
+  if (!row) return true;
+  if (row.website_check_failed === true) return false;
+  const reason = row.website_check_reason;
+  if (reason === null || reason === undefined || reason === '') return true; // pre-feature rows
+  return WEBSITE_VERIFIED_REASONS.includes(reason);
+}
+
+function websiteCheckNote(row) {
+  if (!row) return '';
+  if (row.website_check_failed === true) return row.website_check_reason || 'failed';
+  if (!isWebsiteVerified(row)) return 'unverified (' + (row.website_check_reason || 'unknown') + ')';
+  return '';
+}
 
 const ALERT_COOLDOWN_MS   = { critical: 3 * 60 * 60 * 1000, warning: 60 * 60 * 1000 };
 const ALERT_EMAIL_TO      = ['darshil.dixit@gushwork.ai', 'darshil@darshildixit.com'];
@@ -374,25 +405,190 @@ async function sendAlertEmail(subject, details) {
   }
 }
 
+const _alertSuppressed = new Map();        // same key -> count hidden by cooldown
+const _alertSuppressedIds = new Map();     // same key -> identifiers hidden by cooldown
+
 function alertOps(severity, source, title, details) {
-  const sev  = severity === 'critical' ? 'critical' : 'warning';
-  const key  = `${sev}:${source}:${title}`;
-  const now  = Date.now();
-  const last = _alertLastSent.get(key) || 0;
-  if (now - last < ALERT_COOLDOWN_MS[sev]) return; // inside cooldown — stay quiet
-  _alertLastSent.set(key, now);
+  // Fully defensive: alerting must NEVER throw into a request path.
+  try {
+    const sev  = severity === 'critical' ? 'critical' : 'warning';
+    const key  = `${sev}:${source}:${title}`;
+    const now  = Date.now();
+    const last = _alertLastSent.get(key) || 0;
+    if (now - last < ALERT_COOLDOWN_MS[sev]) {
+      // Still inside cooldown — stay quiet, but remember it happened so the
+      // next alert can report the true scale rather than hiding it.
+      _alertSuppressed.set(key, (_alertSuppressed.get(key) || 0) + 1);
+      // Remember the identifier too, so the next alert can name what was missed
+      const idVal = details && (details.Email || details.Recipient || details.Session || details.Affected);
+      if (idVal) {
+        const ids = _alertSuppressedIds.get(key) || [];
+        if (ids.length < 25) ids.push(String(idVal));
+        _alertSuppressedIds.set(key, ids);
+      }
+      return false;
+    }
+    _alertLastSent.set(key, now);
 
-  const icon = sev === 'critical' ? '🚨' : '⚠️';
-  const heading = `${icon} ${source} — ${title}`;
-  const blocks = [bHeader(heading), bDivider()];
-  const f = bFields(Object.entries(details || {}).map(([label, value]) => ({ label, value: value == null ? '' : String(value) })));
-  if (f) blocks.push(f);
-  blocks.push(bContext(`Severity: *${sev}* · ${new Date().toISOString()}`));
-  sendOpsSlack(blocks, heading);
+    const hidden    = _alertSuppressed.get(key) || 0;
+    const hiddenIds = _alertSuppressedIds.get(key) || [];
+    _alertSuppressed.set(key, 0);
+    _alertSuppressedIds.set(key, []);
 
-  if (sev === 'critical') sendAlertEmail(heading, details).catch(() => {});
-  console.log(`[alertOps] ${icon} ${source} — ${title}`);
+    const icon = sev === 'critical' ? '🚨' : '⚠️';
+    const heading = `${icon} ${source} — ${title}`;
+    const fieldList = Object.entries(details || {}).map(([label, value]) => ({ label, value: value == null ? '' : String(value) }));
+    if (hidden > 0) {
+      fieldList.push({ label: 'Also occurred', value: `${hidden} more time(s) since the last alert` });
+      if (hiddenIds.length > 0) fieldList.push({ label: 'Also affected', value: hiddenIds.join(', ').substring(0, 900) });
+    }
+
+    const blocks = [bHeader(heading), bDivider()];
+    const f = bFields(fieldList);
+    if (f) blocks.push(f);
+    blocks.push(bContext(`Severity: *${sev}* · ${new Date().toISOString()}`));
+    sendOpsSlack(blocks, heading);
+
+    if (sev === 'critical') sendAlertEmail(heading, Object.assign({}, details, hidden > 0 ? { 'Also occurred': `${hidden} more time(s)` } : {})).catch(() => {});
+    console.log(`[alertOps] ${icon} ${source} — ${title}${hidden > 0 ? ` (+${hidden} suppressed)` : ''}`);
+    return true;
+  } catch (err) {
+    console.warn('[alertOps] internal error (ignored):', err && err.message);
+    return false;
+  }
 }
+
+/* ── Slack-failure escalation ───────────────────────────────────────
+   Alerting about a broken Slack VIA Slack is circular, so this path is
+   email-only. Separate cooldown so it can't be starved by other alerts.
+   ─────────────────────────────────────────────────────────────────── */
+let _slackFailureLastAlert = 0;
+function alertSlackBroken(detail) {
+  try {
+    const now = Date.now();
+    if (now - _slackFailureLastAlert < 3 * 60 * 60 * 1000) return;
+    _slackFailureLastAlert = now;
+    console.warn('[alertOps] 🚨 Slack delivery broken — escalating by email');
+    sendAlertEmail('🚨 Slack — lead notifications are failing', {
+      'Detail': detail,
+      'Impact': 'Lead notifications are not reaching Slack. Leads are still being saved and pushed to Salesforce.',
+      'Action': 'Check the Slack webhook URL / app installation.',
+    }).catch(() => {});
+  } catch (err) {
+    console.warn('[alertOps] slack-escalation error (ignored):', err && err.message);
+  }
+}
+
+/* ── PHASE 2: rate-based monitoring ────────────────────────────────
+   Individual failures for these are normal noise; a sustained RATE is
+   the real signal. Same rolling-window idea already proven on ELV.
+   ─────────────────────────────────────────────────────────────────── */
+const FAILURE_MONITORS = {
+  'Meta CAPI': { alertAfter: 5, impact: 'Conversion events are not reaching Meta, so ad optimisation is degrading.' },
+  'Apollo':    { alertAfter: 5, impact: 'These leads were saved without enrichment data.' },
+  'AWS sync':  { alertAfter: 5, impact: 'The AWS mirror database is drifting out of sync with Railway.' },
+  'Email':     { alertAfter: 5, impact: 'Drop-off follow-up emails are not being delivered. If this is all of them, the Gmail connection is likely broken.' },
+};
+const FAILURE_BUFFER_TTL_MS = 6 * 60 * 60 * 1000; // stale failures expire, so a slow trickle never accumulates
+const _failBuffers = new Map(); // source -> [{ id, error, at }]
+
+// Collect failures per integration and alert once a threshold is reached,
+// listing exactly WHICH items failed. Deliberately count-based rather than
+// percentage-based: "5 failures, here they are" is actionable, "40% of a
+// rolling window" is not.
+function recordFailure(source, id, error) {
+  try {
+    const cfg = FAILURE_MONITORS[source];
+    if (!cfg) return;
+    const now = Date.now();
+    let buf = (_failBuffers.get(source) || []).filter(x => now - x.at < FAILURE_BUFFER_TTL_MS);
+    buf.push({ id: id || 'unknown', error: String(error || '').substring(0, 120), at: now });
+    _failBuffers.set(source, buf);
+    if (buf.length >= cfg.alertAfter) {
+      const sent = alertOps('warning', source, 'Repeated failures', {
+        'Count': `${buf.length} in the last ${Math.round(FAILURE_BUFFER_TTL_MS / 3600000)} hours`,
+        'Affected': buf.map(x => x.id).join(', ').substring(0, 900),
+        'Last error': buf[buf.length - 1].error,
+        'Impact': cfg.impact,
+      });
+      // Clear ONLY if the alert actually went out. If it was suppressed by
+      // the cooldown, keep accumulating so nothing is lost — the next alert
+      // then reports the true total rather than just the latest five.
+      if (sent) _failBuffers.set(source, []);
+    }
+  } catch (err) {
+    console.warn('[recordFailure] error (ignored):', err && err.message);
+  }
+}
+
+/* ── PHASE 3: heartbeat ────────────────────────────────────────────
+   Some failures produce no error at all — the recovery cron simply
+   stops being called, or the form stops sending leads. Nothing throws,
+   so catch blocks can't see it. These timestamps + a periodic self
+   check are the only way to notice an ABSENCE of activity.
+   In-memory, so they reset on redeploy (a fresh instance starts clean).
+   ─────────────────────────────────────────────────────────────────── */
+let _lastLeadAt    = Date.now();
+let _lastCronRunAt = Date.now();
+const HEARTBEAT_CHECK_MS   = 30 * 60 * 1000;      // self-check cadence
+const CRON_STALE_MS        = 3 * 60 * 60 * 1000;  // cron should run well within 3h
+const NO_LEADS_STALE_MS    = 12 * 60 * 60 * 1000; // 12h with zero leads is anomalous
+
+function startHeartbeat() {
+  setInterval(() => {
+    try {
+      const now = Date.now();
+      const cronAge = now - _lastCronRunAt;
+      if (cronAge > CRON_STALE_MS) {
+        alertOps('critical', 'Recovery cron', 'Has not run recently', {
+          'Last run': `${Math.round(cronAge / 60000)} minutes ago`,
+          'Impact': 'Drop-off follow-up emails are not being sent.',
+          'Action': 'Check the scheduler that calls POST /cron/send-partials.',
+        });
+      }
+      const leadAge = now - _lastLeadAt;
+      if (leadAge > NO_LEADS_STALE_MS) {
+        alertOps('critical', 'Form', 'No leads received', {
+          'Last lead': `${Math.round(leadAge / 3600000)} hours ago`,
+          'Impact': 'The form may be broken, or the script may not be loading.',
+          'Action': 'Open /demo and check the browser console for the init banner.',
+        });
+      }
+    } catch (err) {
+      console.warn('[heartbeat] error (ignored):', err && err.message);
+    }
+  }, HEARTBEAT_CHECK_MS);
+  console.log('[heartbeat] ✅ Monitoring started (cron staleness + lead flow)');
+}
+
+/* ── PHASE 3: startup configuration audit ──────────────────────────
+   A missing env var silently disables a whole integration. One check
+   at boot beats discovering it weeks later.
+   ─────────────────────────────────────────────────────────────────── */
+function auditStartupConfig() {
+  try {
+    const required = {
+      ELV_API_KEY:              'Email verification',
+      SLACK_WEBHOOK_URL:        'Lead notifications',
+      GMAIL_USER:               'Drop-off follow-up emails',
+      GMAIL_APP_PASSWORD:       'Drop-off follow-up emails',
+      SLACK_ALERTS_WEBHOOK_URL: 'Ops alerts',
+    };
+    const missing = Object.entries(required).filter(([k]) => !process.env[k]).map(([k, v]) => `${k} (${v})`);
+    if (missing.length > 0) {
+      console.warn('[Startup] ⚠ Missing configuration:', missing.join(', '));
+      alertOps('critical', 'Startup', 'Configuration incomplete', {
+        'Missing': missing.join(', '),
+        'Impact': 'The listed features are silently disabled.',
+      });
+    } else {
+      console.log('[Startup] ✅ All monitored environment variables present');
+    }
+  } catch (err) {
+    console.warn('[Startup] audit error (ignored):', err && err.message);
+  }
+}
+
 
 function buildEnrichmentBlocks(blocks, e) {
   const hasPersonInfo = e.enriched_title || e.enriched_seniority || e.enriched_departments || e.enriched_email_status;
@@ -479,6 +675,9 @@ function slackSubmit(d) {
   if (d.website_check_failed) {
     const wf = bFields([{ label: '⚠️ Website check', value: d.website_check_reason || 'failed' }]);
     if (wf) blocks.push(wf);
+  } else if (d.website_check_reason && !['resolved','mx_only','social_profile_url','content_clean','test_email_skipped','ok'].includes(d.website_check_reason)) {
+    const uf = bFields([{ label: '❓ Website check', value: 'Could not verify (' + d.website_check_reason + ')' }]);
+    if (uf) blocks.push(uf);
   } else if (d.website_check_reason === 'social_profile_url') {
     const sf = bFields([{ label: '🔗 Website', value: 'Social profile (no company site)' }]);
     if (sf) blocks.push(sf);
@@ -506,6 +705,7 @@ function getGmailTransport() {
 async function sendFollowUpEmail(email, firstName) {
   if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
     console.warn('[Email] GMAIL credentials not set — skipping');
+    alertOps('critical', 'Email', 'Credentials not configured', { 'Impact': 'No drop-off follow-up emails are being sent at all.' });
     return;
   }
   if (!email) return;
@@ -525,6 +725,7 @@ async function sendFollowUpEmail(email, firstName) {
     console.log(`[Email] ✅ Follow-up sent to ${email} | messageId: ${result.messageId}`);
   } catch (err) {
     console.warn(`[Email] ⚠ Failed to send to ${email}:`, err.message);
+    recordFailure('Email', email, err.message);
   }
 }
 
@@ -775,6 +976,7 @@ app.get('/monitor/leads', async (req, res) => {
   if (websiteCheck === 'failed') conditions.push(`l.website_check_failed IS TRUE`);
   if (websiteCheck === 'passed') conditions.push(`l.website_check_failed IS NOT TRUE`); // covers false AND null (pre-migration rows)
   if (websiteCheck === 'social') conditions.push(`l.website_check_reason = 'social_profile_url'`);
+  if (websiteCheck === 'unverified') conditions.push(`(l.website_check_failed IS TRUE OR (l.website_check_reason IS NOT NULL AND l.website_check_reason <> '' AND l.website_check_reason NOT IN ('resolved','mx_only','social_profile_url','content_clean','test_email_skipped','ok')))`);
   if (repeatAttempts === 'yes') conditions.push(`EXISTS (SELECT 1 FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at)`);
   if (repeatAttempts === 'no')  conditions.push(`NOT EXISTS (SELECT 1 FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at)`);
 
@@ -1089,7 +1291,7 @@ app.get('/monitor', (req, res) => {
   '<select id="fsellto" onchange="loadLeads(1)"><option value="all">All sell-to</option><option value="B2B">B2B</option><option value="B2B (clarified from B2C)">B2B (clarified from B2C)</option><option value="B2B (clarified from Mixed)">B2B (clarified from Mixed)</option><option value="B2C">B2C</option><option value="Mixed">Mixed</option><option value="__clarified">Clarified (any)</option></select>' +
   '<select id="fsource" onchange="loadLeads(1)"><option value="all">All sources</option></select>' +
   '<select id="fenrich" onchange="loadLeads(1)"><option value="all">Enrichment: all</option><option value="yes">Enriched</option><option value="no">Not enriched</option></select>' +
-  '<select id="fwebsitecheck" onchange="loadLeads(1)"><option value="all">Website check: all</option><option value="failed">Failed</option><option value="passed">Passed</option><option value="social">Social profile</option></select>' +
+  '<select id="fwebsitecheck" onchange="loadLeads(1)"><option value="all">Website check: all</option><option value="failed">Failed</option><option value="passed">Passed</option><option value="social">Social profile</option><option value="unverified">Not verified (any)</option></select>' +
   '<select id="frepeat" onchange="loadLeads(1)"><option value="all">Attempts: all</option><option value="yes">Repeat only</option><option value="no">First-time only</option></select>' +
   '<input type="text" id="fhear" list="hearlist" placeholder="Heard about us..." oninput="debounce()" style="min-width:170px">' +
   '<datalist id="hearlist"></datalist>' +
@@ -1349,9 +1551,9 @@ app.get('/monitor', (req, res) => {
 
 // Statuses ELV is known to return. Anything outside this set gets
 // surfaced rather than silently treated as a pass.
-const ELV_KNOWN_STATUSES = ['ok', 'invalid', 'invalid_mx', 'accept_all', 'ok_for_all', 'disposable', 'role', 'email_disabled', 'dead_server', 'unknown', 'smtp_protocol', 'unknown_email', 'domain_error', 'syntax_error', 'spamtrap', 'error'];
+const ELV_KNOWN_STATUSES = ['ok', 'invalid', 'invalid_mx', 'accept_all', 'ok_for_all', 'disposable', 'role', 'email_disabled', 'dead_server', 'unknown', 'smtp_protocol', 'antispam_system', 'unknown_email', 'domain_error', 'syntax_error', 'spamtrap', 'error'];
 // Outcomes that mean "we learned nothing" — the degradation signal.
-const ELV_INDETERMINATE  = ['smtp_protocol', 'unknown', 'error', 'http_error', 'timeout', 'network_error', 'skipped'];
+const ELV_INDETERMINATE  = ['smtp_protocol', 'antispam_system', 'unknown', 'error', 'http_error', 'timeout', 'network_error', 'skipped'];
 const ELV_WINDOW_SIZE       = 20;
 const ELV_DEGRADED_RATE     = 0.4; // 8 of 20 inconclusive
 const _elvWindow = [];
@@ -1582,10 +1784,11 @@ app.post('/enrich', async (req, res) => {
     `, [session_id,email,person.first_name||null,person.last_name||null,person.title||null,org.name||null,org.estimated_num_employees?.toString()||null,org.industry||null,person.linkedin_url||null,city,state,country,seniority,departments,emailStatus,foundedYear,annualRevenue,fundingEvents,alexaRanking,keywords,orgHQ,totalFunding,fundingStage,apolloData]);
     await pool.query(`UPDATE leads SET enriched_city=$2,enriched_state=$3,enriched_country=$4,enriched_seniority=$5,enriched_departments=$6,enriched_email_status=$7,enriched_founded_year=$8,enriched_annual_revenue=$9,enriched_funding_events=$10,enriched_alexa_ranking=$11,enriched_keywords=$12,enriched_org_hq=$13,enriched_total_funding=$14,enriched_funding_stage=$15,updated_at=NOW() WHERE session_id=$1`, [session_id,city,state,country,seniority,departments,emailStatus,foundedYear,annualRevenue,fundingEvents,alexaRanking,keywords,orgHQ,totalFunding,fundingStage]);
     res.json({ first_name:person.first_name||'',last_name:person.last_name||'',title:person.title||'',company:org.name||'',company_size:org.estimated_num_employees?.toString()||'',industry:org.industry||'',linkedin_url:person.linkedin_url||'',website:org.website_url||'' });
-  } catch (err) { console.error('[/enrich] Error:', err.message, err.detail||''); res.json({ first_name:'',last_name:'',title:'',company:'',company_size:'',industry:'',linkedin_url:'',website:'' }); }
+  } catch (err) { console.error('[/enrich] Error:', err.message, err.detail||''); recordFailure('Apollo', email || 'unknown', err.message); res.json({ first_name:'',last_name:'',title:'',company:'',company_size:'',industry:'',linkedin_url:'',website:'' }); }
 });
 
 app.post('/partial', async (req, res) => {
+  _lastLeadAt = Date.now(); // heartbeat: form traffic is flowing
   const session_id         = (req.body.session_id         || '').toString().trim().slice(0, 100);
   const page_url           = (req.body.page_url           || '').toString().trim().slice(0, 500);
   const email              = (req.body.email              || '').toString().trim().slice(0, 254).toLowerCase();
@@ -1666,7 +1869,7 @@ app.post('/partial', async (req, res) => {
     // and already ELV-verified by the form before /partial is called.
     const isBusinessEmail = !!email && !FREE_EMAIL_DOMAINS.includes(email.split('@')[1] || '');
     if (!disqualified && isBusinessEmail) {
-      pushStartTrialToMeta({session_id,email,sell_to,page_url,fbc,fbp,landing_page}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => console.warn('[/partial] Meta CAPI StartTrial failed (non-blocking):', err.message));
+      pushStartTrialToMeta({session_id,email,sell_to,page_url,fbc,fbp,landing_page}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => { console.warn('[/partial] Meta CAPI StartTrial failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (StartTrial)', err.message); });
     } else if (!disqualified) {
       console.log(`[/partial] ⏭ StartTrial skipped — free email domain: ${email}`);
     }
@@ -1760,15 +1963,15 @@ app.post('/submit', async (req, res) => {
     if (!alreadyCompleted) {
       slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
 
-      pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => console.warn('[/submit] SF push failed (non-blocking):', err.message));
+      pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'form completed', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
 
       // Meta CAPI Lead — suppressed when the website check failed (temporary
       // non-blocking mode still lets the lead through, but keeps the Lead
       // event clean). Slack/SF above still fire normally either way.
-      if (!website_check_failed) {
-        pushFormEventsToMeta({session_id,email,phone,first_name,last_name,company,website,sell_to,page_url,fbc,fbp,landing_page,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_seniority:enrich.enriched_seniority,enriched_funding_stage:enrich.enriched_funding_stage}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => console.warn('[/submit] Meta CAPI failed (non-blocking):', err.message));
+      if (isWebsiteVerified({ website_check_failed, website_check_reason })) {
+        pushFormEventsToMeta({session_id,email,phone,first_name,last_name,company,website,sell_to,page_url,fbc,fbp,landing_page,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_seniority:enrich.enriched_seniority,enriched_funding_stage:enrich.enriched_funding_stage}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => { console.warn('[/submit] Meta CAPI failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (Lead)', err.message); });
       } else {
-        console.log(`[/submit] ⏭ Meta CAPI Lead skipped — website check failed (${website_check_reason}): ${email}`);
+        console.log(`[/submit] ⏭ Meta CAPI Lead skipped — website not verified (${website_check_reason || 'failed'}): ${email}`);
       }
 
       console.log(`[/submit] ✅ Lead completed: ${email} | session: ${session_id}`);
@@ -1802,12 +2005,12 @@ app.post('/booking-confirmed', async (req, res) => {
     if (email) {
       findSFLeadByEmail(email).then(leadId => {
         if (leadId) return updateSFLead(leadId, { booking_uid__c: booking_uid, booking_start_time__c: start_time || '', booking_event_type__c: event_type || '', completed__c: true });
-      }).catch(err => console.warn('[/booking-confirmed] SF update failed (non-blocking):', err.message));
+      }).catch(err => { console.warn('[/booking-confirmed] SF update failed (non-blocking):', err.message); alertOps('warning', 'Salesforce', 'Booking not recorded', { 'Session': session_id, 'Error': err.message, 'Impact': 'The lead exists in Salesforce but the booking is missing.' }); });
       pool.query('SELECT * FROM leads l LEFT JOIN enrichment_data e ON e.session_id=l.session_id WHERE l.session_id=$1', [session_id]).then(r => {
         const fullLead = r.rows[0] || {};
-        if (fullLead.website_check_failed) { console.log(`[/booking-confirmed] ⏭ Meta CAPI Schedule skipped — website check failed: session ${session_id}`); return; }
+        if (!isWebsiteVerified(fullLead)) { console.log(`[/booking-confirmed] ⏭ Meta CAPI Schedule skipped — website not verified: session ${session_id}`); return; }
         return pushFormEventsToMeta({...fullLead, booking_uid}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''});
-      }).catch(err => console.warn('[/booking-confirmed] Meta CAPI failed (non-blocking):', err.message));
+      }).catch(err => { console.warn('[/booking-confirmed] Meta CAPI failed (non-blocking):', err.message); recordFailure('Meta CAPI', session_id + ' (Schedule)', err.message); });
     }
     console.log(`[/booking-confirmed] ✅ Booked: ${booking_uid} | session: ${session_id} | email: ${email}`);
     res.json({ ok: true });
@@ -1872,12 +2075,12 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
         syncBookingToAWS(lead.session_id, bookingUid, startTime, endTime, eventType);
         findSFLeadByEmail(email).then(leadId => {
           if (leadId) return updateSFLead(leadId, { booking_uid__c: bookingUid, booking_start_time__c: startTime || '', booking_event_type__c: eventType || '', completed__c: true });
-        }).catch(err => console.warn('[/cal-webhook] SF update failed (non-blocking):', err.message));
+        }).catch(err => { console.warn('[/cal-webhook] SF update failed (non-blocking):', err.message); alertOps('warning', 'Salesforce', 'Booking not recorded', { 'Email': email, 'Error': err.message, 'Impact': 'The lead exists in Salesforce but the booking is missing.' }); });
         pool.query('SELECT * FROM leads l LEFT JOIN enrichment_data e ON e.session_id=l.session_id WHERE l.session_id=$1', [lead.session_id]).then(r => {
           const fullLead = r.rows[0] || {};
-          if (fullLead.website_check_failed) { console.log(`[/cal-webhook] ⏭ Meta CAPI Schedule skipped — website check failed: session ${lead.session_id}`); return; }
+          if (!isWebsiteVerified(fullLead)) { console.log(`[/cal-webhook] ⏭ Meta CAPI Schedule skipped — website not verified: session ${lead.session_id}`); return; }
           return pushFormEventsToMeta({...fullLead, booking_uid: bookingUid}, {clientIpAddress:'',clientUserAgent:''});
-        }).catch(err => console.warn('[/cal-webhook] Meta CAPI failed (non-blocking):', err.message));
+        }).catch(err => { console.warn('[/cal-webhook] Meta CAPI failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (Schedule)', err.message); });
         console.log(`[/cal-webhook] ✅ Updated existing lead: ${email} | session: ${lead.session_id}`);
       } else {
         console.log(`[/cal-webhook] ⏭ Lead already booked: ${email} | existing booking: ${lead.booking_uid}`);
@@ -1928,7 +2131,7 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
 
     slackSubmit({ first_name:slackFirstName, last_name:slackLastName, email, company:slackCompany, sell_to:'B2B', phone:attendee.phone||'', enriched_title:enrichData.enriched_title, enriched_company_size:enrichData.enriched_company_size, enriched_industry:enrichData.enriched_industry, enriched_linkedin:enrichData.enriched_linkedin, enriched_city:enrichData.enriched_city, enriched_state:enrichData.enriched_state, enriched_country:enrichData.enriched_country, enriched_seniority:enrichData.enriched_seniority, enriched_departments:enrichData.enriched_departments, enriched_email_status:enrichData.enriched_email_status, enriched_founded_year:enrichData.enriched_founded_year, enriched_annual_revenue:enrichData.enriched_annual_revenue, enriched_funding_events:enrichData.enriched_funding_events, enriched_alexa_ranking:enrichData.enriched_alexa_ranking, enriched_keywords:enrichData.enriched_keywords, enriched_org_hq:enrichData.enriched_org_hq, enriched_total_funding:enrichData.enriched_total_funding, enriched_funding_stage:enrichData.enriched_funding_stage, prefill_source:'cal_webhook' });
 
-    pushToSalesforce({ first_name:slackFirstName, last_name:slackLastName, email, phone:attendee.phone||'', company:slackCompany, sell_to:'B2B', booking_uid:bookingUid, start_time:startTime, event_type:eventType, enriched_title:enrichData.enriched_title, enriched_company_size:enrichData.enriched_company_size, enriched_industry:enrichData.enriched_industry, enriched_linkedin:enrichData.enriched_linkedin, enriched_seniority:enrichData.enriched_seniority, enriched_departments:enrichData.enriched_departments, enriched_city:enrichData.enriched_city, enriched_state:enrichData.enriched_state, enriched_country:enrichData.enriched_country, enriched_annual_revenue:enrichData.enriched_annual_revenue, enriched_total_funding:enrichData.enriched_total_funding, enriched_funding_stage:enrichData.enriched_funding_stage, enriched_founded_year:enrichData.enriched_founded_year, step_reached:2, booked:true }).catch(err => console.warn('[/cal-webhook] SF push failed (non-blocking):', err.message));
+    pushToSalesforce({ first_name:slackFirstName, last_name:slackLastName, email, phone:attendee.phone||'', company:slackCompany, sell_to:'B2B', booking_uid:bookingUid, start_time:startTime, event_type:eventType, enriched_title:enrichData.enriched_title, enriched_company_size:enrichData.enriched_company_size, enriched_industry:enrichData.enriched_industry, enriched_linkedin:enrichData.enriched_linkedin, enriched_seniority:enrichData.enriched_seniority, enriched_departments:enrichData.enriched_departments, enriched_city:enrichData.enriched_city, enriched_state:enrichData.enriched_state, enriched_country:enrichData.enriched_country, enriched_annual_revenue:enrichData.enriched_annual_revenue, enriched_total_funding:enrichData.enriched_total_funding, enriched_funding_stage:enrichData.enriched_funding_stage, enriched_founded_year:enrichData.enriched_founded_year, step_reached:2, booked:true }).catch(err => { console.warn('[/cal-webhook] SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'booking webhook', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
 
     console.log(`[/cal-webhook] ✅ Created new lead: ${email} | session: ${webhookSessionId}`);
     res.json({ ok: true, action: 'created_new', session_id: webhookSessionId });
@@ -1966,6 +2169,7 @@ app.post('/cron/send-partials', async (req, res) => {
     `);
 
     const leads = result.rows;
+    _lastCronRunAt = Date.now(); // heartbeat: the scheduler reached us
     console.log(`[Cron] Found ${leads.length} leads to process`);
 
     for (const lead of leads) {
@@ -2119,13 +2323,13 @@ if (payload.router_name && payload.router_name !== 'Inbound Router - Website') {
         findSFLeadByEmail(email).then(leadId => {
           console.log(`[/rh-webhook] 🔗 SF lookup for ${email}: ${leadId ? 'Found ' + leadId : 'Not found'}`);
           if (leadId) return updateSFLead(leadId, { booking_uid__c: bookingUid, booking_start_time__c: startTime || '', booking_event_type__c: eventType || '', completed__c: true });
-        }).catch(err => console.warn('[/rh-webhook] ⚠ SF update failed (non-blocking):', err.message));
+        }).catch(err => { console.warn('[/rh-webhook] ⚠ SF update failed (non-blocking):', err.message); alertOps('warning', 'Salesforce', 'Booking not recorded', { 'Email': email, 'Error': err.message, 'Impact': 'The lead exists in Salesforce but the booking is missing.' }); });
 
         pool.query('SELECT * FROM leads l LEFT JOIN enrichment_data e ON e.session_id=l.session_id WHERE l.session_id=$1', [lead.session_id]).then(r => {
           const fullLead = r.rows[0] || {};
-          if (fullLead.website_check_failed) { console.log(`[/rh-webhook] ⏭ Meta CAPI Schedule skipped — website check failed: session ${lead.session_id}`); return; }
+          if (!isWebsiteVerified(fullLead)) { console.log(`[/rh-webhook] ⏭ Meta CAPI Schedule skipped — website not verified: session ${lead.session_id}`); return; }
           return pushFormEventsToMeta({...fullLead, booking_uid: bookingUid}, {clientIpAddress:'',clientUserAgent:''});
-        }).catch(err => console.warn('[/rh-webhook] ⚠ Meta CAPI failed (non-blocking):', err.message));
+        }).catch(err => { console.warn('[/rh-webhook] ⚠ Meta CAPI failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (Schedule)', err.message); });
 
         console.log(`[/rh-webhook] ✅ Updated existing lead: ${email} | session: ${lead.session_id} | booking_uid: ${bookingUid}`);
       } else {
@@ -2156,7 +2360,7 @@ if (payload.router_name && payload.router_name !== 'Inbound Router - Website') {
 
     syncToAWS({ session_id:webhookSessionId, email, first_name:firstName, last_name:lastName, company, sell_to:'B2B', completed:true, step_reached:2, prefill_source:'rh_webhook' });
     slackSubmit({ first_name:firstName, last_name:lastName, email, company, sell_to:'B2B', prefill_source:'rh_webhook' });
-    pushToSalesforce({ first_name:firstName, last_name:lastName, email, company, sell_to:'B2B', booking_uid:bookingUid, start_time:startTime, event_type:eventType, step_reached:2, booked:true }).catch(err => console.warn('[/rh-webhook] ⚠ SF push failed (non-blocking):', err.message));
+    pushToSalesforce({ first_name:firstName, last_name:lastName, email, company, sell_to:'B2B', booking_uid:bookingUid, start_time:startTime, event_type:eventType, step_reached:2, booked:true }).catch(err => { console.warn('[/rh-webhook] ⚠ SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'booking webhook', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
 
     console.log(`[/rh-webhook] ✅ Created new lead (fallback): ${email} | session: ${webhookSessionId}`);
     res.json({ ok: true, action: 'created_new', session_id: webhookSessionId });
@@ -2174,6 +2378,8 @@ async function start() {
     app.listen(PORT, () => {
       console.log(`[GW API] Running on port ${PORT}`);
       console.log(`[GW API] Allowed origins: ${allowedOrigins.join(', ')}`);
+      auditStartupConfig();
+      startHeartbeat();
     });
   } catch (err) { console.error('[GW API] Failed to start:', err); process.exit(1); }
 }
