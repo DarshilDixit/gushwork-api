@@ -350,7 +350,10 @@ function bContext(text) { return { type: 'context', elements: [{ type: 'mrkdwn',
    NULL/absent reason means the lead predates this field — those still
    fire, so we never retroactively suppress historic leads.
    ─────────────────────────────────────────────────────────────────── */
-const WEBSITE_VERIFIED_REASONS = ['resolved', 'mx_only', 'social_profile_url', 'content_clean', 'test_email_skipped', 'ok'];
+// social_profile_url deliberately EXCLUDED: those leads convert poorly, so
+// sending Meta a Lead event for them trains the algorithm to find more of the
+// same. They still pass the form and are tagged for visibility.
+const WEBSITE_VERIFIED_REASONS = ['resolved', 'mx_only', 'content_clean', 'test_email_skipped', 'ok'];
 
 function isWebsiteVerified(row) {
   if (!row) return true;
@@ -976,7 +979,7 @@ app.get('/monitor/leads', async (req, res) => {
   if (websiteCheck === 'failed') conditions.push(`l.website_check_failed IS TRUE`);
   if (websiteCheck === 'passed') conditions.push(`l.website_check_failed IS NOT TRUE`); // covers false AND null (pre-migration rows)
   if (websiteCheck === 'social') conditions.push(`l.website_check_reason = 'social_profile_url'`);
-  if (websiteCheck === 'unverified') conditions.push(`(l.website_check_failed IS TRUE OR (l.website_check_reason IS NOT NULL AND l.website_check_reason <> '' AND l.website_check_reason NOT IN ('resolved','mx_only','social_profile_url','content_clean','test_email_skipped','ok')))`);
+  if (websiteCheck === 'unverified') conditions.push(`(l.website_check_failed IS TRUE OR (l.website_check_reason IS NOT NULL AND l.website_check_reason <> '' AND l.website_check_reason NOT IN ('resolved','mx_only','content_clean','test_email_skipped','ok')))`);
   if (repeatAttempts === 'yes') conditions.push(`EXISTS (SELECT 1 FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at)`);
   if (repeatAttempts === 'no')  conditions.push(`NOT EXISTS (SELECT 1 FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at)`);
 
@@ -1669,7 +1672,12 @@ async function attemptFetch(urlString, timeoutMs) {
     const response = await fetch(urlString, {
       signal: controller.signal,
       redirect: 'follow',
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; GushworkFormBot/1.0)' },
+      // A real browser UA, deliberately. Domain monetisation networks serve
+      // BOTS a "this domain is for sale" page while forwarding real visitors to
+      // the actual site — that's how afgmmoving.com (a working forward) got
+      // mislabelled. The whole point of this check is "does this URL work for a
+      // person", so we must see what a person sees.
+      headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36' },
     });
     clearTimeout(t);
     return response;
