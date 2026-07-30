@@ -1,5 +1,5 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v4.12.0  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.0.0  (/demo PAGE VERSION - thru github/jsdlivr)
 
   /* --------------------------------------------------------
   INJECT STYLES
@@ -145,7 +145,12 @@
     // TEMPORARY (per team decision, July 2026): website check still runs
     // and still shows the red error, but no longer blocks progression.
     // Flip to true to restore blocking — no other code changes needed.
-    const WEBSITE_CHECK_BLOCKING = false;
+    // Reasons that HARD BLOCK. All three mean "this isn't a website you own",
+    // which has no legitimate case — as opposed to parked/for-sale/page-won't-
+    // load, which mean "the site may be broken" and can false-positive on real
+    // businesses (see afgmmoving.com). Add or remove a reason here to change
+    // scope; nothing else needs touching.
+    const WEBSITE_BLOCKING_REASONS = ['nxdomain', 'brand_mismatch', 'mailbox_domain'];
 
     const formState = {
       session_id: '',
@@ -616,6 +621,15 @@
     // lazy-fake pattern and stays blocked exactly as before.
     const SOCIAL_PROFILE_DOMAINS = ['linkedin.com', 'facebook.com', 'fb.com', 'instagram.com', 'twitter.com', 'x.com', 'youtube.com', 'tiktok.com'];
 
+    // LinkedIn and YouTube use STRUCTURED paths — /in/, /company/, /@handle.
+    // A bare path like linkedin.com/xyz is not a real profile URL, so it must
+    // not earn a clean pass. Facebook / Instagram / X / TikTok genuinely do use
+    // bare handles, so they stay permissive (no pattern = any path accepted).
+    const SOCIAL_PATH_PATTERNS = {
+      'linkedin.com': /^\/(in|company|school|showcase|pub)\/[^\/]+/i,
+      'youtube.com': /^\/(@[^\/]+|c\/[^\/]+|channel\/[^\/]+|user\/[^\/]+)/i,
+    };
+
     function getUrlPathname(raw) {
       try {
         const u = new URL(raw.startsWith('http') ? raw : 'https://' + raw);
@@ -639,11 +653,12 @@
       '199.59.243.', // Bodis
       '208.91.197.', // Confluence Networks parking
       '216.198.79.1', // Hostinger 'website not configured' placeholder (exact IP)
+      '103.224.182.', // Trellian / Above.com parking (caught afgmmoving.com)
     ];
 
     // Nameservers used ONLY for parking / domain-sale landers → always block.
     // Match is suffix-based, so ns1.sedoparking.com etc. all hit.
-    const PARKING_NS_STRICT = ['sedoparking.com', 'parkingcrew.net', 'bodis.com', 'above.com', 'parklogic.com', 'uniregistrymarket.link', 'afternic.com', 'dan.com'];
+    const PARKING_NS_STRICT = ['sedoparking.com', 'parkingcrew.net', 'bodis.com', 'above.com', 'parklogic.com', 'uniregistrymarket.link', 'afternic.com', 'dan.com', 'abovedomains.com'];
     // NOTE: dns-parking.com was briefly here (v4.9.10) and REMOVED in v4.11.0.
     // It is Hostinger's nameserver hostname for ALL customers, live sites
     // included (processwithbryant.com: real site + Google Workspace MX, was
@@ -718,24 +733,51 @@
       tip.style.display = showNudge ? 'flex' : 'none';
     }
 
+    const DOH_PROVIDERS = ['https://dns.google/resolve?', 'https://cloudflare-dns.com/dns-query?'];
+
+    // Query ONE named provider. Needed for the second-opinion check before a
+    // hard block — dohQuery() returns the first success, so on its own it can't
+    // tell us whether two independent resolvers actually agree.
+    // 'accept' is CORS-safelisted, so no preflight is fired.
+    async function dohQueryProvider(idx, name, type) {
+      const url = DOH_PROVIDERS[idx] + 'name=' + encodeURIComponent(name) + '&type=' + type;
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), 4000);
+      try {
+        const res = await fetch(url, { signal: controller.signal, headers: { accept: 'application/dns-json' } });
+        clearTimeout(t);
+        if (!res.ok) throw new Error('DoH ' + res.status);
+        return await res.json();
+      } catch (e) {
+        clearTimeout(t);
+        throw e;
+      }
+    }
+
     async function dohQuery(name, type) {
       // Google first, Cloudflare fallback. Throws only if BOTH fail.
-      // 'accept' is a CORS-safelisted header — no preflight fired.
-      const providers = ['https://dns.google/resolve?name=' + encodeURIComponent(name) + '&type=' + type, 'https://cloudflare-dns.com/dns-query?name=' + encodeURIComponent(name) + '&type=' + type];
       let lastErr;
-      for (const url of providers) {
+      for (let i = 0; i < DOH_PROVIDERS.length; i++) {
         try {
-          const controller = new AbortController();
-          const t = setTimeout(() => controller.abort(), 4000);
-          const res = await fetch(url, { signal: controller.signal, headers: { accept: 'application/dns-json' } });
-          clearTimeout(t);
-          if (!res.ok) throw new Error('DoH ' + res.status);
-          return await res.json();
+          return await dohQueryProvider(i, name, type);
         } catch (e) {
           lastErr = e;
         }
       }
       throw lastErr || new Error('DoH failed');
+    }
+
+    // Second opinion before hard-blocking. Both resolvers must independently
+    // answer AND both must say NXDOMAIN. If either fails to respond or
+    // disagrees we do NOT block — one resolver having a bad moment, or a domain
+    // mid-nameserver-transfer, must never wall out a real lead.
+    async function bothResolversSayNxdomain(domain) {
+      try {
+        const answers = await Promise.all(DOH_PROVIDERS.map((_, i) => dohQueryProvider(i, domain, 'A').catch(() => null)));
+        return answers.length > 0 && answers.every((j) => j && j.Status === 3);
+      } catch {
+        return false;
+      }
     }
 
     function dohARecords(json) {
@@ -760,7 +802,14 @@
       // tagged informationally (not a failure). No DNS check needed
       // either: linkedin.com etc. are obviously real, live domains.
       if (SOCIAL_PROFILE_DOMAINS.includes(domain) && getUrlPathname(rawValue).length > 1) {
-        return { ok: true, reason: 'social_profile_url' };
+        const pathPattern = SOCIAL_PATH_PATTERNS[domain];
+        // No pattern defined = platform uses bare handles, accept any path.
+        // Pattern defined = the path must actually look like a profile URL.
+        if (!pathPattern || pathPattern.test(getUrlPathname(rawValue))) {
+          return { ok: true, reason: 'social_profile_url' };
+        }
+        // Structurally invalid for this platform — fall through to the brand
+        // check below, which will flag it.
       }
 
       // 2. Brand domains — valid only when the email domain matches
@@ -787,10 +836,16 @@
         }
 
         if (!ips.length) {
-          // Only block on DECISIVE answers: NXDOMAIN (Status 3) or a
-          // clean empty NOERROR (Status 0). Anything else — SERVFAIL
-          // (Status 2, e.g. a real domain with broken DNSSEC), REFUSED,
-          // etc. — is indeterminate and must fail open, never block.
+          // IPv6-only sites exist. Without this, a domain served purely over
+          // AAAA looks nonexistent to us and would be hard-blocked.
+          const aaaaJson = await dohQuery(domain, 'AAAA').catch(() => null);
+          if (aaaaJson && (aaaaJson.Answer || []).some((r) => r.type === 28)) {
+            return { ok: true, reason: 'resolved' };
+          }
+
+          // Only block on DECISIVE answers. SERVFAIL (Status 2, e.g. broken
+          // DNSSEC on a real domain), REFUSED, etc. are indeterminate and must
+          // fail open rather than block.
           const decisive = (j) => !!j && (j.Status === 0 || j.Status === 3);
           if (!decisive(json) && !decisive(wwwJson)) {
             return { ok: true, reason: 'dns_indeterminate' };
@@ -799,6 +854,18 @@
           const mxJson = await dohQuery(domain, 'MX').catch(() => null);
           const hasMX = !!(mxJson && (mxJson.Answer || []).some((r) => r.type === 15));
           if (hasMX) return { ok: true, reason: 'mx_only' };
+
+          // DNS distinguishes "this domain does not exist" (NXDOMAIN, Status 3)
+          // from "it exists but has no records yet" (NOERROR + empty answer).
+          // The second usually means somebody owns it and is mid-setup, so it
+          // gets flagged rather than blocked.
+          if (json && json.Status === 0) {
+            return { ok: false, reason: 'no_dns_records', msg: "This website doesn't appear to be set up yet. Please check the URL." };
+          }
+
+          // True NXDOMAIN — require BOTH resolvers to agree before blocking.
+          const confirmed = await bothResolversSayNxdomain(domain);
+          if (!confirmed) return { ok: false, reason: 'nxdomain_unconfirmed', msg: "This website doesn't appear to exist. Please check the URL." };
           return { ok: false, reason: 'nxdomain', msg: "This website doesn't appear to exist. Please check the URL." };
         }
 
@@ -832,7 +899,7 @@
 
     // Verdicts safe to cache — decisive, email-independent DNS results.
     // Transient/indeterminate outcomes must be re-checked next time.
-    const CACHEABLE_REASONS = ['nxdomain', 'parked', 'parked_ns', 'resolved', 'mx_only', 'for_sale_lander'];
+    const CACHEABLE_REASONS = ['nxdomain', 'nxdomain_unconfirmed', 'no_dns_records', 'parked', 'parked_ns', 'resolved', 'mx_only', 'for_sale_lander'];
 
     // Stage 2 — server-level content check (v4.9.5). DNS/IP/NS alone can't
     // see PAGE CONTENT, so marketplace landers on shared CDN IPs (Atom,
@@ -1332,11 +1399,11 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
           }
           if (!wv.ok) {
             showError('website-error', wv.msg);
-            // WEBSITE_CHECK_BLOCKING=false (temporary, team decision): the
-            // red error still shows, but the lead is allowed to continue.
+            // Only WEBSITE_BLOCKING_REASONS stop submission; everything else
+            // shows the red error but is allowed to continue.
             // formState.website_check_failed rides along to Railway, which
             // suppresses Meta CAPI and flags it for Slack/monitor.
-            if (WEBSITE_CHECK_BLOCKING) return; // finally-block resets the button
+            if (WEBSITE_BLOCKING_REASONS.indexOf(wv.reason) !== -1) return; // finally-block resets the button
           }
         } else {
           formState.website_check_failed = false;
@@ -1565,7 +1632,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v4.12.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
+      console.log('[GW] ✅ Form initialised v5.0.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
