@@ -1,5 +1,5 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.1.0  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.2.0  (/demo PAGE VERSION - thru github/jsdlivr)
 
   /* --------------------------------------------------------
   INJECT STYLES
@@ -201,7 +201,6 @@
     };
 
     let _enrichedForEmail = '';
-    let _lastVerifiedEmail = '';
     let _submitting = false;
     let _isPopstateNav = false;
 
@@ -584,12 +583,16 @@
 
       tip.innerHTML = '<img src="https://cdn.prod.website-files.com/65c292289fb0ea1ff3a84bd3/6a573b62ef8929dda9d988f1_WarningCircle.svg" alt="">' + '<span>Business email preferred over personal email.</span>';
 
-      function updateProTip() {
+      // allowClear is TRUE only on input (they actually typed something).
+      // On blur nothing changed, so clearing there would wipe a verification
+      // error that prewarmEmail had just set for this same address — a
+      // latent ordering dependency between two blur listeners.
+      function updateProTip(allowClear) {
         const email = emailInput.value.trim();
         // Live-clear a stale error once the email becomes format-valid —
         // without this, an error shown on a previous Next click stays
         // visible while typing and permanently suppresses the nudge
-        if (isValidEmail(email)) hideError('email-error');
+        if (allowClear === true && isValidEmail(email)) hideError('email-error');
         const errVisible = document.getElementById('email-error')?.style.display === 'block';
         if (!errVisible && isValidEmail(email) && !isWorkEmail(email)) {
           tip.style.display = 'flex';
@@ -600,9 +603,9 @@
         }
       }
 
-      emailInput.addEventListener('input', updateProTip);
-      emailInput.addEventListener('blur', updateProTip);
-      updateProTip(); // covers URL-param / returning-visitor prefill
+      emailInput.addEventListener('input', function () { updateProTip(true); });
+      emailInput.addEventListener('blur', function () { updateProTip(false); });
+      updateProTip(false); // covers URL-param / returning-visitor prefill
     }
 
     /* =======================================================
@@ -1193,6 +1196,15 @@
       if (!el) return;
       const val = el.value.trim();
       if (!val || !isValidEmail(val) || isTestEmail(val)) return;
+      // Apply the SAME local junk check validateStep1 does, before spending
+      // an ELV credit. Without this, test@gushwork.ai gets verified on blur
+      // (showing ELV's message) and then re-judged on the Next click by
+      // validateStep1 (showing a different message) — the copy visibly
+      // changes under the lead for one address.
+      if (isJunkText(val.split('@')[0], JUNK_WORDS_EMAIL_LOCAL)) {
+        showError('email-error', "This doesn't look like a real email address. Please double-check.");
+        return;
+      }
       verifyEmail(val).then((v) => {
         // Only surface it if they're still on this address — they may
         // have kept typing since the check started.
@@ -1801,7 +1813,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.1.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
+      console.log('[GW] ✅ Form initialised v5.2.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
