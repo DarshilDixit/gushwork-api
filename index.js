@@ -1,5 +1,6 @@
 require('dotenv').config();
 const crypto    = require('crypto');
+const dnsPromises = require('dns').promises;
 const express   = require('express');
 const cors      = require('cors');
 const helmet    = require('helmet');
@@ -1344,6 +1345,7 @@ app.get('/monitor', (req, res) => {
   '<div class="sr"><div><div class="sn">API uptime</div><div class="sd">/health responding</div></div><span class="badge bx" id="s-api">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">Step 1 &#8212; /partial</div><div class="sd">Email + lead saved to Railway + AWS</div></div><span class="badge bx" id="s-partial">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">Step 2 &#8212; /submit</div><div class="sd">Lead completed + Slack fired</div></div><span class="badge bx" id="s-submit">Checking...</span></div>' +
+  '<div class="sr"><div><div class="sn">ELV email verification</div><div class="sd">Inconclusive rate, rolling 90-minute window</div></div><span class="badge bx" id="s-elv">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">Apollo enrichment</div><div class="sd">enrichment_data populated per session</div></div><span class="badge bx" id="s-enrich">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">Booking &#8212; RevenueHero</div><div class="sd">People booked / people completed</div></div><span class="badge bx" id="s-cal">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">Cron &#8212; drop-off recovery</div><div class="sd">Leads waiting &gt;2 hours without booking</div></div><span class="badge bx" id="s-cron">Checking...</span></div>' +
@@ -1371,6 +1373,7 @@ app.get('/monitor', (req, res) => {
   'function ist(ts){if(!ts)return"\\u2014";return new Date(ts).toLocaleString("en-IN",{timeZone:"Asia/Kolkata",dateStyle:"short",timeStyle:"short"});}' +
   'function esc(s){if(!s)return"";return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}' +
   'async function checkApi(){try{var r=await fetch(API+"/health",{signal:AbortSignal.timeout(5000)});if(r.ok){document.getElementById("apidot").className="dot dot-green";document.getElementById("apist").textContent="API online";badge("s-api","Online","bg");return true;}throw new Error("HTTP "+r.status);}catch(e){document.getElementById("apidot").className="dot dot-red";document.getElementById("apist").textContent="API offline";badge("s-api","Offline","br");return false;}}' +
+  'async function checkElv(){try{var r=await fetch(API+"/monitor/elv-health",{signal:AbortSignal.timeout(5000)});var d=await r.json();if(d.state==="degraded"){badge("s-elv",d.rate+"% inconclusive","br");}else if(d.state==="insufficient_data"){badge("s-elv","Idle ("+d.checks+" checks)","bx");}else{badge("s-elv","Healthy ("+d.rate+"% inconclusive)","bg");}}catch(e){badge("s-elv","Unknown","bx");}}' +
   'function renderAlerts(d){var a=[];if(d.pendingPartials>0)a.push({c:"aw",i:"!",m:d.pendingPartials+" session(s) waiting >2 hours without booking \\u2014 recovery cron will pick them up."});if(d.noBookingUid>0)a.push({c:"aw",i:"!",m:d.noBookingUid+" people (deduped, qualified B2B) completed the form but have no booking on any session \\u2014 see SDR List."});if(!d.awsSynced)a.push({c:"ae",i:"x",m:"AWS sync disabled."});if(d.total>5&&d.enriched<d.total*0.3)a.push({c:"aw",i:"!",m:"Low enrichment rate ("+Math.round(d.enriched/d.total*100)+"% of sessions)."});if(d.todayCount===0)a.push({c:"aw",i:"o",m:"No new sessions in the last 24 hours."});if(a.length===0)a.push({c:"ao",i:"\\u2713",m:"All systems healthy."});document.getElementById("alerts").innerHTML=a.map(function(x){return"<div class=\\"alertbox "+x.c+"\\"><span>"+x.i+"</span><span>"+x.m+"</span></div>";}).join("");}' +
   'function renderFunnel(t,c,b,d){var steps=[{l:"People entered (Step 1)",v:t,p:100,col:"#818cf8"},{l:"People completed (Step 2)",v:c,p:t?Math.round(c/t*100):0,col:"#38bdf8"},{l:"People booked",v:b,p:t?Math.round(b/t*100):0,col:"#34d399"},{l:"People disqualified",v:d,p:t?Math.round(d/t*100):0,col:"#fb923c"}];document.getElementById("funnel").innerHTML=steps.map(function(s){return"<div class=\\"fr\\"><div class=\\"fl\\"><span>"+s.l+"</span><span style=\\"font-weight:500\\">"+s.v+" <span style=\\"color:#aaa\\">("+s.p+"%)</span></span></div><div class=\\"fb\\"><div class=\\"ff\\" style=\\"width:"+s.p+"%;background:"+s.col+"\\"></div></div></div>";}).join("");}' +
   'function renderChart(rows){var labels=(rows||[]).map(function(r){return r.day_label;}),data=(rows||[]).map(function(r){return parseInt(r.count)||0;});if(lChart)lChart.destroy();var ctx=document.getElementById("lchart").getContext("2d");lChart=new Chart(ctx,{type:"bar",data:{labels:labels,datasets:[{data:data,backgroundColor:"#818cf8",borderRadius:4,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{stepSize:1,color:"#aaa"},grid:{color:"#f0f0f0"}},x:{ticks:{color:"#aaa",maxRotation:45,autoSkip:false},grid:{display:false}}}}});}' +
@@ -1441,7 +1444,7 @@ app.get('/monitor', (req, res) => {
   '"<tr class=\\"erow\\" id=\\"er-"+sid+"\\" style=\\"display:none\\"><td></td><td colspan=\\"9\\">"+enrichPanel(l)+"</td></tr>";}).join("");' +
   'document.getElementById("ltbody").innerHTML=html;renderPag(d.page,d.pages);}catch(e){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function renderPag(pg,pages){if(pages<=1){document.getElementById("lpag").innerHTML="";return;}var h="";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg-1)+")\\""+(pg<=1?" disabled":"")+">&larr;</button>";var s=Math.max(1,pg-2),e=Math.min(pages,pg+2);if(s>1)h+="<button class=\\"pb\\" onclick=\\"loadLeads(1)\\">1</button>"+(s>2?"<span class=\\"pi\\">&#8230;</span>":"");for(var i=s;i<=e;i++)h+="<button class=\\"pb"+(i===pg?" act":"")+ "\\" onclick=\\"loadLeads("+i+")\\" >"+i+"</button>";if(e<pages)h+=(e<pages-1?"<span class=\\"pi\\">&#8230;</span>":"")+"<button class=\\"pb\\" onclick=\\"loadLeads("+pages+")\\" >"+pages+"</button>";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg+1)+")\\"" +(pg>=pages?" disabled":"")+">&rarr;</button><span class=\\"pi\\">Page "+pg+" of "+pages+"</span>";document.getElementById("lpag").innerHTML=h;}' +
-  'async function loadAll(){set("lupd","Refreshing...");var ok=await checkApi();if(!ok){document.getElementById("alerts").innerHTML="<div class=\\"alertbox ae\\"><span>x</span><span>API offline.</span></div>";set("lupd","API offline");return;}' +
+  'async function loadAll(){set("lupd","Refreshing...");var ok=await checkApi();if(!ok){document.getElementById("alerts").innerHTML="<div class=\\"alertbox ae\\"><span>x</span><span>API offline.</span></div>";set("lupd","API offline");return;}checkElv();' +
   'try{var r=await fetch(API+"/monitor/metrics"+TP,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
   'set("m-total",d.peopleTotal);set("m-totals",d.total+" sessions \\u00B7 "+d.todayCount+" in last 24h");' +
   'set("m-comp",d.peopleCompleted);set("m-cpct",pct(d.peopleCompleted,d.peopleTotal)+" of people \\u00B7 "+d.completed+" sessions");' +
@@ -1540,39 +1543,326 @@ app.get('/monitor', (req, res) => {
   res.send(html + js);
 });
 
-/* ── ELV health tracking ───────────────────────────────────────────
-   Purely observational: NOTHING here changes which emails get blocked.
-   blockedStatuses is untouched. This only makes ELV failures visible,
-   because today a rejected API key returns a JSON error body that
-   matches no blocked status — so verification silently switches off
-   and every email sails through unverified with no signal at all.
+/* ── ELV email verification + health tracking ──────────────────────
+   REBUILT 2026-08-07. Four defects fixed, in order of impact:
 
-   Individual inconclusive results are normal (Gmail routinely refuses
-   verification probes — that's the smtp_protocol case), so those are
-   never alerted on individually; only a sustained RATE trips an alert.
+   1. THE STATUS BUCKETS OVERLAPPED. 'error' — ELV's standard response
+      for a genuinely invalid mailbox — was in BOTH blockedStatuses and
+      ELV_INDETERMINATE. So every correctly-rejected bad email ALSO
+      counted as "the check learned nothing", inflating the degradation
+      rate. The alert was substantially measuring bad leads, not a
+      broken ELV. Buckets are now mutually exclusive and audited at boot.
+
+   2. THE WINDOW WAS COUNT-BASED, NOT TIME-BASED. 20 checks at ~10
+      leads/day spans nearly two days, so a bad patch overnight kept
+      alerting through the next morning while it aged out one slot per
+      lead (12/20 at 06:50 → 8/20 at 10:05 was exactly four leads
+      later). The window is now 90 minutes and self-clears.
+
+   3. IT RE-ALERTED WHILE ALREADY DEGRADED. Every cooldown expiry
+      re-fired the same standing condition. It is now a state machine:
+      one alert entering degraded, one on recovery, silence between.
+      Hysteresis (50% in, 25% out) stops flapping across the threshold —
+      the old 40% line was being straddled, which is why it repeated.
+
+   4. UNKNOWN STATUSES PASSED INVISIBLY. ELV returns 'invalid_syntax'
+      (and p_/t_ prefixed variants of several others) which weren't in
+      the known list, so a malformed address was treated as a pass AND
+      never counted toward health. Prefixes are normalised, unknowns now
+      count as indeterminate, and invalid_syntax blocks.
+
+   Added: a local syntax + MX gate so obvious garbage is rejected in
+   ~50ms without spending an ELV credit or making the lead wait 8s, and
+   a 24h result cache so one address is never verified twice in a session.
    ───────────────────────────────────────────────────────────────── */
 
-// Statuses ELV is known to return. Anything outside this set gets
-// surfaced rather than silently treated as a pass.
-const ELV_KNOWN_STATUSES = ['ok', 'invalid', 'invalid_mx', 'accept_all', 'ok_for_all', 'disposable', 'role', 'email_disabled', 'dead_server', 'unknown', 'smtp_protocol', 'antispam_system', 'unknown_email', 'domain_error', 'syntax_error', 'spamtrap', 'error'];
-// Outcomes that mean "we learned nothing" — the degradation signal.
-const ELV_INDETERMINATE  = ['smtp_protocol', 'antispam_system', 'unknown', 'error', 'http_error', 'timeout', 'network_error', 'skipped'];
-const ELV_WINDOW_SIZE       = 20;
-const ELV_DEGRADED_RATE     = 0.4; // 8 of 20 inconclusive
-const _elvWindow = [];
+// ELV prefixes "probable" (p_) and "temporary" (t_) variants of several
+// statuses — p_antispam_system, t_email_disabled, p_unknown_email etc.
+// Strip the prefix before matching, or none of them ever match.
+function normaliseElvStatus(raw) {
+  return String(raw == null ? '' : raw).trim().toLowerCase().replace(/^(?:p_|t_)/, '');
+}
 
-function recordElvOutcome(status) {
-  _elvWindow.push(ELV_INDETERMINATE.includes(status) ? 'indeterminate' : 'definitive');
-  if (_elvWindow.length > ELV_WINDOW_SIZE) _elvWindow.shift();
-  if (_elvWindow.length < ELV_WINDOW_SIZE) return; // wait for a full window
-  const bad = _elvWindow.filter(o => o === 'indeterminate').length;
-  if (bad / _elvWindow.length >= ELV_DEGRADED_RATE) {
-    alertOps('warning', 'ELV', 'Verification degraded', {
-      'Inconclusive': `${bad} of last ${_elvWindow.length} checks`,
-      'Impact': 'Leads are passing without email verification',
-      'Action': 'Check ELV status/credits — no leads are being blocked',
+// ── THREE MUTUALLY EXCLUSIVE BUCKETS ──
+// BLOCK — ELV reached a definitive negative. Reject the address.
+const ELV_BLOCK = [
+  'error', 'invalid', 'invalid_syntax', 'syntax_error', 'invalid_mx',
+  'unknown_email', 'email_disabled', 'domain_error', 'dead_server',
+  'disposable', 'spamtrap', 'attempt_rejected', 'relay_error',
+];
+// PASS — definitive positive, or a benign catch-all / role result.
+// ok_for_all and accept_all are catch-all domains: extremely common in
+// B2B and NOT a sign of anything wrong, so they must not read as noise.
+const ELV_PASS = ['ok', 'ok_for_all', 'accept_all', 'role'];
+// INDETERMINATE — the check itself did not conclude. Fails open, and this
+// is the ONLY bucket that feeds the degradation signal.
+const ELV_INDETERMINATE = [
+  'smtp_protocol', 'antispam_system', 'smtp_error', 'unknown', 'no_connect',
+  'http_error', 'timeout', 'network_error', 'skipped',
+];
+
+// Boot-time audit. This is precisely the class of bug that produced the
+// false degradation alerts, so it now fails loudly instead of silently.
+(function auditElvBuckets() {
+  const seen = new Map();
+  const overlaps = [];
+  [['BLOCK', ELV_BLOCK], ['PASS', ELV_PASS], ['INDETERMINATE', ELV_INDETERMINATE]].forEach(([name, list]) => {
+    list.forEach(s => {
+      if (seen.has(s)) overlaps.push(`"${s}" is in both ${seen.get(s)} and ${name}`);
+      else seen.set(s, name);
     });
+  });
+  if (overlaps.length) {
+    console.error('[ELV] ❌ STATUS BUCKET OVERLAP —', overlaps.join('; '));
+    alertOps('critical', 'ELV', 'Status buckets overlap', {
+      'Overlaps': overlaps.join('; '),
+      'Impact': 'Blocking decisions and health metrics disagree — degradation alerts will be wrong',
+    });
+  } else {
+    console.log(`[ELV] ✅ Status buckets clean — ${ELV_BLOCK.length} block / ${ELV_PASS.length} pass / ${ELV_INDETERMINATE.length} indeterminate`);
   }
+})();
+
+const ELV_WINDOW_MS       = Number(process.env.ELV_WINDOW_MS)       || 90 * 60 * 1000; // time-bounded, not count-bounded
+const ELV_MIN_SAMPLE      = Number(process.env.ELV_MIN_SAMPLE)      || 8;              // never judge on thin traffic
+const ELV_DEGRADED_RATE   = Number(process.env.ELV_DEGRADED_RATE)   || 0.5;
+const ELV_RECOVERED_RATE  = Number(process.env.ELV_RECOVERED_RATE)  || 0.25;           // hysteresis gap prevents flapping
+const ELV_TIMEOUT_MS      = Number(process.env.ELV_TIMEOUT_MS)      || 8000;
+const ELV_WINDOW_MAX      = 200; // hard cap so a traffic burst can't grow the window unbounded
+
+// Internal and throwaway test traffic must never move ops state. Manual
+// testing of utsav,singh@gushwork.ai fired a real Slack page at 4:22pm —
+// that was noise, not an incident.
+const ELV_EXCLUDED_DOMAINS = ['gushwork.ai', 'test.com', 'example.com', 'example.org'];
+
+const _elvWindow    = [];   // [{ t: ms, bad: bool }]
+let   _elvDegraded  = false;
+let   _elvLastStatus = null;
+let   _elvLastCheckAt = 0;
+
+function elvIsInternal(email) {
+  const domain = String(email || '').split('@')[1] || '';
+  return ELV_EXCLUDED_DOMAINS.includes(domain.toLowerCase());
+}
+
+function pruneElvWindow(now) {
+  const cutoff = now - ELV_WINDOW_MS;
+  while (_elvWindow.length && _elvWindow[0].t < cutoff) _elvWindow.shift();
+  while (_elvWindow.length > ELV_WINDOW_MAX) _elvWindow.shift();
+}
+
+function elvHealthSnapshot() {
+  const now = Date.now();
+  pruneElvWindow(now);
+  const checks = _elvWindow.length;
+  const bad    = _elvWindow.filter(e => e.bad).length;
+  return {
+    state:         _elvDegraded ? 'degraded' : (checks < ELV_MIN_SAMPLE ? 'insufficient_data' : 'healthy'),
+    inconclusive:  bad,
+    checks,
+    rate:          checks ? Math.round((bad / checks) * 100) : 0,
+    windowMinutes: Math.round(ELV_WINDOW_MS / 60000),
+    minSample:     ELV_MIN_SAMPLE,
+    cacheSize:     _elvCache.size,
+    lastStatus:    _elvLastStatus,
+    lastCheckAt:   _elvLastCheckAt ? new Date(_elvLastCheckAt).toISOString() : null,
+  };
+}
+
+function recordElvOutcome(status, email) {
+  try {
+    const now = Date.now();
+    _elvLastStatus  = status;
+    _elvLastCheckAt = now;
+    if (email && elvIsInternal(email)) return; // own testing never moves health state
+
+    _elvWindow.push({ t: now, bad: ELV_INDETERMINATE.includes(status) });
+    pruneElvWindow(now);
+
+    const checks = _elvWindow.length;
+    if (checks < ELV_MIN_SAMPLE) {
+      // Too little recent signal to make a claim. If we were degraded and
+      // traffic has since dried up, clear silently rather than hold a
+      // stale state overnight — the old code's core failure.
+      _elvDegraded = false;
+      return;
+    }
+    const rate = _elvWindow.filter(e => e.bad).length / checks;
+
+    if (!_elvDegraded && rate >= ELV_DEGRADED_RATE) {
+      _elvDegraded = true;
+      alertOps('warning', 'ELV', 'Verification degraded', {
+        'Inconclusive': `${Math.round(rate * 100)}% of ${checks} checks in the last ${Math.round(ELV_WINDOW_MS / 60000)} min`,
+        'Impact': 'Inconclusive results are passing unverified. Definitively bad emails are STILL being blocked.',
+        'Action': 'Check ELV status/credits. Self-recovers — no action needed if it clears.',
+      });
+    } else if (_elvDegraded && rate <= ELV_RECOVERED_RATE) {
+      _elvDegraded = false;
+      // Recovery goes straight to Slack so it reads ✅ and can't be
+      // swallowed by the warning-severity cooldown.
+      const heading = '✅ ELV — Verification recovered';
+      sendOpsSlack([
+        bHeader(heading),
+        bDivider(),
+        bFields([{ label: 'Inconclusive', value: `${Math.round(rate * 100)}% of ${checks} recent checks` }]),
+        bContext(`Severity: *info* · ${new Date().toISOString()}`),
+      ].filter(Boolean), heading);
+      console.log('[ELV] ✅ Recovered — degradation cleared');
+    }
+  } catch (err) {
+    console.warn('[ELV] health tracking error (ignored):', err && err.message);
+  }
+}
+
+/* ── Result cache ──────────────────────────────────────────────────
+   janene.kingsley@gmail.com was verified twice inside one session in
+   the 07/08 logs. Every duplicate is a wasted credit and 1-8s of extra
+   wait for the lead. Only DEFINITIVE outcomes are cached — inconclusive
+   ones must be retried, never remembered.
+   ───────────────────────────────────────────────────────────────── */
+const ELV_CACHE_TTL_MS = Number(process.env.ELV_CACHE_TTL_MS) || 24 * 60 * 60 * 1000;
+const ELV_CACHE_MAX    = 5000;
+const _elvCache        = new Map(); // email -> { valid, status, at }
+
+function elvCacheGet(email) {
+  const hit = _elvCache.get(email);
+  if (!hit) return null;
+  if (Date.now() - hit.at > ELV_CACHE_TTL_MS) { _elvCache.delete(email); return null; }
+  return hit;
+}
+function elvCacheSet(email, valid, status) {
+  if (!ELV_BLOCK.includes(status) && !ELV_PASS.includes(status)) return;
+  if (_elvCache.size >= ELV_CACHE_MAX) _elvCache.delete(_elvCache.keys().next().value);
+  _elvCache.set(email, { valid, status, at: Date.now() });
+}
+
+/* ── Local pre-checks ──────────────────────────────────────────────
+   Deliberately conservative: these only reject what cannot possibly be
+   a working address. Anything arguable is handed to ELV. The point is
+   latency — abctest@test.com and hshbhs@jsbjbd.com should not cost the
+   lead an 8-second wait to learn what a regex and a DNS lookup already
+   know.
+   ───────────────────────────────────────────────────────────────── */
+const EMAIL_SYNTAX_RE = /^[^\s@,;:<>()[\]\\"]+@[^\s@,;:<>()[\]\\"]+\.[A-Za-z]{2,}$/;
+
+async function localMxCheck(domain) {
+  try {
+    const records = await Promise.race([
+      dnsPromises.resolveMx(domain),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('mx_timeout')), 2500)),
+    ]);
+    return Array.isArray(records) && records.length > 0 ? 'has_mx' : 'no_mx';
+  } catch (err) {
+    // NXDOMAIN is definitive: the domain does not exist at all.
+    // Everything else (SERVFAIL, timeout) is inconclusive and MUST NOT
+    // block — same fail-open philosophy as the website check.
+    if (err && (err.code === 'ENOTFOUND' || err.code === 'NXDOMAIN')) return 'nxdomain';
+    return 'inconclusive';
+  }
+}
+
+/* ── Did-you-mean: domain typo suggestion ──────────────────────────
+   Two REAL leads in the 07/08 logs were rejected on a gmail typo
+   (b@gmai.com, utsavsingh5600@gmai.com). Both got a generic error and
+   presumably left. Naming the likely fix turns a dead end into a
+   one-tap correction.
+
+   This NEVER changes the block/pass decision — it only supplies copy.
+   ───────────────────────────────────────────────────────────────── */
+function damerauLevenshtein(a, b) {
+  // Counts a transposition as ONE edit. Essential here: swapping two
+  // adjacent letters (gmial/gmail) is the commonest typing mistake and
+  // plain Levenshtein scores it 2, which would miss it.
+  const m = a.length, n = b.length;
+  if (Math.abs(m - n) > 3) return 99;
+  const d = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) d[i][0] = i;
+  for (let j = 0; j <= n; j++) d[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + cost);
+      }
+    }
+  }
+  return d[m][n];
+}
+
+// Derived from FREE_EMAIL_DOMAINS, never hand-maintained alongside it.
+// An exact match short-circuits to "no suggestion", so every provider the
+// system already recognises is automatically immune from being "corrected".
+// This matters: ymail.com is a real Yahoo domain, sits one edit from
+// gmail.com, and a hand-written list missed it — those leads would have
+// been told "Did you mean b@gmail.com?" about a perfectly valid address.
+const TYPO_CANDIDATE_DOMAINS = Array.from(new Set([
+  ...FREE_EMAIL_DOMAINS,
+  'yahoo.co.in', 'yahoo.co.uk', 'proton.me', 'zoho.com', 'zoho.in',
+  'yandex.com', 'gmx.com', 'comcast.net', 'verizon.net', 'sbcglobal.net',
+  'outlook.in', 'hotmail.co.uk', 'qq.com', 'naver.com', 'web.de',
+]));
+const TYPO_BAD_TLDS = { '.con': '.com', '.cmo': '.com', '.ocm': '.com', '.vom': '.com', '.xom': '.com', '.comm': '.com', '.cm': '.com', '.om': '.com', '.couk': '.co.uk' };
+
+function suggestDomainFix(domain) {
+  const d = String(domain || '').toLowerCase();
+  if (!d || TYPO_CANDIDATE_DOMAINS.includes(d)) return null;
+  for (const [bad, good] of Object.entries(TYPO_BAD_TLDS)) {
+    if (d.endsWith(bad)) return d.slice(0, -bad.length) + good;
+  }
+  let best = null, bestDist = 99;
+  for (const c of TYPO_CANDIDATE_DOMAINS) {
+    const dist = damerauLevenshtein(d, c);
+    if (dist < bestDist) { bestDist = dist; best = c; }
+  }
+  // 1 edit always. 2 edits only on longer names, where two slips are
+  // proportionally small and collisions with real domains are rarer.
+  if (bestDist === 1 || (bestDist === 2 && best.length >= 10)) return best;
+  return null;
+}
+
+/* ── User-facing copy ──────────────────────────────────────────────
+   Lives server-side so the wording is consistent and can be changed
+   without a Webflow republish. gushwork-form.js should render
+   `message`, and offer `suggestion` as a one-tap fix when present.
+   ───────────────────────────────────────────────────────────────── */
+const ELV_MESSAGES = {
+  invalid_syntax: "That email address doesn't look quite right — check for a typo.",
+  syntax_error:   "That email address doesn't look quite right — check for a typo.",
+  domain_error:   "We couldn't find that email domain. Check the spelling after the @.",
+  invalid_mx:     "That domain isn't set up to receive email. Check the spelling after the @.",
+  dead_server:    "That domain isn't accepting email right now. Try another address?",
+  unknown_email:  "We couldn't find that mailbox. Check the spelling?",
+  email_disabled: "That mailbox looks inactive. Try another address?",
+  disposable:     "Please use your permanent work email.",
+  spamtrap:       "Please use a different email address.",
+  relay_error:    "That mailbox couldn't be reached. Try another address?",
+  attempt_rejected: "That mailbox couldn't be reached. Try another address?",
+  error:          "That email address doesn't appear to be valid. Mind double-checking it?",
+  invalid:        "That email address doesn't appear to be valid. Mind double-checking it?",
+};
+
+function elvRejection(email, status) {
+  const raw       = String(email);
+  const localPart = raw.split('@')[0] || '';
+  const domain    = raw.split('@')[1] || '';
+  const base      = ELV_MESSAGES[status] || "That email address doesn't appear to be valid.";
+  const fixed     = suggestDomainFix(domain);
+
+  // Only offer a fix that actually FIXES it. We correct the domain and
+  // never the local part, so a compound error — say utsav,singh@gmai.com,
+  // where BOTH halves are wrong — would otherwise produce
+  // "Did you mean utsav,singh@gmail.com?", still invalid, and tapping it
+  // would loop on the same broken suggestion forever.
+  const candidate = fixed ? `${localPart}@${fixed}` : null;
+  const usable    = candidate && EMAIL_SYNTAX_RE.test(candidate);
+
+  return {
+    valid: false,
+    status,
+    message: usable ? `Did you mean ${candidate}?` : base,
+    suggestion: usable ? candidate : null,
+  };
 }
 
 const ELV_HTTP_MEANING = { 401: 'API key rejected', 402: 'Credits exhausted', 403: 'Access forbidden', 429: 'Rate limited' };
@@ -1580,22 +1870,65 @@ const ELV_HTTP_MEANING = { 401: 'API key rejected', 402: 'Credits exhausted', 40
 app.post('/verify-email', async (req, res) => {
   const email = (req.body.email || '').toString().trim().slice(0, 254).toLowerCase();
   if (!email) return res.status(400).json({ valid: false, error: 'email required' });
+
+  // 1 — Syntax. Instant, free, no credit. Catches utsav,singh@gushwork.ai.
+  if (!EMAIL_SYNTAX_RE.test(email)) {
+    console.log(`[ELV] BLOCKED ${email} — local: invalid_syntax`);
+    return res.json(Object.assign(elvRejection(email, 'invalid_syntax'), { source: 'local' }));
+  }
+
+  // 2 — Cache.
+  const cached = elvCacheGet(email);
+  if (cached) {
+    console.log(`[ELV] ${email} → "${cached.status}" (cached)`);
+    return res.json(cached.valid
+      ? { valid: true, status: cached.status, source: 'cache' }
+      : Object.assign(elvRejection(email, cached.status), { source: 'cache' }));
+  }
+
+  const domain = email.split('@')[1];
+
   const apiKey = process.env.ELV_API_KEY;
   if (!apiKey) {
     console.warn('[ELV] ELV_API_KEY not set — skipping, allowing through');
     alertOps('critical', 'ELV', 'API key not configured', { 'Impact': 'All emails passing unverified' });
-    recordElvOutcome('skipped');
+    recordElvOutcome('skipped', email);
     return res.json({ valid: true, status: 'skipped' });
   }
+
+  const startedAt = Date.now();
   try {
+    // 3 — DNS and ELV run CONCURRENTLY, not in sequence.
+    //     Sequentially this was worst-case 2.5s (DNS) + 8s (ELV) = 10.5s.
+    //     Raced, the worst case is 8s and the typical case is whichever
+    //     answers first. DNS usually wins by a wide margin, so a dead
+    //     domain is rejected in ~50ms instead of after the full ELV wait.
     const controller = new AbortController();
-    const timeout    = setTimeout(() => controller.abort(), 8000);
+    const timeout    = setTimeout(() => controller.abort(), ELV_TIMEOUT_MS);
     const url        = `https://apps.emaillistverify.com/api/verifyEmail?secret=${apiKey}&email=${encodeURIComponent(email)}`;
-    const response   = await fetch(url, { signal: controller.signal });
+    const elvPromise = fetch(url, { signal: controller.signal });
+    const mxPromise  = localMxCheck(domain);
+
+    // A definitive NXDOMAIN is enough on its own — the domain does not
+    // exist, so nothing ELV says can change the answer. Bail immediately
+    // and let the in-flight ELV call be discarded.
+    //     'no_mx' deliberately does NOT block: RFC 5321 permits A-record
+    //     fallback for mail, so that case waits for ELV.
+    const mx = await mxPromise;
+    if (mx === 'nxdomain') {
+      clearTimeout(timeout);
+      controller.abort();
+      elvPromise.catch(() => {}); // discard the aborted request quietly
+      console.log(`[ELV] BLOCKED ${email} — local: nxdomain | ${Date.now() - startedAt}ms`);
+      elvCacheSet(email, false, 'domain_error');
+      return res.json(Object.assign(elvRejection(email, 'domain_error'), { source: 'local' }));
+    }
+
+    const response = await elvPromise;
     clearTimeout(timeout);
 
-    // Non-200 means the CHECK failed, not that the email is bad. Fail open
-    // (as before) but loudly — this is the silent-failure hole.
+    // Non-200 means the CHECK failed, not that the email is bad. Fail open,
+    // but loudly — this is the silent-failure hole.
     if (!response.ok) {
       const meaning  = ELV_HTTP_MEANING[response.status] || `HTTP ${response.status}`;
       const severity = [401, 402, 403].includes(response.status) ? 'critical' : 'warning';
@@ -1603,36 +1936,49 @@ app.post('/verify-email', async (req, res) => {
       alertOps(severity, 'ELV', meaning, {
         'HTTP status': response.status,
         'Impact': 'Emails are passing unverified',
-        'Action': severity === 'critical' ? 'Renew key / top up credits in ELV dashboard' : 'Monitor — may self-resolve',
+        'Action': severity === 'critical' ? 'Renew key / top up credits in the ELV dashboard' : 'Monitor — may self-resolve',
       });
-      recordElvOutcome('http_error');
+      recordElvOutcome('http_error', email);
       return res.json({ valid: true, status: 'http_error' });
     }
 
-    const text   = await response.text();
-    const status = text.trim().toLowerCase();
-    console.log(`[ELV] ${email} → "${status}"`);
+    const rawText = (await response.text()).trim().toLowerCase();
+    const status  = normaliseElvStatus(rawText);
+    const ms      = Date.now() - startedAt;
+    console.log(`[ELV] ${email} → "${status}"${status !== rawText ? ` (raw: "${rawText}")` : ''} | ${ms}ms`);
 
-    if (!ELV_KNOWN_STATUSES.includes(status)) {
-      console.warn(`[ELV] ⚠ Unrecognised status "${status.substring(0, 60)}" — treating as pass`);
-      alertOps('warning', 'ELV', 'Unrecognised status', {
-        'Status': status.substring(0, 100),
-        'Impact': 'Treated as a pass — review whether it should block',
-      });
+    const known = ELV_BLOCK.includes(status) || ELV_PASS.includes(status) || ELV_INDETERMINATE.includes(status);
+    if (!known) {
+      // Unknown genuinely means we don't know. Still fails open — but it
+      // now counts toward the health signal instead of being invisible.
+      console.warn(`[ELV] ⚠ Unrecognised status "${status.substring(0, 60)}" — treating as indeterminate (passes)`);
+      if (!elvIsInternal(email)) {
+        alertOps('warning', 'ELV', 'Unrecognised status', {
+          'Status': status.substring(0, 100),
+          'Domain': domain,
+          'Impact': 'Passed through. Add it to ELV_BLOCK or ELV_PASS if it should be definitive.',
+        });
+      }
     }
 
-    const blockedStatuses = ['error', 'invalid', 'unknown_email', 'email_disabled', 'domain_error', 'dead_server', 'syntax_error', 'disposable', 'spamtrap', 'invalid_mx'];
-    const valid = !blockedStatuses.includes(status);
+    const valid = !ELV_BLOCK.includes(status);
     if (!valid) console.log(`[ELV] BLOCKED ${email} — status: "${status}"`);
-    recordElvOutcome(status);
-    res.json({ valid, status });
+    recordElvOutcome(known ? status : 'unknown', email);
+    elvCacheSet(email, valid, status);
+    res.json(valid ? { valid: true, status, ms } : Object.assign(elvRejection(email, status), { ms }));
   } catch (err) {
     const isTimeout = err.name === 'AbortError';
-    if (isTimeout) console.warn(`[ELV] Timeout for ${email} — failing open`);
+    if (isTimeout) console.warn(`[ELV] Timeout after ${Date.now() - startedAt}ms for ${email} — failing open`);
     else console.warn('[ELV] Error:', err.message, '— failing open');
-    recordElvOutcome(isTimeout ? 'timeout' : 'network_error');
+    recordElvOutcome(isTimeout ? 'timeout' : 'network_error', email);
     res.json({ valid: true, status: 'error_fallback' });
   }
+});
+
+// Live ELV health for the dashboard's System Health tab.
+app.get('/monitor/elv-health', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(elvHealthSnapshot());
 });
 
 // ── /verify-website — server-level for-sale/parked-lander content check ──
