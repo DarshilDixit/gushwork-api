@@ -9,6 +9,7 @@ const { Pool }  = require('pg');
 const { pool, initDB } = require('./db');
 const { pushToSalesforce, findSFLeadByEmail, updateSFLead } = require('./salesforce');
 const { pushFormEventsToMeta, pushStartTrialToMeta } = require('./meta-capi');
+const createLeadMagnetRouter = require('./lead-magnet');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -67,6 +68,10 @@ app.use('/booking-confirmed', globalLimiter);
 app.use('/verify-email', strictLimiter);
 app.use('/enrich',       strictLimiter);
 app.use('/verify-website', strictLimiter);
+// Lead magnet. /lm/queue is deliberately NOT limited (token-guarded instead) —
+// the same mistake that made the monitor dashboard trip its own limiter.
+app.use('/lm/track',  globalLimiter);
+app.use('/lm/submit', globalLimiter);
 
 let awsPool = null;
 
@@ -1264,6 +1269,7 @@ app.get('/monitor', (req, res) => {
   '<div class="tab" id="t-leads" onclick="showTab(\'leads\')">All Leads</div>' +
   '<div class="tab" id="t-sdr" onclick="showTab(\'sdr\')">SDR List</div>' +
   '<div class="tab" id="t-dupes" onclick="showTab(\'dupes\')" style="color:#aaa">Duplicates</div>' +
+  '<div class="tab" id="t-lm" onclick="showTab(\'lm\')">Lead Magnet</div>' +
   '<div class="tab" id="t-health" onclick="showTab(\'health\')">System Health</div>' +
   '</div>' +
   '<div class="tp act" id="tp-overview">' +
@@ -1360,13 +1366,38 @@ app.get('/monitor', (req, res) => {
   '<div class="mc"><div class="ml">With location</div><div class="mv" id="h-loc">&#8212;</div><div class="ms">% of enriched</div></div>' +
   '</div>' +
   '</div>' +
+  '<div class="tp" id="tp-lm">' +
+  '<div class="sl">Funnel &#8212; last 30 days</div>' +
+  '<div class="g4">' +
+  '<div class="mc"><div class="ml">Page views</div><div class="mv" id="lm-views">&#8212;</div></div>' +
+  '<div class="mc"><div class="ml">Form opened</div><div class="mv" id="lm-opens">&#8212;</div><div class="ms" id="lm-opens-r">&#8212;</div></div>' +
+  '<div class="mc"><div class="ml">Email entered</div><div class="mv" id="lm-emails">&#8212;</div><div class="ms" id="lm-emails-r">&#8212;</div></div>' +
+  '<div class="mc"><div class="ml">Submitted</div><div class="mv" id="lm-submitted">&#8212;</div><div class="ms" id="lm-submitted-r">&#8212;</div></div>' +
+  '</div>' +
+  '<div class="g2">' +
+  '<div class="card"><div class="sl">Daily volume</div><canvas id="lm-chart" height="90"></canvas></div>' +
+  '<div class="card"><div class="sl">Top industries</div><div id="lm-inds"><div class="nd">Loading...</div></div></div>' +
+  '</div>' +
+  '<div class="g2">' +
+  '<div class="card"><div class="sl">Email type</div><div id="lm-emailtype"><div class="nd">Loading...</div></div></div>' +
+  '<div class="card"><div class="sl">Custom categories entered</div>' +
+  '<div class="ms" style="margin-bottom:8px">What people typed when the list did not fit. Feed recurring ones back into the dropdown.</div>' +
+  '<div id="lm-custom"><div class="nd">Loading...</div></div></div>' +
+  '</div>' +
+  '<div class="sl">Leads <span class="apill" id="lm-pending" style="margin-left:8px"></span>' +
+  '<button class="btn" style="float:right" onclick="lmCsv()">Export CSV</button></div>' +
+  '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
+  '<th>Email</th><th>Industry</th><th>Product / service</th><th>Sells to</th>' +
+  '<th>Website</th><th>Source</th><th>Sent</th><th>Submitted (IST)</th>' +
+  '</tr></thead><tbody id="lm-tbody"><tr><td colspan="8" class="nd">Loading...</td></tr></tbody></table></div></div>' +
+  '</div>' +
   '</div>';
 
   const js = '<script>' +
   'var TP="' + tp + '";' +
   'var API=window.location.origin;' +
   'var lChart=null,curPage=1,stimer=null,curSort="created_at",curDir="desc",filterOptsLoaded=false;' +
-  'function showTab(n){["overview","leads","sdr","dupes","health"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();}' +
+  'function showTab(n){["overview","leads","sdr","dupes","health","lm"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();}' +
   'function badge(id,text,cls){var el=document.getElementById(id);if(!el)return;el.textContent=text;el.className="badge "+cls;}' +
   'function set(id,v){var el=document.getElementById(id);if(el)el.textContent=v;}' +
   'function pct(a,b){return b?Math.round(a/b*100)+"%":"0%";}' +
@@ -1444,6 +1475,53 @@ app.get('/monitor', (req, res) => {
   '"<tr class=\\"erow\\" id=\\"er-"+sid+"\\" style=\\"display:none\\"><td></td><td colspan=\\"9\\">"+enrichPanel(l)+"</td></tr>";}).join("");' +
   'document.getElementById("ltbody").innerHTML=html;renderPag(d.page,d.pages);}catch(e){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function renderPag(pg,pages){if(pages<=1){document.getElementById("lpag").innerHTML="";return;}var h="";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg-1)+")\\""+(pg<=1?" disabled":"")+">&larr;</button>";var s=Math.max(1,pg-2),e=Math.min(pages,pg+2);if(s>1)h+="<button class=\\"pb\\" onclick=\\"loadLeads(1)\\">1</button>"+(s>2?"<span class=\\"pi\\">&#8230;</span>":"");for(var i=s;i<=e;i++)h+="<button class=\\"pb"+(i===pg?" act":"")+ "\\" onclick=\\"loadLeads("+i+")\\" >"+i+"</button>";if(e<pages)h+=(e<pages-1?"<span class=\\"pi\\">&#8230;</span>":"")+"<button class=\\"pb\\" onclick=\\"loadLeads("+pages+")\\" >"+pages+"</button>";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg+1)+")\\"" +(pg>=pages?" disabled":"")+">&rarr;</button><span class=\\"pi\\">Page "+pg+" of "+pages+"</span>";document.getElementById("lpag").innerHTML=h;}' +
+  'var lmLeads=[],lmChart=null;' +
+  'function lmPct(a,b){return b>0?Math.round(a/b*100)+"%":"\\u2014";}' +
+  'function lmIST(t){if(!t)return "\\u2014";return new Date(t).toLocaleString("en-IN",{timeZone:"Asia/Kolkata",day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"});}' +
+  'function lmBars(rows,total){if(!rows.length)return "<div class=\\"nd\\">No data yet</div>";' +
+  'return rows.map(function(r){var p=total>0?Math.round(r.n/total*100):0;' +
+  'return "<div style=\\"margin-bottom:8px\\"><div style=\\"display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px\\"><span>"+esc(r.label)+"</span><span style=\\"color:#888\\">"+r.n+"</span></div>"+' +
+  '"<div style=\\"height:6px;background:#f0f0f0;border-radius:3px;overflow:hidden\\"><div style=\\"height:100%;width:"+p+"%;background:#1a1a1a\\"></div></div></div>";}).join("");}' +
+  'async function loadLM(){' +
+  'try{var r=await fetch(API+"/monitor/lm-metrics"+TP,{cache:"no-store"});var d=await r.json();var f=d.funnel||{};' +
+  'var v=+f.views||0,o=+f.modal_opens||0,e=+f.emails||0,sb=+f.submitted||0;' +
+  'set("lm-views",v);set("lm-opens",o);set("lm-emails",e);set("lm-submitted",sb);' +
+  'set("lm-opens-r",lmPct(o,v)+" of views");set("lm-emails-r",lmPct(e,o)+" of opens");set("lm-submitted-r",lmPct(sb,e)+" of emails");' +
+  'var pend=+f.pending_delivery||0;' +
+  'document.getElementById("lm-pending").innerHTML="<span class=\\"dot "+(pend>0?"dot-amber":"dot-green")+"\\"></span>"+pend+" awaiting send";' +
+  'document.getElementById("lm-inds").innerHTML=lmBars(d.industries||[],sb);' +
+  'var fr=+f.free_email||0,bz=+f.business_email||0;' +
+  'document.getElementById("lm-emailtype").innerHTML=lmBars([{label:"Business email",n:bz},{label:"Free mailbox",n:fr}],fr+bz);' +
+  'var cc=d.custom_categories||[];' +
+  'document.getElementById("lm-custom").innerHTML=cc.length?cc.map(function(x){' +
+  'return "<div style=\\"display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0f0;font-size:13px\\"><span>"+esc(x.label)+"</span><span style=\\"color:#888\\">"+x.n+"</span></div>";}).join(""):' +
+  '"<div class=\\"nd\\">None yet \\u2014 the list is covering everyone so far.</div>";' +
+  'var dy=d.daily||[],cv=document.getElementById("lm-chart");' +
+  'if(cv&&window.Chart){if(lmChart)lmChart.destroy();lmChart=new Chart(cv,{type:"line",data:{labels:dy.map(function(x){return x.day.slice(5);}),' +
+  'datasets:[{label:"Views",data:dy.map(function(x){return x.views;}),borderColor:"#ccc",tension:0.3,pointRadius:0},' +
+  '{label:"Submitted",data:dy.map(function(x){return x.submitted;}),borderColor:"#1a1a1a",tension:0.3,pointRadius:0}]},' +
+  'options:{responsive:true,plugins:{legend:{display:true,labels:{boxWidth:10,font:{size:11}}}},scales:{y:{beginAtZero:true,ticks:{precision:0}}}}});}' +
+  '}catch(err){console.warn("[LM] metrics failed",err);}' +
+  'try{var r2=await fetch(API+"/monitor/lm-leads"+TP,{cache:"no-store"});var d2=await r2.json();lmLeads=d2.leads||[];' +
+  'var tb=document.getElementById("lm-tbody");' +
+  'if(!lmLeads.length){tb.innerHTML="<tr><td colspan=\\"8\\" class=\\"nd\\">No submissions yet</td></tr>";return;}' +
+  'tb.innerHTML=lmLeads.map(function(l){return "<tr"+(l.is_internal?" style=\\"opacity:.45\\"":"")+">"+' +
+  '"<td>"+esc(l.email)+(l.is_free_email?" <span style=\\"color:#f59e0b\\" title=\\"Free mailbox\\">&#9679;</span>":"")+"</td>"+' +
+  '"<td>"+esc(l.industry_category)+(l.industry_is_custom?" <span style=\\"color:#888\\">(custom)</span>":"")+"</td>"+' +
+  '"<td>"+esc(l.product_or_service)+"</td><td>"+esc(l.sell_to)+"</td>"+' +
+  '"<td>"+esc(l.website||"\\u2014")+(l.website_source==="derived_from_email"?" <span style=\\"color:#888\\">(from email)</span>":"")+"</td>"+' +
+  '"<td>"+esc(l.utm_source||l.referrer||"direct")+"</td>"+' +
+  '"<td>"+(l.delivered?"<span class=\\"dot dot-green\\"></span> yes":"<span class=\\"dot dot-amber\\"></span> no")+"</td>"+' +
+  '"<td>"+lmIST(l.submitted_at)+"</td></tr>";}).join("");' +
+  '}catch(err2){console.warn("[LM] leads failed",err2);}}' +
+  'function lmCsv(){if(!lmLeads.length)return;' +
+  'var cols=["email","industry_category","industry_is_custom","product_or_service","sell_to","website","website_source","is_free_email","utm_source","utm_campaign","landing_page","referrer","delivered","submitted_at"];' +
+  'var Q=String.fromCharCode(34);' +
+  'var q=function(v){return Q+String(v==null?"":v).split(Q).join(Q+Q)+Q;};' +
+  'var rows=[cols.join(",")].concat(lmLeads.map(function(l){return cols.map(function(c){return q(l[c]);}).join(",");}));' +
+  'var a=document.createElement("a");' +
+  'a.href=URL.createObjectURL(new Blob([rows.join(String.fromCharCode(10))],{type:"text/csv"}));' +
+  'a.download="lead-magnet-"+new Date().toISOString().slice(0,10)+".csv";a.click();}' +
   'async function loadAll(){set("lupd","Refreshing...");var ok=await checkApi();if(!ok){document.getElementById("alerts").innerHTML="<div class=\\"alertbox ae\\"><span>x</span><span>API offline.</span></div>";set("lupd","API offline");return;}checkElv();' +
   'try{var r=await fetch(API+"/monitor/metrics"+TP,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
   'set("m-total",d.peopleTotal);set("m-totals",d.total+" sessions \\u00B7 "+d.todayCount+" in last 24h");' +
@@ -2724,6 +2802,12 @@ if (payload.router_name && payload.router_name !== 'Inbound Router - Website') {
     res.status(500).json({ error: 'Webhook processing failed' });
   }
 });
+
+/* Lead-magnet routes. Mounted HERE, not at the top: FREE_EMAIL_DOMAINS is a
+   const declared further up the file, so mounting above it would throw a TDZ
+   ReferenceError at boot. Borrowing elvIsInternal means there is no second
+   copy of the internal-domain list to drift out of sync. */
+app.use(createLeadMagnetRouter({ pool, elvIsInternal, FREE_EMAIL_DOMAINS }));
 
 async function start() {
   try {
