@@ -1,5 +1,5 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.0.0  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.1.0  (/demo PAGE VERSION - thru github/jsdlivr)
 
   /* --------------------------------------------------------
   INJECT STYLES
@@ -27,6 +27,20 @@
   font-weight: 500;
   line-height: 1.4;
   margin-top: 4px;
+  }
+  .gw-email-fix {
+  color: #2f6bff;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  padding: 6px 3px;
+  margin: -6px -3px;
+  border-radius: 4px;
+  }
+  .gw-email-fix:hover,
+  .gw-email-fix:focus-visible {
+  background: rgba(47, 107, 255, 0.08);
+  outline: none;
   }
   #email-protip img {
   width: 14px;
@@ -333,7 +347,7 @@
 
     function saveSession() {
       if (!isRailwayReady()) return;
-      fetch(`${RAILWAY_API_URL}/session`, {
+      fetchWithTimeout(`${RAILWAY_API_URL}/session`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -345,7 +359,7 @@
           utm_content: formState.utm_content,
           referrer: formState.referrer,
         }),
-      }).catch(() => {});
+      }, NET_TIMEOUT_MS.session).catch(() => {});
     }
 
     function prefillFromURL() {
@@ -1025,27 +1039,178 @@
       return TEST_EMAILS.includes(email.toLowerCase());
     }
 
-    async function verifyEmail(email) {
-      if (isTestEmail(email)) {
-        console.log('[GW] Test email — skipping ELV');
-        return true;
-      }
-      if (!isRailwayReady()) return true;
-      if (email === _lastVerifiedEmail) return true;
+    /* -------------------------------------------------------
+    NETWORK — every backend call gets a deadline.
+    Six of the seven Railway fetches had no AbortController, so a
+    stalled request left the Next button stuck on "Verifying..."
+    with no recovery path. Fail-open on timeout is deliberate and
+    matches the ELV/website policy: a backend blip must never cost
+    a real lead.
+    ------------------------------------------------------- */
+    const NET_TIMEOUT_MS = {
+      verifyEmail: 10000,  // backend caps ELV at 8s; allow overhead
+      enrich:      8000,
+      partial:     8000,
+      submit:      12000,  // the one call we most want to land
+      session:     5000,
+      booking:     8000,
+    };
+
+    async function fetchWithTimeout(url, options, timeoutMs) {
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), timeoutMs);
       try {
-        const res = await fetch(`${RAILWAY_API_URL}/verify-email`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email }),
-        });
-        const data = await res.json();
-        if (data.valid) _lastVerifiedEmail = email;
-        return data.valid;
-      } catch (err) {
-        console.warn('[GW] ELV failed — allowing through:', err.message);
-        return true;
+        return await fetch(url, Object.assign({}, options, { signal: controller.signal }));
+      } finally {
+        clearTimeout(t);
       }
     }
+
+    /* -------------------------------------------------------
+    EMAIL VERIFICATION — cached, deduped, prewarmed on blur.
+
+    Was: one fetch fired on the Next click, no timeout, and a
+    single-slot cache that only ever remembered PASSES — so every
+    rejected address was re-verified on each click. Now mirrors the
+    website-check pattern: blur prewarms, Next reuses the in-flight
+    promise, and definitive verdicts are cached per address.
+
+    Verdict shape: { valid, status, message, suggestion }
+    ------------------------------------------------------- */
+    const _emailVerdicts = new Map(); // email -> verdict
+    const _emailInFlight = new Map(); // email -> Promise<verdict>
+
+    // Fail-open outcomes must NEVER be cached — a transient blip would
+    // otherwise be remembered as a pass for the rest of the session.
+    const EMAIL_UNCACHEABLE = ['skipped', 'http_error', 'error_fallback', 'backend_error', 'fetch_error', 'no_backend', 'timeout', 'empty'];
+
+    function verifyEmail(rawEmail) {
+      const email = (rawEmail || '').trim().toLowerCase();
+      if (!email) return Promise.resolve({ valid: true, status: 'empty' });
+      if (isTestEmail(email)) {
+        console.log('[GW] Test email — skipping ELV');
+        return Promise.resolve({ valid: true, status: 'test_email' });
+      }
+      if (!isRailwayReady()) return Promise.resolve({ valid: true, status: 'no_backend' });
+      if (_emailVerdicts.has(email)) return Promise.resolve(_emailVerdicts.get(email));
+      if (_emailInFlight.has(email)) return _emailInFlight.get(email);
+
+      const p = (async () => {
+        try {
+          const res = await fetchWithTimeout(`${RAILWAY_API_URL}/verify-email`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email }),
+          }, NET_TIMEOUT_MS.verifyEmail);
+          if (!res.ok) return { valid: true, status: 'backend_error' };
+          const data = await res.json();
+          return {
+            valid:      data.valid !== false,
+            status:     data.status || 'checked',
+            message:    data.message || null,
+            suggestion: data.suggestion || null,
+          };
+        } catch (err) {
+          const timedOut = err && err.name === 'AbortError';
+          console.warn('[GW] ELV ' + (timedOut ? 'timed out' : 'failed') + ' — allowing through:', err && err.message);
+          return { valid: true, status: timedOut ? 'timeout' : 'fetch_error' };
+        }
+      })()
+        .then((v) => {
+          if (EMAIL_UNCACHEABLE.indexOf(v.status) === -1) _emailVerdicts.set(email, v);
+          return v;
+        })
+        .finally(() => { _emailInFlight.delete(email); });
+
+      _emailInFlight.set(email, p);
+      return p;
+    }
+
+    /* -------------------------------------------------------
+    Renders a rejection, plus a tap-to-accept fix when the backend
+    identified a likely domain typo. The element is created here
+    rather than in Webflow so no republish is needed.
+    ------------------------------------------------------- */
+    function showEmailVerdictError(verdict) {
+      const errEl = document.getElementById('email-error');
+      const emailInput = document.getElementById('email');
+      const msg = verdict.message || 'This email address appears to be invalid. Please use a real email.';
+
+      // No suggestion — plain text path, identical to every other error.
+      if (!verdict.suggestion || !errEl || !emailInput) {
+        showError('email-error', msg);
+        return;
+      }
+
+      // Suggestion path: the corrected address itself becomes the tap
+      // target, inline in the sentence. Deliberately NOT a separate
+      // button — the form has exactly one blue control ("Pick a time")
+      // and a second one competing beside it costs more than it gains.
+      showError('email-error', msg); // sets state: hides protip, red border, display block
+      const marker = 'Did you mean ';
+      if (msg.indexOf(marker) !== 0) return; // wording changed server-side; leave as plain text
+
+      // Built with DOM nodes, never innerHTML — the local part is user
+      // input and must never be parsed as markup.
+      errEl.textContent = '';
+      errEl.appendChild(document.createTextNode(marker));
+      const link = document.createElement('span');
+      link.id = 'email-suggestion';
+      link.className = 'gw-email-fix';
+      link.setAttribute('role', 'button');
+      link.setAttribute('tabindex', '0');
+      link.textContent = verdict.suggestion;
+      const apply = function () {
+        emailInput.value = verdict.suggestion;
+        hideError('email-error');
+        emailInput.dispatchEvent(new Event('input', { bubbles: true }));
+        emailInput.focus();
+        prewarmEmail(); // re-verify the corrected address immediately
+      };
+      link.addEventListener('click', apply);
+      link.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); apply(); }
+      });
+      errEl.appendChild(link);
+      errEl.appendChild(document.createTextNode('?'));
+    }
+
+    function hideEmailSuggestion() {
+      const errEl = document.getElementById('email-error');
+      if (errEl && errEl.querySelector('#email-suggestion')) hideError('email-error');
+    }
+
+    /* -------------------------------------------------------
+    OPTION A — blur prewarm.
+    Step 1 is email + sell-to. Firing verification the moment they
+    leave the email field means it resolves while they pick their
+    sell-to option, so the Next click is usually a cache hit.
+    Enrichment is chained behind a PASS so Apollo is warm too and
+    no credit is spent on an address that failed.
+    ------------------------------------------------------- */
+    function prewarmEmail() {
+      const el = document.getElementById('email');
+      if (!el) return;
+      const val = el.value.trim();
+      if (!val || !isValidEmail(val) || isTestEmail(val)) return;
+      verifyEmail(val).then((v) => {
+        // Only surface it if they're still on this address — they may
+        // have kept typing since the check started.
+        const current = (document.getElementById('email')?.value || '').trim().toLowerCase();
+        if (current !== val.toLowerCase()) return;
+        if (!v.valid) { showEmailVerdictError(v); return; }
+        hideEmailSuggestion();
+        triggerEnrichment(val).catch(() => {});
+      }).catch(() => {});
+    }
+
+    function initEmailPrewarm() {
+      const el = document.getElementById('email');
+      if (!el) return;
+      el.addEventListener('blur', prewarmEmail);
+      el.addEventListener('input', hideEmailSuggestion);
+    }
+
 
     /* =======================================================
     SECTION 5 — STEP NAVIGATION
@@ -1110,11 +1275,11 @@
       }
       if (!isRailwayReady()) return true;
       try {
-        const res = await fetch(`${RAILWAY_API_URL}/partial`, {
+        const res = await fetchWithTimeout(`${RAILWAY_API_URL}/partial`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(formState),
-        });
+        }, NET_TIMEOUT_MS.partial);
         return res.ok;
       } catch (err) {
         console.warn('[GW] Partial capture failed:', err);
@@ -1131,11 +1296,11 @@
       }
       if (!isRailwayReady()) return true;
       try {
-        const res = await fetch(`${RAILWAY_API_URL}/submit`, {
+        const res = await fetchWithTimeout(`${RAILWAY_API_URL}/submit`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(formState),
-        });
+        }, NET_TIMEOUT_MS.submit);
         return res.ok;
       } catch (err) {
         console.warn('[GW] Submit failed:', err);
@@ -1175,11 +1340,11 @@
       if (_enrichInFlight.has(email)) return null;
       _enrichInFlight.add(email);
       try {
-        const res = await fetch(`${RAILWAY_API_URL}/enrich`, {
+        const res = await fetchWithTimeout(`${RAILWAY_API_URL}/enrich`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, session_id: formState.session_id }),
-        });
+        }, NET_TIMEOUT_MS.enrich);
         if (!res.ok) return null;
         return await res.json();
       } catch {
@@ -1281,7 +1446,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
 
         // Fire existing /booking-confirmed endpoint — same one Cal uses
         if (isRailwayReady() && !isTestEmail(formState.email)) {
-          await fetch(`${RAILWAY_API_URL}/booking-confirmed`, {
+          await fetchWithTimeout(`${RAILWAY_API_URL}/booking-confirmed`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1291,7 +1456,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
               end_time: '',
               event_type: 'demo',
             }),
-          }).catch(() => {});
+          }, NET_TIMEOUT_MS.booking).catch(() => {});
         }
       });
     }
@@ -1312,13 +1477,16 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       setLoading('step-1-next', true, 'Verifying...');
 
       try {
-        const isVerified = await verifyEmail(email);
-        if (!isVerified) {
-          showError('email-error', 'This email address appears to be invalid. Please use a real email.');
+        // Normally already resolved by the blur prewarm, so this is a
+        // cache hit and the button barely flickers.
+        const verdict = await verifyEmail(email);
+        if (!verdict.valid) {
+          showEmailVerdictError(verdict);
           return;
         }
 
         hideError('email-error');
+        hideEmailSuggestion();
         formState.email = email;
         formState.sell_to = sellTo;
         localStorage.setItem('gw_email', formState.email);
@@ -1626,13 +1794,14 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       saveSession();
       prefillFromURL();
       initEmailProTip();
+      initEmailPrewarm();
       initWebsiteCheck();
       initButtons();
       initEnterKey();
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.0.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
+      console.log('[GW] ✅ Form initialised v5.1.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
