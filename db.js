@@ -103,6 +103,93 @@ async function initDB() {
     `);
 
     /* -------------------------------------------------------
+       LEAD MAGNET — 150 buyer questions LP
+       Separate table. Never joined to `leads` at write time.
+
+       One row per SESSION, not per lead: the row is created on page
+       load, so most rows have no email. Those are the funnel
+       denominator — they are what lets you see view -> open -> email
+       -> submit instead of guessing. Anything that reads this as
+       "leads" filters on completed = true (see the view below).
+
+       Wrapped in try/catch ON PURPOSE. start() does `await initDB()`
+       then process.exit(1) on throw, so an unwrapped failure here
+       would take down /verify-email and /submit for the demo form
+       too. Worst case now: /lm/* returns 500s and everything already
+       in production keeps running.
+    ------------------------------------------------------- */
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS lead_magnet_leads (
+          id                 SERIAL PRIMARY KEY,
+          session_id         TEXT UNIQUE NOT NULL,
+          linked_session_id  TEXT,
+          -- captured
+          email              TEXT,
+          is_free_email      BOOLEAN DEFAULT FALSE,
+          is_internal        BOOLEAN DEFAULT FALSE,
+          website            TEXT,
+          website_source     TEXT,          -- 'entered' | 'derived_from_email'
+          industry_category  TEXT,
+          industry_is_custom BOOLEAN DEFAULT FALSE,
+          product_or_service TEXT,
+          sell_to            TEXT,
+          -- verification
+          elv_status         TEXT,
+          elv_checked_at     TIMESTAMPTZ,
+          -- attribution
+          page_url           TEXT,
+          landing_page       TEXT,
+          previous_page      TEXT,
+          referrer           TEXT,
+          utm_source         TEXT,
+          utm_medium         TEXT,
+          utm_campaign       TEXT,
+          utm_content        TEXT,
+          utm_term           TEXT,
+          fbc                TEXT,
+          fbp                TEXT,
+          user_agent         TEXT,
+          -- funnel
+          step_reached       INT DEFAULT 1,
+          completed          BOOLEAN DEFAULT FALSE,
+          submitted_at       TIMESTAMPTZ,
+          -- handoff
+          delivered          BOOLEAN DEFAULT FALSE,
+          delivered_at       TIMESTAMPTZ,
+          delivery_note      TEXT,
+          -- meta
+          capi_contact_sent  BOOLEAN DEFAULT FALSE,
+          created_at         TIMESTAMPTZ DEFAULT NOW(),
+          updated_at         TIMESTAMPTZ DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS lm_pending_idx
+          ON lead_magnet_leads (submitted_at)
+          WHERE completed = true AND delivered = false;
+        CREATE INDEX IF NOT EXISTS lm_email_idx   ON lead_magnet_leads (email);
+        CREATE INDEX IF NOT EXISTS lm_created_idx ON lead_magnet_leads (created_at);
+
+        -- The handoff surface. The email team reads THIS, not the table.
+        -- Partials, internal tests and already-sent leads are filtered by
+        -- the database, so nobody downstream can forget a WHERE clause.
+        CREATE OR REPLACE VIEW lead_magnet_queue AS
+          SELECT id, session_id, email, website, website_source,
+                 industry_category, industry_is_custom,
+                 product_or_service, sell_to, is_free_email,
+                 utm_source, utm_campaign, submitted_at
+            FROM lead_magnet_leads
+           WHERE completed = true
+             AND delivered = false
+             AND is_internal IS NOT TRUE
+           ORDER BY submitted_at;
+      `);
+      console.log('[DB] Lead-magnet table ready');
+    } catch (err) {
+      console.error('[DB] Lead-magnet table init FAILED (non-fatal):', err.message);
+    }
+
+    /* -------------------------------------------------------
        MIGRATIONS — runs on every startup, safe due to IF NOT EXISTS
     ------------------------------------------------------- */
     const migrations = [
@@ -161,6 +248,8 @@ async function initDB() {
       `ALTER TABLE enrichment_data ADD COLUMN IF NOT EXISTS enriched_org_hq TEXT`,
       `ALTER TABLE enrichment_data ADD COLUMN IF NOT EXISTS enriched_total_funding TEXT`,
       `ALTER TABLE enrichment_data ADD COLUMN IF NOT EXISTS enriched_funding_stage TEXT`,
+      // Lead magnet — add new columns here, same pattern as above
+      `ALTER TABLE lead_magnet_leads ADD COLUMN IF NOT EXISTS website_source TEXT`,
     ];
 
     for (const sql of migrations) {
