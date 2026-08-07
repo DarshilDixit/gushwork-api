@@ -36,6 +36,8 @@ function normalizePhone(value) {
   return digits.length > 0 ? digits : undefined;
 }
 
+const FIXED_EVENT_ID_EVENTS = ['StartTrial', 'Contact'];
+
 /**
  * Send a single event to Meta CAPI
  */
@@ -50,7 +52,7 @@ async function sendEvent(eventName, payload, options = {}) {
 
     // StartTrial uses fixed event_id per session (Meta deduplicates repeated partials)
     // Other events use random suffix to stay unique
-    const eventId = eventName === 'StartTrial'
+    const eventId = FIXED_EVENT_ID_EVENTS.includes(eventName)
       ? `${eventName}_${payload.session_id || Date.now()}`
       : `${eventName}_${payload.session_id || Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
@@ -82,6 +84,9 @@ async function sendEvent(eventName, payload, options = {}) {
       seniority: payload.enriched_seniority || undefined,
       funding_stage: payload.enriched_funding_stage || undefined,
       sell_to: payload.sell_to || undefined,
+      industry_category:  payload.industry_category  || undefined,
+      product_or_service: payload.product_or_service || undefined,
+      is_free_email:      payload.is_free_email === undefined ? undefined : String(payload.is_free_email),
     },
   };
 
@@ -170,4 +175,13 @@ async function pushStartTrialToMeta(payload, options = {}) {
   return results;
 }
 
-module.exports = { pushFormEventsToMeta, pushStartTrialToMeta };
+async function pushContactToMeta(payload, options = {}) {
+  const results = await Promise.allSettled([sendEvent('Contact', payload, options)]);
+  results.forEach((r) => {
+    if (r.status === 'fulfilled') console.log('[Meta CAPI] [Contact]:', r.value);
+    else console.error('[Meta CAPI] [Contact] failed:', r.reason);
+  });
+  return results;
+}
+
+module.exports = { pushFormEventsToMeta, pushStartTrialToMeta, pushContactToMeta };
