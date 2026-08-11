@@ -1597,8 +1597,8 @@ app.get('/monitor', (req, res) => {
   '"<tr class=\\"erow\\" id=\\"lm-er-"+i+"\\" style=\\"display:none\\"><td></td><td colspan=\\"9\\">"+lmDetail(l)+"</td></tr>";' +
   '}).join("");}' +
 
-  'function lmCell(k,v,link){if(!v)v="\\u2014";' +
-  'var body=link&&v!=="\\u2014"?"<a href=\\""+esc(v)+"\\" target=\\"_blank\\" style=\\"word-break:break-all\\">"+esc(v)+"</a>":"<span style=\\"word-break:break-all\\">"+esc(v)+"</span>";' +
+  'function lmCell(k,v,link,raw){if(!v)v="\\u2014";' +
+  'var body=raw?v:(link&&v!=="\\u2014"?"<a href=\\""+esc(v)+"\\" target=\\"_blank\\" style=\\"word-break:break-all\\">"+esc(v)+"</a>":"<span style=\\"word-break:break-all\\">"+esc(v)+"</span>");' +
   'return "<div style=\\"background:#fafafa;border-radius:6px;padding:8px 10px\\"><div class=\\"ms\\" style=\\"margin-bottom:2px\\">"+k+"</div><div style=\\"font-size:12px\\">"+body+"</div></div>";}' +
   'function lmDetail(l){' +
   'return "<div style=\\"display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;padding:10px 0\\">"+' +
@@ -1612,7 +1612,7 @@ app.get('/monitor', (req, res) => {
   'lmCell("Meta fbc",l.fbc)+lmCell("Meta fbp",l.fbp)+' +
   'lmCell("Meta Contact sent",l.capi_contact_sent?"Yes":"No")+' +
   'lmCell("Loops",l.loops_sent?("Sent "+lmIST(l.loops_sent_at)):(l.loops_error?("Failed: "+l.loops_error):"Not sent"))+' +
-  '(l.loops_error||(!l.loops_sent&&l.completed)?lmCell("Retry","<button class=\\"btn\\" onclick=\\"lmLoopsRetry("+l.id+")\\">Push to Loops</button>"):"")+' +
+  '(l.loops_error||(!l.loops_sent&&l.completed)?lmCell("Retry","<button class=\\"btn\\" onclick=\\"lmLoopsRetry("+l.id+")\\">Push to Loops</button>",0,1):"")+' +
   'lmCell("Submitted",lmIST(l.submitted_at))+lmCell("First seen",lmIST(l.created_at))+' +
   'lmCell("Delivered at",lmIST(l.delivered_at))+' +
   'lmCell("Session ID",l.session_id)+"</div>";}' +
