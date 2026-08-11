@@ -1367,29 +1367,47 @@ app.get('/monitor', (req, res) => {
   '</div>' +
   '</div>' +
   '<div class="tp" id="tp-lm">' +
+
   '<div class="sl">Funnel &#8212; last 30 days</div>' +
   '<div class="g4">' +
-  '<div class="mc"><div class="ml">Page views</div><div class="mv" id="lm-views">&#8212;</div></div>' +
+  '<div class="mc"><div class="ml">Page views</div><div class="mv" id="lm-views">&#8212;</div><div class="ms">people who loaded the LP</div></div>' +
   '<div class="mc"><div class="ml">Form opened</div><div class="mv" id="lm-opens">&#8212;</div><div class="ms" id="lm-opens-r">&#8212;</div></div>' +
   '<div class="mc"><div class="ml">Email entered</div><div class="mv" id="lm-emails">&#8212;</div><div class="ms" id="lm-emails-r">&#8212;</div></div>' +
   '<div class="mc"><div class="ml">Submitted</div><div class="mv" id="lm-submitted">&#8212;</div><div class="ms" id="lm-submitted-r">&#8212;</div></div>' +
   '</div>' +
+
+  '<div class="sl">Where people drop off</div>' +
+  '<div class="card"><div id="lm-dropoff"><div class="nd">Loading...</div></div></div>' +
+
   '<div class="g2">' +
   '<div class="card"><div class="sl">Daily volume</div><canvas id="lm-chart" height="90"></canvas></div>' +
-  '<div class="card"><div class="sl">Top industries</div><div id="lm-inds"><div class="nd">Loading...</div></div></div>' +
+  '<div class="card"><div class="sl">Industries</div>' +
+  '<div class="ms" style="margin-bottom:8px">Tagged <b>custom</b> where they typed their own instead of picking from the list.</div>' +
+  '<div id="lm-inds"><div class="nd">Loading...</div></div></div>' +
   '</div>' +
+
   '<div class="g2">' +
   '<div class="card"><div class="sl">Email type</div><div id="lm-emailtype"><div class="nd">Loading...</div></div></div>' +
   '<div class="card"><div class="sl">Custom categories entered</div>' +
   '<div class="ms" style="margin-bottom:8px">What people typed when the list did not fit. Feed recurring ones back into the dropdown.</div>' +
   '<div id="lm-custom"><div class="nd">Loading...</div></div></div>' +
   '</div>' +
-  '<div class="sl">Leads <span class="apill" id="lm-pending" style="margin-left:8px"></span>' +
-  '<button class="btn" style="float:right" onclick="lmCsv()">Export CSV</button></div>' +
+
+  '<div class="sl">Leads</div>' +
+  '<div class="card" style="margin-bottom:12px">' +
+  '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
+  '<input id="lm-search" placeholder="Search email, industry, product, website..." ' +
+  'oninput="lmRender()" style="flex:1;min-width:220px;padding:8px 10px;border:1px solid #e5e5e5;border-radius:6px;font-size:13px" />' +
+  '<button class="btn" onclick="lmCsv()">Export CSV</button>' +
+  '</div>' +
+  '<div id="lm-pills" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px"></div>' +
+  '</div>' +
   '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
-  '<th>Email</th><th>Industry</th><th>Product / service</th><th>Sells to</th>' +
-  '<th>Website</th><th>Source</th><th>Sent</th><th>Submitted (IST)</th>' +
-  '</tr></thead><tbody id="lm-tbody"><tr><td colspan="8" class="nd">Loading...</td></tr></tbody></table></div></div>' +
+  '<th style="width:28px"></th><th>Email</th><th>Industry</th><th>Product / service</th><th>Sells to</th>' +
+  '<th>Website</th><th>Source</th><th>Status</th><th>When (IST)</th><th></th>' +
+  '</tr></thead><tbody id="lm-tbody"><tr><td colspan="10" class="nd">Loading...</td></tr></tbody></table></div></div>' +
+  '<div class="ms" id="lm-count" style="margin-top:8px"></div>' +
+
   '</div>' +
   '</div>';
 
@@ -1475,52 +1493,127 @@ app.get('/monitor', (req, res) => {
   '"<tr class=\\"erow\\" id=\\"er-"+sid+"\\" style=\\"display:none\\"><td></td><td colspan=\\"9\\">"+enrichPanel(l)+"</td></tr>";}).join("");' +
   'document.getElementById("ltbody").innerHTML=html;renderPag(d.page,d.pages);}catch(e){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function renderPag(pg,pages){if(pages<=1){document.getElementById("lpag").innerHTML="";return;}var h="";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg-1)+")\\""+(pg<=1?" disabled":"")+">&larr;</button>";var s=Math.max(1,pg-2),e=Math.min(pages,pg+2);if(s>1)h+="<button class=\\"pb\\" onclick=\\"loadLeads(1)\\">1</button>"+(s>2?"<span class=\\"pi\\">&#8230;</span>":"");for(var i=s;i<=e;i++)h+="<button class=\\"pb"+(i===pg?" act":"")+ "\\" onclick=\\"loadLeads("+i+")\\" >"+i+"</button>";if(e<pages)h+=(e<pages-1?"<span class=\\"pi\\">&#8230;</span>":"")+"<button class=\\"pb\\" onclick=\\"loadLeads("+pages+")\\" >"+pages+"</button>";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg+1)+")\\"" +(pg>=pages?" disabled":"")+">&rarr;</button><span class=\\"pi\\">Page "+pg+" of "+pages+"</span>";document.getElementById("lpag").innerHTML=h;}' +
-  'var lmLeads=[],lmChart=null;' +
+  'var lmLeads=[],lmChart=null,lmFilter="all";' +
+  'var lmPillDefs=[["all","All"],["awaiting","Awaiting send"],["sent","Sent"],["abandoned","Abandoned"],["internal","Internal tests"]];' +
   'function lmPct(a,b){return b>0?Math.round(a/b*100)+"%":"\\u2014";}' +
   'function lmIST(t){if(!t)return "\\u2014";return new Date(t).toLocaleString("en-IN",{timeZone:"Asia/Kolkata",day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"});}' +
   'function lmBars(rows,total){if(!rows.length)return "<div class=\\"nd\\">No data yet</div>";' +
   'return rows.map(function(r){var p=total>0?Math.round(r.n/total*100):0;' +
-  'return "<div style=\\"margin-bottom:8px\\"><div style=\\"display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px\\"><span>"+esc(r.label)+"</span><span style=\\"color:#888\\">"+r.n+"</span></div>"+' +
+  'return "<div style=\\"margin-bottom:8px\\"><div style=\\"display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px\\"><span>"+esc(r.label)+' +
+  '(r.is_custom?" <span style=\\"color:#888;font-size:11px\\">custom</span>":"")+"</span><span style=\\"color:#888\\">"+r.n+"</span></div>"+' +
   '"<div style=\\"height:6px;background:#f0f0f0;border-radius:3px;overflow:hidden\\"><div style=\\"height:100%;width:"+p+"%;background:#1a1a1a\\"></div></div></div>";}).join("");}' +
+
+  'function lmDrop(label,lost,base,hint){var p=base>0?Math.round(lost/base*100):0;' +
+  'return "<div style=\\"display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid #f2f2f2\\">"+' +
+  '"<div style=\\"flex:1\\"><div style=\\"font-size:13px\\">"+label+"</div><div class=\\"ms\\">"+hint+"</div></div>"+' +
+  '"<div style=\\"width:130px;height:6px;background:#f0f0f0;border-radius:3px;overflow:hidden\\"><div style=\\"height:100%;width:"+p+"%;background:"+(p>50?"#b91c1c":"#f59e0b")+"\\"></div></div>"+' +
+  '"<div style=\\"width:96px;text-align:right;font-size:13px\\"><b>"+lost+"</b> <span style=\\"color:#888\\">("+p+"%)</span></div></div>";}' +
+
   'async function loadLM(){' +
   'try{var r=await fetch(API+"/monitor/lm-metrics"+TP,{cache:"no-store"});var d=await r.json();var f=d.funnel||{};' +
   'var v=+f.views||0,o=+f.modal_opens||0,e=+f.emails||0,sb=+f.submitted||0;' +
   'set("lm-views",v);set("lm-opens",o);set("lm-emails",e);set("lm-submitted",sb);' +
   'set("lm-opens-r",lmPct(o,v)+" of views");set("lm-emails-r",lmPct(e,o)+" of opens");set("lm-submitted-r",lmPct(sb,e)+" of emails");' +
-  'var pend=+f.pending_delivery||0;' +
-  'document.getElementById("lm-pending").innerHTML="<span class=\\"dot "+(pend>0?"dot-amber":"dot-green")+"\\"></span>"+pend+" awaiting send";' +
+  'document.getElementById("lm-dropoff").innerHTML=' +
+  'lmDrop("Left without opening the form",(+f.bounced_before_open||0),v,"Saw the page, never clicked a CTA")+' +
+  'lmDrop("Opened the form, no email",(+f.opened_no_email||0),o,"Modal opened but no valid email entered")+' +
+  'lmDrop("Entered email, never submitted",(+f.abandoned||0),e,"Verified email captured &#8212; these are recoverable")+' +
+  '"<div style=\\"display:flex;padding:9px 0;font-size:13px\\"><div style=\\"flex:1\\">Completed</div>"+' +
+  '"<div style=\\"width:96px;text-align:right\\"><b>"+sb+"</b> <span style=\\"color:#888\\">("+lmPct(sb,v)+" of views)</span></div></div>";' +
   'document.getElementById("lm-inds").innerHTML=lmBars(d.industries||[],sb);' +
   'var fr=+f.free_email||0,bz=+f.business_email||0;' +
   'document.getElementById("lm-emailtype").innerHTML=lmBars([{label:"Business email",n:bz},{label:"Free mailbox",n:fr}],fr+bz);' +
   'var cc=d.custom_categories||[];' +
   'document.getElementById("lm-custom").innerHTML=cc.length?cc.map(function(x){' +
   'return "<div style=\\"display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0f0;font-size:13px\\"><span>"+esc(x.label)+"</span><span style=\\"color:#888\\">"+x.n+"</span></div>";}).join(""):' +
-  '"<div class=\\"nd\\">None yet \\u2014 the list is covering everyone so far.</div>";' +
+  '"<div class=\\"nd\\">None yet \\u2014 the dropdown is covering everyone so far.</div>";' +
   'var dy=d.daily||[],cv=document.getElementById("lm-chart");' +
   'if(cv&&window.Chart){if(lmChart)lmChart.destroy();lmChart=new Chart(cv,{type:"line",data:{labels:dy.map(function(x){return x.day.slice(5);}),' +
-  'datasets:[{label:"Views",data:dy.map(function(x){return x.views;}),borderColor:"#ccc",tension:0.3,pointRadius:0},' +
-  '{label:"Submitted",data:dy.map(function(x){return x.submitted;}),borderColor:"#1a1a1a",tension:0.3,pointRadius:0}]},' +
-  'options:{responsive:true,plugins:{legend:{display:true,labels:{boxWidth:10,font:{size:11}}}},scales:{y:{beginAtZero:true,ticks:{precision:0}}}}});}' +
+  'datasets:[{label:"Views",data:dy.map(function(x){return x.views;}),borderColor:"#d4d4d4",backgroundColor:"#d4d4d4",tension:0.25,pointRadius:0,borderWidth:2},' +
+  '{label:"Email entered",data:dy.map(function(x){return x.emails;}),borderColor:"#f59e0b",backgroundColor:"#f59e0b",tension:0.25,pointRadius:0,borderWidth:2},' +
+  '{label:"Submitted",data:dy.map(function(x){return x.submitted;}),borderColor:"#1a1a1a",backgroundColor:"#1a1a1a",tension:0.25,pointRadius:0,borderWidth:2}]},' +
+  'options:{responsive:true,interaction:{mode:"index",intersect:false},plugins:{legend:{display:true,labels:{boxWidth:10,font:{size:11}}}},scales:{y:{beginAtZero:true,ticks:{precision:0}}}}});}' +
   '}catch(err){console.warn("[LM] metrics failed",err);}' +
-  'try{var r2=await fetch(API+"/monitor/lm-leads"+TP,{cache:"no-store"});var d2=await r2.json();lmLeads=d2.leads||[];' +
-  'var tb=document.getElementById("lm-tbody");' +
-  'if(!lmLeads.length){tb.innerHTML="<tr><td colspan=\\"8\\" class=\\"nd\\">No submissions yet</td></tr>";return;}' +
-  'tb.innerHTML=lmLeads.map(function(l){return "<tr"+(l.is_internal?" style=\\"opacity:.45\\"":"")+">"+' +
-  '"<td>"+esc(l.email)+(l.is_free_email?" <span style=\\"color:#f59e0b\\" title=\\"Free mailbox\\">&#9679;</span>":"")+"</td>"+' +
-  '"<td>"+esc(l.industry_category)+(l.industry_is_custom?" <span style=\\"color:#888\\">(custom)</span>":"")+"</td>"+' +
-  '"<td>"+esc(l.product_or_service)+"</td><td>"+esc(l.sell_to)+"</td>"+' +
+  'try{var r2=await fetch(API+"/monitor/lm-leads"+TP,{cache:"no-store"});var d2=await r2.json();lmLeads=d2.leads||[];lmRender();' +
+  '}catch(e2){document.getElementById("lm-tbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\">Failed to load</td></tr>";}}' +
+
+  'function lmMatch(l){' +
+  'if(lmFilter==="internal")return l.is_internal;' +
+  'if(l.is_internal)return false;' +
+  'if(lmFilter==="all")return true;' +
+  'return l.status===lmFilter;}' +
+  'function lmSearched(){var q=(document.getElementById("lm-search").value||"").toLowerCase().trim();' +
+  'var base=lmLeads.filter(lmMatch);if(!q)return base;' +
+  'return base.filter(function(l){return [l.email,l.industry_category,l.product_or_service,l.website,l.utm_campaign,l.utm_source].join(" ").toLowerCase().indexOf(q)>=0;});}' +
+  'function lmSetFilter(k){lmFilter=k;lmRender();}' +
+
+  'function lmRender(){' +
+  'var counts={all:0,awaiting:0,sent:0,abandoned:0,internal:0};' +
+  'lmLeads.forEach(function(l){if(l.is_internal){counts.internal++;return;}counts.all++;if(counts[l.status]!==undefined)counts[l.status]++;});' +
+  'document.getElementById("lm-pills").innerHTML=lmPillDefs.map(function(p){var on=lmFilter===p[0];' +
+  'return "<button onclick=\\"lmSetFilter(\'"+p[0]+"\')\\" style=\\"padding:5px 11px;border-radius:99px;font-size:12px;cursor:pointer;border:1px solid "+' +
+  '(on?"#1a1a1a":"#e5e5e5")+";background:"+(on?"#1a1a1a":"#fff")+";color:"+(on?"#fff":"#444")+' +
+  '"\\">"+p[1]+" <span style=\\"opacity:.6\\">"+(counts[p[0]]||0)+"</span></button>";}).join("");' +
+  'var rows=lmSearched();var tb=document.getElementById("lm-tbody");' +
+  'set("lm-count",rows.length+" shown");' +
+  'if(!rows.length){tb.innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\">Nothing matches</td></tr>";return;}' +
+  'tb.innerHTML=rows.map(function(l,i){' +
+  'var badge=l.is_internal?"<span style=\\"color:#888\\">internal</span>":' +
+  '(l.status==="sent"?"<span class=\\"dot dot-green\\"></span> sent":' +
+  '(l.status==="awaiting"?"<span class=\\"dot dot-amber\\"></span> awaiting":' +
+  '"<span class=\\"dot\\" style=\\"background:#b91c1c\\"></span> abandoned"));' +
+  'var act=(l.status==="awaiting"&&!l.is_internal)?"<button class=\\"btn\\" onclick=\\"lmMark("+l.id+",0)\\">Mark sent</button>":' +
+  '(l.status==="sent"?"<button class=\\"btn\\" onclick=\\"lmMark("+l.id+",1)\\">Undo</button>":"");' +
+  'return "<tr"+(l.is_internal?" style=\\"opacity:.5\\"":"")+">"+' +
+  '"<td><span id=\\"lm-x-"+i+"\\" onclick=\\"lmToggle("+i+")\\" style=\\"cursor:pointer;color:#888\\">&#9654;</span></td>"+' +
+  '"<td>"+esc(l.email)+(l.is_free_email?" <span style=\\"color:#f59e0b\\" title=\\"Free mailbox\\">&#9679;</span>":"")+' +
+  '(l.attempts>1?" <span class=\\"ms\\">&times;"+l.attempts+"</span>":"")+"</td>"+' +
+  '"<td>"+esc(l.industry_category||"\\u2014")+(l.industry_is_custom?" <span style=\\"color:#888\\">(custom)</span>":"")+"</td>"+' +
+  '"<td>"+esc(l.product_or_service||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td>"+' +
   '"<td>"+esc(l.website||"\\u2014")+(l.website_source==="derived_from_email"?" <span style=\\"color:#888\\">(from email)</span>":"")+"</td>"+' +
   '"<td>"+esc(l.utm_source||l.referrer||"direct")+"</td>"+' +
-  '"<td>"+(l.delivered?"<span class=\\"dot dot-green\\"></span> yes":"<span class=\\"dot dot-amber\\"></span> no")+"</td>"+' +
-  '"<td>"+lmIST(l.submitted_at)+"</td></tr>";}).join("");' +
-  '}catch(err2){console.warn("[LM] leads failed",err2);}}' +
-  'function lmCsv(){if(!lmLeads.length)return;' +
-  'var cols=["email","industry_category","industry_is_custom","product_or_service","sell_to","website","website_source","is_free_email","utm_source","utm_campaign","landing_page","referrer","delivered","submitted_at"];' +
+  '"<td>"+badge+"</td>"+' +
+  '"<td>"+lmIST(l.submitted_at||l.created_at)+"</td>"+' +
+  '"<td>"+act+"</td></tr>"+' +
+  '"<tr class=\\"erow\\" id=\\"lm-er-"+i+"\\" style=\\"display:none\\"><td></td><td colspan=\\"9\\">"+lmDetail(l)+"</td></tr>";' +
+  '}).join("");}' +
+
+  'function lmCell(k,v,link){if(!v)v="\\u2014";' +
+  'var body=link&&v!=="\\u2014"?"<a href=\\""+esc(v)+"\\" target=\\"_blank\\" style=\\"word-break:break-all\\">"+esc(v)+"</a>":"<span style=\\"word-break:break-all\\">"+esc(v)+"</span>";' +
+  'return "<div style=\\"background:#fafafa;border-radius:6px;padding:8px 10px\\"><div class=\\"ms\\" style=\\"margin-bottom:2px\\">"+k+"</div><div style=\\"font-size:12px\\">"+body+"</div></div>";}' +
+  'function lmDetail(l){' +
+  'return "<div style=\\"display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;padding:10px 0\\">"+' +
+  'lmCell("Attempts",l.attempts>1?l.attempts+" sessions from this email":"First attempt")+' +
+  'lmCell("ELV status",l.elv_status)+' +
+  'lmCell("Reached step",l.step_reached+" of 4")+' +
+  'lmCell("UTM source",l.utm_source)+lmCell("UTM medium",l.utm_medium)+' +
+  'lmCell("UTM campaign",l.utm_campaign)+lmCell("UTM content",l.utm_content)+lmCell("UTM term",l.utm_term)+' +
+  'lmCell("Referrer",l.referrer)+' +
+  'lmCell("Landing page",l.landing_page,1)+lmCell("Previous page",l.previous_page,1)+lmCell("Form page",l.page_url,1)+' +
+  'lmCell("Meta fbc",l.fbc)+lmCell("Meta fbp",l.fbp)+' +
+  'lmCell("Meta Contact sent",l.capi_contact_sent?"Yes":"No")+' +
+  'lmCell("Submitted",lmIST(l.submitted_at))+lmCell("First seen",lmIST(l.created_at))+' +
+  'lmCell("Delivered at",lmIST(l.delivered_at))+' +
+  'lmCell("Session ID",l.session_id)+"</div>";}' +
+  'function lmToggle(i){var r=document.getElementById("lm-er-"+i);if(!r)return;' +
+  'var vis=r.style.display!=="none";r.style.display=vis?"none":"table-row";' +
+  'var x=document.getElementById("lm-x-"+i);if(x)x.innerHTML=vis?"&#9654;":"&#9660;";}' +
+
+  'async function lmMark(id,undo){' +
+  'try{var u=API+"/monitor/lm-delivered/"+id+(TP?TP+"&":"?")+(undo?"undo=1":"undo=0");' +
+  'var r=await fetch(u,{method:"POST"});if(!r.ok)throw new Error("HTTP "+r.status);' +
+  'var l=lmLeads.filter(function(x){return x.id===id;})[0];' +
+  'if(l){l.delivered=!undo;l.status=undo?"awaiting":"sent";l.delivered_at=undo?null:new Date().toISOString();}' +
+  'lmRender();loadLM();' +
+  '}catch(e){alert("Could not update: "+e.message);}}' +
+
+  'function lmCsv(){var rows0=lmSearched();if(!rows0.length)return;' +
+  'var cols=["email","status","industry_category","industry_is_custom","product_or_service","sell_to","website","website_source","is_free_email","elv_status","attempts","utm_source","utm_medium","utm_campaign","utm_content","utm_term","referrer","landing_page","previous_page","page_url","submitted_at","delivered","delivered_at","session_id"];' +
   'var Q=String.fromCharCode(34);' +
   'var q=function(v){return Q+String(v==null?"":v).split(Q).join(Q+Q)+Q;};' +
-  'var rows=[cols.join(",")].concat(lmLeads.map(function(l){return cols.map(function(c){return q(l[c]);}).join(",");}));' +
+  'var out=[cols.join(",")].concat(rows0.map(function(l){return cols.map(function(c){return q(l[c]);}).join(",");}));' +
   'var a=document.createElement("a");' +
-  'a.href=URL.createObjectURL(new Blob([rows.join(String.fromCharCode(10))],{type:"text/csv"}));' +
+  'a.href=URL.createObjectURL(new Blob([out.join(String.fromCharCode(10))],{type:"text/csv"}));' +
   'a.download="lead-magnet-"+new Date().toISOString().slice(0,10)+".csv";a.click();}' +
   'async function loadAll(){set("lupd","Refreshing...");var ok=await checkApi();if(!ok){document.getElementById("alerts").innerHTML="<div class=\\"alertbox ae\\"><span>x</span><span>API offline.</span></div>";set("lupd","API offline");return;}checkElv();' +
   'try{var r=await fetch(API+"/monitor/metrics"+TP,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
@@ -2805,8 +2898,7 @@ if (payload.router_name && payload.router_name !== 'Inbound Router - Website') {
 
 /* Lead-magnet routes. Mounted HERE, not at the top: FREE_EMAIL_DOMAINS is a
    const declared further up the file, so mounting above it would throw a TDZ
-   ReferenceError at boot. Borrowing elvIsInternal means there is no second
-   copy of the internal-domain list to drift out of sync. */
+   ReferenceError at boot. */
 app.use(createLeadMagnetRouter({ pool, elvIsInternal, FREE_EMAIL_DOMAINS }));
 
 async function start() {
