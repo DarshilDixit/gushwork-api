@@ -88,6 +88,14 @@ async function gateEmail(email) {
 function resolveWebsite(email, entered, free) {
   if (entered) {
     var url = /^https?:\/\//i.test(entered) ? entered : 'https://' + entered;
+    /* Lowercase the host only — paths can be case-sensitive. Without this,
+       "Gushwork.ai" and "gushwork.ai" are different strings to anything
+       that groups or dedupes by domain later. */
+    try {
+      var u = new URL(url);
+      u.hostname = u.hostname.toLowerCase();
+      url = u.toString().replace(/\/$/, '');
+    } catch (e) { url = url.trim(); }
     return { website: url, website_source: 'entered' };
   }
   if (email && !free) {
@@ -388,9 +396,17 @@ module.exports = function createLeadMagnetRouter(deps) {
   });
 
   /* ── Dashboard data ────────────────────────────────────────
-     Consumed by the Lead Magnet tab in /monitor.
+     Consumed by the Lead Magnet tab in /monitor. Same MONITOR_TOKEN
+     gate as every other /monitor/* route — these return lead email
+     addresses, so they must not be the one open door.
   ──────────────────────────────────────────────────────────── */
-  router.get('/monitor/lm-metrics', async (req, res) => {
+  function monitorAuth(req, res, next) {
+    const token = process.env.MONITOR_TOKEN;
+    if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+    next();
+  }
+
+  router.get('/monitor/lm-metrics', monitorAuth, async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     const days = Math.min(parseInt(req.query.days, 10) || 30, 365);
     const scope = `created_at > NOW() - INTERVAL '${days} days' AND is_internal IS NOT TRUE`;
@@ -398,31 +414,49 @@ module.exports = function createLeadMagnetRouter(deps) {
       const [funnel, industries, custom, daily] = await Promise.all([
         pool.query(`
           SELECT
-            COUNT(*)                                              AS views,
-            COUNT(*) FILTER (WHERE step_reached >= 2)             AS modal_opens,
-            COUNT(*) FILTER (WHERE email IS NOT NULL)             AS emails,
-            COUNT(*) FILTER (WHERE completed)                     AS submitted,
-            COUNT(*) FILTER (WHERE completed AND is_free_email)   AS free_email,
+            COUNT(*)                                                AS views,
+            COUNT(*) FILTER (WHERE step_reached >= 2)               AS modal_opens,
+            COUNT(*) FILTER (WHERE email IS NOT NULL)               AS emails,
+            COUNT(*) FILTER (WHERE completed)                       AS submitted,
+            -- the leak: a verified email that never finished the form
+            COUNT(*) FILTER (WHERE email IS NOT NULL AND NOT completed) AS abandoned,
+            COUNT(*) FILTER (WHERE step_reached < 2)                AS bounced_before_open,
+            COUNT(*) FILTER (WHERE step_reached >= 2 AND email IS NULL) AS opened_no_email,
+            COUNT(*) FILTER (WHERE completed AND is_free_email)     AS free_email,
             COUNT(*) FILTER (WHERE completed AND NOT is_free_email) AS business_email,
-            COUNT(*) FILTER (WHERE completed AND NOT delivered)   AS pending_delivery
+            COUNT(*) FILTER (WHERE completed AND NOT delivered)     AS pending_delivery,
+            COUNT(*) FILTER (WHERE completed AND delivered)         AS sent
           FROM lead_magnet_leads WHERE ${scope}`),
+        /* Custom entries count too. Excluding them made the panel read
+           "No data yet" while real leads existed — the tag tells you which
+           came from the dropdown and which someone typed. */
         pool.query(`
-          SELECT industry_category AS label, COUNT(*)::int AS n
+          SELECT industry_category AS label,
+                 bool_or(industry_is_custom) AS is_custom,
+                 COUNT(*)::int AS n
             FROM lead_magnet_leads
            WHERE ${scope} AND completed AND industry_category IS NOT NULL
-             AND industry_is_custom IS NOT TRUE
            GROUP BY 1 ORDER BY n DESC LIMIT 15`),
         pool.query(`
           SELECT industry_category AS label, COUNT(*)::int AS n, MAX(submitted_at) AS last_seen
             FROM lead_magnet_leads
            WHERE ${scope} AND completed AND industry_is_custom = true
            GROUP BY 1 ORDER BY n DESC, last_seen DESC LIMIT 50`),
+        /* generate_series zero-fills days with no rows. Without it the chart
+           silently omits quiet days and draws a straight line across them,
+           so a dead day looks like a gentle slope instead of a dead day. */
         pool.query(`
-          SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day,
-                 COUNT(*)::int AS views,
-                 COUNT(*) FILTER (WHERE completed)::int AS submitted
-            FROM lead_magnet_leads WHERE ${scope}
-           GROUP BY 1 ORDER BY 1`),
+          SELECT to_char(d.day, 'YYYY-MM-DD') AS day,
+                 COALESCE(COUNT(l.id) FILTER (WHERE l.id IS NOT NULL), 0)::int AS views,
+                 COALESCE(COUNT(l.id) FILTER (WHERE l.completed), 0)::int      AS submitted,
+                 COALESCE(COUNT(l.id) FILTER (WHERE l.email IS NOT NULL), 0)::int AS emails
+            FROM generate_series(
+                   date_trunc('day', NOW() - INTERVAL '${days} days'),
+                   date_trunc('day', NOW()), '1 day') AS d(day)
+            LEFT JOIN lead_magnet_leads l
+              ON date_trunc('day', l.created_at) = d.day
+             AND l.is_internal IS NOT TRUE
+           GROUP BY d.day ORDER BY d.day`),
       ]);
       res.json({
         funnel: funnel.rows[0],
@@ -436,24 +470,64 @@ module.exports = function createLeadMagnetRouter(deps) {
     }
   });
 
-  router.get('/monitor/lm-leads', async (req, res) => {
+  /* Returns anyone who got as far as an email — completed or not. Abandoned
+     leads are the most actionable thing on the page, so they belong in the
+     same list behind a filter rather than hidden by a completed = true. */
+  router.get('/monitor/lm-leads', monitorAuth, async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
-    const limit = Math.min(parseInt(req.query.limit, 10) || 200, 1000);
-    const onlyPending = req.query.pending === '1';
+    const limit = Math.min(parseInt(req.query.limit, 10) || 500, 2000);
+    const days = Math.min(parseInt(req.query.days, 10) || 30, 365);
     try {
       const { rows } = await pool.query(
-        `SELECT id, email, website, website_source, industry_category, industry_is_custom,
-                product_or_service, sell_to, is_free_email, is_internal,
-                utm_source, utm_campaign, landing_page, previous_page, referrer,
-                delivered, delivered_at, submitted_at, created_at
-           FROM lead_magnet_leads
-          WHERE completed = true ${onlyPending ? 'AND delivered = false' : ''}
-          ORDER BY submitted_at DESC LIMIT $1`,
+        `SELECT l.id, l.session_id, l.email, l.website, l.website_source,
+                l.industry_category, l.industry_is_custom, l.product_or_service,
+                l.sell_to, l.is_free_email, l.is_internal, l.elv_status,
+                l.page_url, l.landing_page, l.previous_page, l.referrer,
+                l.utm_source, l.utm_medium, l.utm_campaign, l.utm_content, l.utm_term,
+                l.fbc, l.fbp, l.step_reached, l.completed,
+                l.delivered, l.delivered_at, l.delivery_note,
+                l.capi_contact_sent, l.submitted_at, l.created_at,
+                -- how many separate sessions this address has produced
+                (SELECT COUNT(*)::int FROM lead_magnet_leads a
+                  WHERE a.email = l.email) AS attempts,
+                CASE
+                  WHEN l.completed AND l.delivered     THEN 'sent'
+                  WHEN l.completed                     THEN 'awaiting'
+                  ELSE 'abandoned'
+                END AS status
+           FROM lead_magnet_leads l
+          WHERE l.email IS NOT NULL
+            AND l.created_at > NOW() - INTERVAL '${days} days'
+          ORDER BY COALESCE(l.submitted_at, l.created_at) DESC
+          LIMIT $1`,
         [limit]
       );
       res.json({ leads: rows });
     } catch (err) {
       console.error('[LM /monitor/lm-leads]', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /* Mark-sent from the dashboard. Guarded by MONITOR_TOKEN rather than
+     LM_QUEUE_TOKEN so the tab works without embedding the team's API token
+     in the page source. */
+  router.post('/monitor/lm-delivered/:id', monitorAuth, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return res.status(400).json({ error: 'valid id required' });
+    const undo = req.query.undo === '1';
+    try {
+      const { rowCount } = await pool.query(
+        undo
+          ? `UPDATE lead_magnet_leads SET delivered = false, delivered_at = NULL,
+                    updated_at = NOW() WHERE id = $1`
+          : `UPDATE lead_magnet_leads SET delivered = true, delivered_at = NOW(),
+                    updated_at = NOW() WHERE id = $1 AND completed = true`,
+        [id]
+      );
+      res.json({ ok: true, updated: rowCount });
+    } catch (err) {
+      console.error('[LM /monitor/lm-delivered]', err.message);
       res.status(500).json({ error: err.message });
     }
   });
