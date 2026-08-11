@@ -1611,6 +1611,8 @@ app.get('/monitor', (req, res) => {
   'lmCell("Landing page",l.landing_page,1)+lmCell("Previous page",l.previous_page,1)+lmCell("Form page",l.page_url,1)+' +
   'lmCell("Meta fbc",l.fbc)+lmCell("Meta fbp",l.fbp)+' +
   'lmCell("Meta Contact sent",l.capi_contact_sent?"Yes":"No")+' +
+  'lmCell("Loops",l.loops_sent?("Sent "+lmIST(l.loops_sent_at)):(l.loops_error?("Failed: "+l.loops_error):"Not sent"))+' +
+  '(l.loops_error||(!l.loops_sent&&l.completed)?lmCell("Retry","<button class=\\"btn\\" onclick=\\"lmLoopsRetry("+l.id+")\\">Push to Loops</button>"):"")+' +
   'lmCell("Submitted",lmIST(l.submitted_at))+lmCell("First seen",lmIST(l.created_at))+' +
   'lmCell("Delivered at",lmIST(l.delivered_at))+' +
   'lmCell("Session ID",l.session_id)+"</div>";}' +
@@ -1618,6 +1620,10 @@ app.get('/monitor', (req, res) => {
   'var vis=r.style.display!=="none";r.style.display=vis?"none":"table-row";' +
   'var x=document.getElementById("lm-x-"+i);if(x)x.innerHTML=vis?"&#9654;":"&#9660;";}' +
 
+  'async function lmLoopsRetry(id){' +
+  'try{var r=await fetch(API+"/monitor/lm-loops-retry/"+id+TP,{method:"POST"});var d=await r.json();' +
+  'alert(d.ok?"Pushed to Loops":"Failed: "+(d.error||"unknown"));loadLM();' +
+  '}catch(e){alert("Retry failed: "+e.message);}}' +
   'async function lmMark(id,undo){' +
   'try{var u=API+"/monitor/lm-delivered/"+id+(TP?TP+"&":"?")+(undo?"undo=1":"undo=0");' +
   'var r=await fetch(u,{method:"POST"});if(!r.ok)throw new Error("HTTP "+r.status);' +
