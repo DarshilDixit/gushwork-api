@@ -1368,7 +1368,11 @@ app.get('/monitor', (req, res) => {
   '</div>' +
   '<div class="tp" id="tp-lm">' +
 
-  '<div class="sl">Funnel &#8212; last 30 days</div>' +
+  '<div class="sl">Funnel' +
+  '<select id="lm-days" onchange="loadLM()" style="float:right;padding:4px 8px;border:1px solid #e5e5e5;border-radius:6px;font-size:12px">' +
+  '<option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option>' +
+  '<option value="90">Last 90 days</option><option value="365">Last year</option></select></div>' +
+  '<div class="ms" id="lm-people" style="margin:-4px 0 10px">&nbsp;</div>' +
   '<div class="g4">' +
   '<div class="mc"><div class="ml">Page views</div><div class="mv" id="lm-views">&#8212;</div><div class="ms">people who loaded the LP</div></div>' +
   '<div class="mc"><div class="ml">Form opened</div><div class="mv" id="lm-opens">&#8212;</div><div class="ms" id="lm-opens-r">&#8212;</div></div>' +
@@ -1510,10 +1514,13 @@ app.get('/monitor', (req, res) => {
   '"<div style=\\"width:96px;text-align:right;font-size:13px\\"><b>"+lost+"</b> <span style=\\"color:#888\\">("+p+"%)</span></div></div>";}' +
 
   'async function loadLM(){' +
-  'try{var r=await fetch(API+"/monitor/lm-metrics"+TP,{cache:"no-store"});var d=await r.json();var f=d.funnel||{};' +
+  'var dsel=document.getElementById("lm-days");var dq=(TP?TP+"&":"?")+"days="+(dsel?dsel.value:30);' +
+  'try{var r=await fetch(API+"/monitor/lm-metrics"+dq,{cache:"no-store"});var d=await r.json();var f=d.funnel||{};' +
   'var v=+f.views||0,o=+f.modal_opens||0,e=+f.emails||0,sb=+f.submitted||0;' +
   'set("lm-views",v);set("lm-opens",o);set("lm-emails",e);set("lm-submitted",sb);' +
   'set("lm-opens-r",lmPct(o,v)+" of views");set("lm-emails-r",lmPct(e,o)+" of opens");set("lm-submitted-r",lmPct(sb,e)+" of emails");' +
+  'var pp=+f.people||0,ps=+f.people_submitted||0,pa=+f.people_abandoned||0;' +
+  'set("lm-people","Sessions = visits \u00B7 People = distinct emails. "+pp+" people entered an email \u2014 "+ps+" completed, "+pa+" did not.");' +
   'document.getElementById("lm-dropoff").innerHTML=' +
   'lmDrop("Left without opening the form",(+f.bounced_before_open||0),v,"Saw the page, never clicked a CTA")+' +
   'lmDrop("Opened the form, no email",(+f.opened_no_email||0),o,"Modal opened but no valid email entered")+' +
@@ -1534,7 +1541,7 @@ app.get('/monitor', (req, res) => {
   '{label:"Submitted",data:dy.map(function(x){return x.submitted;}),borderColor:"#1a1a1a",backgroundColor:"#1a1a1a",tension:0.25,pointRadius:0,borderWidth:2}]},' +
   'options:{responsive:true,interaction:{mode:"index",intersect:false},plugins:{legend:{display:true,labels:{boxWidth:10,font:{size:11}}}},scales:{y:{beginAtZero:true,ticks:{precision:0}}}}});}' +
   '}catch(err){console.warn("[LM] metrics failed",err);}' +
-  'try{var r2=await fetch(API+"/monitor/lm-leads"+TP,{cache:"no-store"});var d2=await r2.json();lmLeads=d2.leads||[];lmRender();' +
+  'try{var r2=await fetch(API+"/monitor/lm-leads"+dq,{cache:"no-store"});var d2=await r2.json();lmLeads=d2.leads||[];lmRender();' +
   '}catch(e2){document.getElementById("lm-tbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\">Failed to load</td></tr>";}}' +
 
   'function lmMatch(l){' +
