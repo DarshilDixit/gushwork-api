@@ -1392,9 +1392,11 @@ app.get('/monitor', (req, res) => {
 
   '<div class="g2">' +
   '<div class="card"><div class="sl">Where they entered from</div>' +
-  '<div class="ms" style="margin-bottom:8px">Which CTA opened the form, and how many of those went on to submit.</div>' +
+  '<div class="ms" style="margin-bottom:10px">Which CTA opened the form, and how many of those went on to submit.</div>' +
   '<div id="lm-entries"><div class="nd">Loading...</div></div>' +
-  '<div class="sl" style="margin-top:14px">Email type</div><div id="lm-emailtype"><div class="nd">Loading...</div></div></div>' +
+  '<div style="height:1px;background:#f0f0f0;margin:16px 0"></div>' +
+  '<div class="sl" style="margin-top:0">Email type</div>' +
+  '<div style="margin-top:8px" id="lm-emailtype"><div class="nd">Loading...</div></div></div>' +
   '<div class="card"><div class="sl">Custom categories entered</div>' +
   '<div class="ms" style="margin-bottom:8px">What people typed when the list did not fit. Feed recurring ones back into the dropdown.</div>' +
   '<div id="lm-custom"><div class="nd">Loading...</div></div></div>' +
