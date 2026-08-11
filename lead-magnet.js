@@ -19,6 +19,7 @@
 const express = require('express');
 const dnsPromises = require('dns').promises;
 const { pushContactToMeta } = require('./meta-capi');
+const { pushContactToLoops, ensureLoopsProperties, testLoopsKey } = require('./loops');
 
 /* Row is created at page load, so most rows have no email. That is the
    point — they are the funnel denominator. Everything that reads this
@@ -318,6 +319,36 @@ module.exports = function createLeadMagnetRouter(deps) {
         )
         .catch((err) => console.warn('[LM] Meta Contact failed (non-blocking):', err.message));
 
+      /* Loops. Fire-and-forget like the Meta call — a Loops outage must
+         never hold up someone's thanks screen or lose the lead, which is
+         already committed to Postgres by this point. */
+      const leadForLoops = {
+        id: row.id,
+        email: p.email,
+        website: resolveWebsite(p.email, p.website, isFree(p.email)).website,
+        website_source: resolveWebsite(p.email, p.website, isFree(p.email)).website_source,
+        industry_category: p.industry_category,
+        industry_is_custom: p.industry_is_custom,
+        product_or_service: p.product_or_service,
+        sell_to: p.sell_to,
+        is_free_email: isFree(p.email),
+        entry_point: p.entry_point,
+        utm_source: p.utm_source,
+        utm_campaign: p.utm_campaign,
+      };
+      pushContactToLoops(leadForLoops)
+        .then((r) =>
+          pool.query(
+            `UPDATE lead_magnet_leads
+                SET loops_sent = $2, loops_sent_at = CASE WHEN $2 THEN NOW() ELSE loops_sent_at END,
+                    loops_contact_id = COALESCE($3, loops_contact_id),
+                    loops_error = $4, updated_at = NOW()
+              WHERE id = $1`,
+            [row.id, r.ok === true, r.contactId || null, r.ok ? (r.eventError || null) : (r.error || null)]
+          )
+        )
+        .catch((err) => console.warn('[LM] Loops push failed (non-blocking):', err.message));
+
       sendWebhook({
         id: row.id,
         session_id: p.session_id,
@@ -328,6 +359,9 @@ module.exports = function createLeadMagnetRouter(deps) {
         product_or_service: p.product_or_service,
         sell_to: p.sell_to,
         is_free_email: isFree(p.email),
+        entry_point: p.entry_point,
+        utm_source: p.utm_source,
+        utm_campaign: p.utm_campaign,
         submitted_at: new Date().toISOString(),
       });
 
@@ -509,7 +543,8 @@ module.exports = function createLeadMagnetRouter(deps) {
                 l.utm_source, l.utm_medium, l.utm_campaign, l.utm_content, l.utm_term,
                 l.fbc, l.fbp, l.step_reached, l.completed,
                 l.delivered, l.delivered_at, l.delivery_note,
-                l.capi_contact_sent, l.submitted_at, l.created_at,
+                l.capi_contact_sent, l.loops_sent, l.loops_sent_at, l.loops_error,
+                l.submitted_at, l.created_at,
                 -- how many separate sessions this address has produced
                 (SELECT COUNT(*)::int FROM lead_magnet_leads a
                   WHERE a.email = l.email) AS attempts,
@@ -555,8 +590,53 @@ module.exports = function createLeadMagnetRouter(deps) {
     }
   });
 
+  router.get('/monitor/lm-loops-health', monitorAuth, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      const [key, stats] = await Promise.all([
+        testLoopsKey(),
+        pool.query(`SELECT COUNT(*) FILTER (WHERE loops_sent) AS sent,
+                           COUNT(*) FILTER (WHERE completed AND NOT loops_sent AND is_internal IS NOT TRUE) AS pending,
+                           COUNT(*) FILTER (WHERE loops_error IS NOT NULL) AS errored
+                      FROM lead_magnet_leads`),
+      ]);
+      res.json({ key, counts: stats.rows[0] });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /* Re-push a single lead. Loops is the one downstream that can fail
+     silently for a specific person, so there has to be a way to fix one
+     row without replaying the whole queue. */
+  router.post('/monitor/lm-loops-retry/:id', monitorAuth, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return res.status(400).json({ error: 'valid id required' });
+    try {
+      const { rows } = await pool.query(
+        `SELECT id, email, website, website_source, industry_category, industry_is_custom,
+                product_or_service, sell_to, is_free_email, entry_point, utm_source, utm_campaign
+           FROM lead_magnet_leads WHERE id = $1 AND completed = true`, [id]);
+      if (!rows.length) return res.status(404).json({ error: 'lead not found or not completed' });
+      const r = await pushContactToLoops(rows[0]);
+      await pool.query(
+        `UPDATE lead_magnet_leads
+            SET loops_sent = $2, loops_sent_at = CASE WHEN $2 THEN NOW() ELSE loops_sent_at END,
+                loops_contact_id = COALESCE($3, loops_contact_id),
+                loops_error = $4, updated_at = NOW()
+          WHERE id = $1`,
+        [id, r.ok === true, r.contactId || null, r.ok ? (r.eventError || null) : (r.error || null)]);
+      res.json(r);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  ensureLoopsProperties().catch(() => {});
+
   console.log('[LM] Lead-magnet routes mounted — /lm/track, /lm/submit, /lm/queue' +
-              (process.env.LM_WEBHOOK_URL ? ' | webhook ON' : ' | webhook off (LM_WEBHOOK_URL unset)'));
+              (process.env.LM_WEBHOOK_URL ? ' | webhook ON' : ' | webhook off') +
+              (process.env.LOOPS_API_KEY ? ' | Loops ON' : ' | Loops off'));
 
   return router;
 };
