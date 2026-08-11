@@ -251,6 +251,10 @@ async function initDB() {
       // Lead magnet — add new columns here, same pattern as above
       `ALTER TABLE lead_magnet_leads ADD COLUMN IF NOT EXISTS website_source TEXT`,
       `ALTER TABLE lead_magnet_leads ADD COLUMN IF NOT EXISTS entry_point TEXT`,
+      `ALTER TABLE lead_magnet_leads ADD COLUMN IF NOT EXISTS loops_sent BOOLEAN DEFAULT FALSE`,
+      `ALTER TABLE lead_magnet_leads ADD COLUMN IF NOT EXISTS loops_sent_at TIMESTAMPTZ`,
+      `ALTER TABLE lead_magnet_leads ADD COLUMN IF NOT EXISTS loops_contact_id TEXT`,
+      `ALTER TABLE lead_magnet_leads ADD COLUMN IF NOT EXISTS loops_error TEXT`,
     ];
 
     for (const sql of migrations) {
