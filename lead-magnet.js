@@ -116,6 +116,7 @@ function readPayload(body) {
     product_or_service: s(body.product_or_service, 300),
     sell_to: s(body.sell_to, 50),
     elv_status: s(body.elv_status, 50),
+    entry_point: s(body.entry_point, 60),
     page_url: s(body.page_url, 500),
     landing_page: s(body.landing_page, 500),
     previous_page: s(body.previous_page, 500),
@@ -135,10 +136,10 @@ const UPSERT_SQL = `
   INSERT INTO lead_magnet_leads
     (session_id, linked_session_id, email, is_free_email, is_internal, website, website_source,
      industry_category, industry_is_custom, product_or_service, sell_to,
-     elv_status, elv_checked_at, page_url, landing_page, previous_page, referrer,
+     elv_status, elv_checked_at, entry_point, page_url, landing_page, previous_page, referrer,
      utm_source, utm_medium, utm_campaign, utm_content, utm_term,
      fbc, fbp, user_agent, step_reached, completed, submitted_at, updated_at)
-  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,NOW())
+  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,NOW())
   ON CONFLICT (session_id) DO UPDATE SET
     linked_session_id  = COALESCE(EXCLUDED.linked_session_id,  lead_magnet_leads.linked_session_id),
     email              = COALESCE(EXCLUDED.email,              lead_magnet_leads.email),
@@ -152,6 +153,8 @@ const UPSERT_SQL = `
     sell_to            = COALESCE(EXCLUDED.sell_to,            lead_magnet_leads.sell_to),
     elv_status         = COALESCE(EXCLUDED.elv_status,         lead_magnet_leads.elv_status),
     elv_checked_at     = COALESCE(EXCLUDED.elv_checked_at,     lead_magnet_leads.elv_checked_at),
+    -- first entry point wins: where they came IN is not overwritten later
+    entry_point        = COALESCE(lead_magnet_leads.entry_point, EXCLUDED.entry_point),
     page_url           = COALESCE(EXCLUDED.page_url,           lead_magnet_leads.page_url),
     landing_page       = COALESCE(EXCLUDED.landing_page,       lead_magnet_leads.landing_page),
     previous_page      = COALESCE(EXCLUDED.previous_page,      lead_magnet_leads.previous_page),
@@ -197,6 +200,7 @@ module.exports = function createLeadMagnetRouter(deps) {
       p.sell_to || null,
       p.elv_status || null,
       p.elv_status ? new Date() : null,
+      p.entry_point || null,
       p.page_url || null,
       p.landing_page || null,
       p.previous_page || null,
@@ -411,7 +415,7 @@ module.exports = function createLeadMagnetRouter(deps) {
     const days = Math.min(parseInt(req.query.days, 10) || 30, 365);
     const scope = `created_at > NOW() - INTERVAL '${days} days' AND is_internal IS NOT TRUE`;
     try {
-      const [funnel, industries, custom, daily] = await Promise.all([
+      const [funnel, industries, custom, daily, entries] = await Promise.all([
         pool.query(`
           SELECT
             COUNT(*)                                                AS views,
@@ -431,7 +435,11 @@ module.exports = function createLeadMagnetRouter(deps) {
                visitor silently inflates every number on the page. */
             COUNT(DISTINCT email)                                   AS people,
             COUNT(DISTINCT email) FILTER (WHERE completed)           AS people_submitted,
-            COUNT(DISTINCT email) FILTER (WHERE email IS NOT NULL AND NOT completed)
+            /* People who NEVER completed — not "people with an incomplete
+               session". Someone who abandons Monday and completes Friday
+               belongs only in people_submitted, else the two overlap and
+               the totals stop adding up. */
+            COUNT(DISTINCT email) - COUNT(DISTINCT email) FILTER (WHERE completed)
               AS people_abandoned
           FROM lead_magnet_leads WHERE ${scope}`),
         /* Custom entries count too. Excluding them made the panel read
@@ -464,12 +472,20 @@ module.exports = function createLeadMagnetRouter(deps) {
               ON date_trunc('day', l.created_at) = d.day
              AND l.is_internal IS NOT TRUE
            GROUP BY d.day ORDER BY d.day`),
+        pool.query(`
+          SELECT COALESCE(entry_point, 'unknown') AS label,
+                 COUNT(*)::int                             AS n,
+                 COUNT(*) FILTER (WHERE completed)::int    AS completed
+            FROM lead_magnet_leads
+           WHERE ${scope} AND step_reached >= 2
+           GROUP BY 1 ORDER BY n DESC LIMIT 10`),
       ]);
       res.json({
         funnel: funnel.rows[0],
         industries: industries.rows,
         custom_categories: custom.rows,
         daily: daily.rows,
+        entry_points: entries.rows,
       });
     } catch (err) {
       console.error('[LM /monitor/lm-metrics]', err.message);
@@ -488,7 +504,7 @@ module.exports = function createLeadMagnetRouter(deps) {
       const { rows } = await pool.query(
         `SELECT l.id, l.session_id, l.email, l.website, l.website_source,
                 l.industry_category, l.industry_is_custom, l.product_or_service,
-                l.sell_to, l.is_free_email, l.is_internal, l.elv_status,
+                l.sell_to, l.is_free_email, l.is_internal, l.elv_status, l.entry_point,
                 l.page_url, l.landing_page, l.previous_page, l.referrer,
                 l.utm_source, l.utm_medium, l.utm_campaign, l.utm_content, l.utm_term,
                 l.fbc, l.fbp, l.step_reached, l.completed,
