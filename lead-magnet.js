@@ -425,7 +425,14 @@ module.exports = function createLeadMagnetRouter(deps) {
             COUNT(*) FILTER (WHERE completed AND is_free_email)     AS free_email,
             COUNT(*) FILTER (WHERE completed AND NOT is_free_email) AS business_email,
             COUNT(*) FILTER (WHERE completed AND NOT delivered)     AS pending_delivery,
-            COUNT(*) FILTER (WHERE completed AND delivered)         AS sent
+            COUNT(*) FILTER (WHERE completed AND delivered)         AS sent,
+            /* People, not sessions. One person retrying three times is three
+               sessions but one person — without this split, a single repeat
+               visitor silently inflates every number on the page. */
+            COUNT(DISTINCT email)                                   AS people,
+            COUNT(DISTINCT email) FILTER (WHERE completed)           AS people_submitted,
+            COUNT(DISTINCT email) FILTER (WHERE email IS NOT NULL AND NOT completed)
+              AS people_abandoned
           FROM lead_magnet_leads WHERE ${scope}`),
         /* Custom entries count too. Excluding them made the panel read
            "No data yet" while real leads existed — the tag tells you which
