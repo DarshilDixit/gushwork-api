@@ -1391,7 +1391,10 @@ app.get('/monitor', (req, res) => {
   '</div>' +
 
   '<div class="g2">' +
-  '<div class="card"><div class="sl">Email type</div><div id="lm-emailtype"><div class="nd">Loading...</div></div></div>' +
+  '<div class="card"><div class="sl">Where they entered from</div>' +
+  '<div class="ms" style="margin-bottom:8px">Which CTA opened the form, and how many of those went on to submit.</div>' +
+  '<div id="lm-entries"><div class="nd">Loading...</div></div>' +
+  '<div class="sl" style="margin-top:14px">Email type</div><div id="lm-emailtype"><div class="nd">Loading...</div></div></div>' +
   '<div class="card"><div class="sl">Custom categories entered</div>' +
   '<div class="ms" style="margin-bottom:8px">What people typed when the list did not fit. Feed recurring ones back into the dropdown.</div>' +
   '<div id="lm-custom"><div class="nd">Loading...</div></div></div>' +
@@ -1530,6 +1533,13 @@ app.get('/monitor', (req, res) => {
   'document.getElementById("lm-inds").innerHTML=lmBars(d.industries||[],sb);' +
   'var fr=+f.free_email||0,bz=+f.business_email||0;' +
   'document.getElementById("lm-emailtype").innerHTML=lmBars([{label:"Business email",n:bz},{label:"Free mailbox",n:fr}],fr+bz);' +
+  'var eps=d.entry_points||[];var epMax=eps.length?eps[0].n:0;' +
+  'document.getElementById("lm-entries").innerHTML=eps.length?eps.map(function(x){' +
+  'var w=epMax>0?Math.round(x.n/epMax*100):0;var cvr=x.n>0?Math.round(x.completed/x.n*100):0;' +
+  'return "<div style=\\"margin-bottom:9px\\"><div style=\\"display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px\\">"+' +
+  '"<span>"+esc(x.label)+"</span><span style=\\"color:#888\\">"+x.n+" opens \\u00B7 "+cvr+"% submitted</span></div>"+' +
+  '"<div style=\\"height:6px;background:#f0f0f0;border-radius:3px;overflow:hidden\\"><div style=\\"height:100%;width:"+w+"%;background:#1a1a1a\\"></div></div></div>";' +
+  '}).join(""):"<div class=\\"nd\\">No opens recorded yet \\u2014 needs the v4.4 embed.</div>";' +
   'var cc=d.custom_categories||[];' +
   'document.getElementById("lm-custom").innerHTML=cc.length?cc.map(function(x){' +
   'return "<div style=\\"display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0f0;font-size:13px\\"><span>"+esc(x.label)+"</span><span style=\\"color:#888\\">"+x.n+"</span></div>";}).join(""):' +
@@ -1591,7 +1601,7 @@ app.get('/monitor', (req, res) => {
   'function lmDetail(l){' +
   'return "<div style=\\"display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;padding:10px 0\\">"+' +
   'lmCell("Attempts",l.attempts>1?l.attempts+" sessions from this email":"First attempt")+' +
-  'lmCell("ELV status",l.elv_status)+' +
+  'lmCell("Entered from",l.entry_point)+lmCell("ELV status",l.elv_status)+' +
   'lmCell("Reached step",l.step_reached+" of 4")+' +
   'lmCell("UTM source",l.utm_source)+lmCell("UTM medium",l.utm_medium)+' +
   'lmCell("UTM campaign",l.utm_campaign)+lmCell("UTM content",l.utm_content)+lmCell("UTM term",l.utm_term)+' +
@@ -1615,7 +1625,7 @@ app.get('/monitor', (req, res) => {
   '}catch(e){alert("Could not update: "+e.message);}}' +
 
   'function lmCsv(){var rows0=lmSearched();if(!rows0.length)return;' +
-  'var cols=["email","status","industry_category","industry_is_custom","product_or_service","sell_to","website","website_source","is_free_email","elv_status","attempts","utm_source","utm_medium","utm_campaign","utm_content","utm_term","referrer","landing_page","previous_page","page_url","submitted_at","delivered","delivered_at","session_id"];' +
+  'var cols=["email","status","industry_category","industry_is_custom","product_or_service","sell_to","website","website_source","is_free_email","elv_status","entry_point","attempts","utm_source","utm_medium","utm_campaign","utm_content","utm_term","referrer","landing_page","previous_page","page_url","submitted_at","delivered","delivered_at","session_id"];' +
   'var Q=String.fromCharCode(34);' +
   'var q=function(v){return Q+String(v==null?"":v).split(Q).join(Q+Q)+Q;};' +
   'var out=[cols.join(",")].concat(rows0.map(function(l){return cols.map(function(c){return q(l[c]);}).join(",");}));' +
