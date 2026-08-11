@@ -250,6 +250,7 @@ async function initDB() {
       `ALTER TABLE enrichment_data ADD COLUMN IF NOT EXISTS enriched_funding_stage TEXT`,
       // Lead magnet — add new columns here, same pattern as above
       `ALTER TABLE lead_magnet_leads ADD COLUMN IF NOT EXISTS website_source TEXT`,
+      `ALTER TABLE lead_magnet_leads ADD COLUMN IF NOT EXISTS entry_point TEXT`,
     ];
 
     for (const sql of migrations) {
