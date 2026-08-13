@@ -1,5 +1,26 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.2.0  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.3.0  (/demo PAGE VERSION - thru github/jsdlivr)
+
+  v5.3.0 — WEBSITE CHECK: DNS narrows, HTTP decides.
+    Registrar parking IPs and nameservers are SHARED with registrar URL
+    forwarding, so DNS alone cannot tell a for-sale lander from a working
+    forward to the owner's real site. Stage 1 therefore no longer returns a
+    terminal parked verdict — it returns a HINT, and the server-side content
+    check (which follows redirects and measures the page) decides. Real
+    content always outranks a DNS hint.
+      - Removed '216.198.79.1' from the parking list: it is VERCEL's anycast
+        apex IP, not a Hostinger placeholder. It had been silently marking
+        live Vercel-hosted businesses as parked and suppressing their Meta
+        events (ryanlaw.us, tupii.co, grannyathome.com, infinitytech.rw).
+      - Stage 2 now also arbitrates a parking hint. Previously it ran only on
+        'resolved', so adding '103.224.182.' to the IP list made the browser
+        User-Agent fix — written specifically to rescue afgmmoving.com —
+        unreachable for afgmmoving.com.
+      - Website typo suggester: Damerau-Levenshtein against the lead's own
+        email domain, plus a wrong-TLD map, rendered as a tappable one-tap
+        fix. suggestUrlFix() only ever handled a completely missing dot.
+      - NXDOMAIN safety valve: if the typed website domain IS the lead's
+        verified email domain, the domain provably exists — never block.
 
   /* --------------------------------------------------------
   INJECT STYLES
@@ -450,7 +471,16 @@
     // Missing-dot typo recovery: malbecgrillcom -> malbecgrill.com.
     // Only 3+ char TLDs, so we never produce silly suggestions like
     // mumbai -> mumb.ai. Returns '' when there's nothing confident to say.
-    const TYPO_TLDS = ['online', 'store', 'tech', 'site', 'info', 'com', 'net', 'org', 'biz', 'app', 'dev', 'xyz'];
+    // v5.3.0: was 12 entries with no country TLDs at all, so a missing dot on
+    // e.g. "acmeco.us" or "acme.io" could not be suggested. Sorted longest
+    // first at match time, so 'online' still wins over 'in'.
+    // Two-letter entries are safe only because suggestUrlFix() requires the
+    // host to be longer than the TLD + 1, which stops absurd splits.
+    const TYPO_TLDS = [
+      'online', 'store', 'agency', 'digital', 'tech', 'site', 'info', 'shop', 'cloud',
+      'com', 'net', 'org', 'biz', 'app', 'dev', 'xyz', 'pro', 'ltd', 'inc',
+      'io', 'ai', 'co', 'us', 'uk', 'in', 'ca', 'au', 'nz', 'de', 'fr', 'es', 'it', 'nl', 'me', 'tv',
+    ];
 
     function suggestUrlFix(raw) {
       try {
@@ -609,19 +639,32 @@
     }
 
     /* =======================================================
-    SECTION 3C — WEBSITE EXISTENCE CHECK (client-side DoH)
-    Fully front-end — nothing touches Railway/Slack/monitor.
-    DNS-over-HTTPS via dns.google, cloudflare-dns.com fallback
-    (both free, CORS-enabled, no key). Hard blocks:
-      1. Free-mailbox domain typed as website (gmail.com...)
-      2. Brand domain that doesn't match the lead's email domain
-      3. NXDOMAIN — domain doesn't exist (www. variant retried)
-      4. Parked domain — resolved IP in a known registrar
-         parking range (Namecheap/GoDaddy/Sedo/ParkingCrew/...)
+    SECTION 3C — WEBSITE EXISTENCE CHECK
+    STAGE 1 (here, client-side DoH via dns.google with a
+    cloudflare-dns.com fallback — both free, CORS-enabled, no key).
+    STAGE 2 is the server-side content check at /verify-website.
+
+    HARD BLOCKS (WEBSITE_BLOCKING_REASONS, unchanged since July 2026 —
+    each means "this is not a website you own"):
+      1. mailbox_domain  — free-mailbox domain typed as a website
+      2. brand_mismatch  — brand domain not matching the email domain
+      3. nxdomain        — domain does not exist (www. variant retried,
+                           BOTH resolvers must agree, and it is waived
+                           when the domain is the lead's own verified
+                           email domain — see nxdomain_contradicted)
+
+    NOT a block, only a FLAG (v5.3.0): parking. A registrar parking IP
+    or nameserver is shared with registrar URL FORWARDING, so DNS cannot
+    distinguish a for-sale lander from a working forward to the owner's
+    real site. Stage 1 therefore emits a `parkingHint` and stage 2, which
+    follows redirects and measures the page, returns the verdict.
+    Real content always outranks the hint.
+
     Allows: email-only companies (MX records but no A record).
-    Fail-open on any DoH/network error — a validation outage
-    must never lose a real lead (same policy as ELV).
-    Verdicts cached per domain; blur prewarms so Next is instant.
+    Fail-open on any DoH/network error — a validation outage must never
+    lose a real lead (same policy as ELV).
+    Base verdicts cached per domain; email-dependent rules recomputed
+    every call. Blur prewarms so the Next click is a cache hit.
     ======================================================= */
 
     const _websiteVerdicts = new Map(); // domain -> {ok, reason, msg}
@@ -656,11 +699,31 @@
       }
     }
 
-    // Known registrar parking / domain-for-sale IP ranges.
-    // 3-octet entries are prefix matches; full IPs are exact.
-    const PARKING_IP_PREFIXES = [
-      '162.255.119.', // Namecheap parking / URL-forwarding
+    /* v5.3.0 — THESE ARE HINTS, NOT VERDICTS.
+       Registrar parking IPs are shared with registrar URL-FORWARDING. The same
+       Above.com IP serves a for-sale lander and a working forward to the
+       owner's real site (afgmmoving.com -> afewgoodmenmoving.com); the same
+       GoDaddy anycast pair serves a parked placeholder and a plain redirect.
+       DNS cannot tell those apart — only the HTTP redirect destination can.
+       So a match here no longer decides anything. It sets `parkingHint`, and
+       the server-side content check (which follows redirects and measures the
+       page) returns the authoritative verdict. Real content always wins.
+
+       That inversion is what makes this list SAFE to extend, and why a bad
+       entry can no longer cost a lead its Meta event. Removed in v5.3.0:
+         '216.198.79.1' — commented as a "Hostinger placeholder". It is
+         actually VERCEL's anycast apex IP (216.198.79.0/24 is Vercel-owned),
+         so every lead whose site is deployed on modern Vercel was stamped
+         "parked": ryanlaw.us, tupii.co, grannyathome.com, infinitytech.rw —
+         all live businesses, all of whom booked a demo. Note that Vercel's
+         other apex IP (64.29.17.1) was never in the list, so the flag fired
+         at random depending on resolver ordering.
+       3-octet entries are prefix matches; full IPs are exact. */
+    const PARKING_IP_HINTS = [
+      '162.255.119.', // Namecheap parking / URL-forwarding (shared with real hosting)
       '34.102.136.180', // GoDaddy parking (exact IP)
+      '3.33.130.190', // GoDaddy parking / forwarding anycast (exact IP)
+      '15.197.148.33', // GoDaddy parking / forwarding anycast (exact IP)
       '91.195.240.', // Sedo
       '91.195.241.', // Sedo
       '185.53.177.', // ParkingCrew
@@ -669,8 +732,7 @@
       '199.59.242.', // Bodis
       '199.59.243.', // Bodis
       '208.91.197.', // Confluence Networks parking
-      '216.198.79.1', // Hostinger 'website not configured' placeholder (exact IP)
-      '103.224.182.', // Trellian / Above.com parking (caught afgmmoving.com)
+      '103.224.182.', // Trellian / Above.com parking AND forwarding
     ];
 
     // Nameservers used ONLY for parking / domain-sale landers → always block.
@@ -702,6 +764,85 @@
 
     function emailDomainOf(email) {
       return ((email || '').split('@')[1] || '').toLowerCase();
+    }
+
+    /* =======================================================
+    SECTION 3D — WEBSITE DOMAIN TYPO SUGGESTER (v5.3.0)
+
+    suggestUrlFix() (SECTION 2) only handles a COMPLETELY MISSING DOT
+    ("malbecgrillcom" -> "malbecgrill.com") and runs pre-DNS as a format
+    error. It cannot help the cases that actually reach a hard NXDOMAIN
+    block, all of which are well-formed URLs:
+      - misspelled second level: "chrishenenssyteam.com", typed by
+        chris@chrishennessyteam.com. Comparing against the lead's OWN
+        email domain is the highest-precision signal available and was
+        going unused.
+      - wrong TLD: ".con" / ".cmo" / ".ocm" pass isValidURL (they match
+        [a-z]{2,}), reach DNS, and hard-block with no suggestion offered.
+
+    Mirrors the server-side suggestDomainFix() in index.js. Duplicated
+    deliberately: the NXDOMAIN verdict is computed client-side, and a
+    round trip on a blocking path would cost the lead a visible delay.
+    Keep the two in step if either is edited.
+    ======================================================= */
+
+    function damerauLevenshtein(a, b) {
+      // Transposition counts as ONE edit — swapping adjacent letters
+      // (hennessy/henenssy) is the commonest typing slip and plain
+      // Levenshtein scores it 2, which would miss it.
+      const m = a.length, n = b.length;
+      if (Math.abs(m - n) > 3) return 99;
+      const d = [];
+      for (let i = 0; i <= m; i++) { d[i] = new Array(n + 1).fill(0); d[i][0] = i; }
+      for (let j = 0; j <= n; j++) d[0][j] = j;
+      for (let i = 1; i <= m; i++) {
+        for (let j = 1; j <= n; j++) {
+          const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+          d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+          if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+            d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + cost);
+          }
+        }
+      }
+      return d[m][n];
+    }
+
+    // Mistyped TLDs, longest key first at match time so '.co.m' can't be
+    // shadowed by a shorter key. Values must be real TLDs.
+    const WEBSITE_BAD_TLDS = {
+      '.con': '.com', '.cmo': '.com', '.ocm': '.com', '.vom': '.com', '.xom': '.com',
+      '.comm': '.com', '.copm': '.com', '.co.m': '.com', '.cim': '.com', '.cpm': '.com',
+      '.ner': '.net', '.nte': '.net', '.nett': '.net', '.het': '.net',
+      '.ogr': '.org', '.orgg': '.org', '.rog': '.org', '.or': '.org',
+      '.couk': '.co.uk', '.co.ku': '.co.uk',
+      '.iu': '.io', '.oi': '.io', '.ai.': '.ai',
+    };
+
+    function suggestWebsiteDomainFix(domain, emailDomain) {
+      const d = String(domain || '').toLowerCase().replace(/\.$/, '');
+      if (!d || d.indexOf('.') === -1) return '';
+
+      // 1. The lead's own email domain. Highest precision by far — if they
+      //    can receive mail at it, it exists, and a near-match on the
+      //    website field is almost certainly the same domain mistyped.
+      const ed = String(emailDomain || '').toLowerCase();
+      if (ed && ed !== d && ed.indexOf('.') !== -1 && PERSONAL_EMAIL_DOMAINS.indexOf(ed) === -1) {
+        const dist = damerauLevenshtein(d, ed);
+        // 1 edit always. 2 edits only on longer names, where two slips are
+        // proportionally small and a collision with a different real
+        // domain is much less likely.
+        if (dist === 1 || (dist === 2 && ed.length >= 10)) return ed;
+      }
+
+      // 2. Mistyped TLD. Longest suffix first so overlapping keys resolve
+      //    to the most specific match.
+      const bad = Object.keys(WEBSITE_BAD_TLDS).sort((a, b) => b.length - a.length);
+      for (let i = 0; i < bad.length; i++) {
+        if (d.length > bad[i].length && d.slice(-bad[i].length) === bad[i]) {
+          return d.slice(0, d.length - bad[i].length) + WEBSITE_BAD_TLDS[bad[i]];
+        }
+      }
+      return '';
     }
 
     function domainsMatch(a, b) {
@@ -738,6 +879,57 @@
     function hideWebsiteMismatchTip() {
       const tip = document.getElementById('website-mismatch-protip');
       if (tip) tip.style.display = 'none';
+    }
+
+    /* -------------------------------------------------------
+    Renders a website rejection, plus a tap-to-accept fix when a likely
+    typo was identified. Same interaction and same single-blue-control
+    rule as showEmailVerdictError() — the corrected domain itself is the
+    tap target, inline in the sentence, never a competing button.
+    ------------------------------------------------------- */
+    function showWebsiteVerdictError(verdict) {
+      const errEl = document.getElementById('website-error');
+      const websiteInput = document.getElementById('website');
+      const msg = verdict.msg || "This website doesn't appear to exist. Please check the URL.";
+
+      if (!verdict.suggestion || !errEl || !websiteInput) {
+        showError('website-error', msg);
+        return;
+      }
+
+      showError('website-error', msg); // sets state: red border, display block
+      const marker = 'Did you mean ';
+      if (msg.indexOf(marker) !== 0) return; // wording changed; leave as plain text
+
+      // DOM nodes, never innerHTML — the domain is user input and must
+      // never be parsed as markup.
+      errEl.textContent = '';
+      errEl.appendChild(document.createTextNode(marker));
+      const link = document.createElement('span');
+      link.id = 'website-suggestion';
+      link.className = 'gw-email-fix'; // reuse the existing underlined-link style
+      link.setAttribute('role', 'button');
+      link.setAttribute('tabindex', '0');
+      link.textContent = verdict.suggestion;
+      const apply = function () {
+        websiteInput.value = verdict.suggestion;
+        hideError('website-error');
+        websiteInput.dispatchEvent(new Event('input', { bubbles: true }));
+        websiteInput.focus();
+        // Re-check the corrected domain immediately so the cache is warm and
+        // Next doesn't stall. Cannot loop: the only email-domain suggestion
+        // resolves to 'nxdomain_contradicted' (a pass) if it is itself
+        // unresolvable, and a TLD fix always changes the string.
+        checkWebsite(verdict.suggestion).then(function (v) {
+          if (!v.ok && websiteInput.value.trim() === verdict.suggestion) showWebsiteVerdictError(v);
+        }).catch(function () { /* fail open, same as everywhere else */ });
+      };
+      link.addEventListener('click', apply);
+      link.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); apply(); }
+      });
+      errEl.appendChild(link);
+      errEl.appendChild(document.createTextNode('?'));
     }
 
     function updateWebsiteMismatchTip() {
@@ -886,25 +1078,40 @@
           return { ok: false, reason: 'nxdomain', msg: "This website doesn't appear to exist. Please check the URL." };
         }
 
-        // Parked — every path resolved, but into a known parking range
-        const parked = ips.some((ip) => PARKING_IP_PREFIXES.some((p) => (p.split('.').length === 4 && p.slice(-1) !== '.' ? ip === p : ip.indexOf(p) === 0)));
-        if (parked) {
-          return { ok: false, reason: 'parked', msg: "This doesn't appear to be a live company website. Please check the URL." };
+        // ── Parking HINTS (v5.3.0) ────────────────────────────────────
+        // Previously these returned a terminal `parked` / `parked_ns`
+        // verdict, which also meant stage 2 never ran (it only fires on
+        // 'resolved') — so the browser User-Agent added to the backend
+        // specifically to rescue afgmmoving.com became unreachable for
+        // afgmmoving.com the moment '103.224.182.' was added here. Two
+        // fixes for one bug, the second silently undoing the first.
+        // Now: collect a hint, let the content check decide.
+        let parkingHint = null;
+        const hintIp = ips.find((ip) => PARKING_IP_HINTS.some((p) => (p.split('.').length === 4 && p.slice(-1) !== '.' ? ip === p : ip.indexOf(p) === 0)));
+        if (hintIp) parkingHint = 'ip:' + hintIp;
+
+        // Nameserver fingerprint — sale pages sit on generic cloud IPs the
+        // IP list can't see. Fail-open if the query errors.
+        if (!parkingHint) {
+          const nsJson = await dohQuery(domain, 'NS').catch(() => null);
+          const nsHosts = nsJson ? (nsJson.Answer || []).filter((r) => r.type === 2).map((r) => String(r.data).toLowerCase().replace(/\.$/, '')) : [];
+          const nsMatches = (list) => nsHosts.reduce((acc, h) => acc || list.find((s) => h === s || h.endsWith('.' + s)) || null, null);
+          const strictHit = nsMatches(PARKING_NS_STRICT);
+          if (strictHit) parkingHint = 'ns:' + strictHit;
+          else {
+            const softHit = nsMatches(PARKING_NS_SOFT);
+            if (softHit) parkingHint = 'ns_soft:' + softHit;
+          }
         }
 
-        // For-sale lander via NAMESERVERS (v4.9.1) — sale pages sit on
-        // generic cloud IPs the IP list can't see, but the NS records
-        // fingerprint the parking service. Fail-open if the query errors.
-        const nsJson = await dohQuery(domain, 'NS').catch(() => null);
-        const nsHosts = nsJson ? (nsJson.Answer || []).filter((r) => r.type === 2).map((r) => String(r.data).toLowerCase().replace(/\.$/, '')) : [];
-        const nsMatches = (list) => nsHosts.some((h) => list.some((s) => h === s || h.endsWith('.' + s)));
-        if (nsMatches(PARKING_NS_STRICT)) {
-          return { ok: false, reason: 'parked_ns', msg: "This doesn't appear to be a live company website. Please check the URL." };
-        }
-        if (nsMatches(PARKING_NS_SOFT)) {
-          const softMxJson = await dohQuery(domain, 'MX').catch(() => null);
-          const softHasMX = !!(softMxJson && (softMxJson.Answer || []).some((r) => r.type === 15));
-          if (!softHasMX) return { ok: false, reason: 'parked_ns', msg: "This doesn't appear to be a live company website. Please check the URL." };
+        if (parkingHint) {
+          // MX is a liveness prior the backend uses to weigh a thin page: a
+          // genuine company domain virtually always receives email, a sale
+          // lander never does. Queried ONLY on the hint path, so the happy
+          // path costs no extra round trip.
+          const hintMxJson = await dohQuery(domain, 'MX').catch(() => null);
+          const hintHasMX = !!(hintMxJson && (hintMxJson.Answer || []).some((r) => r.type === 15));
+          return { ok: true, reason: 'parked_suspect', parkingHint, hasMX: hintHasMX };
         }
 
         return { ok: true, reason: 'resolved' };
@@ -914,9 +1121,23 @@
       }
     }
 
-    // Verdicts safe to cache — decisive, email-independent DNS results.
+    // Verdicts safe to cache — decisive, email-independent results.
     // Transient/indeterminate outcomes must be re-checked next time.
-    const CACHEABLE_REASONS = ['nxdomain', 'nxdomain_unconfirmed', 'no_dns_records', 'parked', 'parked_ns', 'resolved', 'mx_only', 'for_sale_lander'];
+    // 'nxdomain_unconfirmed' was REMOVED in v5.3.0: it means the two resolvers
+    // disagreed, i.e. explicitly indeterminate, and caching it stopped a lead
+    // from recovering by simply retrying in the same session.
+    const CACHEABLE_REASONS = [
+      'nxdomain', 'no_dns_records', 'resolved', 'mx_only',
+      'for_sale_lander', 'marketplace_redirect', 'parked_confirmed',
+      'forwarded_to_live_site', 'live_despite_dns_hint', 'content_clean',
+      'thin_content', 'thin_content_wildcard', 'parked_suspect',
+    ];
+
+    // Stage-2 reasons that mean the backend ACTUALLY FETCHED the page and so
+    // its answer is authoritative. Anything else means it couldn't look, in
+    // which case a DNS parking hint must survive as a flag rather than
+    // silently passing as clean.
+    const STAGE2_DECISIVE = ['content_clean', 'live_despite_dns_hint', 'forwarded_to_live_site', 'thin_content', 'thin_content_wildcard'];
 
     // Stage 2 — server-level content check (v4.9.5). DNS/IP/NS alone can't
     // see PAGE CONTENT, so marketplace landers on shared CDN IPs (Atom,
@@ -926,7 +1147,7 @@
     // test-email, since there's either nothing to scan or nothing to gain.
     // Same fail-open contract as everything else: any backend hiccup,
     // timeout, or bot-wall passes the lead through rather than blocking it.
-    async function verifyWebsiteContent(rawValue) {
+    async function verifyWebsiteContent(rawValue, parkingHint, hasMX) {
       if (!isRailwayReady()) return { ok: true, reason: 'skipped_no_backend' };
       try {
         const controller = new AbortController();
@@ -940,7 +1161,7 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           signal: controller.signal,
-          body: JSON.stringify({ website: rawValue }),
+          body: JSON.stringify({ website: rawValue, parking_hint: parkingHint || null, has_mx: hasMX === true }),
         });
         clearTimeout(t);
         if (!res.ok) return { ok: true, reason: 'backend_error' };
@@ -950,6 +1171,72 @@
         console.warn('[GW] Website content check failed — allowing through:', err && err.message);
         return { ok: true, reason: 'fetch_error' };
       }
+    }
+
+    const NOT_A_LIVE_SITE_MSG = "This doesn't appear to be a live company website. Please check the URL.";
+
+    /* Base verdict: DNS + content only. Email-INDEPENDENT, therefore safe to
+       cache. Email-dependent rules are layered on afterwards so they can never
+       be frozen into the cache (a lead may go back and edit their email). */
+    function baseWebsiteVerdict(domain, rawValue) {
+      if (_websiteVerdicts.has(domain)) return Promise.resolve(_websiteVerdicts.get(domain));
+      if (_websiteInFlight.has(domain)) return _websiteInFlight.get(domain);
+      const p = verifyWebsiteDomain(domain)
+        .then(async (v) => {
+          // v5.3.0: stage 2 now also arbitrates 'parked_suspect'. Previously
+          // it ran only on 'resolved', so a DNS hint was final and
+          // unappealable — the one layer that can actually see the page
+          // never got asked. Content is ground truth; DNS is a prior.
+          const needsContentCheck = (v.reason === 'resolved' || v.reason === 'parked_suspect');
+          if (!needsContentCheck || isTestEmail(getField('email'))) return v;
+
+          const cv = await verifyWebsiteContent(rawValue, v.parkingHint, v.hasMX);
+          if (!cv.ok) {
+            return { ok: false, reason: cv.reason || 'for_sale_lander', msg: NOT_A_LIVE_SITE_MSG, canonical_url: cv.canonical_url || null };
+          }
+          if (STAGE2_DECISIVE.indexOf(cv.reason) !== -1) {
+            // The backend fetched the page — its verdict supersedes stage 1.
+            return { ok: true, reason: cv.reason, canonical_url: cv.canonical_url || null };
+          }
+          // Backend couldn't look (no backend, timeout, unreachable, bot wall).
+          // Keep a parking hint alive as a FLAG rather than passing it as
+          // clean — but still never block on it.
+          if (v.parkingHint) return { ok: true, reason: 'parked_suspect', canonical_url: cv.canonical_url || null };
+          if (cv.canonical_url) return { ...v, canonical_url: cv.canonical_url };
+          return v;
+        })
+        .then((v) => {
+          if (CACHEABLE_REASONS.indexOf(v.reason) !== -1) _websiteVerdicts.set(domain, v);
+          return v;
+        })
+        .finally(() => {
+          _websiteInFlight.delete(domain);
+        });
+      _websiteInFlight.set(domain, p);
+      return p;
+    }
+
+    /* Email-dependent layer, recomputed on every call, never cached. */
+    function applyEmailDependentWebsiteRules(domain, verdict) {
+      if (!verdict || verdict.reason !== 'nxdomain') return verdict;
+      const emailDomain = emailDomainOf(getField('email') || formState.email || '');
+
+      // SAFETY VALVE. If the typed website domain is the lead's own email
+      // domain, the domain provably exists — they receive mail on it and the
+      // address already cleared verification at step 1. An NXDOMAIN here is a
+      // resolver blip, and blocking it would wall out a real customer.
+      if (emailDomain && PERSONAL_EMAIL_DOMAINS.indexOf(emailDomain) === -1 && domainsMatch(domain, emailDomain)) {
+        return { ok: true, reason: 'nxdomain_contradicted' };
+      }
+
+      // Offer a one-tap fix instead of a dead end. Six of the seven real
+      // NXDOMAIN cases in the Jul/Aug sample were typos by real businesses
+      // that went on to book, not junk leads.
+      const suggestion = suggestWebsiteDomainFix(domain, emailDomain);
+      if (suggestion) {
+        return { ...verdict, suggestion, msg: 'Did you mean ' + suggestion + '?' };
+      }
+      return verdict;
     }
 
     function checkWebsite(rawValue) {
@@ -962,31 +1249,7 @@
       const local = localWebsiteVerdict(domain, rawValue);
       if (local) return Promise.resolve(local);
 
-      if (_websiteVerdicts.has(domain)) return Promise.resolve(_websiteVerdicts.get(domain));
-      if (_websiteInFlight.has(domain)) return _websiteInFlight.get(domain);
-      const p = verifyWebsiteDomain(domain)
-        .then(async (v) => {
-          // Only worth a content probe when stage 1 found a real, live
-          // website — mx_only/nxdomain/parked/indeterminate need no scan
-          if (v.reason === 'resolved' && !isTestEmail(getField('email'))) {
-            const cv = await verifyWebsiteContent(rawValue);
-            if (!cv.ok) return { ok: false, reason: 'for_sale_lander', msg: "This doesn't appear to be a live company website. Please check the URL." };
-            // Carry the redirect-resolved canonical URL forward when the
-            // backend found one — the domain-match safety net (skip if it
-            // points somewhere unrelated) is applied at the point of use.
-            if (cv.canonical_url) return { ...v, canonical_url: cv.canonical_url };
-          }
-          return v;
-        })
-        .then((v) => {
-          if (CACHEABLE_REASONS.indexOf(v.reason) !== -1) _websiteVerdicts.set(domain, v);
-          return v;
-        })
-        .finally(() => {
-          _websiteInFlight.delete(domain);
-        });
-      _websiteInFlight.set(domain, p);
-      return p;
+      return baseWebsiteVerdict(domain, rawValue).then((v) => applyEmailDependentWebsiteRules(domain, v));
     }
 
     function initWebsiteCheck() {
@@ -1017,7 +1280,7 @@
         const v = await checkWebsite(val);
         // Only show if the field still holds the value we checked
         if (!v.ok && el.value.trim() === val) {
-          showError('website-error', v.msg);
+          showWebsiteVerdictError(v);
         } else {
           updateWebsiteMismatchTip(); // re-evaluate now the block cleared
         }
@@ -1578,7 +1841,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
             } catch {}
           }
           if (!wv.ok) {
-            showError('website-error', wv.msg);
+            showWebsiteVerdictError(wv);
             // Only WEBSITE_BLOCKING_REASONS stop submission; everything else
             // shows the red error but is allowed to continue.
             // formState.website_check_failed rides along to Railway, which
