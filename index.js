@@ -359,7 +359,32 @@ function bContext(text) { return { type: 'context', elements: [{ type: 'mrkdwn',
 // social_profile_url deliberately EXCLUDED: those leads convert poorly, so
 // sending Meta a Lead event for them trains the algorithm to find more of the
 // same. They still pass the form and are tagged for visibility.
-const WEBSITE_VERIFIED_REASONS = ['resolved', 'mx_only', 'content_clean', 'test_email_skipped', 'ok'];
+// v5.3.0 — new PASS reasons from the redirect-aware website check:
+//   forwarded_to_live_site  domain 301s to a DIFFERENT domain that has real
+//                           content. A legitimate forward (afgmmoving.com ->
+//                           afewgoodmenmoving.com), never a parked domain.
+//   live_despite_dns_hint   DNS said "parking infrastructure" but the page has
+//                           real substance. Content is ground truth; DNS is a
+//                           prior. This is what stops a wrong IP in the hint
+//                           list from ever suppressing a real lead again.
+//   thin_content /          Page has little/no server-rendered substance. Kept
+//   thin_content_wildcard   VERIFIED on purpose: client-rendered SPAs look
+//                           identical to parked pages over HTTP, so this is
+//                           surfaced for humans in Slack/monitor but must not
+//                           cost a real lead its Meta event.
+//   nxdomain_contradicted   Website domain == the lead's own verified email
+//                           domain, so the domain provably exists and the
+//                           NXDOMAIN was a resolver blip.
+const WEBSITE_VERIFIED_REASONS = [
+  'resolved', 'mx_only', 'content_clean', 'test_email_skipped', 'ok',
+  'forwarded_to_live_site', 'live_despite_dns_hint',
+  'thin_content', 'thin_content_wildcard', 'nxdomain_contradicted',
+];
+
+// Reasons that mean "we looked and it is genuinely not a company website".
+// These set website_check_failed and suppress Meta. They do NOT block the
+// form — blocking is form.js's WEBSITE_BLOCKING_REASONS, unchanged.
+const WEBSITE_NEGATIVE_REASONS = ['for_sale_lander', 'marketplace_redirect', 'parked_confirmed'];
 
 function isWebsiteVerified(row) {
   if (!row) return true;
@@ -684,7 +709,7 @@ function slackSubmit(d) {
   if (d.website_check_failed) {
     const wf = bFields([{ label: '⚠️ Website check', value: d.website_check_reason || 'failed' }]);
     if (wf) blocks.push(wf);
-  } else if (d.website_check_reason && !['resolved','mx_only','social_profile_url','content_clean','test_email_skipped','ok'].includes(d.website_check_reason)) {
+  } else if (d.website_check_reason && !WEBSITE_VERIFIED_REASONS.includes(d.website_check_reason) && d.website_check_reason !== 'social_profile_url') {
     const uf = bFields([{ label: '❓ Website check', value: 'Could not verify (' + d.website_check_reason + ')' }]);
     if (uf) blocks.push(uf);
   } else if (d.website_check_reason === 'social_profile_url') {
@@ -985,7 +1010,13 @@ app.get('/monitor/leads', async (req, res) => {
   if (websiteCheck === 'failed') conditions.push(`l.website_check_failed IS TRUE`);
   if (websiteCheck === 'passed') conditions.push(`l.website_check_failed IS NOT TRUE`); // covers false AND null (pre-migration rows)
   if (websiteCheck === 'social') conditions.push(`l.website_check_reason = 'social_profile_url'`);
-  if (websiteCheck === 'unverified') conditions.push(`(l.website_check_failed IS TRUE OR (l.website_check_reason IS NOT NULL AND l.website_check_reason <> '' AND l.website_check_reason NOT IN ('resolved','mx_only','content_clean','test_email_skipped','ok')))`);
+  // Built from WEBSITE_VERIFIED_REASONS so this can never drift out of sync
+  // with the Meta gate. Values are internal literals; the filter below is a
+  // belt-and-braces guard so nothing unexpected can reach the SQL string.
+  if (websiteCheck === 'unverified') {
+    const verifiedSql = WEBSITE_VERIFIED_REASONS.filter((r) => /^[a-z0-9_]+$/.test(r)).map((r) => `'${r}'`).join(',');
+    conditions.push(`(l.website_check_failed IS TRUE OR (l.website_check_reason IS NOT NULL AND l.website_check_reason <> '' AND l.website_check_reason NOT IN (${verifiedSql})))`);
+  }
   if (repeatAttempts === 'yes') conditions.push(`EXISTS (SELECT 1 FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at)`);
   if (repeatAttempts === 'no')  conditions.push(`NOT EXISTS (SELECT 1 FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at)`);
 
@@ -2186,7 +2217,149 @@ app.get('/monitor/elv-health', (req, res) => {
 // real case that exposed this). Same fail-open philosophy as ELV: any
 // timeout, block, redirect loop, or bot-challenge response passes through
 // rather than risk rejecting a real company's site.
-const FOR_SALE_PHRASES = ['domain is for sale', 'domain name is for sale', 'this domain may be for sale', 'buy this domain', 'make an offer', 'this domain is available', 'domain for sale', 'inquire about this domain', 'this web page is parked', 'premium domain for sale', 'purchase this domain', 'domain broker', 'this domain is not configured', 'parked domain name', 'hostinger dns system'];
+// PHRASES — v5.3.0. Every entry must be unambiguous when read as ordinary
+// English on a real company's website, and is matched against VISIBLE TEXT
+// only (scripts/styles/comments stripped), never raw HTML.
+//
+// REMOVED and why — each of these is normal copy on a real business site:
+//   'make an offer'          Standard SEC/FINRA disclaimer wording ("does not
+//                            intend to make an offer or solicitation..."), on
+//                            essentially every RIA / broker-dealer / wealth
+//                            manager site. Also real estate and e-commerce.
+//                            This is what flagged seasoninvestments.com.
+//   'this domain is available' Common on hosting / web-agency / registrar copy.
+//   'purchase this domain'   Same.
+//   'domain broker'          Legitimate on hosting and web-services sites.
+const FOR_SALE_PHRASES = [
+  'this domain is for sale',
+  'this domain name is for sale',
+  'domain is for sale',
+  'domain name is for sale',
+  'this domain may be for sale',
+  'buy this domain',
+  'inquire about this domain',
+  'this web page is parked',
+  'this domain is parked',
+  'premium domain for sale',
+  'parked domain name',
+  'the domain you are looking for is for sale',
+  'interested in this domain',
+];
+
+// Placeholder pages are NOT for-sale landers — somebody owns the domain and
+// hasn't finished setting it up. Separated so the reason label tells the truth.
+const PLACEHOLDER_PHRASES = [
+  'this domain is not configured',
+  'hostinger dns system',
+  'website coming soon',
+  'future home of something quite cool',
+  'if you are the owner of this website',
+  'default web site page',
+  'apache2 ubuntu default page',
+  'welcome to nginx',
+];
+
+// Domain marketplaces. A domain that REDIRECTS to one of these is for sale —
+// this is host identity, not English text, so unlike phrase matching it cannot
+// false-positive on a real company's copy. Highest-precision signal we have.
+const MARKETPLACE_DOMAINS = [
+  'dan.com', 'afternic.com', 'sedo.com', 'sedoparking.com', 'hugedomains.com',
+  'atom.com', 'squadhelp.com', 'brandbucket.com', 'buydomains.com',
+  'undeveloped.com', 'efty.com', 'brandpa.com', 'saw.com', 'sav.com',
+  'domainmarket.com', 'domainagents.com', 'namerific.com', 'flippa.com',
+  'parklogic.com', 'bodis.com', 'above.com', 'abovedomains.com',
+  'uniregistrymarket.link', 'epik.com', 'dynadot.com', 'namesilo.com',
+];
+
+// Public-suffix handling without pulling in the full PSL. Covers the
+// multi-part suffixes that actually show up in inbound leads.
+const MULTI_PART_SUFFIXES = new Set([
+  'co.uk','org.uk','me.uk','ac.uk','gov.uk','net.uk','plc.uk','ltd.uk',
+  'co.in','net.in','org.in','firm.in','gen.in','ind.in','ac.in','edu.in','gov.in',
+  'com.au','net.au','org.au','edu.au','gov.au','co.nz','net.nz','org.nz','govt.nz',
+  'com.br','net.br','org.br','com.mx','com.ar','com.co','com.pe','com.ec',
+  'com.uy','com.py','com.bo','com.do','com.gt','com.pa','com.ve','com.sv',
+  'co.za','org.za','com.ng','co.ke','com.gh','com.eg','com.sa','com.ae',
+  'com.sg','com.my','com.ph','co.th','com.vn','com.pk','com.bd','com.hk',
+  'com.tw','com.cn','net.cn','org.cn','co.jp','or.jp','ne.jp','ac.jp',
+  'co.kr','com.tr','com.ua','com.pl','com.ro','com.gr','com.cy','com.mt',
+  'co.id','co.il','org.il','com.es','com.pt','com.it','com.de','com.fr','com.ru',
+]);
+
+function registrableDomain(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/\.$/, '');
+  if (!h || /^\d{1,3}(\.\d{1,3}){3}$/.test(h)) return h;
+  const parts = h.split('.').filter(Boolean);
+  if (parts.length <= 2) return parts.join('.');
+  const lastTwo = parts.slice(-2).join('.');
+  if (MULTI_PART_SUFFIXES.has(lastTwo)) return parts.slice(-3).join('.');
+  return lastTwo;
+}
+
+function isMarketplaceHost(hostname) {
+  const reg = registrableDomain(hostname);
+  return MARKETPLACE_DOMAINS.includes(reg) ? reg : null;
+}
+
+/* ── Structural substance analysis ─────────────────────────────────
+   Judges "is there a real website here" by SHAPE rather than wording:
+   a parked page has near-zero visible text, no internal navigation, and
+   a title that is just the bare domain. A real site has nav and prose.
+   Deliberately lexicon-free, so it works on parking pages in any
+   language and on providers we've never seen.
+   ───────────────────────────────────────────────────────────────── */
+function analyzeSubstance(html, finalHost) {
+  const visible = String(html || '')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&(?:[a-z]+|#\d+|#x[0-9a-f]+);/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const titleMatch = String(html || '').match(/<title[^>]*>([\s\S]{0,300}?)<\/title>/i);
+  const title = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '';
+
+  const reg = registrableDomain(finalHost);
+  let internalLinks = 0;
+  let externalLinks = 0;
+  const hrefRe = /<a\b[^>]*?href\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+  let m;
+  while ((m = hrefRe.exec(html)) !== null) {
+    const href = (m[1] || m[2] || '').trim();
+    if (!href || /^(?:#|mailto:|tel:|javascript:|data:)/i.test(href)) continue;
+    if (/^https?:\/\//i.test(href)) {
+      try {
+        if (registrableDomain(new URL(href).hostname) === reg) internalLinks++;
+        else externalLinks++;
+      } catch { /* malformed href — ignore */ }
+    } else {
+      internalLinks++; // relative link = same site
+    }
+  }
+
+  // A title that is just the domain (with or without TLD) is a parking tell.
+  const bareTitle = title.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const bareHost = reg.replace(/[^a-z0-9]/g, '');
+  const titleIsJustDomain = !!title && (bareTitle === bareHost || bareTitle === bareHost.replace(/(com|net|org|us|co|io|ai|in)$/, ''));
+
+  const textLen = visible.length;
+  // Substantial: enough prose OR real navigation. Either alone is sufficient —
+  // an image-heavy one-pager has few words but many links, and a long text
+  // page may have little nav.
+  const substantial = textLen >= 400 || internalLinks >= 5;
+  // Thin: almost nothing rendered server-side AND no navigation at all.
+  const thin = textLen < 140 && internalLinks <= 1;
+
+  return { textLen, internalLinks, externalLinks, title, titleIsJustDomain, substantial, thin, visible };
+}
+
+function findPhrase(list, visibleLower) {
+  return list.find((p) => visibleLower.includes(p)) || null;
+}
 
 // Blocks requests aimed at internal/private infrastructure so this route
 // can't be used as an SSRF pivot into Railway's own network.
@@ -2234,6 +2407,7 @@ function flipWww(hostname) {
 }
 
 app.post('/verify-website', async (req, res) => {
+  const startedAt = Date.now(); // budgets the optional wildcard probe below
   const raw = (req.body.website || '').toString().trim().slice(0, 300);
   if (!raw) return res.status(400).json({ ok: true, reason: 'empty' }); // fail open, form's own required-check owns this
   let url;
@@ -2280,19 +2454,108 @@ app.post('/verify-website', async (req, res) => {
   // every redirect — this is the one reliable URL, captured for free.
   const canonical_url = response.url || undefined;
 
+  // ── Where did we actually land? ──────────────────────────────────
+  // This is the highest-value signal in the whole check, and until v5.3.0
+  // it was computed and thrown away. DNS cannot distinguish a domain that
+  // is PARKED from one that FORWARDS to the owner's real site: Above.com,
+  // GoDaddy, Afternic and Namecheap all serve both from the same IPs and
+  // the same nameservers. Only the redirect destination separates them.
+  let finalHost = url.hostname;
+  try { if (canonical_url) finalHost = new URL(canonical_url).hostname; } catch { /* keep typed host */ }
+  const typedReg = registrableDomain(url.hostname);
+  const finalReg = registrableDomain(finalHost);
+  const redirectedOffDomain = !!finalReg && !!typedReg && finalReg !== typedReg;
+
+  // TIER 1 — host identity. A domain that redirects to a domain marketplace
+  // is for sale, full stop. No text matching, so no false positives on a
+  // real company's copy.
+  const marketplace = isMarketplaceHost(finalHost);
+  if (marketplace && redirectedOffDomain) {
+    console.log(`[verify-website] NEGATIVE ${url.hostname} → redirects to marketplace ${marketplace}`);
+    return res.json({ ok: false, reason: 'marketplace_redirect', matched: marketplace, canonical_url });
+  }
+
   if (!response.ok) {
     console.log(`[verify-website] ${url.hostname} → HTTP ${response.status} — failing open`);
-    return res.json({ ok: true, reason: 'http_' + response.status, canonical_url });
+    return res.json({ ok: true, reason: 'http_' + response.status, canonical_url, redirected_off_domain: redirectedOffDomain });
   }
   const contentType = response.headers.get('content-type') || '';
   if (!contentType.includes('html')) return res.json({ ok: true, reason: 'non_html', canonical_url }); // fail open — not a page we can scan
-  const html = (await response.text()).slice(0, 50000).toLowerCase(); // cap read size
-  const hit = FOR_SALE_PHRASES.find((p) => html.includes(p));
-  if (hit) {
-    console.log(`[verify-website] BLOCKED ${url.hostname} — matched for-sale phrase: "${hit}"`);
-    return res.json({ ok: false, reason: 'for_sale_lander', matched: hit, canonical_url });
+
+  const rawHtml = (await response.text()).slice(0, 200000); // cap read size
+  const sub = analyzeSubstance(rawHtml, finalHost);
+  const visibleLower = sub.visible.toLowerCase();
+
+  // TIER 1 — unambiguous for-sale wording, VISIBLE TEXT ONLY. Scanning raw
+  // HTML (pre-v5.3.0) meant a phrase inside a <script> blob, a meta tag or
+  // an analytics payload counted as a for-sale page.
+  const saleHit = findPhrase(FOR_SALE_PHRASES, visibleLower);
+  if (saleHit) {
+    console.log(`[verify-website] NEGATIVE ${url.hostname} — for-sale phrase in visible text: "${saleHit}"`);
+    return res.json({ ok: false, reason: 'for_sale_lander', matched: saleHit, canonical_url });
   }
-  res.json({ ok: true, reason: 'content_clean', canonical_url });
+
+  // TIER 2 — a forward onto a DIFFERENT domain that has real content is a
+  // legitimate forward. This is afgmmoving.com -> afewgoodmenmoving.com, and
+  // it outranks any DNS parking hint: nobody parks a domain by pointing it
+  // at a working business website.
+  if (redirectedOffDomain && sub.substantial) {
+    console.log(`[verify-website] PASS ${url.hostname} → forwards to live site ${finalReg} (text=${sub.textLen}, links=${sub.internalLinks})`);
+    return res.json({ ok: true, reason: 'forwarded_to_live_site', canonical_url, forwarded_to: finalReg, substance: { textLen: sub.textLen, internalLinks: sub.internalLinks } });
+  }
+
+  const placeholderHit = findPhrase(PLACEHOLDER_PHRASES, visibleLower);
+  const parkingHint = (req.body.parking_hint || '').toString().slice(0, 40) || null;
+  const hasMX = req.body.has_mx === true || req.body.has_mx === 'true';
+
+  // TIER 2 — real content wins over a DNS hint, ALWAYS. This is the guard
+  // that makes the hint list safe: a mislabelled IP (216.198.79.1 was Vercel,
+  // flagged as a Hostinger placeholder, and quietly marked four live
+  // businesses as parked) can no longer cost a lead its Meta event.
+  if (sub.substantial && !placeholderHit) {
+    const reason = parkingHint ? 'live_despite_dns_hint' : 'content_clean';
+    if (parkingHint) console.log(`[verify-website] PASS ${url.hostname} — DNS hint "${parkingHint}" overridden by real content (text=${sub.textLen}, links=${sub.internalLinks})`);
+    return res.json({ ok: true, reason, canonical_url, substance: { textLen: sub.textLen, internalLinks: sub.internalLinks } });
+  }
+
+  // TIER 3 — thin page. Corroborated by parking infrastructure, this is a
+  // confident parked domain (theroutermill.us: GoDaddy parking IPs, page
+  // painted entirely in JS so no phrase is ever present in the HTML).
+  if (sub.thin || placeholderHit) {
+    if (parkingHint && !hasMX) {
+      console.log(`[verify-website] NEGATIVE ${url.hostname} — thin page + parking infra "${parkingHint}", no MX`);
+      return res.json({ ok: false, reason: 'parked_confirmed', matched: placeholderHit || parkingHint, canonical_url });
+    }
+    if (parkingHint) {
+      console.log(`[verify-website] NEGATIVE ${url.hostname} — thin page + parking infra "${parkingHint}" (has MX)`);
+      return res.json({ ok: false, reason: 'parked_confirmed', matched: placeholderHit || parkingHint, canonical_url });
+    }
+
+    // No corroboration. A client-rendered SPA is indistinguishable from a
+    // parked page over plain HTTP, so this must NEVER cost a real lead its
+    // Meta event. One cheap extra probe raises confidence for the human
+    // reading Slack: parking serves identical content for EVERY path
+    // because there is no site behind it. Informational only.
+    let wildcard = false;
+    if (Date.now() - startedAt < 6000) {
+      try {
+        const probeUrl = `${new URL(canonical_url || url.toString()).origin}/gw-probe-${Math.random().toString(36).slice(2, 10)}`;
+        const probe = await attemptFetch(probeUrl, 3500);
+        if (probe.status === 200) {
+          const probeHtml = (await probe.text()).slice(0, 200000);
+          const probeSub = analyzeSubstance(probeHtml, finalHost);
+          wildcard = Math.abs(probeSub.textLen - sub.textLen) < 40 && probeSub.title === sub.title;
+        }
+      } catch { /* probe is a bonus signal — never let it change the outcome */ }
+    }
+    const reason = wildcard ? 'thin_content_wildcard' : 'thin_content';
+    console.log(`[verify-website] FLAG ${url.hostname} — ${reason} (text=${sub.textLen}, links=${sub.internalLinks}, titleIsDomain=${sub.titleIsJustDomain})`);
+    // ok:true and a VERIFIED reason: surfaced for humans, costs the lead nothing.
+    return res.json({ ok: true, reason, canonical_url, substance: { textLen: sub.textLen, internalLinks: sub.internalLinks, titleIsJustDomain: sub.titleIsJustDomain, wildcard } });
+  }
+
+  // Neither substantial nor thin — a small but real page. Pass clean.
+  res.json({ ok: true, reason: parkingHint ? 'live_despite_dns_hint' : 'content_clean', canonical_url, substance: { textLen: sub.textLen, internalLinks: sub.internalLinks } });
 });
 
 
