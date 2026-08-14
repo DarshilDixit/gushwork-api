@@ -2563,16 +2563,11 @@ async function evaluateWebsite({ raw, parkingHint = null, hasMX = false }) {
   return { ok: true, reason: parkingHint ? 'live_despite_dns_hint' : 'content_clean', canonical_url, substance: { textLen: sub.textLen, internalLinks: sub.internalLinks } };
 }
 
-/* ── computeParkingHint ───────────────────────────────────────────
-   form.js computes this hint in the browser over DNS-over-HTTPS. The
-   historical recheck has no browser, so this is the server-side twin using
-   node's resolver.
-
-   ⚠ KEEP THE THREE LISTS BELOW IN SYNC WITH gushwork-form.js (SECTION 3C).
-   They are duplicated only because the two callers run in different
-   runtimes. A hint is never a verdict — evaluateWebsite() arbitrates — so a
-   drift here degrades labelling, it cannot wall out a lead.
-   ───────────────────────────────────────────────────────────────── */
+/* ⚠ KEEP THE THREE LISTS BELOW IN SYNC WITH gushwork-form.js (SECTION 3C).
+   Duplicated only because form.js resolves over DNS-over-HTTPS in the browser
+   while the historical recheck resolves via node. A hint is never a verdict —
+   evaluateWebsite() arbitrates — so drift here degrades a label, it cannot
+   wall out a lead. */
 const PARKING_IP_HINTS = [
   '162.255.119.', // Namecheap parking / URL-forwarding (shared with real hosting)
   '34.102.136.180', // GoDaddy parking (exact)
@@ -2587,15 +2582,42 @@ const PARKING_IP_HINTS = [
 const PARKING_NS_STRICT = ['sedoparking.com', 'parkingcrew.net', 'bodis.com', 'above.com', 'parklogic.com', 'uniregistrymarket.link', 'afternic.com', 'dan.com', 'abovedomains.com'];
 const PARKING_NS_SOFT = ['namebrightdns.com', 'safesecureweb.com'];
 
-async function computeParkingHint(domain) {
-  const out = { parkingHint: null, hasMX: false, ips: [], ns: [] };
+/* ── resolveWebsiteDns ────────────────────────────────────────────
+   Server-side twin of STAGE 1, which normally runs in the browser over
+   DNS-over-HTTPS in gushwork-form.js.
+
+   v5.3.2 — added because the first recheck dry run exposed that the route
+   was running STAGE 2 ONLY. With no existence check it simply tried to
+   fetch a non-existent domain, failed open, and wrote 'unreachable' over
+   six perfectly good 'nxdomain' verdicts — a strict downgrade, since
+   nxdomain is accurate AND blocking while unreachable is neither.
+
+   Node distinguishes the two cases we care about:
+     ENOTFOUND → NXDOMAIN, the name does not exist
+     ENODATA   → NOERROR with no records of that type (domain DOES exist)
+   ───────────────────────────────────────────────────────────────── */
+async function resolveWebsiteDns(domain) {
+  const out = { status: 'resolved', parkingHint: null, hasMX: false, ips: [], ns: [] };
   if (!domain) return out;
 
+  let apexCode = null, wwwCode = null;
   try { out.ips = await dnsPromises.resolve4(domain); }
-  catch { try { out.ips = await dnsPromises.resolve4('www.' + domain); } catch { /* no A record */ } }
+  catch (e) {
+    apexCode = e.code;
+    try { out.ips = await dnsPromises.resolve4('www.' + domain); }
+    catch (e2) { wwwCode = e2.code; }
+  }
 
   try { out.hasMX = (await dnsPromises.resolveMx(domain)).some((r) => r.exchange && r.exchange !== '.'); }
   catch { /* no MX */ }
+
+  if (!out.ips.length) {
+    try { if ((await dnsPromises.resolve6(domain)).length) return out; } catch { /* no AAAA */ }
+    if (out.hasMX) { out.status = 'mx_only'; return out; } // email-only company — legitimate
+    // Both lookups must agree the name is absent before we call it NXDOMAIN.
+    out.status = (apexCode === 'ENOTFOUND' && wwwCode === 'ENOTFOUND') ? 'nxdomain' : 'no_dns_records';
+    return out;
+  }
 
   const hintIp = out.ips.find((ip) => PARKING_IP_HINTS.some((p) => (p.split('.').length === 4 && p.slice(-1) !== '.' ? ip === p : ip.indexOf(p) === 0)));
   if (hintIp) { out.parkingHint = 'ip:' + hintIp; return out; }
@@ -2609,6 +2631,25 @@ async function computeParkingHint(domain) {
   if (soft && !out.hasMX) out.parkingHint = 'ns_soft:' + soft;
   return out;
 }
+
+/* Verdicts the recheck is allowed to WRITE. Anything absent from this list
+   means "we did not get a real answer" — a timeout, a connection failure, a
+   bot wall, an HTTP error. Those are states of the network at one moment,
+   not facts about the domain, and persisting one is strictly worse than
+   keeping whatever is already recorded. */
+const RECHECK_WRITEABLE = [
+  'content_clean', 'live_despite_dns_hint', 'forwarded_to_live_site',
+  'thin_content', 'thin_content_wildcard',
+  'parked_confirmed', 'for_sale_lander', 'marketplace_redirect',
+  'nxdomain', 'no_dns_records', 'mx_only',
+];
+
+/* Verdicts the recheck must NEVER overwrite. These come from
+   localWebsiteVerdict() in gushwork-form.js and depend on the lead's EMAIL,
+   which this route deliberately does not re-derive. Left alone, they stay
+   correct; recomputed from content alone, a LinkedIn profile URL comes back
+   as 'content_clean' because linkedin.com serves a real page. */
+const RECHECK_PROTECTED = ['brand_mismatch', 'mailbox_domain', 'social_profile_url', 'test_email_skipped', 'unparseable'];
 
 /* Thin HTTP wrapper. Behaviour is identical to pre-v5.3.1 — the regression
    suite asserts this. */
@@ -2704,24 +2745,38 @@ app.get('/monitor/website-recheck', async (req, res) => {
 
     const results = [];
     for (const [website, leads] of byDomain) {
-      let verdict, hint = null;
+      let verdict, hint = null, skip = null;
       try {
         const host = new URL(website.startsWith('http') ? website : 'https://' + website).hostname.replace(/^www\./, '');
-        const dns = await computeParkingHint(host);
+        // STAGE 1 — existence and parking hint. Must run FIRST: without it a
+        // non-existent domain merely fails to fetch and looks 'unreachable',
+        // which silently downgrades an accurate, blocking 'nxdomain'.
+        const dns = await resolveWebsiteDns(host);
         hint = dns.parkingHint;
-        verdict = await evaluateWebsite({ raw: website, parkingHint: dns.parkingHint, hasMX: dns.hasMX });
+        if (dns.status === 'nxdomain') verdict = { ok: false, reason: 'nxdomain', matched: 'ENOTFOUND on apex + www' };
+        else if (dns.status === 'no_dns_records') verdict = { ok: true, reason: 'no_dns_records' };
+        else if (dns.status === 'mx_only') verdict = { ok: true, reason: 'mx_only', matched: 'MX only — email-only company' };
+        // STAGE 2 — only meaningful once we know the domain resolves.
+        else verdict = await evaluateWebsite({ raw: website, parkingHint: dns.parkingHint, hasMX: dns.hasMX });
       } catch (err) {
         verdict = { ok: true, reason: 'recheck_error', error: err.message };
       }
+      if (!RECHECK_WRITEABLE.includes(verdict.reason)) skip = 'no decisive answer (' + verdict.reason + ') — keeping existing verdict';
+
       const nowVerified = WEBSITE_VERIFIED_REASONS.includes(verdict.reason);
       for (const l of leads) {
+        const rowSkip = RECHECK_PROTECTED.includes(l.website_check_reason)
+          ? 'email-dependent verdict — not re-derivable here'
+          : skip;
         const wasVerified = l.website_check_failed !== true && WEBSITE_VERIFIED_REASONS.includes(l.website_check_reason);
+        const changed = !rowSkip && (l.website_check_reason !== verdict.reason || (l.website_check_failed === true) !== !verdict.ok);
         results.push({
           session_id: l.session_id, email: l.email, company: l.company, website,
           was: l.website_check_reason, was_failed: l.website_check_failed === true,
-          now: verdict.reason, now_failed: !verdict.ok,
-          changed: l.website_check_reason !== verdict.reason || (l.website_check_failed === true) !== !verdict.ok,
-          direction: wasVerified === nowVerified ? 'same' : (nowVerified ? 'FALSE POSITIVE — was suppressed, is real' : 'MISSED — passed before, is not a real site'),
+          now: rowSkip ? l.website_check_reason : verdict.reason,
+          now_failed: rowSkip ? l.website_check_failed === true : !verdict.ok,
+          probed: verdict.reason, skip: rowSkip, changed,
+          direction: rowSkip ? 'SKIPPED — left as-is' : (wasVerified === nowVerified ? 'same' : (nowVerified ? 'FALSE POSITIVE — was suppressed, is real' : 'MISSED — passed before, is not a real site')),
           hint, why: verdict.matched || (verdict.substance ? `text=${verdict.substance.textLen} links=${verdict.substance.internalLinks}` : '') || verdict.forwarded_to || '',
           booked: !!l.booking_uid,
         });
@@ -2753,6 +2808,7 @@ app.get('/monitor/website-recheck', async (req, res) => {
       mode: apply ? 'APPLIED' : 'DRY RUN',
       scope, leads_examined: results.length, distinct_domains: byDomain.size,
       would_change: results.filter((r) => r.changed).length,
+      skipped: results.filter((r) => r.skip).length,
       false_positives: results.filter((r) => r.direction.startsWith('FALSE')).length,
       missed: results.filter((r) => r.direction.startsWith('MISSED')).length,
       written,
@@ -2761,7 +2817,7 @@ app.get('/monitor/website-recheck', async (req, res) => {
     if (asJson) return res.json({ summary, results });
 
     const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-    const colour = (d) => (d.startsWith('FALSE') ? '#047857' : d.startsWith('MISSED') ? '#b91c1c' : '#6b7280');
+    const colour = (d) => (d.startsWith('FALSE') ? '#047857' : d.startsWith('MISSED') ? '#b91c1c' : d.startsWith('SKIPPED') ? '#a16207' : '#6b7280');
     res.set('Content-Type', 'text/html').send(`<!doctype html><meta charset="utf-8"><title>Website recheck — ${esc(summary.mode)}</title>
 <style>body{font:14px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:24px;color:#111}h1{font-size:19px;margin:0 0 4px}
 .sum{background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:12px 14px;margin:12px 0;display:flex;gap:22px;flex-wrap:wrap}
@@ -2775,7 +2831,7 @@ a.btn{display:inline-block;background:#111;color:#fff;padding:9px 15px;border-ra
 <div style="color:#6b7280">scope=<code>${esc(scope)}</code> · limit=${limit} · offset=${offset}</div>
 <div class="sum">
 <div>Leads examined<b>${summary.leads_examined}</b></div><div>Distinct domains<b>${summary.distinct_domains}</b></div>
-<div>Would change<b>${summary.would_change}</b></div>
+<div>Would change<b>${summary.would_change}</b></div><div>Skipped (left as-is)<b>${summary.skipped}</b></div>
 <div style="color:#047857">False positives<b>${summary.false_positives}</b></div>
 <div style="color:#b91c1c">Missed<b>${summary.missed}</b></div>
 ${apply ? `<div>Rows written<b>${written}</b></div>` : ''}
@@ -2784,10 +2840,10 @@ ${apply
   ? `<div class="sum" style="background:#ecfdf5;border-color:#a7f3d0">Applied. Previous values kept in <code>website_check_reason_prev</code>.</div>`
   : `<div class="warn"><b>Nothing has been written.</b> Review the rows below, then re-run with <code>&amp;apply=1</code> to save. Previous values are preserved in <code>website_check_reason_prev</code>.</div>
      <a class="btn" href="?token=${esc(req.query.token)}&scope=${esc(scope)}&limit=${limit}&offset=${offset}&apply=1">Apply ${summary.would_change} correction(s)</a>`}
-<table><thead><tr><th>Email</th><th>Company</th><th>Website</th><th>Was</th><th>Now</th><th>Direction</th><th>Why</th><th>Booked</th></tr></thead><tbody>
+<table><thead><tr><th>Email</th><th>Company</th><th>Website</th><th>Was</th><th>Now</th><th>Direction</th><th>Probe / Why</th><th>Booked</th></tr></thead><tbody>
 ${results.map((r) => `<tr class="${r.changed ? 'chg' : ''}"><td>${esc(r.email)}</td><td>${esc(r.company)}</td><td>${esc(r.website)}</td>
 <td><code>${esc(r.was)}</code>${r.was_failed ? ' ⚠️' : ''}</td><td><code>${esc(r.now)}</code>${r.now_failed ? ' ⚠️' : ''}</td>
-<td style="color:${colour(r.direction)}">${esc(r.direction)}</td><td style="color:#6b7280">${esc(r.hint ? r.hint + ' · ' : '')}${esc(r.why)}</td>
+<td style="color:${colour(r.direction)}">${esc(r.direction)}</td><td style="color:#6b7280">${esc(r.hint ? r.hint + ' · ' : '')}${esc(r.why)}${r.skip ? `<br><i>probed <code>${esc(r.probed)}</code> — ${esc(r.skip)}</i>` : ''}</td>
 <td>${r.booked ? 'Yes' : '—'}</td></tr>`).join('')}
 </tbody></table>`);
   } catch (err) {
