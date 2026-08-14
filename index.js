@@ -2406,18 +2406,25 @@ function flipWww(hostname) {
   return hostname.toLowerCase().startsWith('www.') ? hostname.slice(4) : 'www.' + hostname;
 }
 
-app.post('/verify-website', async (req, res) => {
+/* ── evaluateWebsite ──────────────────────────────────────────────
+   The whole tiered decision. Extracted from the /verify-website route in
+   v5.3.1 so the route AND the historical recheck run the SAME code path.
+   Two copies of this logic is exactly the drift that produced the
+   duplicated-verified-reasons bug, so there is deliberately only one.
+
+   Returns the verdict object the route used to res.json() directly.
+   ───────────────────────────────────────────────────────────────── */
+async function evaluateWebsite({ raw, parkingHint = null, hasMX = false }) {
   const startedAt = Date.now(); // budgets the optional wildcard probe below
-  const raw = (req.body.website || '').toString().trim().slice(0, 300);
-  if (!raw) return res.status(400).json({ ok: true, reason: 'empty' }); // fail open, form's own required-check owns this
+  if (!raw) return ({ ok: true, reason: 'empty' }); // fail open, form's own required-check owns this
   let url;
   try {
     url = new URL(raw.startsWith('http') ? raw : 'https://' + raw);
   } catch {
-    return res.json({ ok: true, reason: 'unparseable' }); // format errors are the browser's job
+    return ({ ok: true, reason: 'unparseable' }); // format errors are the browser's job
   }
   if (!['http:', 'https:'].includes(url.protocol) || isPrivateOrLocalHost(url.hostname)) {
-    return res.json({ ok: true, reason: 'skipped_unsafe_target' }); // never fetch internal/local targets; fail open
+    return ({ ok: true, reason: 'skipped_unsafe_target' }); // never fetch internal/local targets; fail open
   }
 
   // Fallback ladder: as-typed -> www/bare flip (same protocol) -> http downgrade.
@@ -2439,7 +2446,7 @@ app.post('/verify-website', async (req, res) => {
     } catch (err) {
       if (err.name === 'AbortError') {
         console.warn(`[verify-website] Timeout for ${c.u} — failing open`);
-        return res.json({ ok: true, reason: 'timeout' });
+        return ({ ok: true, reason: 'timeout' });
       }
       console.warn(`[verify-website] Connection failed for ${c.u} (${err.message}) — trying next candidate`);
     }
@@ -2447,7 +2454,7 @@ app.post('/verify-website', async (req, res) => {
 
   if (!response) {
     console.warn(`[verify-website] All candidates unreachable for ${url.hostname} — failing open`);
-    return res.json({ ok: true, reason: 'unreachable' });
+    return ({ ok: true, reason: 'unreachable' });
   }
 
   // fetch() resolves response.url to the FINAL address after following
@@ -2472,15 +2479,15 @@ app.post('/verify-website', async (req, res) => {
   const marketplace = isMarketplaceHost(finalHost);
   if (marketplace && redirectedOffDomain) {
     console.log(`[verify-website] NEGATIVE ${url.hostname} → redirects to marketplace ${marketplace}`);
-    return res.json({ ok: false, reason: 'marketplace_redirect', matched: marketplace, canonical_url });
+    return ({ ok: false, reason: 'marketplace_redirect', matched: marketplace, canonical_url });
   }
 
   if (!response.ok) {
     console.log(`[verify-website] ${url.hostname} → HTTP ${response.status} — failing open`);
-    return res.json({ ok: true, reason: 'http_' + response.status, canonical_url, redirected_off_domain: redirectedOffDomain });
+    return ({ ok: true, reason: 'http_' + response.status, canonical_url, redirected_off_domain: redirectedOffDomain });
   }
   const contentType = response.headers.get('content-type') || '';
-  if (!contentType.includes('html')) return res.json({ ok: true, reason: 'non_html', canonical_url }); // fail open — not a page we can scan
+  if (!contentType.includes('html')) return ({ ok: true, reason: 'non_html', canonical_url }); // fail open — not a page we can scan
 
   const rawHtml = (await response.text()).slice(0, 200000); // cap read size
   const sub = analyzeSubstance(rawHtml, finalHost);
@@ -2492,7 +2499,7 @@ app.post('/verify-website', async (req, res) => {
   const saleHit = findPhrase(FOR_SALE_PHRASES, visibleLower);
   if (saleHit) {
     console.log(`[verify-website] NEGATIVE ${url.hostname} — for-sale phrase in visible text: "${saleHit}"`);
-    return res.json({ ok: false, reason: 'for_sale_lander', matched: saleHit, canonical_url });
+    return ({ ok: false, reason: 'for_sale_lander', matched: saleHit, canonical_url });
   }
 
   // TIER 2 — a forward onto a DIFFERENT domain that has real content is a
@@ -2501,12 +2508,10 @@ app.post('/verify-website', async (req, res) => {
   // at a working business website.
   if (redirectedOffDomain && sub.substantial) {
     console.log(`[verify-website] PASS ${url.hostname} → forwards to live site ${finalReg} (text=${sub.textLen}, links=${sub.internalLinks})`);
-    return res.json({ ok: true, reason: 'forwarded_to_live_site', canonical_url, forwarded_to: finalReg, substance: { textLen: sub.textLen, internalLinks: sub.internalLinks } });
+    return ({ ok: true, reason: 'forwarded_to_live_site', canonical_url, forwarded_to: finalReg, substance: { textLen: sub.textLen, internalLinks: sub.internalLinks } });
   }
 
   const placeholderHit = findPhrase(PLACEHOLDER_PHRASES, visibleLower);
-  const parkingHint = (req.body.parking_hint || '').toString().slice(0, 40) || null;
-  const hasMX = req.body.has_mx === true || req.body.has_mx === 'true';
 
   // TIER 2 — real content wins over a DNS hint, ALWAYS. This is the guard
   // that makes the hint list safe: a mislabelled IP (216.198.79.1 was Vercel,
@@ -2515,7 +2520,7 @@ app.post('/verify-website', async (req, res) => {
   if (sub.substantial && !placeholderHit) {
     const reason = parkingHint ? 'live_despite_dns_hint' : 'content_clean';
     if (parkingHint) console.log(`[verify-website] PASS ${url.hostname} — DNS hint "${parkingHint}" overridden by real content (text=${sub.textLen}, links=${sub.internalLinks})`);
-    return res.json({ ok: true, reason, canonical_url, substance: { textLen: sub.textLen, internalLinks: sub.internalLinks } });
+    return ({ ok: true, reason, canonical_url, substance: { textLen: sub.textLen, internalLinks: sub.internalLinks } });
   }
 
   // TIER 3 — thin page. Corroborated by parking infrastructure, this is a
@@ -2524,11 +2529,11 @@ app.post('/verify-website', async (req, res) => {
   if (sub.thin || placeholderHit) {
     if (parkingHint && !hasMX) {
       console.log(`[verify-website] NEGATIVE ${url.hostname} — thin page + parking infra "${parkingHint}", no MX`);
-      return res.json({ ok: false, reason: 'parked_confirmed', matched: placeholderHit || parkingHint, canonical_url });
+      return ({ ok: false, reason: 'parked_confirmed', matched: placeholderHit || parkingHint, canonical_url });
     }
     if (parkingHint) {
       console.log(`[verify-website] NEGATIVE ${url.hostname} — thin page + parking infra "${parkingHint}" (has MX)`);
-      return res.json({ ok: false, reason: 'parked_confirmed', matched: placeholderHit || parkingHint, canonical_url });
+      return ({ ok: false, reason: 'parked_confirmed', matched: placeholderHit || parkingHint, canonical_url });
     }
 
     // No corroboration. A client-rendered SPA is indistinguishable from a
@@ -2551,11 +2556,244 @@ app.post('/verify-website', async (req, res) => {
     const reason = wildcard ? 'thin_content_wildcard' : 'thin_content';
     console.log(`[verify-website] FLAG ${url.hostname} — ${reason} (text=${sub.textLen}, links=${sub.internalLinks}, titleIsDomain=${sub.titleIsJustDomain})`);
     // ok:true and a VERIFIED reason: surfaced for humans, costs the lead nothing.
-    return res.json({ ok: true, reason, canonical_url, substance: { textLen: sub.textLen, internalLinks: sub.internalLinks, titleIsJustDomain: sub.titleIsJustDomain, wildcard } });
+    return ({ ok: true, reason, canonical_url, substance: { textLen: sub.textLen, internalLinks: sub.internalLinks, titleIsJustDomain: sub.titleIsJustDomain, wildcard } });
   }
 
   // Neither substantial nor thin — a small but real page. Pass clean.
-  res.json({ ok: true, reason: parkingHint ? 'live_despite_dns_hint' : 'content_clean', canonical_url, substance: { textLen: sub.textLen, internalLinks: sub.internalLinks } });
+  return { ok: true, reason: parkingHint ? 'live_despite_dns_hint' : 'content_clean', canonical_url, substance: { textLen: sub.textLen, internalLinks: sub.internalLinks } };
+}
+
+/* ── computeParkingHint ───────────────────────────────────────────
+   form.js computes this hint in the browser over DNS-over-HTTPS. The
+   historical recheck has no browser, so this is the server-side twin using
+   node's resolver.
+
+   ⚠ KEEP THE THREE LISTS BELOW IN SYNC WITH gushwork-form.js (SECTION 3C).
+   They are duplicated only because the two callers run in different
+   runtimes. A hint is never a verdict — evaluateWebsite() arbitrates — so a
+   drift here degrades labelling, it cannot wall out a lead.
+   ───────────────────────────────────────────────────────────────── */
+const PARKING_IP_HINTS = [
+  '162.255.119.', // Namecheap parking / URL-forwarding (shared with real hosting)
+  '34.102.136.180', // GoDaddy parking (exact)
+  '3.33.130.190', // GoDaddy parking / forwarding anycast (exact)
+  '15.197.148.33', // GoDaddy parking / forwarding anycast (exact)
+  '91.195.240.', '91.195.241.', // Sedo
+  '185.53.177.', '185.53.178.', '185.53.179.', // ParkingCrew
+  '199.59.242.', '199.59.243.', // Bodis
+  '208.91.197.', // Confluence Networks parking
+  '103.224.182.', // Trellian / Above.com parking AND forwarding
+];
+const PARKING_NS_STRICT = ['sedoparking.com', 'parkingcrew.net', 'bodis.com', 'above.com', 'parklogic.com', 'uniregistrymarket.link', 'afternic.com', 'dan.com', 'abovedomains.com'];
+const PARKING_NS_SOFT = ['namebrightdns.com', 'safesecureweb.com'];
+
+async function computeParkingHint(domain) {
+  const out = { parkingHint: null, hasMX: false, ips: [], ns: [] };
+  if (!domain) return out;
+
+  try { out.ips = await dnsPromises.resolve4(domain); }
+  catch { try { out.ips = await dnsPromises.resolve4('www.' + domain); } catch { /* no A record */ } }
+
+  try { out.hasMX = (await dnsPromises.resolveMx(domain)).some((r) => r.exchange && r.exchange !== '.'); }
+  catch { /* no MX */ }
+
+  const hintIp = out.ips.find((ip) => PARKING_IP_HINTS.some((p) => (p.split('.').length === 4 && p.slice(-1) !== '.' ? ip === p : ip.indexOf(p) === 0)));
+  if (hintIp) { out.parkingHint = 'ip:' + hintIp; return out; }
+
+  try { out.ns = (await dnsPromises.resolveNs(domain)).map((h) => String(h).toLowerCase().replace(/\.$/, '')); }
+  catch { /* no NS */ }
+  const nsMatch = (list) => out.ns.reduce((acc, h) => acc || list.find((s) => h === s || h.endsWith('.' + s)) || null, null);
+  const strict = nsMatch(PARKING_NS_STRICT);
+  if (strict) { out.parkingHint = 'ns:' + strict; return out; }
+  const soft = nsMatch(PARKING_NS_SOFT);
+  if (soft && !out.hasMX) out.parkingHint = 'ns_soft:' + soft;
+  return out;
+}
+
+/* Thin HTTP wrapper. Behaviour is identical to pre-v5.3.1 — the regression
+   suite asserts this. */
+app.post('/verify-website', async (req, res) => {
+  const raw = (req.body.website || '').toString().trim().slice(0, 300);
+  const parkingHint = (req.body.parking_hint || '').toString().slice(0, 40) || null;
+  const hasMX = req.body.has_mx === true || req.body.has_mx === 'true';
+  if (!raw) return res.status(400).json({ ok: true, reason: 'empty' }); // fail open, form's own required-check owns this
+  try {
+    const verdict = await evaluateWebsite({ raw, parkingHint, hasMX });
+    res.json(verdict);
+  } catch (err) {
+    console.error('[verify-website] Unexpected error — failing open:', err.message);
+    res.json({ ok: true, reason: 'backend_error' }); // never let a checker fault cost a lead
+  }
+});
+
+/* =======================================================
+   HISTORICAL WEBSITE RECHECK  (v5.3.1)
+
+   Re-runs the CURRENT check against domains already in the DB and reports
+   what changed. Exists because four separate bugs shipped without anything
+   ever re-examining a verdict after the fact:
+     - a Vercel IP mislabelled as a parking IP, marking live businesses parked
+     - 'make an offer' matching the standard SEC/FINRA disclaimer
+     - phrase scanning raw HTML, so <script> contents counted
+     - JS-rendered parked pages passing clean (no phrase in the HTML to find)
+
+   Corrects BOTH directions: false positives sitting in "Not verified", and
+   genuinely-parked domains sitting in "Passed" as content_clean.
+
+     GET /monitor/website-recheck?token=…               dry run (DEFAULT)
+     GET /monitor/website-recheck?token=…&apply=1       writes
+     &scope=unverified|clean|all   default all
+     &limit=200   &offset=0   &format=json
+
+   Dry run is the default and the ONLY thing that writes is apply=1.
+   Never touches social_profile_url rows or rows with no reason recorded.
+   Sequential with a delay — this must not look like a burst of scraping.
+   ======================================================= */
+app.get('/monitor/website-recheck', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  if (!token) {
+    // A route that can rewrite lead data must never be open.
+    return res.status(403).json({ error: 'MONITOR_TOKEN must be set before using this endpoint' });
+  }
+
+  const apply = req.query.apply === '1';
+  const scope = ['unverified', 'clean', 'all'].includes(req.query.scope) ? req.query.scope : 'all';
+  const limit = Math.min(parseInt(req.query.limit, 10) || 200, 500);
+  const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+  const asJson = req.query.format === 'json';
+
+  const verifiedSql = WEBSITE_VERIFIED_REASONS.filter((r) => /^[a-z0-9_]+$/.test(r)).map((r) => `'${r}'`).join(',');
+  // 'unverified' mirrors the monitor filter exactly; 'clean' catches the
+  // opposite error — a parked domain that the old phrase scan waved through.
+  const scopeSql = {
+    unverified: `(website_check_failed IS TRUE OR website_check_reason NOT IN (${verifiedSql}))`,
+    clean: `website_check_reason IN ('content_clean','resolved')`,
+    all: `(website_check_failed IS TRUE OR website_check_reason NOT IN (${verifiedSql}) OR website_check_reason IN ('content_clean','resolved'))`,
+  }[scope];
+
+  try {
+    if (apply) {
+      // Preserve the original verdict. Self-creating so there is no separate
+      // migration step to remember.
+      await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS website_check_reason_prev TEXT`);
+      await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS website_rechecked_at TIMESTAMPTZ`);
+    }
+
+    const { rows } = await pool.query(
+      `SELECT session_id, email, company, website, website_check_failed, website_check_reason, booking_uid
+         FROM leads
+        WHERE website IS NOT NULL AND website <> ''
+          AND website_check_reason IS NOT NULL AND website_check_reason <> ''
+          AND website_check_reason <> 'social_profile_url'
+          AND ${scopeSql}
+        ORDER BY created_at DESC
+        LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    // One evaluation per DISTINCT domain — several leads often share one.
+    const byDomain = new Map();
+    for (const r of rows) {
+      const key = (r.website || '').trim().toLowerCase();
+      if (!byDomain.has(key)) byDomain.set(key, []);
+      byDomain.get(key).push(r);
+    }
+
+    const results = [];
+    for (const [website, leads] of byDomain) {
+      let verdict, hint = null;
+      try {
+        const host = new URL(website.startsWith('http') ? website : 'https://' + website).hostname.replace(/^www\./, '');
+        const dns = await computeParkingHint(host);
+        hint = dns.parkingHint;
+        verdict = await evaluateWebsite({ raw: website, parkingHint: dns.parkingHint, hasMX: dns.hasMX });
+      } catch (err) {
+        verdict = { ok: true, reason: 'recheck_error', error: err.message };
+      }
+      const nowVerified = WEBSITE_VERIFIED_REASONS.includes(verdict.reason);
+      for (const l of leads) {
+        const wasVerified = l.website_check_failed !== true && WEBSITE_VERIFIED_REASONS.includes(l.website_check_reason);
+        results.push({
+          session_id: l.session_id, email: l.email, company: l.company, website,
+          was: l.website_check_reason, was_failed: l.website_check_failed === true,
+          now: verdict.reason, now_failed: !verdict.ok,
+          changed: l.website_check_reason !== verdict.reason || (l.website_check_failed === true) !== !verdict.ok,
+          direction: wasVerified === nowVerified ? 'same' : (nowVerified ? 'FALSE POSITIVE — was suppressed, is real' : 'MISSED — passed before, is not a real site'),
+          hint, why: verdict.matched || (verdict.substance ? `text=${verdict.substance.textLen} links=${verdict.substance.internalLinks}` : '') || verdict.forwarded_to || '',
+          booked: !!l.booking_uid,
+        });
+      }
+      await new Promise((r) => setTimeout(r, 400)); // be a polite citizen
+    }
+
+    let written = 0;
+    if (apply) {
+      for (const r of results) {
+        if (!r.changed || r.now === 'recheck_error') continue;
+        await pool.query(
+          `UPDATE leads
+              SET website_check_reason_prev = COALESCE(website_check_reason_prev, website_check_reason),
+                  website_check_reason      = $1,
+                  website_check_failed      = $2,
+                  website_rechecked_at      = NOW()
+            WHERE session_id = $3`,
+          [r.now, r.now_failed, r.session_id]
+        );
+        written++;
+      }
+      console.log(`[website-recheck] APPLIED ${written} correction(s) across ${byDomain.size} domain(s)`);
+    } else {
+      console.log(`[website-recheck] DRY RUN — ${results.filter((r) => r.changed).length} of ${results.length} lead(s) would change`);
+    }
+
+    const summary = {
+      mode: apply ? 'APPLIED' : 'DRY RUN',
+      scope, leads_examined: results.length, distinct_domains: byDomain.size,
+      would_change: results.filter((r) => r.changed).length,
+      false_positives: results.filter((r) => r.direction.startsWith('FALSE')).length,
+      missed: results.filter((r) => r.direction.startsWith('MISSED')).length,
+      written,
+    };
+
+    if (asJson) return res.json({ summary, results });
+
+    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const colour = (d) => (d.startsWith('FALSE') ? '#047857' : d.startsWith('MISSED') ? '#b91c1c' : '#6b7280');
+    res.set('Content-Type', 'text/html').send(`<!doctype html><meta charset="utf-8"><title>Website recheck — ${esc(summary.mode)}</title>
+<style>body{font:14px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:24px;color:#111}h1{font-size:19px;margin:0 0 4px}
+.sum{background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:12px 14px;margin:12px 0;display:flex;gap:22px;flex-wrap:wrap}
+.sum b{display:block;font-size:20px}table{border-collapse:collapse;width:100%;font-size:13px}
+th{text-align:left;background:#f3f4f6;padding:8px;border-bottom:2px solid #e5e7eb;position:sticky;top:0}
+td{padding:8px;border-bottom:1px solid #f3f4f6;vertical-align:top}tr.chg{background:#fffbeb}
+code{background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:12px}
+.warn{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:10px 14px;border-radius:8px;margin:12px 0}
+a.btn{display:inline-block;background:#111;color:#fff;padding:9px 15px;border-radius:7px;text-decoration:none;font-weight:600}</style>
+<h1>Website recheck — ${esc(summary.mode)}</h1>
+<div style="color:#6b7280">scope=<code>${esc(scope)}</code> · limit=${limit} · offset=${offset}</div>
+<div class="sum">
+<div>Leads examined<b>${summary.leads_examined}</b></div><div>Distinct domains<b>${summary.distinct_domains}</b></div>
+<div>Would change<b>${summary.would_change}</b></div>
+<div style="color:#047857">False positives<b>${summary.false_positives}</b></div>
+<div style="color:#b91c1c">Missed<b>${summary.missed}</b></div>
+${apply ? `<div>Rows written<b>${written}</b></div>` : ''}
+</div>
+${apply
+  ? `<div class="sum" style="background:#ecfdf5;border-color:#a7f3d0">Applied. Previous values kept in <code>website_check_reason_prev</code>.</div>`
+  : `<div class="warn"><b>Nothing has been written.</b> Review the rows below, then re-run with <code>&amp;apply=1</code> to save. Previous values are preserved in <code>website_check_reason_prev</code>.</div>
+     <a class="btn" href="?token=${esc(req.query.token)}&scope=${esc(scope)}&limit=${limit}&offset=${offset}&apply=1">Apply ${summary.would_change} correction(s)</a>`}
+<table><thead><tr><th>Email</th><th>Company</th><th>Website</th><th>Was</th><th>Now</th><th>Direction</th><th>Why</th><th>Booked</th></tr></thead><tbody>
+${results.map((r) => `<tr class="${r.changed ? 'chg' : ''}"><td>${esc(r.email)}</td><td>${esc(r.company)}</td><td>${esc(r.website)}</td>
+<td><code>${esc(r.was)}</code>${r.was_failed ? ' ⚠️' : ''}</td><td><code>${esc(r.now)}</code>${r.now_failed ? ' ⚠️' : ''}</td>
+<td style="color:${colour(r.direction)}">${esc(r.direction)}</td><td style="color:#6b7280">${esc(r.hint ? r.hint + ' · ' : '')}${esc(r.why)}</td>
+<td>${r.booked ? 'Yes' : '—'}</td></tr>`).join('')}
+</tbody></table>`);
+  } catch (err) {
+    console.error('[website-recheck] Failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 
