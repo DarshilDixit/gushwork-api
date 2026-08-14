@@ -1,5 +1,5 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.3.0-ads  (ADS Pop-up PAGE VERSION)
+  GUSHWORK — MULTI-STEP FORM  v5.3.3-ads  (ADS PAGE VERSION)
 
   Built from /demo v5.3.0. Full feature parity with /demo, EXCEPT the
   booking step, which keeps the Ads page's fullscreen modal
@@ -63,6 +63,150 @@
     const style = document.createElement('style');
     style.textContent = css;
     document.head.appendChild(style);
+  })();
+
+  /* --------------------------------------------------------
+  SECTION 0 — MARKUP BACKFILL  (ADS-PAGE SPECIFIC)
+
+  /demo's page markup carries a phone field and a full set of error
+  divs. The Ads pages do not. Rather than making that a manual Webflow
+  checklist, this block creates anything missing — same pattern
+  ensureWebsiteMismatchTip() already uses for its own element.
+
+  Runs before SECTION 0A so injected inputs get float-label wrapped,
+  and long before initPhoneInputs() (which waits on 3 CDN scripts).
+
+  Everything here is a no-op when the element already exists, so adding
+  the fields properly in Webflow later changes nothing.
+  -------------------------------------------------------- */
+  (function markupBackfill() {
+    // Set to false if you add the phone field in Webflow instead.
+    const AUTO_INJECT_PHONE = true;
+    // intl-tel-input preferred-country order.
+    const PHONE_PREFERRED = 'us,in,gb';
+
+    // error div id -> the input it belongs after
+    const ERROR_FIELDS = {
+      'email-error': 'email',
+      'disq-error': 'disq-waitlist',
+      'sell-error': 'radio-wrap',
+      'first-name-error': 'first-name',
+      'last-name-error': 'last-name',
+      'company-error': 'company',
+      'website-error': 'website',
+      'phone-error': 'phone',
+      'hear-about-us-error': 'hear-about-us',
+    };
+
+    // Insert after the input's outermost field wrapper when there is one,
+    // so the error sits below the styled box rather than inside it.
+    function outerOf(el) {
+      return el.closest('.float-label-wrapper') || el;
+    }
+
+    // Everything downstream looks the field up by id 'phone' and needs the
+    // ms-code-phone-number attribute for intl-tel-input to bind. A field
+    // added in Webflow may have neither, so normalise before deciding
+    // whether anything needs creating at all.
+    function normalisePhoneField(el) {
+      if (!el) return;
+      if (el.id !== 'phone') {
+        console.log('[GW] adopted existing phone field (id was "' + el.id + '")');
+        el.id = 'phone';
+      }
+      if (!el.hasAttribute('ms-code-phone-number')) {
+        el.setAttribute('ms-code-phone-number', PHONE_PREFERRED);
+        console.log('[GW] added ms-code-phone-number to existing phone field');
+      }
+      if (el.type !== 'tel') el.type = 'tel';
+      if (!el.classList.contains('input-field')) el.classList.add('input-field');
+      if (!el.getAttribute('autocomplete')) el.setAttribute('autocomplete', 'tel');
+      // A Webflow "required" attribute would fire native validation before
+      // validateStep2 runs, bypassing the free-mailbox-only rule.
+      el.removeAttribute('required');
+    }
+
+    // Find a phone field the page already has, whatever it was named.
+    // Ordered most to least reliable; never matches the other known fields.
+    function findExistingPhoneField() {
+      const exact = document.getElementById('phone');
+      if (exact) return exact;
+      const selectors = ['input[ms-code-phone-number]', 'input[type="tel"]', 'input[name*="phone" i]', 'input[id*="phone" i]', 'input[autocomplete="tel"]', 'input[placeholder*="phone" i]', 'input[placeholder*="mobile" i]'];
+      const taken = ['email', 'first-name', 'last-name', 'company', 'website', 'hear-about-us'];
+      for (let i = 0; i < selectors.length; i++) {
+        const found = document.querySelectorAll(selectors[i]);
+        for (let j = 0; j < found.length; j++) {
+          if (taken.indexOf(found[j].id) === -1) return found[j];
+        }
+      }
+      return null;
+    }
+
+    function ensurePhoneField() {
+      const existing = findExistingPhoneField();
+      if (existing) {
+        normalisePhoneField(existing);
+        return;
+      }
+      if (!AUTO_INJECT_PHONE) return;
+
+      // Clone an existing field's wrapper so the injected input inherits
+      // the page's exact Webflow styling instead of guessing at CSS.
+      const donorInput = document.getElementById('website') || document.getElementById('company') || document.getElementById('last-name');
+      if (!donorInput) return;
+
+      const donorWrapper = donorInput.closest('.field-wrapper');
+      let phoneInput;
+
+      if (donorWrapper) {
+        const clone = donorWrapper.cloneNode(true);
+        // strip anything carried over from the donor
+        clone.querySelectorAll('[id$="-error"]').forEach((e) => e.remove());
+        clone.querySelectorAll('.float-label-wrapper').forEach((w) => {
+          const inner = w.querySelector('input');
+          if (inner) w.parentNode.insertBefore(inner, w);
+          w.remove();
+        });
+        phoneInput = clone.querySelector('input');
+        if (!phoneInput) return;
+        phoneInput.removeAttribute('value');
+        phoneInput.value = '';
+        clone.style.removeProperty('display'); // donor may have been hidden
+        donorWrapper.insertAdjacentElement('afterend', clone);
+      } else {
+        phoneInput = donorInput.cloneNode(true);
+        phoneInput.value = '';
+        donorInput.insertAdjacentElement('afterend', phoneInput);
+      }
+
+      phoneInput.id = 'phone';
+      phoneInput.name = 'phone';
+      phoneInput.setAttribute('placeholder', 'Phone number');
+      phoneInput.removeAttribute('data-typing-placeholder');
+      normalisePhoneField(phoneInput);
+      console.log('[GW] phone field injected (page had none)');
+    }
+
+    function ensureErrorEls() {
+      Object.keys(ERROR_FIELDS).forEach(function (errId) {
+        if (document.getElementById(errId)) return;
+        const input = document.getElementById(ERROR_FIELDS[errId]);
+        if (!input) return; // no field, no error slot needed
+        const div = document.createElement('div');
+        div.id = errId;
+        // styling comes from the injected [id$="-error"] rule
+        div.style.display = 'none';
+        outerOf(input).insertAdjacentElement('afterend', div);
+      });
+    }
+
+    function run() {
+      ensurePhoneField();
+      ensureErrorEls();
+    }
+
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run);
+    else run();
   })();
 
   /* --------------------------------------------------------
@@ -811,12 +955,32 @@
       if (emailInput) emailInput.classList.remove('gw-input-warning');
     }
 
+    /* Builds #email-protip if the page doesn't have one, exactly as
+       ensureWebsiteMismatchTip() does for its own element. /demo gets this
+       div from its page markup; the Ads pages don't, and a missing div
+       must not be the difference between a working nudge and silence.
+       Inline styles mirror the #email-protip rule in injectStyles(), so it
+       looks identical whether the div came from Webflow or from here. */
+    function ensureEmailProTip() {
+      let tip = document.getElementById('email-protip');
+      if (tip) return tip;
+      const emailInput = document.getElementById('email');
+      if (!emailInput) return null;
+      tip = document.createElement('div');
+      tip.id = 'email-protip';
+      tip.style.cssText = 'display:none;align-items:flex-start;gap:4px;color:#FF6A00;font-size:12px;font-weight:500;line-height:1.4;margin-top:4px;';
+      const errEl = document.getElementById('email-error');
+      if (errEl && errEl.parentNode) errEl.parentNode.insertBefore(tip, errEl.nextSibling);
+      else (emailInput.closest('.float-label-wrapper') || emailInput).insertAdjacentElement('afterend', tip);
+      return tip;
+    }
+
     function initEmailProTip() {
-      const tip = document.getElementById('email-protip');
+      const tip = ensureEmailProTip();
       const emailInput = document.getElementById('email');
       if (!tip || !emailInput) return;
 
-      tip.innerHTML = '<img src="https://cdn.prod.website-files.com/65c292289fb0ea1ff3a84bd3/6a573b62ef8929dda9d988f1_WarningCircle.svg" alt="">' + '<span>Business email preferred over personal email.</span>';
+      tip.innerHTML = '<img src="https://cdn.prod.website-files.com/65c292289fb0ea1ff3a84bd3/6a573b62ef8929dda9d988f1_WarningCircle.svg" style="width:14px;height:14px;display:block;margin-top:1px;flex-shrink:0;" alt="">' + '<span>Business email preferred over personal email.</span>';
 
       // allowClear is TRUE only on input (they actually typed something).
       // On blur nothing changed, so clearing there would wipe a verification
@@ -1991,6 +2155,22 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       }
     }
 
+    /* Called by handleDisqualifiedNext only when no choice was passed — i.e.
+       from a #step-disqualified-next button click. /demo's disqualified step
+       is radios-only, so this was never defined there and never reached. If
+       the Ads page markup DOES have that button, the undefined call throws a
+       ReferenceError and the button dies silently with no feedback. Defined
+       here so the file is correct either way; the radio path passes `choice`
+       explicitly and never touches this. */
+    function validateDisqualified() {
+      const waitlist = document.getElementById('disq-waitlist');
+      const b2b = document.getElementById('disq-b2b');
+      if (b2b && b2b.checked) { hideError('disq-error'); return { valid: true, choice: 'b2b' }; }
+      if (waitlist && waitlist.checked) { hideError('disq-error'); return { valid: true, choice: 'waitlist' }; }
+      showError('disq-error', 'Please select one of the options above.');
+      return { valid: false, choice: '' };
+    }
+
     async function handleDisqualifiedNext(choice) {
       if (_submitting) return;
       if (!choice) {
@@ -2213,6 +2393,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
 
     const ERROR_INPUT_MAP = {
       'email-error': 'email',
+      'disq-error': 'disq-waitlist',
       'sell-error': 'radio-wrap',
       'first-name-error': 'first-name',
       'last-name-error': 'last-name',
@@ -2223,8 +2404,19 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
     };
 
     function showError(id, msg) {
-      const el = document.getElementById(id);
-      if (!el) return;
+      let el = document.getElementById(id);
+      // Last resort: an error with nowhere to render is a dead button —
+      // validation returns false and the lead sees no reason why. Build
+      // the slot rather than fail silently. SECTION 0 normally has this
+      // covered; this catches anything added to ERROR_INPUT_MAP later.
+      if (!el) {
+        const host = document.getElementById(ERROR_INPUT_MAP[id]);
+        if (!host) return;
+        el = document.createElement('div');
+        el.id = id;
+        el.style.display = 'none';
+        (host.closest('.float-label-wrapper') || host).insertAdjacentElement('afterend', el);
+      }
       if (id === 'email-error') hideProTip(); // error takes the slot + border
       if (id === 'website-error') hideWebsiteMismatchTip(); // error takes the slot
       el.textContent = msg;
@@ -2281,7 +2473,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.3.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
+      console.log('[GW] ✅ Form initialised v5.3.3-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
