@@ -384,7 +384,60 @@ const WEBSITE_VERIFIED_REASONS = [
 // Reasons that mean "we looked and it is genuinely not a company website".
 // These set website_check_failed and suppress Meta. They do NOT block the
 // form — blocking is form.js's WEBSITE_BLOCKING_REASONS, unchanged.
-const WEBSITE_NEGATIVE_REASONS = ['for_sale_lander', 'marketplace_redirect', 'parked_confirmed'];
+const WEBSITE_NEGATIVE_REASONS = ['for_sale_lander', 'marketplace_redirect', 'parked_confirmed', 'hosting_placeholder'];
+
+/* ── Plain-English labels ─────────────────────────────────────────
+   Slack and the monitor used to print the raw reason code — 'parked_ns',
+   'doh_error' — which tells an SDR nothing. Same verdict, readable wording.
+   Purely presentational: nothing here changes a decision. */
+const WEBSITE_REASON_LABELS = {
+  nxdomain:               "Domain doesn't exist — likely a typo",
+  no_dns_records:         'Domain registered but nothing set up on it',
+  hosting_placeholder:    'No website yet — domain points to a hosting setup page',
+  parked_confirmed:       'Domain registered but no website on it',
+  parked:                 'Domain registered but no website on it',
+  parked_ns:              'Domain registered but no website on it',
+  parked_suspect:         'Looks like a parked domain — could not confirm',
+  for_sale_lander:        'Domain is listed for sale',
+  marketplace_redirect:   'Domain is for sale on a domain marketplace',
+  mailbox_domain:         'Typed an email provider instead of their website',
+  brand_mismatch:         "Typed a well-known brand's site, not their own",
+  social_profile_url:     'Gave a social profile instead of a website',
+  thin_content:           'Page looked mostly empty to us — worth a manual look',
+  thin_content_wildcard:  'Page looked mostly empty to us — worth a manual look',
+  forwarded_to_live_site: 'Redirects to their live site — checked OK',
+  live_despite_dns_hint:  'Live site (an early parking signal was overruled)',
+  mx_only:                'Email-only company — no website, but mail works',
+  nxdomain_contradicted:  'DNS blip — domain matches their verified email domain',
+  content_clean:          'Live website',
+  resolved:               'Domain resolves',
+  dns_indeterminate:      'Could not reach the site to check it',
+  doh_error:              'Could not reach the site to check it',
+  timeout:                'Could not reach the site to check it',
+  unreachable:            'Could not reach the site to check it',
+  non_html:               'Address did not return a web page',
+  backend_error:          'Our check errored — not the website’s fault',
+  fetch_error:            'Our check errored — not the website’s fault',
+  skipped_no_backend:     'Check was skipped',
+  skipped_unsafe_target:  'Address pointed at an internal network — skipped',
+  test_email_skipped:     'Internal test — check skipped',
+  ok:                     'Website checked OK',
+};
+
+// SEO is the product, so "they have no website yet" is a sales fact, not just
+// a data note. These get an extra line an SDR can actually use on the call.
+const WEBSITE_SALES_HINTS = {
+  hosting_placeholder: 'They may need a site built before SEO can help',
+  no_dns_records:      'They may need a site built before SEO can help',
+  mx_only:             'They may need a site built before SEO can help',
+};
+
+function websiteReasonLabel(reason) {
+  if (!reason) return 'Unknown';
+  if (WEBSITE_REASON_LABELS[reason]) return WEBSITE_REASON_LABELS[reason];
+  if (String(reason).startsWith('http_')) return `Site returned an error (${String(reason).slice(5)})`;
+  return String(reason).replace(/_/g, ' '); // unknown code — at least make it readable
+}
 
 function isWebsiteVerified(row) {
   if (!row) return true;
@@ -707,11 +760,29 @@ function slackSubmit(d) {
   ]);
   if (lf) blocks.push(lf);
   if (d.website_check_failed) {
-    const wf = bFields([{ label: '⚠️ Website check', value: d.website_check_reason || 'failed' }]);
+    const hint = WEBSITE_SALES_HINTS[d.website_check_reason];
+    const wf = bFields([{
+      label: '⚠️ Website check',
+      value: websiteReasonLabel(d.website_check_reason) + (hint ? `\n→ ${hint}` : ''),
+    }]);
     if (wf) blocks.push(wf);
+  } else if (d.website_check_reason === 'thin_content' || d.website_check_reason === 'thin_content_wildcard') {
+    // v5.4.0 — these are VERIFIED reasons, so they fell through to the final
+    // else and were never shown at all. 25 of them in three days existed only
+    // in the Railway logs. The design intent was always "flag it for a human";
+    // without this branch there was no human-visible flag.
+    const tf = bFields([{ label: 'ℹ️ Website check', value: websiteReasonLabel(d.website_check_reason) }]);
+    if (tf) blocks.push(tf);
   } else if (d.website_check_reason && !WEBSITE_VERIFIED_REASONS.includes(d.website_check_reason) && d.website_check_reason !== 'social_profile_url') {
-    const uf = bFields([{ label: '❓ Website check', value: 'Could not verify (' + d.website_check_reason + ')' }]);
+    const uf = bFields([{ label: '❓ Website check', value: websiteReasonLabel(d.website_check_reason) }]);
     if (uf) blocks.push(uf);
+  } else if (d.website_check_reason === 'forwarded_to_live_site' || d.website_check_reason === 'live_despite_dns_hint' || d.website_check_reason === 'mx_only') {
+    // Explains an odd-looking-but-fine result so nobody re-investigates it.
+    const gf = bFields([{
+      label: '✅ Website check',
+      value: websiteReasonLabel(d.website_check_reason) + (WEBSITE_SALES_HINTS[d.website_check_reason] ? `\n→ ${WEBSITE_SALES_HINTS[d.website_check_reason]}` : ''),
+    }]);
+    if (gf) blocks.push(gf);
   } else if (d.website_check_reason === 'social_profile_url') {
     const sf = bFields([{ label: '🔗 Website', value: 'Social profile (no company site)' }]);
     if (sf) blocks.push(sf);
@@ -1456,13 +1527,15 @@ app.get('/monitor', (req, res) => {
   'var API=window.location.origin;' +
   'var lChart=null,curPage=1,stimer=null,curSort="created_at",curDir="desc",filterOptsLoaded=false;' +
   'function showTab(n){["overview","leads","sdr","dupes","health","lm"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();}' +
+  'var WLBL={"nxdomain": "Domain doesn\'t exist \u2014 likely a typo", "no_dns_records": "Domain registered but nothing set up on it", "hosting_placeholder": "No website yet \u2014 domain points to a hosting setup page", "parked_confirmed": "Domain registered but no website on it", "parked": "Domain registered but no website on it", "parked_ns": "Domain registered but no website on it", "parked_suspect": "Looks like a parked domain \u2014 could not confirm", "for_sale_lander": "Domain is listed for sale", "marketplace_redirect": "Domain is for sale on a domain marketplace", "mailbox_domain": "Typed an email provider instead of their website", "brand_mismatch": "Typed a well-known brand\'s site, not their own", "social_profile_url": "Gave a social profile instead of a website", "thin_content": "Page looked mostly empty to us \u2014 worth a manual look", "thin_content_wildcard": "Page looked mostly empty to us \u2014 worth a manual look", "forwarded_to_live_site": "Redirects to their live site \u2014 checked OK", "live_despite_dns_hint": "Live site (an early parking signal was overruled)", "mx_only": "Email-only company \u2014 no website, but mail works", "nxdomain_contradicted": "DNS blip \u2014 domain matches their verified email domain", "content_clean": "Live website", "resolved": "Domain resolves", "dns_indeterminate": "Could not reach the site to check it", "doh_error": "Could not reach the site to check it", "timeout": "Could not reach the site to check it", "unreachable": "Could not reach the site to check it", "non_html": "Address did not return a web page", "backend_error": "Our check errored \u2014 not the website\u2019s fault", "fetch_error": "Our check errored \u2014 not the website\u2019s fault", "skipped_no_backend": "Check was skipped", "skipped_unsafe_target": "Address pointed at an internal network \u2014 skipped", "test_email_skipped": "Internal test \u2014 check skipped", "ok": "Website checked OK"};' +
+  'function wlabel(r){if(!r)return"Unknown";if(WLBL[r])return WLBL[r];if(String(r).indexOf("http_")===0)return"Site returned an error ("+String(r).slice(5)+")";return String(r).replace(/_/g," ");}' +
   'function badge(id,text,cls){var el=document.getElementById(id);if(!el)return;el.textContent=text;el.className="badge "+cls;}' +
   'function set(id,v){var el=document.getElementById(id);if(el)el.textContent=v;}' +
   'function pct(a,b){return b?Math.round(a/b*100)+"%":"0%";}' +
   'function ist(ts){if(!ts)return"\\u2014";return new Date(ts).toLocaleString("en-IN",{timeZone:"Asia/Kolkata",dateStyle:"short",timeStyle:"short"});}' +
   'function esc(s){if(!s)return"";return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}' +
   'async function checkApi(){try{var r=await fetch(API+"/health",{signal:AbortSignal.timeout(5000)});if(r.ok){document.getElementById("apidot").className="dot dot-green";document.getElementById("apist").textContent="API online";badge("s-api","Online","bg");return true;}throw new Error("HTTP "+r.status);}catch(e){document.getElementById("apidot").className="dot dot-red";document.getElementById("apist").textContent="API offline";badge("s-api","Offline","br");return false;}}' +
-  'async function checkElv(){try{var r=await fetch(API+"/monitor/elv-health",{signal:AbortSignal.timeout(5000)});var d=await r.json();if(d.state==="degraded"){badge("s-elv",d.rate+"% inconclusive","br");}else if(d.state==="insufficient_data"){badge("s-elv","Idle ("+d.checks+" checks)","bx");}else{badge("s-elv","Healthy ("+d.rate+"% inconclusive)","bg");}}catch(e){badge("s-elv","Unknown","bx");}}' +
+  'async function checkElv(){try{var r=await fetch(API+"/monitor/elv-health",{signal:AbortSignal.timeout(5000)});var d=await r.json();var age=(d.minutesSinceLastCheck!=null&&d.minutesSinceLastCheck>=60)?" \\u00b7 last check "+Math.round(d.minutesSinceLastCheck/60)+"h ago":"";if(d.state==="degraded"){badge("s-elv","Degraded \\u2014 "+d.rate+"% of "+d.checks+" inconclusive"+age,"br");}else if(d.state==="insufficient_data"){if(d.rate>=50||d.consecutiveInconclusive>=2){badge("s-elv","Low traffic \\u2014 "+d.rate+"% of "+d.checks+" inconclusive"+age,"ba");}else{badge("s-elv","Quiet \\u2014 "+d.checks+" checks, "+d.rate+"% inconclusive"+age,"bx");}}else{badge("s-elv","Healthy ("+d.rate+"% inconclusive)","bg");}}catch(e){badge("s-elv","Unknown","bx");}}' +
   'function renderAlerts(d){var a=[];if(d.pendingPartials>0)a.push({c:"aw",i:"!",m:d.pendingPartials+" session(s) waiting >2 hours without booking \\u2014 recovery cron will pick them up."});if(d.noBookingUid>0)a.push({c:"aw",i:"!",m:d.noBookingUid+" people (deduped, qualified B2B) completed the form but have no booking on any session \\u2014 see SDR List."});if(!d.awsSynced)a.push({c:"ae",i:"x",m:"AWS sync disabled."});if(d.total>5&&d.enriched<d.total*0.3)a.push({c:"aw",i:"!",m:"Low enrichment rate ("+Math.round(d.enriched/d.total*100)+"% of sessions)."});if(d.todayCount===0)a.push({c:"aw",i:"o",m:"No new sessions in the last 24 hours."});if(a.length===0)a.push({c:"ao",i:"\\u2713",m:"All systems healthy."});document.getElementById("alerts").innerHTML=a.map(function(x){return"<div class=\\"alertbox "+x.c+"\\"><span>"+x.i+"</span><span>"+x.m+"</span></div>";}).join("");}' +
   'function renderFunnel(t,c,b,d){var steps=[{l:"People entered (Step 1)",v:t,p:100,col:"#818cf8"},{l:"People completed (Step 2)",v:c,p:t?Math.round(c/t*100):0,col:"#38bdf8"},{l:"People booked",v:b,p:t?Math.round(b/t*100):0,col:"#34d399"},{l:"People disqualified",v:d,p:t?Math.round(d/t*100):0,col:"#fb923c"}];document.getElementById("funnel").innerHTML=steps.map(function(s){return"<div class=\\"fr\\"><div class=\\"fl\\"><span>"+s.l+"</span><span style=\\"font-weight:500\\">"+s.v+" <span style=\\"color:#aaa\\">("+s.p+"%)</span></span></div><div class=\\"fb\\"><div class=\\"ff\\" style=\\"width:"+s.p+"%;background:"+s.col+"\\"></div></div></div>";}).join("");}' +
   'function renderChart(rows){var labels=(rows||[]).map(function(r){return r.day_label;}),data=(rows||[]).map(function(r){return parseInt(r.count)||0;});if(lChart)lChart.destroy();var ctx=document.getElementById("lchart").getContext("2d");lChart=new Chart(ctx,{type:"bar",data:{labels:labels,datasets:[{data:data,backgroundColor:"#818cf8",borderRadius:4,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{stepSize:1,color:"#aaa"},grid:{color:"#f0f0f0"}},x:{ticks:{color:"#aaa",maxRotation:45,autoSkip:false},grid:{display:false}}}}});}' +
@@ -1488,7 +1561,8 @@ app.get('/monitor', (req, res) => {
   '{lb:"LinkedIn",v:l.enriched_linkedin,lnk:true},' +
   '{lb:"Phone",v:l.e_phone||l.phone},' +
   '{lb:"Website",v:l.website,lnk:true},' +
-  '{lb:"\\u26A0\\uFE0F Website check",v:l.website_check_failed?("Failed"+(l.website_check_reason?" ("+l.website_check_reason+")":"")):null},' +
+  '{lb:"\\u26A0\\uFE0F Website check",v:l.website_check_failed?wlabel(l.website_check_reason):null},' +
+  '{lb:"\\u2139\\uFE0F Website check",v:(!l.website_check_failed&&l.website_check_reason&&l.website_check_reason!=="social_profile_url"&&["content_clean","resolved","ok","test_email_skipped"].indexOf(l.website_check_reason)===-1)?wlabel(l.website_check_reason):null},' +
   '{lb:"\\uD83D\\uDD17 Website type",v:(!l.website_check_failed&&l.website_check_reason==="social_profile_url")?"Social profile (no company site)":null},' +
   '{lb:"\\uD83D\\uDD01 Attempts",v:(Number(l.prior_attempts)>0)?("Attempt "+(Number(l.prior_attempts)+1)+" \\u2014 "+l.prior_attempts+" prior"+(Number(l.prior_disqualified)>0?", "+l.prior_disqualified+" disqualified":"")):null},' +
   '{lb:"Hear about us",v:l.hear_about_us},' +
@@ -1854,6 +1928,15 @@ const ELV_WINDOW_MS       = Number(process.env.ELV_WINDOW_MS)       || 90 * 60 *
 const ELV_MIN_SAMPLE      = Number(process.env.ELV_MIN_SAMPLE)      || 8;              // never judge on thin traffic
 const ELV_DEGRADED_RATE   = Number(process.env.ELV_DEGRADED_RATE)   || 0.5;
 const ELV_RECOVERED_RATE  = Number(process.env.ELV_RECOVERED_RATE)  || 0.25;           // hysteresis gap prevents flapping
+// v5.4.0 — ELV_MIN_SAMPLE exists so a couple of unlucky checks can't cry wolf.
+// But it also meant a TOTAL outage was invisible whenever traffic was thin:
+// 16 Aug 13:14 → 17 Aug 05:33, 49 consecutive failures, and the overnight
+// stretch never reached 8 checks in a 90-minute window, so nothing fired.
+// A run of consecutive failures is an outage at ANY volume, so it bypasses
+// the sample floor entirely.
+const ELV_CONSECUTIVE_FAIL = Number(process.env.ELV_CONSECUTIVE_FAIL) || 4;
+// Recovery needs more than one lucky result, or the state flaps on thin traffic.
+const ELV_RECOVER_STREAK   = Number(process.env.ELV_RECOVER_STREAK)   || 2;
 const ELV_TIMEOUT_MS      = Number(process.env.ELV_TIMEOUT_MS)      || 8000;
 const ELV_WINDOW_MAX      = 200; // hard cap so a traffic burst can't grow the window unbounded
 
@@ -1866,6 +1949,9 @@ const _elvWindow    = [];   // [{ t: ms, bad: bool }]
 let   _elvDegraded  = false;
 let   _elvLastStatus = null;
 let   _elvLastCheckAt = 0;
+let   _elvConsecBad  = 0;   // running streak of inconclusive results
+let   _elvConsecGood = 0;   // running streak of conclusive results
+let   _elvDegradedSince = 0;
 
 function elvIsInternal(email) {
   const domain = String(email || '').split('@')[1] || '';
@@ -1883,16 +1969,29 @@ function elvHealthSnapshot() {
   pruneElvWindow(now);
   const checks = _elvWindow.length;
   const bad    = _elvWindow.filter(e => e.bad).length;
+  const rate   = checks ? Math.round((bad / checks) * 100) : 0;
+  // v5.4.0 — 'insufficient_data' used to render as a calm grey "Idle", which
+  // reads as "all fine" when it actually means "I am not allowed to have an
+  // opinion". A live snapshot showed rate:40 checks:5 badged as Idle. The
+  // rate is now always reported so a thin sample can still look worrying.
+  let state;
+  if (_elvDegraded) state = 'degraded';
+  else if (checks < ELV_MIN_SAMPLE) state = 'insufficient_data';
+  else state = 'healthy';
   return {
-    state:         _elvDegraded ? 'degraded' : (checks < ELV_MIN_SAMPLE ? 'insufficient_data' : 'healthy'),
+    state,
     inconclusive:  bad,
     checks,
-    rate:          checks ? Math.round((bad / checks) * 100) : 0,
+    rate,
+    consecutiveInconclusive: _elvConsecBad,
+    degradedSince: _elvDegradedSince ? new Date(_elvDegradedSince).toISOString() : null,
     windowMinutes: Math.round(ELV_WINDOW_MS / 60000),
     minSample:     ELV_MIN_SAMPLE,
+    consecutiveFailThreshold: ELV_CONSECUTIVE_FAIL,
     cacheSize:     _elvCache.size,
     lastStatus:    _elvLastStatus,
     lastCheckAt:   _elvLastCheckAt ? new Date(_elvLastCheckAt).toISOString() : null,
+    minutesSinceLastCheck: _elvLastCheckAt ? Math.round((now - _elvLastCheckAt) / 60000) : null,
   };
 }
 
@@ -1903,38 +2002,65 @@ function recordElvOutcome(status, email) {
     _elvLastCheckAt = now;
     if (email && elvIsInternal(email)) return; // own testing never moves health state
 
-    _elvWindow.push({ t: now, bad: ELV_INDETERMINATE.includes(status) });
+    const bad = ELV_INDETERMINATE.includes(status);
+    if (bad) { _elvConsecBad += 1; _elvConsecGood = 0; }
+    else     { _elvConsecGood += 1; _elvConsecBad = 0; }
+
+    _elvWindow.push({ t: now, bad });
     pruneElvWindow(now);
 
     const checks = _elvWindow.length;
-    if (checks < ELV_MIN_SAMPLE) {
-      // Too little recent signal to make a claim. If we were degraded and
-      // traffic has since dried up, clear silently rather than hold a
-      // stale state overnight — the old code's core failure.
-      _elvDegraded = false;
+    const rate   = checks ? _elvWindow.filter(e => e.bad).length / checks : 0;
+
+    /* ── ENTER degraded ──
+       Two independent triggers. The rate test needs a decent sample so a
+       couple of unlucky checks can't cry wolf. The streak test has no
+       sample requirement at all — a run of consecutive failures means the
+       upstream is down no matter how quiet the night is. */
+    const byStreak = _elvConsecBad >= ELV_CONSECUTIVE_FAIL;
+    const byRate   = checks >= ELV_MIN_SAMPLE && rate >= ELV_DEGRADED_RATE;
+
+    if (!_elvDegraded && (byStreak || byRate)) {
+      _elvDegraded = true;
+      _elvDegradedSince = now;
+      alertOps('warning', 'ELV', 'Verification degraded', {
+        'Signal': byStreak
+          ? `${_elvConsecBad} inconclusive results in a row`
+          : `${Math.round(rate * 100)}% of ${checks} checks in the last ${Math.round(ELV_WINDOW_MS / 60000)} min`,
+        'Impact': 'Inconclusive results are passing unverified. Definitively bad emails are STILL being blocked.',
+        'Action': 'Check ELV status/credits. Self-recovers — you will get a follow-up when it clears.',
+      });
       return;
     }
-    const rate = _elvWindow.filter(e => e.bad).length / checks;
 
-    if (!_elvDegraded && rate >= ELV_DEGRADED_RATE) {
-      _elvDegraded = true;
-      alertOps('warning', 'ELV', 'Verification degraded', {
-        'Inconclusive': `${Math.round(rate * 100)}% of ${checks} checks in the last ${Math.round(ELV_WINDOW_MS / 60000)} min`,
-        'Impact': 'Inconclusive results are passing unverified. Definitively bad emails are STILL being blocked.',
-        'Action': 'Check ELV status/credits. Self-recovers — no action needed if it clears.',
-      });
-    } else if (_elvDegraded && rate <= ELV_RECOVERED_RATE) {
-      _elvDegraded = false;
-      // Recovery goes straight to Slack so it reads ✅ and can't be
-      // swallowed by the warning-severity cooldown.
-      const heading = '✅ ELV — Verification recovered';
-      sendOpsSlack([
-        bHeader(heading),
-        bDivider(),
-        bFields([{ label: 'Inconclusive', value: `${Math.round(rate * 100)}% of ${checks} recent checks` }]),
-        bContext(`Severity: *info* · ${new Date().toISOString()}`),
-      ].filter(Boolean), heading);
-      console.log('[ELV] ✅ Recovered — degradation cleared');
+    /* ── EXIT degraded ──
+       v5.4.0: the old code did `_elvDegraded = false; return;` whenever the
+       sample was thin. That silently reset the state AND skipped the
+       recovery message — which is why 16 Aug alerted twice for one incident
+       (state cleared overnight, then re-crossed the threshold) and why no
+       "recovered" message was ever sent. State now ONLY leaves degraded
+       through this branch, which always announces itself. */
+    if (_elvDegraded) {
+      const streakClear = _elvConsecGood >= ELV_RECOVER_STREAK;
+      // On a thin sample the rate is not meaningful, so a clean streak is
+      // enough. With a real sample, hysteresis applies.
+      const rateClear = checks >= ELV_MIN_SAMPLE ? rate <= ELV_RECOVERED_RATE : true;
+      if (streakClear && rateClear) {
+        const downFor = _elvDegradedSince ? Math.round((now - _elvDegradedSince) / 60000) : null;
+        _elvDegraded = false;
+        _elvDegradedSince = 0;
+        const heading = '✅ ELV — Verification recovered';
+        sendOpsSlack([
+          bHeader(heading),
+          bDivider(),
+          bFields([
+            { label: 'Now', value: `${_elvConsecGood} conclusive results in a row · ${Math.round(rate * 100)}% inconclusive of ${checks} recent checks` },
+            downFor != null ? { label: 'Degraded for', value: downFor >= 60 ? `${Math.round(downFor / 60)}h ${downFor % 60}m` : `${downFor} min` } : null,
+          ].filter(Boolean)),
+          bContext(`Severity: *info* · ${new Date().toISOString()}`),
+        ].filter(Boolean), heading);
+        console.log(`[ELV] ✅ Recovered — degradation cleared after ${downFor} min`);
+      }
     }
   } catch (err) {
     console.warn('[ELV] health tracking error (ignored):', err && err.message);
@@ -2301,6 +2427,27 @@ function isMarketplaceHost(hostname) {
   return MARKETPLACE_DOMAINS.includes(reg) ? reg : null;
 }
 
+// Hosting PLACEHOLDER hosts — the temporary address a host gives you before
+// your real domain is connected. Detected the same way as marketplaces: by
+// where the redirect LANDS, not by reading the page. That matters because a
+// placeholder page has plenty of content — luctd.com lands on
+// luctd.bgi.ufj.mybluehost.me showing a heading, a paragraph, a signup form
+// and footer links, so every "does this page have substance" test passes it.
+// It is still not a website.
+//
+// Deliberately SHORT. Only addresses that exist purely during setup, which
+// nobody would choose to stay on. Website builder subdomains (wixsite.com,
+// godaddysites.com, myshopify.com…) are NOT here: a small business genuinely
+// running on theirshop.wixsite.com is real, just unpolished, and flagging
+// them would be wrong. Add more only with a real example in the logs.
+const HOSTING_PLACEHOLDER_DOMAINS = ['mybluehost.me', 'hostingersite.com'];
+
+function isHostingPlaceholder(hostname) {
+  const reg = registrableDomain(hostname);
+  return HOSTING_PLACEHOLDER_DOMAINS.includes(reg) ? reg : null;
+}
+
+
 /* ── Structural substance analysis ─────────────────────────────────
    Judges "is there a real website here" by SHAPE rather than wording:
    a parked page has near-zero visible text, no internal navigation, and
@@ -2387,12 +2534,32 @@ async function attemptFetch(urlString, timeoutMs) {
     const response = await fetch(urlString, {
       signal: controller.signal,
       redirect: 'follow',
-      // A real browser UA, deliberately. Domain monetisation networks serve
-      // BOTS a "this domain is for sale" page while forwarding real visitors to
-      // the actual site — that's how afgmmoving.com (a working forward) got
-      // mislabelled. The whole point of this check is "does this URL work for a
-      // person", so we must see what a person sees.
-      headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36' },
+      // v5.4.0 — a real browser UA was already here, deliberately, because
+      // domain monetisation networks serve BOTS a "for sale" page while
+      // forwarding real visitors to the actual site (that's how afgmmoving.com
+      // got mislabelled). But the UA was the ONLY header we sent, and Chrome
+      // sends about ten. Claiming to be Chrome while sending none of Chrome's
+      // other headers is itself a bot signature, and security plugins
+      // fingerprint exactly that. Six unrelated real businesses on six
+      // different hosts all returned byte-identical 73-character stubs in
+      // three days — sites that load perfectly in a browser. Sending the
+      // full set is the same intent as the original UA line, carried through.
+      //
+      // Accept-Encoding is DELIBERATELY omitted: undici sets and handles it,
+      // and overriding it risks getting undecompressed bytes back as text.
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Sec-CH-UA': '"Chromium";v="126", "Google Chrome";v="126", "Not-A.Brand";v="99"',
+        'Sec-CH-UA-Mobile': '?0',
+        'Sec-CH-UA-Platform': '"macOS"',
+      },
     });
     clearTimeout(t);
     return response;
@@ -2482,6 +2649,18 @@ async function evaluateWebsite({ raw, parkingHint = null, hasMX = false }) {
     return ({ ok: false, reason: 'marketplace_redirect', matched: marketplace, canonical_url });
   }
 
+  // TIER 1 — hosting placeholder. Tested HERE, before any content measurement,
+  // because these pages are FULL of content — luctd.com lands on
+  // luctd.bgi.ufj.mybluehost.me with a heading, a paragraph, a signup form and
+  // footer links. Every "does this page have substance" test passes it, so it
+  // sailed through as forwarded_to_live_site. Judged by destination identity,
+  // never by reading the page.
+  const placeholderHost = isHostingPlaceholder(finalHost);
+  if (placeholderHost && redirectedOffDomain) {
+    console.log(`[verify-website] NEGATIVE ${url.hostname} → hosting placeholder at ${placeholderHost} — site not built yet`);
+    return ({ ok: false, reason: 'hosting_placeholder', matched: placeholderHost, canonical_url });
+  }
+
   if (!response.ok) {
     console.log(`[verify-website] ${url.hostname} → HTTP ${response.status} — failing open`);
     return ({ ok: true, reason: 'http_' + response.status, canonical_url, redirected_off_domain: redirectedOffDomain });
@@ -2555,6 +2734,33 @@ async function evaluateWebsite({ raw, parkingHint = null, hasMX = false }) {
     }
     const reason = wildcard ? 'thin_content_wildcard' : 'thin_content';
     console.log(`[verify-website] FLAG ${url.hostname} — ${reason} (text=${sub.textLen}, links=${sub.internalLinks}, titleIsDomain=${sub.titleIsJustDomain})`);
+
+    /* ── DIAGNOSTIC (v5.4.0, temporary) ──────────────────────────────
+       Six unrelated real businesses on six different hosts returned
+       byte-identical 73-character stubs in three days — sites that load
+       perfectly in a browser. The likely cause is that we were sending a
+       Chrome User-Agent and none of Chrome's other headers, which is itself
+       a bot signature; that is fixed in attemptFetch above. But "likely" is
+       not "known", and writing a rule against an unread string is exactly
+       how the Vercel IP got mislabelled as a Hostinger placeholder.
+       So: print what we were actually served. If the header fix worked,
+       these lines stop appearing. If they don't, we can finally read the
+       page instead of theorising about it.
+       REMOVE once the cause is confirmed — this logs page content. */
+    try {
+      const serverHdr = response.headers.get('server') || '-';
+      const cfRay     = response.headers.get('cf-ray') ? 'yes' : 'no';
+      const cfMit     = response.headers.get('cf-mitigated') || '-';
+      const setCookie = response.headers.get('set-cookie') ? 'yes' : 'no';
+      const bodySample = rawHtml.replace(/\s+/g, ' ').trim().slice(0, 300);
+      const textSample = sub.visible.slice(0, 200);
+      console.log(`[verify-website][diag] ${url.hostname} | final=${finalHost} | status=${response.status} | server=${serverHdr} | cf-ray=${cfRay} | cf-mitigated=${cfMit} | set-cookie=${setCookie} | title="${(sub.title || '').slice(0, 80)}"`);
+      console.log(`[verify-website][diag] ${url.hostname} | text(${sub.textLen})="${textSample}"`);
+      console.log(`[verify-website][diag] ${url.hostname} | html(${rawHtml.length})="${bodySample}"`);
+    } catch (e) {
+      console.log(`[verify-website][diag] ${url.hostname} — diagnostic failed (ignored): ${e && e.message}`);
+    }
+
     // ok:true and a VERIFIED reason: surfaced for humans, costs the lead nothing.
     return ({ ok: true, reason, canonical_url, substance: { textLen: sub.textLen, internalLinks: sub.internalLinks, titleIsJustDomain: sub.titleIsJustDomain, wildcard } });
   }
@@ -2640,7 +2846,7 @@ async function resolveWebsiteDns(domain) {
 const RECHECK_WRITEABLE = [
   'content_clean', 'live_despite_dns_hint', 'forwarded_to_live_site',
   'thin_content', 'thin_content_wildcard',
-  'parked_confirmed', 'for_sale_lander', 'marketplace_redirect',
+  'parked_confirmed', 'for_sale_lander', 'marketplace_redirect', 'hosting_placeholder',
   'nxdomain', 'no_dns_records', 'mx_only',
 ];
 
@@ -2754,7 +2960,11 @@ app.get('/monitor/website-recheck', async (req, res) => {
         const dns = await resolveWebsiteDns(host);
         hint = dns.parkingHint;
         if (dns.status === 'nxdomain') verdict = { ok: false, reason: 'nxdomain', matched: 'ENOTFOUND on apex + www' };
-        else if (dns.status === 'no_dns_records') verdict = { ok: true, reason: 'no_dns_records' };
+        // form.js returns ok:false for this (gushwork-form.js SECTION 3C), so the
+        // recheck must too. They disagreed, which is why gslgraphics.com showed
+        // flagged while RosaAinslie.com did not for the identical verdict — and
+        // why a re-run would have silently unflagged one of them.
+        else if (dns.status === 'no_dns_records') verdict = { ok: false, reason: 'no_dns_records' };
         else if (dns.status === 'mx_only') verdict = { ok: true, reason: 'mx_only', matched: 'MX only — email-only company' };
         // STAGE 2 — only meaningful once we know the domain resolves.
         else verdict = await evaluateWebsite({ raw: website, parkingHint: dns.parkingHint, hasMX: dns.hasMX });
