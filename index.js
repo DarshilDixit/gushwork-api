@@ -435,7 +435,13 @@ const WEBSITE_SALES_HINTS = {
 function websiteReasonLabel(reason) {
   if (!reason) return 'Unknown';
   if (WEBSITE_REASON_LABELS[reason]) return WEBSITE_REASON_LABELS[reason];
-  if (String(reason).startsWith('http_')) return `Site returned an error (${String(reason).slice(5)})`;
+  if (String(reason).startsWith('http_')) {
+    const code = String(reason).slice(5);
+    // 999 is LinkedIn's bespoke "no automated access" code; 401/403 are the
+    // site refusing our checker. None of these say anything about the business.
+    if (['999', '403', '401', '429'].includes(code)) return `Site blocked our check (${code})`;
+    return `Site returned an error (${code})`;
+  }
   return String(reason).replace(/_/g, ' '); // unknown code — at least make it readable
 }
 
@@ -570,11 +576,23 @@ function alertSlackBroken(detail) {
    Individual failures for these are normal noise; a sustained RATE is
    the real signal. Same rolling-window idea already proven on ELV.
    ─────────────────────────────────────────────────────────────────── */
+/* v5.5.0 — alertAfter lowered 5 → 3. At 30-40 leads/day a threshold of 5
+   needed most of a working day to trip, and off-peak it never did. The
+   consecutive-streak and auth-failure rules in recordFailure now catch the
+   sharp cases; this count stays as the slow-trickle backstop.
+   Loops added: it holds an API key that can be revoked, and had no failure
+   alerting at all.
+   Deliberately NOT here, because both already alert correctly:
+     Salesforce — alertOps at every call site, critical, first failure.
+     ELV        — alertOps at critical for HTTP 401/402/403 (key rejected /
+                  credits exhausted), and timeouts feed recordElvOutcome,
+                  which has its own consecutive-failure escape hatch. */
 const FAILURE_MONITORS = {
-  'Meta CAPI': { alertAfter: 5, impact: 'Conversion events are not reaching Meta, so ad optimisation is degrading.' },
-  'Apollo':    { alertAfter: 5, impact: 'These leads were saved without enrichment data.' },
-  'AWS sync':  { alertAfter: 5, impact: 'The AWS mirror database is drifting out of sync with Railway.' },
-  'Email':     { alertAfter: 5, impact: 'Drop-off follow-up emails are not being delivered. If this is all of them, the Gmail connection is likely broken.' },
+  'Meta CAPI': { alertAfter: 3, impact: 'Conversion events are not reaching Meta, so ad optimisation is degrading.' },
+  'Apollo':    { alertAfter: 3, impact: 'These leads were saved without enrichment data.' },
+  'AWS sync':  { alertAfter: 3, impact: 'The AWS mirror database is drifting out of sync with Railway.' },
+  'Email':     { alertAfter: 3, impact: 'Drop-off follow-up emails are not being delivered. If this is all of them, the Gmail connection is likely broken.' },
+  'Loops':     { alertAfter: 3, impact: 'Lead-magnet contacts are not reaching the Loops mailing list.' },
 };
 const FAILURE_BUFFER_TTL_MS = 6 * 60 * 60 * 1000; // stale failures expire, so a slow trickle never accumulates
 const _failBuffers = new Map(); // source -> [{ id, error, at }]
@@ -583,14 +601,131 @@ const _failBuffers = new Map(); // source -> [{ id, error, at }]
 // listing exactly WHICH items failed. Deliberately count-based rather than
 // percentage-based: "5 failures, here they are" is actionable, "40% of a
 // rolling window" is not.
+/* ── Credential failures alert INSTANTLY ──────────────────────────
+   v5.5.0. A count-based threshold is right for flaky failures — one bad
+   Apollo lookup shouldn't page anyone. It is wrong for a rejected
+   credential, which never recovers on its own and stays broken until a
+   human fixes it.
+
+   Real case: on 19 Aug the growth@gushwork.ai password was reset at
+   17:23 IST, which silently revokes every Gmail app password. The 18:30
+   cron produced 535-5.7.8 twice. 'Email' alerts after 5 failures, so
+   nothing fired — and because the send flag was set regardless of
+   outcome, both leads (one a Founder & CEO) were marked as emailed and
+   would never have been retried. Found only by reading logs.
+
+   Any error matching these patterns now pages immediately, at critical,
+   bypassing both the count threshold and the warning cooldown. */
+const AUTH_FAILURE_PATTERNS = [
+  /\b535\b/,                       // Gmail SMTP: Username and Password not accepted
+  /\b534\b/,                       // Gmail SMTP: application-specific password required
+  /username and password not accepted/i,
+  /application-specific password required/i,
+  /invalid[ _-]?login/i,
+  /bad ?credentials/i,
+  /invalid_grant/i,                // OAuth refresh token dead
+  /invalid_client/i,
+  /INVALID_SESSION_ID/i,           // Salesforce session expired
+  /invalid[ _-]?api[ _-]?key/i,
+  /api key rejected/i,             // ELV
+  /credits exhausted/i,            // ELV — not auth, but equally terminal
+  /\bunauthorized\b/i,             // HTTP 401 text
+  /\bforbidden\b/i,                // HTTP 403 text
+  /\b401\b/,
+  /\b403\b/,
+  /access[ _-]?token/i,            // Meta: expired/invalid access token
+  /OAuth/i,
+  /authenticat(e|ion|ed) fail/i,
+  /permission denied/i,
+];
+
+function isAuthFailure(error) {
+  const msg = String(error || '');
+  if (!msg) return false;
+  return AUTH_FAILURE_PATTERNS.some((re) => re.test(msg));
+}
+
+/* Plain-English meaning per service, so the Slack message says what to DO
+   rather than making whoever is on call decode an SMTP code at 11pm. */
+const AUTH_FAILURE_GUIDANCE = {
+  'Email':      'Gmail rejected our login. An app password is revoked whenever the account password changes — generate a new one at myaccount.google.com/apppasswords and update GMAIL_APP_PASSWORD.',
+  'Meta CAPI':  'Meta rejected the access token. Check META_ACCESS_TOKEN — tokens expire, and are revoked when the generating user loses access.',
+  'Apollo':     'Apollo rejected the API key. Check APOLLO_API_KEY and the account credit balance.',
+  'Loops':      'Loops rejected the API key. Check LOOPS_API_KEY. Lead-magnet contacts are not reaching the mailing list.',
+  'Salesforce': 'Salesforce rejected the session. The refresh token may be dead — check SF_REFRESH_TOKEN.',
+  'AWS sync':   'AWS Postgres rejected the connection. Check the AWS_PG_* credentials.',
+};
+
+// Consecutive-failure streak per service. A run of failures is an outage at
+// ANY volume — the count threshold needs traffic to trip, and quiet hours
+// are exactly when nobody is watching the logs.
+const _failStreaks = new Map();
+const CONSECUTIVE_FAILURE_ALERT = Number(process.env.CONSECUTIVE_FAILURE_ALERT) || 3;
+
+/* Hard ceiling on follow-up retries. Guarantees the retry loop terminates
+   even for an SMTP error shape we do not classify, so no address is ever
+   retried forever. Cron runs every 30 min, so 3 attempts spans ~1 hour —
+   long enough to ride out a transient outage, short enough that a lead is
+   never left waiting. */
+const FOLLOWUP_MAX_ATTEMPTS = Number(process.env.FOLLOWUP_MAX_ATTEMPTS) || 3;
+
+/* Call on SUCCESS to clear a service's streak, so an outage that recovers
+   doesn't leave a stale count that trips on the next unrelated blip. */
+function recordSuccess(source) {
+  if (_failStreaks.get(source)) _failStreaks.set(source, 0);
+}
+
 function recordFailure(source, id, error) {
   try {
     const cfg = FAILURE_MONITORS[source];
     if (!cfg) return;
     const now = Date.now();
+    const errStr = String(error || '').substring(0, 200);
+
+    // ── Credential failure: page NOW, skip every threshold ──
+    if (isAuthFailure(errStr)) {
+      alertOps('critical', source, 'Authentication failed', {
+        'Affected': id || 'unknown',
+        'Error': errStr,
+        'What this means': AUTH_FAILURE_GUIDANCE[source] || 'A credential for this service has been rejected. It will stay broken until it is replaced.',
+        'Impact': cfg.impact,
+      });
+      _failStreaks.set(source, 0); // the alert is out; don't double-report via the streak
+      return;
+    }
+
+    // ── Consecutive failures: an outage regardless of volume ──
+    const streak = (_failStreaks.get(source) || 0) + 1;
+    _failStreaks.set(source, streak);
+
+    // The window buffer is maintained either way, so the slow-trickle path
+    // below still has an accurate picture.
     let buf = (_failBuffers.get(source) || []).filter(x => now - x.at < FAILURE_BUFFER_TTL_MS);
-    buf.push({ id: id || 'unknown', error: String(error || '').substring(0, 120), at: now });
+    buf.push({ id: id || 'unknown', error: errStr.substring(0, 120), at: now });
     _failBuffers.set(source, buf);
+
+    if (streak >= CONSECUTIVE_FAILURE_ALERT) {
+      const sent = alertOps('warning', source, 'Consecutive failures', {
+        'Count': `${streak} in a row`,
+        'Affected': id || 'unknown',
+        'Last error': errStr,
+        'Impact': cfg.impact,
+      });
+      if (sent) {
+        _failStreaks.set(source, 0);
+        // Both thresholds are 3, so they trip on the same failure. Clearing
+        // the window here stops one incident producing two Slack messages —
+        // the streak alert is the more precise of the two, so it wins.
+        _failBuffers.set(source, []);
+      }
+      return;
+    }
+
+    /* ── Slow trickle: N failures in the window, not consecutive ──
+       Still worth keeping alongside the streak check, because a success
+       between failures resets the streak but not the window. Three failed
+       Apollo lookups in six hours matters even if they were interleaved
+       with successes. */
     if (buf.length >= cfg.alertAfter) {
       const sent = alertOps('warning', source, 'Repeated failures', {
         'Count': `${buf.length} in the last ${Math.round(FAILURE_BUFFER_TTL_MS / 3600000)} hours`,
@@ -807,13 +942,44 @@ function getGmailTransport() {
   return _gmailTransport;
 }
 
+/* ── SMTP permanent-failure detection ─────────────────────────────
+   v5.5.0. Distinguishing "our side is broken" from "that address does not
+   exist" is what makes retrying safe. Retry the first — nothing is wrong
+   with the recipient. NEVER retry the second: the address will not start
+   existing, and repeatedly sending to dead addresses damages the sending
+   reputation of the whole domain.
+   SMTP 5xx = permanent (except the auth codes, which are OUR problem);
+   4xx = transient. */
+const SMTP_PERMANENT_PATTERNS = [
+  /\b5[05][0-9]\b(?!.*\b53[45]\b)/,     // 550/551/552/553/554 etc — recipient rejected
+  /no such user/i,
+  /user unknown/i,
+  /recipient (address )?rejected/i,
+  /address (does not|doesn't) exist/i,
+  /mailbox (unavailable|not found|does not exist)/i,
+  /invalid recipient/i,
+  /domain not found/i,
+  /unrouteable address/i,
+];
+
+function isPermanentSmtpFailure(error) {
+  const msg = String(error || '');
+  if (!msg) return false;
+  if (isAuthFailure(msg)) return false; // 535/534 are OUR credentials, not the recipient
+  return SMTP_PERMANENT_PATTERNS.some((re) => re.test(msg));
+}
+
+/* Returns { sent, permanent, error }.
+   v5.5.0 — this used to swallow its own failure and return undefined, so the
+   cron marked every lead as emailed whether or not anything was delivered.
+   On 19 Aug that silently burned two real leads, one a Founder & CEO. */
 async function sendFollowUpEmail(email, firstName) {
   if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
     console.warn('[Email] GMAIL credentials not set — skipping');
     alertOps('critical', 'Email', 'Credentials not configured', { 'Impact': 'No drop-off follow-up emails are being sent at all.' });
-    return;
+    return { sent: false, permanent: false, error: 'credentials not configured' };
   }
-  if (!email) return;
+  if (!email) return { sent: false, permanent: true, error: 'no email address' };
 
   const name    = firstName || 'there';
   const subject = 'Re: Gushwork Demo';
@@ -828,9 +994,19 @@ async function sendFollowUpEmail(email, firstName) {
       text,
     });
     console.log(`[Email] ✅ Follow-up sent to ${email} | messageId: ${result.messageId}`);
+    recordSuccess('Email');
+    return { sent: true, permanent: false, error: null };
   } catch (err) {
-    console.warn(`[Email] ⚠ Failed to send to ${email}:`, err.message);
+    const permanent = isPermanentSmtpFailure(err.message);
+    // A rejected credential invalidates the pooled transport, so drop it —
+    // otherwise every later send in this process reuses the dead connection.
+    if (isAuthFailure(err.message)) {
+      try { if (_gmailTransport && _gmailTransport.close) _gmailTransport.close(); } catch { /* ignore */ }
+      _gmailTransport = null;
+    }
+    console.warn(`[Email] ⚠ Failed to send to ${email}${permanent ? ' (permanent — will not retry)' : ' (transient — will retry)'}:`, err.message);
     recordFailure('Email', email, err.message);
+    return { sent: false, permanent, error: err.message };
   }
 }
 
@@ -1528,7 +1704,7 @@ app.get('/monitor', (req, res) => {
   'var lChart=null,curPage=1,stimer=null,curSort="created_at",curDir="desc",filterOptsLoaded=false;' +
   'function showTab(n){["overview","leads","sdr","dupes","health","lm"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();}' +
   'var WLBL={"nxdomain": "Domain doesn\'t exist \u2014 likely a typo", "no_dns_records": "Domain registered but nothing set up on it", "hosting_placeholder": "No website yet \u2014 domain points to a hosting setup page", "parked_confirmed": "Domain registered but no website on it", "parked": "Domain registered but no website on it", "parked_ns": "Domain registered but no website on it", "parked_suspect": "Looks like a parked domain \u2014 could not confirm", "for_sale_lander": "Domain is listed for sale", "marketplace_redirect": "Domain is for sale on a domain marketplace", "mailbox_domain": "Typed an email provider instead of their website", "brand_mismatch": "Typed a well-known brand\'s site, not their own", "social_profile_url": "Gave a social profile instead of a website", "thin_content": "Page looked mostly empty to us \u2014 worth a manual look", "thin_content_wildcard": "Page looked mostly empty to us \u2014 worth a manual look", "forwarded_to_live_site": "Redirects to their live site \u2014 checked OK", "live_despite_dns_hint": "Live site (an early parking signal was overruled)", "mx_only": "Email-only company \u2014 no website, but mail works", "nxdomain_contradicted": "DNS blip \u2014 domain matches their verified email domain", "content_clean": "Live website", "resolved": "Domain resolves", "dns_indeterminate": "Could not reach the site to check it", "doh_error": "Could not reach the site to check it", "timeout": "Could not reach the site to check it", "unreachable": "Could not reach the site to check it", "non_html": "Address did not return a web page", "backend_error": "Our check errored \u2014 not the website\u2019s fault", "fetch_error": "Our check errored \u2014 not the website\u2019s fault", "skipped_no_backend": "Check was skipped", "skipped_unsafe_target": "Address pointed at an internal network \u2014 skipped", "test_email_skipped": "Internal test \u2014 check skipped", "ok": "Website checked OK"};' +
-  'function wlabel(r){if(!r)return"Unknown";if(WLBL[r])return WLBL[r];if(String(r).indexOf("http_")===0)return"Site returned an error ("+String(r).slice(5)+")";return String(r).replace(/_/g," ");}' +
+  'function wlabel(r){if(!r)return"Unknown";if(WLBL[r])return WLBL[r];if(String(r).indexOf("http_")===0){var c=String(r).slice(5);return ["999","403","401","429"].indexOf(c)>=0?("Site blocked our check ("+c+")"):("Site returned an error ("+c+")");}return String(r).replace(/_/g," ");}' +
   'function badge(id,text,cls){var el=document.getElementById(id);if(!el)return;el.textContent=text;el.className="badge "+cls;}' +
   'function set(id,v){var el=document.getElementById(id);if(el)el.textContent=v;}' +
   'function pct(a,b){return b?Math.round(a/b*100)+"%":"0%";}' +
@@ -3315,6 +3491,35 @@ app.post('/booking-confirmed', async (req, res) => {
       return res.json({ ok: true, skipped: true, reason: 'already_booked' });
     }
 
+    /* ── Booking with no completed step 2 ─────────────────────────
+       v5.5.0. A booking should always be preceded by /submit. On 18 Aug a
+       spam lead (aasnj@meta.com, "lol noway", heard-about-us "porn hub")
+       booked a demo with NO /submit and NO website check — and because the
+       Slack notification is built in /submit, nothing was announced. It was
+       found the next morning by a colleague seeing the calendar invite.
+       We still do not know how step 2 was bypassed, so rather than guess at
+       a block, surface it the moment it happens.
+       Read-only and non-blocking: the booking is always honoured. */
+    try {
+      // submitted_at is the column /submit stamps. `completed` is also set
+      // by the booking write itself, so it must NOT be used here.
+      const pre = await pool.query('SELECT email, step_reached, submitted_at, website, website_check_reason FROM leads WHERE session_id=$1', [session_id]);
+      const row = pre.rows[0];
+      if (row && !row.submitted_at) {
+        alertOps('warning', 'Form', 'Booking without completed form', {
+          'Email': row.email || '(unknown)',
+          'Session': session_id,
+          'Reached step': row.step_reached == null ? '(unknown)' : String(row.step_reached),
+          'Website': row.website || '(never entered)',
+          'Website check': row.website_check_reason ? websiteReasonLabel(row.website_check_reason) : '(never ran)',
+          'Impact': 'This demo was booked without passing step 2, so the website check never ran and no lead notification was posted. Verify it is genuine before the call.',
+        });
+        console.warn(`[/booking-confirmed] ⚠ Booking with no completed submit — session ${session_id} | email ${row.email} | step ${row.step_reached}`);
+      }
+    } catch (err) {
+      console.warn('[/booking-confirmed] pre-booking integrity check failed (ignored):', err.message);
+    }
+
     await pool.query('UPDATE leads SET booking_uid=$2,start_time=$3,end_time=$4,event_type=$5,completed=true,booked_at=NOW(),updated_at=NOW() WHERE session_id=$1', [session_id,booking_uid,start_time,end_time,event_type||null]);
     syncBookingToAWS(session_id,booking_uid,start_time,end_time,event_type);
     const leadRow = await pool.query('SELECT email FROM leads WHERE session_id=$1', [session_id]);
@@ -3460,6 +3665,13 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
 });
 
 app.post('/cron/send-partials', async (req, res) => {
+  // Self-creating so there is no separate migration step to remember.
+  // Idempotent, so running it every cron costs nothing.
+  try {
+    await pool.query('ALTER TABLE leads ADD COLUMN IF NOT EXISTS followup_attempts INTEGER DEFAULT 0');
+  } catch (err) {
+    console.warn('[Cron] followup_attempts column check failed (continuing):', err.message);
+  }
   try {
     const result = await pool.query(`
       SELECT l.session_id, l.email, l.first_name, l.last_name, l.company, l.website, l.sell_to,
@@ -3470,7 +3682,7 @@ app.post('/cron/send-partials', async (req, res) => {
              l.enriched_city, l.enriched_state, l.enriched_country, l.enriched_seniority,
              l.enriched_departments, l.enriched_email_status, l.enriched_founded_year,
              l.enriched_annual_revenue, l.enriched_funding_events, l.enriched_alexa_ranking,
-             l.enriched_keywords, l.created_at
+             l.enriched_keywords, l.created_at, COALESCE(l.followup_attempts, 0) AS followup_attempts
       FROM leads l
       WHERE l.email IS NOT NULL
         AND l.disqualified = false
@@ -3537,12 +3749,36 @@ app.post('/cron/send-partials', async (req, res) => {
         enriched_funding_stage:  enrich.enriched_funding_stage
       });
 
-      await sendFollowUpEmail(lead.email, lead.first_name);
+      const outcome = await sendFollowUpEmail(lead.email, lead.first_name);
 
-      await pool.query('UPDATE leads SET loops_sent=true WHERE session_id=$1', [lead.session_id]);
-      if (awsPool) awsPool.query('UPDATE gw_form_leads SET loops_sent=true,updated_at=NOW() WHERE session_id=$1', [lead.session_id]).catch(err => console.warn('[AWS] ⚠ loops_sent sync failed:', err.message));
+      /* v5.5.0 — the flag used to be set unconditionally, so a failed send
+         was recorded as delivered and never retried. It now only moves on
+         success, on a permanent recipient failure (the address does not
+         exist — retrying is pointless and harms sending reputation), or
+         once the attempt cap is reached.
+         The cap is the safety net: it guarantees termination even for an
+         error shape isPermanentSmtpFailure() does not recognise, so no
+         address can ever be retried indefinitely. */
+      const attempts = (Number(lead.followup_attempts) || 0) + 1;
+      const giveUp   = outcome.sent || outcome.permanent || attempts >= FOLLOWUP_MAX_ATTEMPTS;
 
-      console.log(`[Cron] ✅ Processed partial for ${lead.email} | completed: ${lead.completed}`);
+      if (giveUp) {
+        await pool.query('UPDATE leads SET loops_sent=true, followup_attempts=$2 WHERE session_id=$1', [lead.session_id, attempts]);
+        if (awsPool) awsPool.query('UPDATE gw_form_leads SET loops_sent=true,updated_at=NOW() WHERE session_id=$1', [lead.session_id]).catch(err => console.warn('[AWS] ⚠ loops_sent sync failed:', err.message));
+      } else {
+        // Leave loops_sent false so the next cron run picks it up again.
+        await pool.query('UPDATE leads SET followup_attempts=$2 WHERE session_id=$1', [lead.session_id, attempts]);
+      }
+
+      if (outcome.sent) {
+        console.log(`[Cron] ✅ Processed partial for ${lead.email} | completed: ${lead.completed}`);
+      } else if (outcome.permanent) {
+        console.log(`[Cron] ⏭ Giving up on ${lead.email} — address rejected permanently (${outcome.error})`);
+      } else if (attempts >= FOLLOWUP_MAX_ATTEMPTS) {
+        console.warn(`[Cron] ⏭ Giving up on ${lead.email} after ${attempts} attempts — last error: ${outcome.error}`);
+      } else {
+        console.warn(`[Cron] ⚠ Send failed for ${lead.email} (attempt ${attempts}/${FOLLOWUP_MAX_ATTEMPTS}) — will retry: ${outcome.error}`);
+      }
     }
 
     res.json({ ok: true, processed: leads.length });
@@ -3691,7 +3927,7 @@ if (payload.router_name && payload.router_name !== 'Inbound Router - Website') {
 /* Lead-magnet routes. Mounted HERE, not at the top: FREE_EMAIL_DOMAINS is a
    const declared further up the file, so mounting above it would throw a TDZ
    ReferenceError at boot. */
-app.use(createLeadMagnetRouter({ pool, elvIsInternal, FREE_EMAIL_DOMAINS }));
+app.use(createLeadMagnetRouter({ pool, elvIsInternal, FREE_EMAIL_DOMAINS, recordFailure, recordSuccess }));
 
 async function start() {
   try {
