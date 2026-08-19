@@ -178,6 +178,12 @@ const UPSERT_SQL = `
 
 module.exports = function createLeadMagnetRouter(deps) {
   const { pool, elvIsInternal, FREE_EMAIL_DOMAINS } = deps;
+  /* v5.5.0 — optional so this module still works standalone if the deps are
+     ever not passed. Loops holds an API key that can be revoked or run out of
+     credit, and until now a rejected key produced only a console warning:
+     lead-magnet contacts would silently stop reaching the mailing list. */
+  const recordFailure = deps.recordFailure || (() => {});
+  const recordSuccess = deps.recordSuccess || (() => {});
   const router = express.Router();
 
   const isFree = (email) =>
@@ -337,6 +343,11 @@ module.exports = function createLeadMagnetRouter(deps) {
         utm_campaign: p.utm_campaign,
       };
       pushContactToLoops(leadForLoops)
+        .then((r) => {
+          if (r && r.ok === true) recordSuccess('Loops');
+          else recordFailure('Loops', p.email, (r && r.error) || 'unknown Loops error');
+          return r;
+        })
         .then((r) =>
           pool.query(
             `UPDATE lead_magnet_leads
@@ -347,7 +358,7 @@ module.exports = function createLeadMagnetRouter(deps) {
             [row.id, r.ok === true, r.contactId || null, r.ok ? (r.eventError || null) : (r.error || null)]
           )
         )
-        .catch((err) => console.warn('[LM] Loops push failed (non-blocking):', err.message));
+        .catch((err) => { console.warn('[LM] Loops push failed (non-blocking):', err.message); recordFailure('Loops', p.email, err.message); });
 
       sendWebhook({
         id: row.id,
