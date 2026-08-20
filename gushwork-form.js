@@ -1,5 +1,32 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.3.0  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.7.0  (/demo PAGE VERSION - thru github/jsdlivr)
+
+  v5.7.0 — three fixes, all "the check failed for reasons that are not
+  the lead's fault":
+    SERVER-SIDE DNS FALLBACK. Stage 1 runs in the VISITOR'S browser over
+      DNS-over-HTTPS, so it inherits their network restrictions. A bank's
+      corporate firewall and the Great Firewall both block it, and two
+      real businesses (firstcitizens.com, ydrapid.com) were marked
+      unverified as a result. When the browser lookup is blocked we now
+      ask the server, which has no such restrictions.
+    EMAIL IN THE WEBSITE FIELD. user@domain.com PASSES isValidURL,
+      because it is a legal URL with a username — so it reached the
+      backend and threw a credentials error. Caught at validation now,
+      with the domain offered as a one-tap fix.
+    WEBSITE TYPO FROM THE EMAIL LOCAL PART. The existing suggester needs
+      a business email domain to compare against, so a Gmail user got
+      nothing. glsgraphics1@gmail.com typing gslgraphics.com is one
+      transposition from their real, live domain — recoverable from the
+      local part alone.
+
+  v5.6.0 — SOFT TYPO HINT on an address that PASSES verification.
+    The did-you-mean suggestion has only ever run when an address is
+    REJECTED. That is backwards for typosquatting: someone registers
+    gmailc.com, points a catch-all mail server at it, and the address
+    verifies cleanly — so no suggestion was ever offered, while the mail
+    reaches the squatter instead of the lead. This adds a non-blocking,
+    tap-to-accept nudge in the orange pro-tip style. `valid` stays true
+    and nothing is blocked; they can ignore it entirely.
 
   v5.3.0 — WEBSITE CHECK: DNS narrows, HTTP decides.
     Registrar parking IPs and nameservers are SHARED with registrar URL
@@ -458,6 +485,26 @@
     // (Trade-off: the literal domain `www.com` would be rejected. Nobody
     // submits that as a company site, and stripping conditionally would
     // reopen the malbecgrillcom hole.)
+    /* An email address typed into the WEBSITE field PASSES isValidURL,
+       because new URL('https://user@domain.com') is a legal URL with a
+       username — so it slipped straight through to the backend, which then
+       threw "Request cannot be constructed from a URL that includes
+       credentials" (seen in the logs on 18 Aug).
+       Returns the domain when it is worth offering as a fix, '' otherwise. */
+    function emailInWebsiteField(value) {
+      const v = String(value || '').trim();
+      if (v.indexOf('@') === -1) return '';
+      try {
+        const u = new URL(/^https?:\/\//i.test(v) ? v : 'https://' + v);
+        if (!u.username) return '';
+        const host = u.hostname.replace(/^www\./i, '').toLowerCase();
+        // A mailbox provider is not their company website, so there is
+        // nothing useful to suggest for someone@gmail.com.
+        if (PERSONAL_EMAIL_DOMAINS.indexOf(host) !== -1) return '';
+        return /^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/i.test(host) ? host : '';
+      } catch (e) { return ''; }
+    }
+
     function isValidURL(url) {
       try {
         const u = new URL(url.startsWith('http') ? url : 'https://' + url);
@@ -552,6 +599,14 @@
       const website = getField('website');
       if (!website) {
         showError('website-error', 'Website URL is required.');
+        valid = false;
+      } else if (website.indexOf('@') !== -1) {
+        // Checked BEFORE isValidURL, which accepts user@domain.com as a
+        // valid URL-with-credentials and lets it straight through.
+        const emailFix = emailInWebsiteField(website);
+        showWebsiteVerdictError(emailFix
+          ? { msg: 'Did you mean ' + emailFix + '?', suggestion: emailFix }
+          : { msg: 'That looks like an email address. Please enter your website (e.g. acme.com).' });
         valid = false;
       } else if (!isValidURL(website)) {
         const suggestion = suggestUrlFix(website);
@@ -818,7 +873,7 @@
       '.iu': '.io', '.oi': '.io', '.ai.': '.ai',
     };
 
-    function suggestWebsiteDomainFix(domain, emailDomain) {
+    function suggestWebsiteDomainFix(domain, emailDomain, emailLocalPart) {
       const d = String(domain || '').toLowerCase().replace(/\.$/, '');
       if (!d || d.indexOf('.') === -1) return '';
 
@@ -834,7 +889,30 @@
         if (dist === 1 || (dist === 2 && ed.length >= 10)) return ed;
       }
 
-      // 2. Mistyped TLD. Longest suffix first so overlapping keys resolve
+      /* 2. The email's LOCAL PART, when the email is a personal one (v5.7.0).
+            Rule 1 needs a business email domain to compare against, so a
+            Gmail user gets nothing from it. But the local part often IS the
+            company name:
+              typed:  gslgraphics.com          (no A record, no mail)
+              email:  glsgraphics1@gmail.com
+              real:   glsgraphics.com          (live, Microsoft 365 mail)
+            GSL vs GLS — one transposition. Reconstructing the local part
+            with the typed TLD produces exactly the right answer.
+            Guarded hard by edit distance: john.smith@gmail.com typing
+            acme.com yields 'johnsmith.com', which is nowhere near, so
+            nothing is suggested. */
+      if (ed && PERSONAL_EMAIL_DOMAINS.indexOf(ed) !== -1) {
+        const local = String(emailLocalPart || '').toLowerCase()
+          .replace(/[^a-z0-9]/g, '')  // drop dots, plus-tags, underscores
+          .replace(/\d+$/, '');       // and a trailing counter: glsgraphics1 -> glsgraphics
+        const typedTld = d.slice(d.indexOf('.'));
+        if (local.length >= 5) {
+          const candidate = local + typedTld;
+          if (candidate !== d && damerauLevenshtein(d, candidate) === 1) return candidate;
+        }
+      }
+
+      // 3. Mistyped TLD. Longest suffix first so overlapping keys resolve
       //    to the most specific match.
       const bad = Object.keys(WEBSITE_BAD_TLDS).sort((a, b) => b.length - a.length);
       for (let i = 0; i < bad.length; i++) {
@@ -1137,6 +1215,16 @@
     // its answer is authoritative. Anything else means it couldn't look, in
     // which case a DNS parking hint must survive as a flag rather than
     // silently passing as clean.
+    /* Server answers that mean it actually determined something. Anything
+       absent from this list means the server could not look either, so the
+       browser's original (passing) verdict stands. */
+    const SERVER_DNS_DECISIVE = [
+      'content_clean', 'live_despite_dns_hint', 'forwarded_to_live_site',
+      'thin_content', 'thin_content_wildcard',
+      'parked_confirmed', 'for_sale_lander', 'marketplace_redirect', 'hosting_placeholder',
+      'nxdomain', 'no_dns_records', 'mx_only',
+    ];
+
     const STAGE2_DECISIVE = ['content_clean', 'live_despite_dns_hint', 'forwarded_to_live_site', 'thin_content', 'thin_content_wildcard'];
 
     // Stage 2 — server-level content check (v4.9.5). DNS/IP/NS alone can't
@@ -1147,6 +1235,50 @@
     // test-email, since there's either nothing to scan or nothing to gain.
     // Same fail-open contract as everything else: any backend hiccup,
     // timeout, or bot-wall passes the lead through rather than blocking it.
+    /* -------------------------------------------------------
+    SERVER-SIDE DNS FALLBACK (v5.7.0)
+
+    STAGE 1 normally runs right here in the browser, over
+    DNS-over-HTTPS to dns.google with cloudflare-dns.com as backup.
+    That is fast and free, but it inherits the VISITOR'S network
+    restrictions — so the check can fail for reasons that have
+    nothing to do with their website:
+      firstcitizens.com  an 18,000-person bank. Corporate networks
+                         routinely block DoH because it bypasses
+                         their own DNS monitoring.
+      ydrapid.com        Shenzhen. Both DoH providers are blocked in
+                         mainland China.
+    Both are real businesses with live sites and live mail, and both
+    were marked unverified — which suppressed their Meta event and
+    put a warning next to them for the SDR.
+
+    Railway has no such restrictions, so when the browser lookup
+    comes back blocked or inconclusive we ask the server to do the
+    whole check instead. Fail-open throughout: if this also fails we
+    keep the original verdict, which already passed.
+    ------------------------------------------------------- */
+    async function resolveWebsiteViaServer(rawValue) {
+      if (!isRailwayReady()) return null;
+      try {
+        const controller = new AbortController();
+        const t = setTimeout(() => controller.abort(), 15000); // matches the content check's budget
+        const res = await fetch(`${RAILWAY_API_URL}/resolve-website`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({ website: rawValue }),
+        });
+        clearTimeout(t);
+        if (!res.ok) return null;
+        const data = await res.json();
+        if (!data || !data.reason) return null;
+        return { ok: data.ok !== false, reason: data.reason, canonical_url: data.canonical_url || null };
+      } catch (err) {
+        console.warn('[GW] Server DNS fallback failed — keeping original verdict:', err && err.message);
+        return null;
+      }
+    }
+
     async function verifyWebsiteContent(rawValue, parkingHint, hasMX) {
       if (!isRailwayReady()) return { ok: true, reason: 'skipped_no_backend' };
       try {
@@ -1187,6 +1319,21 @@
           // it ran only on 'resolved', so a DNS hint was final and
           // unappealable — the one layer that can actually see the page
           // never got asked. Content is ground truth; DNS is a prior.
+          /* v5.7.0 — the browser's own DNS was blocked or inconclusive, so
+             we learned nothing about this domain. Ask the server, which is
+             not behind the visitor's corporate firewall or the Great
+             Firewall. Its answer is authoritative because it ran BOTH
+             stages; if it can't answer either, we keep what we had. */
+          const dnsWasBlocked = (v.reason === 'doh_error' || v.reason === 'dns_indeterminate');
+          if (dnsWasBlocked && !isTestEmail(getField('email'))) {
+            const sv = await resolveWebsiteViaServer(rawValue);
+            if (sv && SERVER_DNS_DECISIVE.indexOf(sv.reason) !== -1) {
+              console.log('[GW] Browser DNS blocked (' + v.reason + ') — server resolved it as ' + sv.reason);
+              return sv;
+            }
+            return v; // server couldn't help either; the original already passes
+          }
+
           const needsContentCheck = (v.reason === 'resolved' || v.reason === 'parked_suspect');
           if (!needsContentCheck || isTestEmail(getField('email'))) return v;
 
@@ -1232,7 +1379,8 @@
       // Offer a one-tap fix instead of a dead end. Six of the seven real
       // NXDOMAIN cases in the Jul/Aug sample were typos by real businesses
       // that went on to book, not junk leads.
-      const suggestion = suggestWebsiteDomainFix(domain, emailDomain);
+      const emailLocal = (getField('email') || formState.email || '').split('@')[0] || '';
+      const suggestion = suggestWebsiteDomainFix(domain, emailDomain, emailLocal);
       if (suggestion) {
         return { ...verdict, suggestion, msg: 'Did you mean ' + suggestion + '?' };
       }
@@ -1375,6 +1523,11 @@
             status:     data.status || 'checked',
             message:    data.message || null,
             suggestion: data.suggestion || null,
+            // v5.6.0 — a PASSING address that still looks like a typo of a
+            // free provider. Typosquatters run catch-all mail servers, so
+            // these verify fine while the mail reaches the squatter rather
+            // than the lead. Advisory only: valid stays true.
+            typo_hint:  data.typo_hint || null,
           };
         } catch (err) {
           const timedOut = err && err.name === 'AbortError';
@@ -1397,6 +1550,46 @@
     identified a likely domain typo. The element is created here
     rather than in Webflow so no republish is needed.
     ------------------------------------------------------- */
+    /* -------------------------------------------------------
+    Soft typo nudge for an address that PASSED verification.
+    Deliberately NOT an error: the address is valid and they can
+    ignore this entirely. It exists because a typosquatted domain
+    (gmailc.com) has real mail servers, so it verifies cleanly while
+    the mail never reaches the person who typed it.
+    Same tap-to-accept pattern as the error suggestion, in the
+    orange pro-tip style rather than red.
+    ------------------------------------------------------- */
+    function showEmailTypoHint(verdict) {
+      const tip = document.getElementById('email-protip');
+      const input = document.getElementById('email');
+      if (!tip || !input) return;
+      if (!verdict || !verdict.typo_hint) return;
+      if (verdict.typo_hint === input.value.trim()) return; // already correct
+
+      // DOM nodes, never innerHTML — this is user input.
+      tip.textContent = '';
+      tip.appendChild(document.createTextNode('Did you mean '));
+      const link = document.createElement('span');
+      link.className = 'gw-email-fix';
+      link.setAttribute('role', 'button');
+      link.setAttribute('tabindex', '0');
+      link.textContent = verdict.typo_hint;
+      const apply = function () {
+        input.value = verdict.typo_hint;
+        tip.style.display = 'none';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.focus();
+        prewarmEmail();
+      };
+      link.addEventListener('click', apply);
+      link.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); apply(); }
+      });
+      tip.appendChild(link);
+      tip.appendChild(document.createTextNode('?'));
+      tip.style.display = 'flex';
+    }
+
     function showEmailVerdictError(verdict) {
       const errEl = document.getElementById('email-error');
       const emailInput = document.getElementById('email');
@@ -1475,6 +1668,7 @@
         if (current !== val.toLowerCase()) return;
         if (!v.valid) { showEmailVerdictError(v); return; }
         hideEmailSuggestion();
+        showEmailTypoHint(v);
         triggerEnrichment(val).catch(() => {});
       }).catch(() => {});
     }
