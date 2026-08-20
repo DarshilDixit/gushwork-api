@@ -2584,6 +2584,11 @@ app.post('/verify-email', async (req, res) => {
     recordElvOutcome(known ? status : 'unknown', email);
     elvCacheSet(email, valid, status);
     if (valid) {
+      // v5.7.1 — the user-facing hint now lives in gushwork-form.js, computed
+      // locally so an ELV timeout cannot swallow it (gmailc.com timed out at
+      // 8002ms on 20 Aug and no hint appeared). Kept here purely as a log
+      // line: one source of truth for what the lead sees, and still visible
+      // to us in Railway.
       const hint  = elvSoftTypoHint(email);
       const brand = isUnverifiableBrandMailbox(email, status);
       if (hint) console.log(`[ELV] 💡 ${email} passed but looks like a typo of ${hint.suggestedDomain}`);
@@ -2599,7 +2604,7 @@ app.post('/verify-email', async (req, res) => {
           'Impact': 'The lead passed and can book. Worth a look before the call — this pattern was used by a spam booking on 18 Aug.',
         });
       }
-      return res.json(Object.assign({ valid: true, status, ms }, hint ? { typo_hint: hint.suggestion } : {}));
+      return res.json({ valid: true, status, ms });
     }
     res.json(Object.assign(elvRejection(email, status), { ms }));
   } catch (err) {
