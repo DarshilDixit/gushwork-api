@@ -1,5 +1,5 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.7.0  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.7.1  (/demo PAGE VERSION - thru github/jsdlivr)
 
   v5.7.0 — three fixes, all "the check failed for reasons that are not
   the lead's fault":
@@ -13,6 +13,12 @@
       because it is a legal URL with a username — so it reached the
       backend and threw a credentials error. Caught at validation now,
       with the domain offered as a one-tap fix.
+    EMAIL TYPO NUDGE, now LOCAL. v5.6.0 attached it to the ELV
+      response, so an ELV timeout swallowed it entirely — gmailc.com
+      timed out at 8002ms on 20 Aug and no hint appeared. It is pure
+      arithmetic, so it now runs in the browser on blur, before and
+      independently of ELV. It also uses its OWN element: writing into
+      #email-protip would have destroyed the work-email nudge.
     WEBSITE TYPO FROM THE EMAIL LOCAL PART. The existing suggester needs
       a business email domain to compare against, so a Gmail user got
       nothing. glsgraphics1@gmail.com typing gslgraphics.com is one
@@ -89,6 +95,16 @@
   .gw-email-fix:focus-visible {
   background: rgba(47, 107, 255, 0.08);
   outline: none;
+  }
+  #gw-email-typo-hint {
+  display: none;
+  align-items: flex-start;
+  gap: 4px;
+  color: #FF6A00;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  margin-top: 4px;
   }
   #email-protip img {
   width: 14px;
@@ -1523,11 +1539,6 @@
             status:     data.status || 'checked',
             message:    data.message || null,
             suggestion: data.suggestion || null,
-            // v5.6.0 — a PASSING address that still looks like a typo of a
-            // free provider. Typosquatters run catch-all mail servers, so
-            // these verify fine while the mail reaches the squatter rather
-            // than the lead. Advisory only: valid stays true.
-            typo_hint:  data.typo_hint || null,
           };
         } catch (err) {
           const timedOut = err && err.name === 'AbortError';
@@ -1551,32 +1562,79 @@
     rather than in Webflow so no republish is needed.
     ------------------------------------------------------- */
     /* -------------------------------------------------------
-    Soft typo nudge for an address that PASSED verification.
-    Deliberately NOT an error: the address is valid and they can
-    ignore this entirely. It exists because a typosquatted domain
-    (gmailc.com) has real mail servers, so it verifies cleanly while
-    the mail never reaches the person who typed it.
-    Same tap-to-accept pattern as the error suggestion, in the
-    orange pro-tip style rather than red.
+    SOFT TYPO NUDGE (v5.7.1)
+
+    Computed ENTIRELY LOCALLY — no network, no ELV. That matters:
+    v5.6.0 attached this to the ELV response, so when ELV timed out
+    (darshildixit21@gmailc.com, 8002ms, 20 Aug) the hint never
+    appeared at all. A typosquat is detectable with arithmetic we
+    already have, so it must not depend on a service being up.
+
+    Uses its OWN element. #email-protip is an existing Webflow node
+    with its own icon and copy that updateProTip() only shows and
+    hides — writing into it would destroy the work-email nudge
+    permanently.
+
+    Advisory only. The address is valid and they can ignore this.
     ------------------------------------------------------- */
-    function showEmailTypoHint(verdict) {
-      const tip = document.getElementById('email-protip');
+    function localEmailTypoHint(email) {
+      const raw    = String(email || '').trim();
+      const at     = raw.lastIndexOf('@');
+      if (at < 1) return '';
+      const local  = raw.slice(0, at);
+      const domain = raw.slice(at + 1).toLowerCase();
+      if (!domain || domain.indexOf('.') === -1) return '';
+      // An exact free provider is correct as typed; a business domain must
+      // never be "corrected" toward a mailbox provider.
+      if (PERSONAL_EMAIL_DOMAINS.indexOf(domain) !== -1) return '';
+      for (let i = 0; i < PERSONAL_EMAIL_DOMAINS.length; i++) {
+        const c = PERSONAL_EMAIL_DOMAINS[i];
+        // 8+ chars only: at short lengths one edit is not distinctive
+        // (me.com vs we.com are unrelated domains).
+        if (c.length < 8) continue;
+        if (Math.abs(domain.length - c.length) > 1) continue;
+        if (damerauLevenshtein(domain, c) === 1) {
+          const candidate = local + '@' + c;
+          return isValidEmail(candidate) ? candidate : '';
+        }
+      }
+      return '';
+    }
+
+    function typoHintEl() {
+      let el = document.getElementById('gw-email-typo-hint');
+      if (el) return el;
       const input = document.getElementById('email');
-      if (!tip || !input) return;
-      if (!verdict || !verdict.typo_hint) return;
-      if (verdict.typo_hint === input.value.trim()) return; // already correct
+      if (!input || !input.parentNode) return null;
+      el = document.createElement('div');
+      el.id = 'gw-email-typo-hint';
+      input.parentNode.insertBefore(el, input.nextSibling);
+      return el;
+    }
+
+    function hideEmailTypoHint() {
+      const el = document.getElementById('gw-email-typo-hint');
+      if (el) el.style.display = 'none';
+    }
+
+    function showEmailTypoHint(email) {
+      const el    = typoHintEl();
+      const input = document.getElementById('email');
+      if (!el || !input) return;
+      const suggestion = localEmailTypoHint(email);
+      if (!suggestion || suggestion === String(email || '').trim()) { el.style.display = 'none'; return; }
 
       // DOM nodes, never innerHTML — this is user input.
-      tip.textContent = '';
-      tip.appendChild(document.createTextNode('Did you mean '));
+      el.textContent = '';
+      el.appendChild(document.createTextNode('Did you mean '));
       const link = document.createElement('span');
       link.className = 'gw-email-fix';
       link.setAttribute('role', 'button');
       link.setAttribute('tabindex', '0');
-      link.textContent = verdict.typo_hint;
+      link.textContent = suggestion;
       const apply = function () {
-        input.value = verdict.typo_hint;
-        tip.style.display = 'none';
+        input.value = suggestion;
+        el.style.display = 'none';
         input.dispatchEvent(new Event('input', { bubbles: true }));
         input.focus();
         prewarmEmail();
@@ -1585,9 +1643,9 @@
       link.addEventListener('keydown', function (e) {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); apply(); }
       });
-      tip.appendChild(link);
-      tip.appendChild(document.createTextNode('?'));
-      tip.style.display = 'flex';
+      el.appendChild(link);
+      el.appendChild(document.createTextNode('?'));
+      el.style.display = 'flex';
     }
 
     function showEmailVerdictError(verdict) {
@@ -1661,14 +1719,20 @@
         showError('email-error', "This doesn't look like a real email address. Please double-check.");
         return;
       }
+      /* v5.7.1 — shown BEFORE the ELV round trip and independently of it.
+         Attaching this to the ELV response meant a timeout swallowed it
+         entirely: darshildixit21@gmailc.com timed out at 8002ms on 20 Aug
+         and no hint ever appeared. The check is local arithmetic, so it
+         should never have depended on a service being reachable. */
+      showEmailTypoHint(val);
+
       verifyEmail(val).then((v) => {
         // Only surface it if they're still on this address — they may
         // have kept typing since the check started.
         const current = (document.getElementById('email')?.value || '').trim().toLowerCase();
         if (current !== val.toLowerCase()) return;
-        if (!v.valid) { showEmailVerdictError(v); return; }
+        if (!v.valid) { hideEmailTypoHint(); showEmailVerdictError(v); return; }
         hideEmailSuggestion();
-        showEmailTypoHint(v);
         triggerEnrichment(val).catch(() => {});
       }).catch(() => {});
     }
@@ -1677,7 +1741,7 @@
       const el = document.getElementById('email');
       if (!el) return;
       el.addEventListener('blur', prewarmEmail);
-      el.addEventListener('input', hideEmailSuggestion);
+      el.addEventListener('input', function () { hideEmailSuggestion(); hideEmailTypoHint(); });
     }
 
 
