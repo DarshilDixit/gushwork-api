@@ -86,8 +86,15 @@ async function ensureLoopsProperties() {
       console.warn(`[Loops] property ${prop.name} failed:`, err.message);
     }
   }
-  console.log(`[Loops] contact properties — ${created} created, ${existed} already present, ${failed} failed`);
-  return { created, existed, failed };
+  console.log(`[Loops] custom fields — ${created} created, ${existed} already present, ${failed} failed`);
+  // v5.6.0 — if EVERY property failed, the key is almost certainly rejected
+  // or the account is unreachable. Previously this printed a line per
+  // property and startup still reported healthy, so a dead Loops key could
+  // sit unnoticed while no lead-magnet contact reached the mailing list.
+  if (failed === CUSTOM_PROPERTIES.length && created === 0 && existed === 0) {
+    console.error('[Loops] ✗ every property call failed — the API key is likely rejected. Lead-magnet contacts will NOT reach the mailing list.');
+  }
+  return { created, existed, failed, allFailed: failed === CUSTOM_PROPERTIES.length };
 }
 
 /* Loops has no `website` default property, and `firstName` is genuinely
