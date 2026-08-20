@@ -18,6 +18,39 @@ const PORT = process.env.PORT || 3000;
 // and the /partial StartTrial gate (Meta CAPI fires for business emails only)
 const FREE_EMAIL_DOMAINS = ['gmail.com','yahoo.com','hotmail.com','outlook.com','icloud.com','protonmail.com','aol.com','mail.com','yahoo.in','rediffmail.com','ymail.com','live.com','msn.com','me.com','mac.com','googlemail.com'];
 
+/* ── Free-provider detection, typo-tolerant ───────────────────────
+   v5.6.0. FREE_EMAIL_DOMAINS is an exact-match list, and that is a hole:
+   typosquatters register the common misspellings and point a catch-all
+   mail server at them. darshildixit21@gmailc.com sailed through as a
+   BUSINESS email and fired a StartTrial to Meta — the exact opposite of
+   what the free-email filter exists to do, since Meta then optimises
+   toward more consumer traffic.
+
+   Confirmed live mail on gmailc.com, gmai.com, gnail.com and
+   hotmial.com, so this is not hypothetical. Matching by edit distance
+   instead of an exact list catches the squats nobody has registered yet
+   too, rather than playing whack-a-mole with a growing list.
+
+   Deliberately strict: distance 1 only, and only against domains of 8+
+   characters. 'me.com' vs 'we.com' is one edit but they are unrelated,
+   whereas 'gmailc.com' vs 'gmail.com' at that length is unmistakable. */
+function freeEmailMatch(domain) {
+  const d = String(domain || '').toLowerCase().trim();
+  if (!d) return null;
+  if (FREE_EMAIL_DOMAINS.includes(d)) return { domain: d, exact: true };
+  for (const c of FREE_EMAIL_DOMAINS) {
+    if (c.length < 8) continue;              // too short for a safe near-match
+    if (Math.abs(d.length - c.length) > 1) continue;
+    if (damerauLevenshtein(d, c) === 1) return { domain: c, exact: false };
+  }
+  return null;
+}
+
+// True for a real free provider OR a near-miss typo of one.
+function isFreeEmailDomain(domain) {
+  return freeEmailMatch(domain) !== null;
+}
+
 app.set('trust proxy', 1);
 
 app.use((req, res, next) => {
@@ -2371,6 +2404,62 @@ const ELV_MESSAGES = {
   invalid:        "That email address doesn't appear to be valid. Mind double-checking it?",
 };
 
+/* ── Typo hint on a PASSING address ───────────────────────────────
+   v5.6.0. suggestDomainFix has only ever run inside elvRejection, i.e.
+   when an address FAILS. That is precisely backwards for typosquats:
+   gmailc.com has a live catch-all mail server, so ELV answered
+   "ok_for_all" (a pass), elvRejection never ran, and no "did you mean
+   gmail.com?" was ever offered. The moment a typo domain becomes real,
+   the typo detection went silent.
+
+   This is a HINT, never a block. The address may genuinely be valid, and
+   the person can ignore it. But mail sent to a squatted domain reaches
+   the squatter rather than the lead, so it is worth surfacing. */
+/* ── Unverifiable mailbox at a household-name domain ──────────────
+   v5.6.0. 'ok_for_all' / 'accept_all' mean the mail server accepts EVERY
+   address without checking whether it exists. That is not verification —
+   it is the absence of it. Normally harmless (plenty of real companies
+   run catch-alls), but it is exactly how the 18 Aug spam lead got in:
+   blocked on a made-up domain, they retried on meta.com — a catch-all at
+   a household name — and it passed. Enrichment then returned Meta Inc's
+   real data and the lead looked impressive in the dashboard.
+
+   Nobody can verify a mailbox at a mega-brand's catch-all, so we stop
+   pretending we did. FLAG, never block: real people do work at Meta. */
+const CATCHALL_STATUSES = ['ok_for_all', 'accept_all'];
+
+const BRAND_MAILBOX_DOMAINS = [
+  'google.com', 'youtube.com', 'facebook.com', 'fb.com', 'meta.com',
+  'instagram.com', 'linkedin.com', 'twitter.com', 'x.com', 'amazon.com',
+  'amazon.in', 'microsoft.com', 'apple.com', 'netflix.com', 'whatsapp.com',
+  'tiktok.com', 'reddit.com', 'openai.com', 'chatgpt.com', 'flipkart.com',
+  'tesla.com', 'nvidia.com', 'oracle.com', 'salesforce.com', 'adobe.com',
+  'ibm.com', 'intel.com', 'spotify.com', 'uber.com', 'airbnb.com',
+];
+
+function isUnverifiableBrandMailbox(email, status) {
+  if (!CATCHALL_STATUSES.includes(status)) return null;
+  const domain = String(email || '').split('@')[1] || '';
+  const d = domain.toLowerCase();
+  return BRAND_MAILBOX_DOMAINS.includes(d) ? d : null;
+}
+
+function elvSoftTypoHint(email) {
+  const raw       = String(email || '');
+  const localPart = raw.split('@')[0] || '';
+  const domain    = (raw.split('@')[1] || '').toLowerCase();
+  if (!domain) return null;
+
+  const match = freeEmailMatch(domain);
+  // Only hint on a NEAR-MISS of a free provider. An exact match is a real
+  // provider, and an unrelated business domain must never be "corrected".
+  if (!match || match.exact) return null;
+
+  const candidate = `${localPart}@${match.domain}`;
+  if (!EMAIL_SYNTAX_RE.test(candidate)) return null;
+  return { suggestion: candidate, suggestedDomain: match.domain };
+}
+
 function elvRejection(email, status) {
   const raw       = String(email);
   const localPart = raw.split('@')[0] || '';
@@ -2494,7 +2583,25 @@ app.post('/verify-email', async (req, res) => {
     if (!valid) console.log(`[ELV] BLOCKED ${email} — status: "${status}"`);
     recordElvOutcome(known ? status : 'unknown', email);
     elvCacheSet(email, valid, status);
-    res.json(valid ? { valid: true, status, ms } : Object.assign(elvRejection(email, status), { ms }));
+    if (valid) {
+      const hint  = elvSoftTypoHint(email);
+      const brand = isUnverifiableBrandMailbox(email, status);
+      if (hint) console.log(`[ELV] 💡 ${email} passed but looks like a typo of ${hint.suggestedDomain}`);
+      if (brand && !elvIsInternal(email)) {
+        // Flag, don't block — real employees exist. But a catch-all at a
+        // household name is unverifiable by definition, so a human should
+        // glance at it before the call.
+        console.warn(`[ELV] ⚠ ${email} — catch-all mailbox at ${brand}, existence NOT verified`);
+        alertOps('warning', 'Form', 'Unverifiable mailbox at a well-known domain', {
+          'Email': email,
+          'Domain': brand,
+          'Why': 'The mail server accepts every address without checking it exists, so we cannot confirm this mailbox is real.',
+          'Impact': 'The lead passed and can book. Worth a look before the call — this pattern was used by a spam booking on 18 Aug.',
+        });
+      }
+      return res.json(Object.assign({ valid: true, status, ms }, hint ? { typo_hint: hint.suggestion } : {}));
+    }
+    res.json(Object.assign(elvRejection(email, status), { ms }));
   } catch (err) {
     const isTimeout = err.name === 'AbortError';
     if (isTimeout) console.warn(`[ELV] Timeout after ${Date.now() - startedAt}ms for ${email} — failing open`);
@@ -3033,6 +3140,57 @@ const RECHECK_WRITEABLE = [
    as 'content_clean' because linkedin.com serves a real page. */
 const RECHECK_PROTECTED = ['brand_mismatch', 'mailbox_domain', 'social_profile_url', 'test_email_skipped', 'unparseable'];
 
+/* ── serverSideWebsiteCheck ───────────────────────────────────────
+   Both stages, run entirely on the server: resolve the domain, then
+   fetch the page. Used by the historical recheck AND by the live form's
+   DNS fallback, so there is exactly one copy of the sequencing.
+
+   v5.7.0 — the live form needs this because STAGE 1 normally runs in the
+   VISITOR'S BROWSER over DNS-over-HTTPS. When their network blocks that,
+   the check fails for reasons that have nothing to do with their website:
+     firstcitizens.com  an 18,000-person bank; corporate networks routinely
+                        block DoH because it bypasses their DNS monitoring
+     ydrapid.com        Shenzhen; dns.google and cloudflare-dns.com are both
+                        blocked in mainland China
+   Both are real businesses with live sites and live mail. Railway has no
+   such restrictions, so when the browser lookup fails we ask the server. */
+async function serverSideWebsiteCheck(website) {
+  const raw = String(website || '').trim();
+  if (!raw) return { ok: true, reason: 'empty' };
+
+  let host;
+  try {
+    host = new URL(raw.startsWith('http') ? raw : 'https://' + raw).hostname.replace(/^www\./, '');
+  } catch {
+    return { ok: true, reason: 'unparseable' }; // format errors belong to the form
+  }
+
+  const dns = await resolveWebsiteDns(host);
+  if (dns.status === 'nxdomain')       return { ok: false, reason: 'nxdomain', matched: 'ENOTFOUND on apex + www', hint: dns.parkingHint };
+  if (dns.status === 'no_dns_records') return { ok: false, reason: 'no_dns_records', hint: dns.parkingHint };
+  if (dns.status === 'mx_only')        return { ok: true,  reason: 'mx_only', matched: 'MX only — email-only company', hint: dns.parkingHint };
+
+  const verdict = await evaluateWebsite({ raw, parkingHint: dns.parkingHint, hasMX: dns.hasMX });
+  return Object.assign({}, verdict, { hint: dns.parkingHint });
+}
+
+/* ── /resolve-website — the form's DNS fallback ───────────────────
+   Called ONLY when the browser's own DNS lookup failed or was
+   inconclusive. Same fail-open policy as everything else: any error here
+   returns a passing verdict rather than costing a real lead. */
+app.post('/resolve-website', strictLimiter, async (req, res) => {
+  const raw = (req.body.website || '').toString().trim().slice(0, 300);
+  if (!raw) return res.json({ ok: true, reason: 'empty' });
+  try {
+    const verdict = await serverSideWebsiteCheck(raw);
+    console.log(`[resolve-website] ${raw} → ${verdict.reason}${verdict.hint ? ` (hint ${verdict.hint})` : ''} — browser DNS was blocked`);
+    res.json(verdict);
+  } catch (err) {
+    console.error('[resolve-website] Unexpected error — failing open:', err.message);
+    res.json({ ok: true, reason: 'backend_error' });
+  }
+});
+
 /* Thin HTTP wrapper. Behaviour is identical to pre-v5.3.1 — the regression
    suite asserts this. */
 app.post('/verify-website', async (req, res) => {
@@ -3129,21 +3287,16 @@ app.get('/monitor/website-recheck', async (req, res) => {
     for (const [website, leads] of byDomain) {
       let verdict, hint = null, skip = null;
       try {
-        const host = new URL(website.startsWith('http') ? website : 'https://' + website).hostname.replace(/^www\./, '');
-        // STAGE 1 — existence and parking hint. Must run FIRST: without it a
-        // non-existent domain merely fails to fetch and looks 'unreachable',
-        // which silently downgrades an accurate, blocking 'nxdomain'.
-        const dns = await resolveWebsiteDns(host);
-        hint = dns.parkingHint;
-        if (dns.status === 'nxdomain') verdict = { ok: false, reason: 'nxdomain', matched: 'ENOTFOUND on apex + www' };
-        // form.js returns ok:false for this (gushwork-form.js SECTION 3C), so the
-        // recheck must too. They disagreed, which is why gslgraphics.com showed
-        // flagged while RosaAinslie.com did not for the identical verdict — and
-        // why a re-run would have silently unflagged one of them.
-        else if (dns.status === 'no_dns_records') verdict = { ok: false, reason: 'no_dns_records' };
-        else if (dns.status === 'mx_only') verdict = { ok: true, reason: 'mx_only', matched: 'MX only — email-only company' };
-        // STAGE 2 — only meaningful once we know the domain resolves.
-        else verdict = await evaluateWebsite({ raw: website, parkingHint: dns.parkingHint, hasMX: dns.hasMX });
+        // v5.7.0 — both stages now live in serverSideWebsiteCheck(), shared
+        // with the live form's /resolve-website fallback. One copy of the
+        // sequencing: resolve first (or a non-existent domain merely fails to
+        // fetch and looks 'unreachable', silently downgrading an accurate,
+        // blocking 'nxdomain'), then fetch.
+        // no_dns_records returns ok:false to match form.js — they disagreed,
+        // which is why gslgraphics.com showed flagged while RosaAinslie.com
+        // did not for the identical verdict.
+        verdict = await serverSideWebsiteCheck(website);
+        hint = verdict.hint || null;
       } catch (err) {
         verdict = { ok: true, reason: 'recheck_error', error: err.message };
       }
@@ -3360,11 +3513,16 @@ app.post('/partial', async (req, res) => {
     // free-mailbox leads (gmail/yahoo/...) are skipped so Meta optimises
     // on higher-intent signals. Email is already lowercased at parse time
     // and already ELV-verified by the form before /partial is called.
-    const isBusinessEmail = !!email && !FREE_EMAIL_DOMAINS.includes(email.split('@')[1] || '');
+    // v5.6.0 — was an exact-list check, so a typosquat of a free provider
+    // (gmailc.com) counted as a business email and fired StartTrial. That
+    // teaches Meta to find MORE consumer traffic, which is precisely what
+    // this gate exists to prevent.
+    const freeMatch = email ? freeEmailMatch(email.split('@')[1] || '') : null;
+    const isBusinessEmail = !!email && !freeMatch;
     if (!disqualified && isBusinessEmail) {
       pushStartTrialToMeta({session_id,email,sell_to,page_url,fbc,fbp,landing_page}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => { console.warn('[/partial] Meta CAPI StartTrial failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (StartTrial)', err.message); });
     } else if (!disqualified) {
-      console.log(`[/partial] ⏭ StartTrial skipped — free email domain: ${email}`);
+      console.log(`[/partial] ⏭ StartTrial skipped — ${freeMatch && !freeMatch.exact ? `likely typo of free provider ${freeMatch.domain}` : 'free email domain'}: ${email}`);
     }
 
     console.log(`[/partial] ✅ Saved session ${session_id} | step ${step_reached} | disqualified: ${disqualified} | email ${email}`);
