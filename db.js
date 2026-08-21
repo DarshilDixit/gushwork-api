@@ -190,6 +190,54 @@ async function initDB() {
     }
 
     /* -------------------------------------------------------
+       FORM SESSIONS — top-of-funnel denominator
+
+       One row per page load, written by POST /session. This is
+       DELIBERATELY NOT the `leads` table. Most visitors never type an
+       email, so writing them into `leads` would fill it with blank rows
+       and silently break every query that already assumes "a row = a
+       person who at least reached step 1" — the monitor metrics, the SDR
+       list, the duplicate report, the recheck tool and the AWS mirror all
+       make that assumption today.
+
+       Kept separate, `leads` behaves exactly as it does now and the funnel
+       is a JOIN on session_id when you want it.
+
+       user_agent is stored but never filtered at write time: crawlers will
+       hit the page, and deciding what counts as a bot is a read-time
+       question we can change our minds about. Throwing the data away at
+       write time is the one thing we could not undo.
+
+       Wrapped in try/catch for the same reason as the lead-magnet block
+       below it: start() exits the process if initDB throws, so an
+       unwrapped failure here would take the live form down with it.
+    ------------------------------------------------------- */
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS form_sessions (
+          id             SERIAL PRIMARY KEY,
+          session_id     TEXT UNIQUE NOT NULL,
+          page_url       TEXT,
+          referrer       TEXT,
+          utm_source     TEXT,
+          utm_medium     TEXT,
+          utm_campaign   TEXT,
+          utm_content    TEXT,
+          utm_term       TEXT,
+          user_agent     TEXT,
+          hits           INT DEFAULT 1,
+          created_at     TIMESTAMPTZ DEFAULT NOW(),
+          updated_at     TIMESTAMPTZ DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS form_sessions_created_idx ON form_sessions (created_at);
+      `);
+      console.log('[DB] Form-sessions table ready');
+    } catch (err) {
+      console.error('[DB] Form-sessions table init FAILED (non-fatal):', err.message);
+    }
+
+    /* -------------------------------------------------------
        MIGRATIONS — runs on every startup, safe due to IF NOT EXISTS
     ------------------------------------------------------- */
     const migrations = [
@@ -233,6 +281,23 @@ async function initDB() {
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS utm_term TEXT`,
       // Journey tracking — new
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS previous_page TEXT`,
+      /* Website check — v5.8.0.
+         These four were never declared here, yet index.js writes them in the
+         /partial and /submit INSERTs and reads them in the monitor, the Meta
+         gate and the recheck tool. They exist on the live database because
+         they were added out of band, so nothing is broken today — but a
+         database built from scratch (new environment, staging, a restore)
+         would start up reporting "Tables ready" and then fail on the first
+         form submission. ADD COLUMN IF NOT EXISTS is a no-op where they
+         already exist, so this costs nothing and makes the schema
+         reproducible.
+         _prev and _rechecked_at are also self-created by /monitor/website-recheck;
+         declaring them here means the recheck tool is no longer the only
+         thing that knows they should exist. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS website_check_failed BOOLEAN DEFAULT FALSE`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS website_check_reason TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS website_check_reason_prev TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS website_rechecked_at TIMESTAMPTZ`,
       // enrichment_data table new fields
       `ALTER TABLE enrichment_data ADD COLUMN IF NOT EXISTS enriched_city TEXT`,
       `ALTER TABLE enrichment_data ADD COLUMN IF NOT EXISTS enriched_state TEXT`,
