@@ -356,14 +356,20 @@ function finish() {
 {
   const funnel = between("app.get('/monitor/funnel'", "app.get('/monitor/duplicates'");
 
-  const coveredSrc  = src.match(/const covered\s+=\s+(.+);/)[1];
-  const coverageSrc = src.match(/const coverage\s+=\s+(.+);/)[1];
-  const rateSrc     = src.match(/step1_rate: (.+),/)[1];
-  const decide = new Function('goLive', 'day', 'sessions', 'step1', `
-    const r = { day };
+  /* Extracted from the ROUTE, not the whole file: prose in the comment
+     block above it discusses step1_rate in English, and a regex over the
+     file happily lifted a sentence instead of the expression. */
+  const coveredSrc  = funnel.match(/const covered\s+=\s+(.+);/)[1];
+  const coverageSrc = funnel.match(/const coverage\s+=\s+(.+);/)[1];
+  const rateSrc     = funnel.match(/\n\s+step1_rate: (.+),\n/)[1];
+  const orphanSrc   = funnel.match(/\n\s+orphan_leads: (.+),\n/)[1];
+  ok('funnel: the extracted rate really is an expression, not prose',
+     /covered/.test(rateSrc) && /sessions/.test(rateSrc), rateSrc);
+  const decide = new Function('goLive', 'day', 'sessions', 'step1', 'rawOrphan', `
+    const r = { day, orphan_leads: rawOrphan === undefined ? 0 : rawOrphan };
     const covered  = ${coveredSrc};
     const coverage = ${coverageSrc};
-    return { coverage, step1_rate: ${rateSrc} };
+    return { coverage, step1_rate: ${rateSrc}, orphan_leads: ${orphanSrc} };
   `);
 
   const goLive = new Date('2026-08-20T10:32:00Z').getTime();
@@ -416,6 +422,93 @@ function finish() {
   // affected by the first-day problem. Must stay unguarded by `covered`.
   ok('funnel: submit_rate is not nulled by coverage',
      /submit_rate: step1 > 0 \?/.test(funnel));
+
+  /* ── orphan_leads coverage, from the numbers it got wrong ──
+     Shipped counting every pre-go-live lead as an orphan, because a lead
+     cannot match a session row that was never written. Real first run:
+     session tracking began 2026-08-21T10:32:37Z and orphan_leads exactly
+     equalled step1 on all seven prior days. */
+  const GO_LIVE = new Date('2026-08-21T10:32:37Z').getTime();
+  const REAL_PRE_GO_LIVE = [
+    ['2026-08-14', 29], ['2026-08-15', 30], ['2026-08-16', 26], ['2026-08-17', 32],
+    ['2026-08-18', 33], ['2026-08-19', 40], ['2026-08-20', 8],
+  ];
+
+  // The regression, stated in the terms it was reported in.
+  eq('orphan: a "none" day with step1=29 yields null, not 29',
+     decide(GO_LIVE, D('2026-08-14'), 0, 29, 29).orphan_leads, null);
+
+  REAL_PRE_GO_LIVE.forEach(([day, n]) => {
+    const row = decide(GO_LIVE, D(day), 0, n, n);
+    eq(`orphan: ${day} (real: ${n}/${n}) is null`, row.orphan_leads, null);
+    eq(`orphan: ${day} is labelled uncovered`, row.coverage, 'none');
+  });
+
+  eq('orphan: the seven real days summed to 198, none of it evidence',
+     REAL_PRE_GO_LIVE.reduce((a, [, n]) => a + n, 0), 198);
+
+  // The go-live day still reports — it has real coverage for part of itself,
+  // and the SQL restricts the count to leads created after tracking began.
+  eq('orphan: the partial go-live day still reports a number',
+     decide(GO_LIVE, D('2026-08-21'), 12, 15, 3).orphan_leads, 3);
+  eq('orphan: a fully covered day reports a number',
+     decide(GO_LIVE, D('2026-08-22'), 40, 12, 0).orphan_leads, 0);
+  eq('orphan: zero on a covered day is a real zero, not null',
+     decide(GO_LIVE, D('2026-08-22'), 40, 12, 0).orphan_leads, 0);
+  eq('orphan: no session tracking at all yields null everywhere',
+     decide(null, D('2026-08-22'), 0, 5, 5).orphan_leads, null);
+
+  // The SQL half of the same rule: pre-go-live leads are excluded in the
+  // query, so even without the JS guard the count would not be 213.
+  ok('orphan: the query itself excludes pre-go-live leads',
+     /AND gl\.go_live IS NOT NULL\s*\n\s*AND l\.created_at >= gl\.go_live/.test(funnel));
+  ok('orphan: go_live comes from a joinable CTE, not a subquery in FILTER',
+     /gl AS \(SELECT MIN\(created_at\) AS go_live FROM form_sessions\)/.test(funnel)
+     && /CROSS JOIN gl/.test(funnel));
+
+  // The window total must skip the nulls rather than summing through them:
+  // a naive reduce over null gives NaN, and `|| 0` would give a quiet zero
+  // that reads as "checked, nothing dropped".
+  const measuredSrc = funnel.match(/const measured = (.+);/)[1];
+  const totalSrc    = funnel.match(/orphan_leads_in_window:\s+(.+),\n/)[1];
+  // Caught rather than thrown: if the expression is changed to something
+  // that needs a helper this sandbox does not have (sum('orphan_leads'), for
+  // instance) that is a failure to report, not a reason to kill the run.
+  const windowCalc = (rows) => {
+    try {
+      return (new Function('rows', `
+        const measured = ${measuredSrc};
+        return { total: ${totalSrc}, days: measured.length };
+      `))(rows);
+    } catch (err) {
+      return { total: 'lift failed: ' + err.message, days: -1 };
+    }
+  };
+  const realWindow = windowCalc([
+    ...REAL_PRE_GO_LIVE.map(() => ({ orphan_leads: null })),
+    { orphan_leads: 3 },
+  ]);
+  eq('orphan: the window total counts only measured days', realWindow.total, 3);
+  eq('orphan: and reports how many days that was', realWindow.days, 1);
+  ok('orphan: the total is a number, not NaN', Number.isFinite(realWindow.total));
+  eq('orphan: an all-null window totals 0 over 0 days',
+     windowCalc([{ orphan_leads: null }, { orphan_leads: null }]), { total: 0, days: 0 });
+  ok('orphan: the response says how many days were measured',
+     /orphan_leads_days_measured/.test(funnel) && /orphan_leads_days_in_window/.test(funnel));
+
+  /* Counts of rows that EXIST in form_sessions are not nulled: zero
+     recorded page loads is literally true on an uncovered day, and it is an
+     input rather than a derived claim. Asserted so a later "consistency"
+     pass does not null them by analogy. */
+  ok('orphan: bot_sessions stays a plain count',
+     /bot_sessions: Number\(r\.bot_sessions\)/.test(funnel));
+  ok('orphan: multi_page_sessions stays a plain count',
+     /multi_page_sessions: Number\(r\.multi_page_sessions\)/.test(funnel));
+  ok('orphan: only orphan_leads is coverage-gated',
+     (funnel.match(/coverage === 'none' \? null/g) || []).length === 1);
+  ok('orphan: rate_note explains the null and why',
+     /orphan_leads is null wherever session_coverage is "none"/.test(funnel)
+     && /measure when tracking started rather than whether writes are being dropped/.test(funnel));
 
   // Orphan leads and multi-page sessions — measured, not corrected.
   ok('funnel: orphan leads counted', /AS orphan_leads/.test(funnel));

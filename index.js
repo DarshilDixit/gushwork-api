@@ -1345,8 +1345,33 @@ app.get('/monitor/metrics', async (req, res) => {
       look at, and now it is visible instead of inferred from a number
       that looked impossible.
 
-   multi_page_sessions is here for a different question: session_id lives
-   in sessionStorage, so an ads-landing-page -> /demo journey in one tab
+      ── and it shipped measuring the wrong thing ──
+      First run: orphan_leads exactly equalled step1 on every day before
+      go-live (29/29, 30/30, 26/26, 32/32, 33/33, 40/40, 8/8) and 198 of
+      213 came from days when form_sessions had no rows at all. Of course
+      they did — a lead cannot match a session row that was never
+      written. The metric would have read 213 with nothing dropped, and
+      grown with the window, which is the opposite of a health signal.
+      That is the same error as recording "we could not check" as "we
+      checked and it is bad", so it gets the same treatment the rate
+      itself got — no coverage, no number. Null on 'none' days, and on
+      the go-live day only leads created at or after the first session
+      row are counted; the earlier ones could never have had one.
+      Residual on the go-live day only: someone who loaded the page at
+      10:30 and typed their email at 10:35 counts as an orphan and is not
+      one. One day, a handful of rows, and visible as 'partial'.
+
+   multi_page_sessions and bot_sessions do NOT get this treatment, and the
+   difference is worth being precise about. They count rows that exist in
+   form_sessions. On an uncovered day there are no such rows, so zero is
+   the literal truth — the same zero `sessions` already reports, and it
+   cannot be mistaken for evidence because it is an input, not a derived
+   signal. orphan_leads was the other kind: a claim about leads MISSING a
+   session row, which is only meaningful where sessions were being
+   recorded at all.
+
+   multi_page_sessions answers its own question: session_id lives in
+   sessionStorage, so an ads-landing-page -> /demo journey in one tab
    reuses it and the /session upsert bumps hits instead of adding a row.
    hits > 1 is that journey, and it confirms the denominator is counting
    visitors rather than page loads. */
@@ -1378,6 +1403,12 @@ app.get('/monitor/funnel', async (req, res) => {
            WHERE created_at > NOW() - ($1 || ' days')::interval
            GROUP BY 1
         ),
+        -- MIN(created_at) as a single-row CTE rather than a scalar subquery,
+        -- because a subquery cannot be referenced from inside a FILTER
+        -- clause. CROSS JOINed below: exactly one row (MIN over an empty
+        -- table still returns one, holding NULL), so it cannot multiply
+        -- anything.
+        gl AS (SELECT MIN(created_at) AS go_live FROM form_sessions),
         l AS (
           SELECT date_trunc('day', l.created_at) AS d,
                  COUNT(*) FILTER (WHERE l.email IS NOT NULL AND l.email <> '' AND NOT (${WEBHOOK_LEAD_SQL})) AS step1,
@@ -1389,12 +1420,18 @@ app.get('/monitor/funnel', async (req, res) => {
                  -- Postgres rejects a subquery there ("cannot use subquery in
                  -- FILTER"). form_sessions.session_id is UNIQUE, so the join
                  -- cannot multiply rows and the other counts above stay exact.
+                 -- The go_live cutoff is what stops this counting leads from
+                 -- before session tracking existed, which is every lead in
+                 -- July and August up to 21 Aug 10:32.
                  COUNT(*) FILTER (
                    WHERE l.email IS NOT NULL AND l.email <> ''
                      AND NOT (${WEBHOOK_LEAD_SQL})
                      AND fs.session_id IS NULL
+                     AND gl.go_live IS NOT NULL
+                     AND l.created_at >= gl.go_live
                  ) AS orphan_leads
             FROM leads l
+            CROSS JOIN gl
             -- Cast to text: form_sessions.session_id is TEXT while
             -- leads.session_id is declared UUID. The cast is a no-op if the
             -- live column is really TEXT, and it keeps the join working for
@@ -1437,7 +1474,12 @@ app.get('/monitor/funnel', async (req, res) => {
         multi_page_sessions: Number(r.multi_page_sessions),
         step1, submitted: Number(r.submitted), booked: Number(r.booked),
         webhook_leads: Number(r.webhook_leads), webhook_booked: Number(r.webhook_booked),
-        orphan_leads: Number(r.orphan_leads),
+        // Null on an uncovered day, for the same reason step1_rate is: with
+        // no session rows at all, "leads with no session row" is every lead,
+        // which is a fact about the tracking and not about dropped writes.
+        // The SQL already excludes pre-go-live leads, so this would read 0 —
+        // but 0 says "checked, nothing dropped", which we have not earned.
+        orphan_leads: coverage === 'none' ? null : Number(r.orphan_leads),
         session_coverage: coverage,
         // Null, not 0 — "we have no usable denominator" is not "nobody
         // converted". Now nulled for partial coverage as well as none.
@@ -1449,15 +1491,23 @@ app.get('/monitor/funnel', async (req, res) => {
     });
 
     const sum = (k) => rows.reduce((a, r) => a + r[k], 0);
+    // Sum only the days where the number means something. A window total
+    // built over nulls would be either NaN or a quiet zero, and a quiet zero
+    // is the reading that gets trusted.
+    const measured = rows.filter((r) => r.orphan_leads !== null);
 
     res.json({
       days,
       session_tracking_live_since: totals.rows[0].go_live,
       total_sessions_recorded: Number(totals.rows[0].total_sessions),
       note: 'sessions are only recorded from session_tracking_live_since onward; use GA4 /demo pageviews for earlier periods',
-      rate_note: 'step1_rate is null unless session_coverage is "full". webhook_leads (RevenueHero/Cal fallback rows) are excluded from step1, submitted and booked because they never touched the form. orphan_leads are form leads with no session row — if this is not ~0, step1 is overstated and /session writes are being dropped.',
+      rate_note: 'step1_rate is null unless session_coverage is "full" — a partially covered day divides two different windows. orphan_leads is null wherever session_coverage is "none": with no session rows to match against, every lead looks orphaned, so the count would measure when tracking started rather than whether writes are being dropped. On the "partial" go-live day only leads created at or after session_tracking_live_since are counted. webhook_leads (RevenueHero/Cal fallback rows) are excluded from step1, submitted and booked because they never touched the form. multi_page_sessions and bot_sessions are plain counts of recorded rows, so 0 on an uncovered day is literally true and is not nulled.',
       webhook_leads_in_window: sum('webhook_leads'),
-      orphan_leads_in_window:  sum('orphan_leads'),
+      // Read these two together: a total of 0 over 1 measured day of 30 is
+      // not the same statement as 0 over 30.
+      orphan_leads_in_window:  measured.reduce((a, r) => a + r.orphan_leads, 0),
+      orphan_leads_days_measured: measured.length,
+      orphan_leads_days_in_window: rows.length,
       rows,
     });
   } catch (err) {
