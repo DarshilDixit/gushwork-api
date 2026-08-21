@@ -4,9 +4,8 @@ Inbound lead capture, verification and routing for gushwork.ai. Node + Express o
 Railway, Postgres, no build step. `index.js` is ~4,400 lines and holds most of the
 system.
 
-Owner: Darshil (Webflow Developer by title, owns the whole inbound GTM stack in
-practice). Explain things in plain language — no jargon, no making things sound
-more complex than they are.
+Explain things in plain language — no jargon, no making things sound more complex
+than they are.
 
 ---
 
@@ -42,7 +41,10 @@ explicitly in your summary. Never let that happen as a side effect.
 
 ## Layout
 
-| File | What it holds |
+Every file in the repo root, so this list can't quietly go stale the way it did
+before — a file missing from here reads as "forgotten," not "not documented yet."
+
+| File | What it's for |
 |---|---|
 | `index.js` | Routes, website checking, email verification, alerting, the monitor dashboard, cron |
 | `db.js` | Schema + migrations. Runs on every boot; everything is `IF NOT EXISTS` |
@@ -50,10 +52,30 @@ explicitly in your summary. Never let that happen as a side effect.
 | `meta-capi.js` | Conversions API — `Lead`, `Schedule`, `StartTrial`, `Contact` |
 | `loops.js` | Loops.so contact push for the lead-magnet landing page |
 | `lead-magnet.js` | `/lm/*` routes. Separate table, deliberately not joined to `leads` |
+| `backfill-sf.js` | Manual recovery tool for re-syncing leads to Salesforce after a broken connection or outage. Not mounted by default — see below |
+| `gushwork-form.js` | The `/demo` form frontend. Lives here and is served live by jsDelivr — see below |
+| `gushwork-form-popup.js` | The Google Ads popup/modal form frontend. Lives here and is served live by jsDelivr — see below |
+| `package.json` | Dependencies, scripts, Node engine constraint |
+| `package-lock.json` | Locked dependency versions, committed so Railway installs exactly what was tested |
+| `.gitignore` | Keeps `node_modules/`, `.env`, logs, and local Claude settings out of the repo |
+| `README.md` | Repo landing blurb, not living documentation. This file is |
+| `tests/` | The three test files described under Deploying |
+| `CLAUDE.md` | This file |
 
-The two frontend files (`gushwork-form.js` for `/demo`, `gushwork-form-popup.js` for
-Google Ads) live in a **different repo**, served over the jsDelivr CDN. They are not
-here. Changing them needs a cache purge; changing this repo does not.
+**`gushwork-form.js` and `gushwork-form-popup.js` are in this repo, not a separate
+one.** jsDelivr serves both straight from `main`:
+`https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@main/gushwork-form.js`.
+Committing either file is a **live production change to the forms** — it needs a
+jsDelivr cache purge to take effect, unlike everything else here, which just needs
+a Railway redeploy. `darshildixit.github.io/gushwork-embeds` is a genuinely
+different repo — it holds the Webflow CSS/JS embeds, not these two files. Don't
+confuse the two.
+
+**`backfill-sf.js` is a kept tool, not dead code.** It re-syncs leads to Salesforce
+after a broken connection or outage. Its `/admin/backfill-sf` route is deliberately
+*not* mounted in `index.js` — it should only run when someone decides to run it.
+Mount it temporarily when a recovery is needed, then remove the route again. Don't
+delete the file.
 
 ## Tables
 
@@ -86,10 +108,9 @@ sent to the browser. Both need updating, and the string one uses `\u2014` for em
 dashes with a **single** backslash. Getting that wrong renders a literal `\u2014`
 in the dashboard.
 
-**`db.js` has drifted from production before.** Four `website_check_*` columns
-existed in the live database but were never declared here, so a database built from
-scratch would boot clean and then fail on the first form submission. If you add a
-column write, add the migration too.
+**`/monitor` is not one page.** It's the dashboard plus several sub-routes that
+feed it data. A reader who greps for a single `/monitor` handler expecting to find
+everything will miss most of it.
 
 **Booking arrives by three routes.** `/booking-confirmed` (browser-fired),
 `/booking-confirmed-webhook` (Cal), `/booking-confirmed-webhook-rh` (RevenueHero).
