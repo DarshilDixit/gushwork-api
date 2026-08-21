@@ -433,6 +433,33 @@ const WEBSITE_VERIFIED_REASONS = [
 // form — blocking is form.js's WEBSITE_BLOCKING_REASONS, unchanged.
 const WEBSITE_NEGATIVE_REASONS = ['for_sale_lander', 'marketplace_redirect', 'parked_confirmed', 'hosting_placeholder'];
 
+/* ── Verdicts that mean "we never got a real answer about this site" ──
+   NOT a fourth list to keep in sync with gushwork-form.js. This one is
+   read-only and server-side: nothing here changes a decision, blocks a
+   lead, or gates Meta. It exists so isUnverifiablePair() (in the ELV
+   section) can ask "did the website check actually conclude anything?"
+   without re-deriving it from the other three lists by elimination.
+
+   Deliberately OUT, each for a reason:
+     check_blocked, http_403/401/429/999  a bot wall is positive evidence.
+                                          Nobody puts captcha protection in
+                                          front of a domain that isn't real.
+                                          Same argument as the check_blocked
+                                          note above WEBSITE_VERIFIED_REASONS.
+     thin_content, non_html               we reached the site and saw
+                                          something. That is an answer.
+     parked_confirmed, for_sale_lander,   real answers, already surfaced and
+     nxdomain, no_dns_records             already suppressing Meta. Flagging
+                                          them a second time is noise.
+     null / ''                            no check ran, or the row predates
+                                          the field. Absence of a verdict is
+                                          not a verdict. */
+const WEBSITE_UNREACHABLE_REASONS = [
+  'dns_unresolved', 'dns_indeterminate', 'doh_error',
+  'timeout', 'unreachable', 'fetch_error', 'backend_error',
+  'skipped_no_backend', 'skipped_unsafe_target', 'unknown',
+];
+
 /* ── Plain-English labels ─────────────────────────────────────────
    Slack and the monitor used to print the raw reason code — 'parked_ns',
    'doh_error' — which tells an SDR nothing. Same verdict, readable wording.
@@ -923,6 +950,14 @@ function slackPartial(d) {
     { label: '🌐 Website', value: d.website  },
   ]);
   if (lf) blocks.push(lf);
+  // Flagged here as well as in /submit, and this is the case that mattered:
+  // yo@yoyo.com never submitted. It dropped out, came through the partials
+  // cron, and got a follow-up email. A flag that only exists on the submit
+  // path would have missed the lead that prompted it.
+  if (isUnverifiablePair(d)) {
+    const nf = bFields([{ label: '⚠️ Nothing verified this lead', value: UNVERIFIABLE_PAIR_NOTE }]);
+    if (nf) blocks.push(nf);
+  }
   buildEnrichmentBlocks(blocks, d);
   buildJourneyBlocks(blocks, d);
   sendSlack(blocks, label);
@@ -943,6 +978,12 @@ function slackSubmit(d) {
     { label: '💬 Heard about us',   value: d.hear_about_us },
   ]);
   if (lf) blocks.push(lf);
+  // Above the website-check line on purpose: this says nothing checked out
+  // at all, which is a bigger fact than which check said what.
+  if (isUnverifiablePair(d)) {
+    const nf = bFields([{ label: '⚠️ Nothing verified this lead', value: UNVERIFIABLE_PAIR_NOTE }]);
+    if (nf) blocks.push(nf);
+  }
   if (d.website_check_failed) {
     const hint = WEBSITE_SALES_HINTS[d.website_check_reason];
     const wf = bFields([{
@@ -1265,7 +1306,55 @@ app.get('/monitor/metrics', async (req, res) => {
    site had no traffic in July.
 
    For the period BEFORE go-live, GA4 pageviews on /demo are the
-   denominator. This route deliberately does not try to blend the two. */
+   denominator. This route deliberately does not try to blend the two.
+
+   ── Why step1_rate came back 266.7 ──
+   Three separate ways the numerator can outlive its denominator. The first
+   two are fixed below; the third is now measured rather than fixed,
+   because it is a symptom and not something a read query can correct.
+
+   1. PARTIAL FIRST DAY. Session recording began at 10:32 UTC; leads count
+      from midnight. The zero-sessions guard handled "no denominator" but
+      nothing handled "denominator covers nine fewer hours than the
+      numerator". That day's rate is arithmetic on two different windows,
+      so it is now null. Only the FIRST day is affected — for today, both
+      counts run midnight-to-now and the coverage is symmetric.
+
+   2. WEBHOOK LEADS HAVE NO SESSION, EVER. The RevenueHero and Cal
+      safety-net branches create a `leads` row for someone who booked
+      without the form: prefill_source is 'rh_webhook' or 'cal_webhook',
+      the session_id is minted server-side, and no form_sessions row
+      exists or ever will. They are real leads and they belong in the
+      totals; they are not form starts and they inflate step1 forever.
+      Excluded from step1, submitted AND booked — all three, because
+      these rows arrive with submitted_at and booking_uid already set, so
+      excluding them from step1 alone would push submit_rate past 100%
+      and trade one wrong number for another. Reported separately as
+      webhook_leads / webhook_booked.
+      Only the fallback branches carry these values: when a webhook finds
+      an existing lead it updates that row and never touches
+      prefill_source, so a real form lead that books keeps its own.
+
+   3. ORPHAN LEADS — reported, not fixed. saveSession() in both form files
+      is fire-and-forget with a swallowed error and a short timeout, while
+      /partial is awaited and visible to the visitor. So any page load
+      where /session was dropped but the person went on to type an email
+      leaves a lead with no session row: step1 inflated, permanently,
+      silently. orphan_leads counts them. Near zero means the rate is
+      trustworthy on covered days; anything else is the next thing to
+      look at, and now it is visible instead of inferred from a number
+      that looked impossible.
+
+   multi_page_sessions is here for a different question: session_id lives
+   in sessionStorage, so an ads-landing-page -> /demo journey in one tab
+   reuses it and the /session upsert bumps hits instead of adding a row.
+   hits > 1 is that journey, and it confirms the denominator is counting
+   visitors rather than page loads. */
+// Assumes the `leads` table is aliased `l`. Qualified on purpose: the query
+// below joins form_sessions, and an unqualified column reference there is one
+// added column away from being ambiguous.
+const WEBHOOK_LEAD_SQL = "COALESCE(l.prefill_source, '') IN ('rh_webhook', 'cal_webhook')";
+
 app.get('/monitor/funnel', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) {
@@ -1281,49 +1370,94 @@ app.get('/monitor/funnel', async (req, res) => {
         WITH s AS (
           SELECT date_trunc('day', created_at) AS d,
                  COUNT(*) FILTER (WHERE user_agent IS NULL OR user_agent !~* $2) AS sessions,
-                 COUNT(*) FILTER (WHERE user_agent ~* $2)                        AS bot_sessions
+                 COUNT(*) FILTER (WHERE user_agent ~* $2)                        AS bot_sessions,
+                 -- Same bot exclusion as the sessions count, or the two
+                 -- cannot be read against each other.
+                 COUNT(*) FILTER (WHERE hits > 1 AND (user_agent IS NULL OR user_agent !~* $2)) AS multi_page_sessions
             FROM form_sessions
            WHERE created_at > NOW() - ($1 || ' days')::interval
            GROUP BY 1
         ),
         l AS (
-          SELECT date_trunc('day', created_at) AS d,
-                 COUNT(*) FILTER (WHERE email IS NOT NULL AND email <> '') AS step1,
-                 COUNT(*) FILTER (WHERE submitted_at IS NOT NULL)          AS submitted,
-                 COUNT(*) FILTER (WHERE booking_uid IS NOT NULL)           AS booked
-            FROM leads
-           WHERE created_at > NOW() - ($1 || ' days')::interval
+          SELECT date_trunc('day', l.created_at) AS d,
+                 COUNT(*) FILTER (WHERE l.email IS NOT NULL AND l.email <> '' AND NOT (${WEBHOOK_LEAD_SQL})) AS step1,
+                 COUNT(*) FILTER (WHERE l.submitted_at IS NOT NULL AND NOT (${WEBHOOK_LEAD_SQL}))            AS submitted,
+                 COUNT(*) FILTER (WHERE l.booking_uid IS NOT NULL AND NOT (${WEBHOOK_LEAD_SQL}))             AS booked,
+                 COUNT(*) FILTER (WHERE ${WEBHOOK_LEAD_SQL})                                                 AS webhook_leads,
+                 COUNT(*) FILTER (WHERE ${WEBHOOK_LEAD_SQL} AND l.booking_uid IS NOT NULL)                    AS webhook_booked,
+                 -- A LEFT JOIN rather than NOT EXISTS inside FILTER, because
+                 -- Postgres rejects a subquery there ("cannot use subquery in
+                 -- FILTER"). form_sessions.session_id is UNIQUE, so the join
+                 -- cannot multiply rows and the other counts above stay exact.
+                 COUNT(*) FILTER (
+                   WHERE l.email IS NOT NULL AND l.email <> ''
+                     AND NOT (${WEBHOOK_LEAD_SQL})
+                     AND fs.session_id IS NULL
+                 ) AS orphan_leads
+            FROM leads l
+            -- Cast to text: form_sessions.session_id is TEXT while
+            -- leads.session_id is declared UUID. The cast is a no-op if the
+            -- live column is really TEXT, and it keeps the join working for
+            -- the webhook rows whose ids are not UUID-shaped.
+            LEFT JOIN form_sessions fs ON fs.session_id = l.session_id::text
+           WHERE l.created_at > NOW() - ($1 || ' days')::interval
            GROUP BY 1
         )
         SELECT COALESCE(s.d, l.d) AS day,
-               COALESCE(s.sessions, 0)     AS sessions,
-               COALESCE(s.bot_sessions, 0) AS bot_sessions,
-               COALESCE(l.step1, 0)        AS step1,
-               COALESCE(l.submitted, 0)    AS submitted,
-               COALESCE(l.booked, 0)       AS booked
+               COALESCE(s.sessions, 0)             AS sessions,
+               COALESCE(s.bot_sessions, 0)         AS bot_sessions,
+               COALESCE(s.multi_page_sessions, 0)  AS multi_page_sessions,
+               COALESCE(l.step1, 0)                AS step1,
+               COALESCE(l.submitted, 0)            AS submitted,
+               COALESCE(l.booked, 0)               AS booked,
+               COALESCE(l.webhook_leads, 0)        AS webhook_leads,
+               COALESCE(l.webhook_booked, 0)       AS webhook_booked,
+               COALESCE(l.orphan_leads, 0)         AS orphan_leads
           FROM s FULL OUTER JOIN l ON s.d = l.d
          ORDER BY 1 DESC
       `, [String(days), BOT_RE]),
       pool.query(`SELECT MIN(created_at) AS go_live, COUNT(*) AS total_sessions FROM form_sessions`),
     ]);
 
+    // Instant comparison, so no assumption about the database's timezone:
+    // date_trunc bucketed each day in the server's zone and pg hands both
+    // values back as absolute times.
+    const goLive = totals.rows[0].go_live ? new Date(totals.rows[0].go_live).getTime() : null;
+
     const rows = byDay.rows.map((r) => {
       const sessions = Number(r.sessions), step1 = Number(r.step1);
+      // Was session recording already running at the START of this day? If
+      // not, the two counts cover different windows and their ratio is not
+      // a conversion rate. sessions > 0 with an uncovered day is only ever
+      // the go-live day itself.
+      const covered  = goLive !== null && goLive <= new Date(r.day).getTime();
+      const coverage = covered ? 'full' : (sessions > 0 ? 'partial' : 'none');
       return {
         day: r.day, sessions, bot_sessions: Number(r.bot_sessions),
+        multi_page_sessions: Number(r.multi_page_sessions),
         step1, submitted: Number(r.submitted), booked: Number(r.booked),
-        // Only meaningful once sessions are being recorded. Null, not 0 —
-        // "we have no denominator" is not "nobody converted".
-        step1_rate: sessions > 0 ? +(step1 / sessions * 100).toFixed(1) : null,
+        webhook_leads: Number(r.webhook_leads), webhook_booked: Number(r.webhook_booked),
+        orphan_leads: Number(r.orphan_leads),
+        session_coverage: coverage,
+        // Null, not 0 — "we have no usable denominator" is not "nobody
+        // converted". Now nulled for partial coverage as well as none.
+        step1_rate: covered && sessions > 0 ? +(step1 / sessions * 100).toFixed(1) : null,
+        // Numerator and denominator both come from `leads`, so coverage is
+        // symmetric and this was never affected by the first-day problem.
         submit_rate: step1 > 0 ? +(Number(r.submitted) / step1 * 100).toFixed(1) : null,
       };
     });
+
+    const sum = (k) => rows.reduce((a, r) => a + r[k], 0);
 
     res.json({
       days,
       session_tracking_live_since: totals.rows[0].go_live,
       total_sessions_recorded: Number(totals.rows[0].total_sessions),
       note: 'sessions are only recorded from session_tracking_live_since onward; use GA4 /demo pageviews for earlier periods',
+      rate_note: 'step1_rate is null unless session_coverage is "full". webhook_leads (RevenueHero/Cal fallback rows) are excluded from step1, submitted and booked because they never touched the form. orphan_leads are form leads with no session row — if this is not ~0, step1 is overstated and /session writes are being dropped.',
+      webhook_leads_in_window: sum('webhook_leads'),
+      orphan_leads_in_window:  sum('orphan_leads'),
       rows,
     });
   } catch (err) {
@@ -1452,6 +1586,7 @@ app.get('/monitor/leads', async (req, res) => {
       l.disqualified, l.disqualified_reason, l.step_reached,
       l.loops_sent, l.created_at, l.submitted_at, l.page_url,
       l.landing_page, l.previous_page, l.website_check_failed, l.website_check_reason,
+      l.elv_status, l.elv_checked_at,
       (SELECT COUNT(*) FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at) AS prior_attempts,
       (SELECT COUNT(*) FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at AND pa.disqualified IS TRUE) AS prior_disqualified,
       l.utm_source, l.utm_medium, l.utm_campaign, l.utm_term, l.referrer, l.prefill_source,
@@ -1490,6 +1625,7 @@ app.get('/monitor/leads', async (req, res) => {
         'completed','booking_uid','disqualified','step_reached','created_at','submitted_at','booked_at',
         'utm_source','utm_medium','utm_campaign','utm_term','referrer','prefill_source',
         'landing_page','previous_page','page_url','website_check_failed','website_check_reason','prior_attempts','prior_disqualified',
+        'elv_status','unverifiable_pair',
         'enriched_title','enriched_company_size','enriched_industry','enriched_seniority','enriched_departments',
         'enriched_linkedin','enriched_city','enriched_state','enriched_country',
         'enriched_annual_revenue','enriched_total_funding','enriched_funding_stage'
@@ -1501,7 +1637,8 @@ app.get('/monitor/leads', async (req, res) => {
       };
       const csv = [
         cols.join(','),
-        ...allRows.rows.map(r => cols.map(c => escape(r[c])).join(','))
+        // Same derived flag as the JSON path, from the same function.
+        ...allRows.rows.map(r => cols.map(c => escape(c === 'unverifiable_pair' ? isUnverifiablePair(r) : r[c])).join(','))
       ].join('\n');
       res.setHeader('Content-Type', 'text/csv');
       res.setHeader('Content-Disposition', `attachment; filename="leads-${new Date().toISOString().slice(0,10)}.csv"`);
@@ -1521,7 +1658,13 @@ app.get('/monitor/leads', async (req, res) => {
       [...params, limit, offset]
     );
 
-    res.json({ total, page, pages: Math.ceil(total / limit), leads: leadsResult.rows });
+    /* Computed here, not in SQL and not in the browser: the rule lives in
+       one place (isUnverifiablePair) and the dashboard just renders the
+       answer. Duplicating the verdict list into the dashboard's JS string
+       is exactly how the label map ended up with two copies. */
+    const leadRows = leadsResult.rows.map(r => ({ ...r, unverifiable_pair: isUnverifiablePair(r) }));
+
+    res.json({ total, page, pages: Math.ceil(total / limit), leads: leadRows });
   } catch (err) {
     console.error('[/monitor/leads]', err.message);
     res.status(500).json({ error: 'Query failed', detail: err.message });
@@ -1907,6 +2050,12 @@ app.get('/monitor', (req, res) => {
   '{lb:"\\u26A0\\uFE0F Website check",v:l.website_check_failed?wlabel(l.website_check_reason):null},' +
   '{lb:"\\u2139\\uFE0F Website check",v:(!l.website_check_failed&&l.website_check_reason&&l.website_check_reason!=="social_profile_url"&&["content_clean","resolved","ok","test_email_skipped"].indexOf(l.website_check_reason)===-1)?wlabel(l.website_check_reason):null},' +
   '{lb:"\\uD83D\\uDD17 Website type",v:(!l.website_check_failed&&l.website_check_reason==="social_profile_url")?"Social profile (no company site)":null},' +
+  // The flag arrives pre-computed as l.unverifiable_pair. Deliberately not
+  // re-derived here from elv_status + website_check_reason: that would put a
+  // second copy of the verdict list in a JS string, which is exactly the
+  // trap the label map fell into.
+  '{lb:"\\u26A0\\uFE0F Nothing verified",v:l.unverifiable_pair?"Catch-all email, unreachable website. Nothing confirmed this lead.":null},' +
+  '{lb:"Email check",v:l.elv_status},' +
   '{lb:"\\uD83D\\uDD01 Attempts",v:(Number(l.prior_attempts)>0)?("Attempt "+(Number(l.prior_attempts)+1)+" \\u2014 "+l.prior_attempts+" prior"+(Number(l.prior_disqualified)>0?", "+l.prior_disqualified+" disqualified":"")):null},' +
   '{lb:"Hear about us",v:l.hear_about_us},' +
   '{lb:"UTM source",v:l.utm_source},' +
@@ -2432,6 +2581,130 @@ function elvCacheSet(email, valid, status) {
   _elvCache.set(email, { valid, status, at: Date.now() });
 }
 
+/* ── Durable store ────────────────────────────────────────────────
+   The cache above is in-memory, so every Railway deploy or restart
+   silently drops the verdict for anyone mid-form. A flag that is
+   SOMETIMES missing is worse than no flag, because its absence reads as
+   "we checked and nothing was wrong". So Postgres is the source of
+   truth and the cache goes back to being what it was always good for:
+   not spending a second ELV credit on one address.
+
+   Same guard as elvCacheSet, and it is the whole point: only DEFINITIVE
+   verdicts are written. 'timeout', 'http_error', 'network_error',
+   'unknown' and 'skipped' write NOTHING, so an empty column always
+   means "we deliberately do not know" and never "we checked, it was
+   fine". Reading it back is only safe because of this line.
+
+   Fire-and-forget on purpose. /verify-email has a lead waiting on it,
+   and a lost write costs nothing: the in-memory cache covers the
+   seconds until /submit, and /submit re-checks rather than storing a
+   blank. Two independent chances plus a re-check. */
+function persistElvVerdict(email, status, valid, source) {
+  if (!ELV_BLOCK.includes(status) && !ELV_PASS.includes(status)) return;
+  pool.query(`
+    INSERT INTO email_verifications (email, status, valid, source, checked_at)
+    VALUES ($1,$2,$3,$4,NOW())
+    ON CONFLICT (email) DO UPDATE SET
+      status     = EXCLUDED.status,
+      valid      = EXCLUDED.valid,
+      source     = EXCLUDED.source,
+      checked_at = NOW()
+  `, [email, status, valid, source || 'elv'])
+    .catch(err => console.warn(`[ELV] verdict not persisted for ${email} (ignored):`, err.message));
+}
+
+// One place that knows the endpoint and the key, so the re-check below
+// and the /verify-email handler can never drift apart on it.
+function elvCheckUrl(email, apiKey) {
+  return `https://apps.emaillistverify.com/api/verifyEmail?secret=${apiKey}&email=${encodeURIComponent(email)}`;
+}
+
+/* Status-only re-check. Deliberately NOT the /verify-email handler: that
+   one races DNS, aborts the in-flight call on NXDOMAIN and composes
+   user-facing copy, none of which applies when nobody is waiting for an
+   answer. Returns a verdict or null — never a guess. */
+async function elvRecheckStatusOnly(email) {
+  const apiKey = process.env.ELV_API_KEY;
+  if (!apiKey) return null;
+  const controller = new AbortController();
+  const timeout    = setTimeout(() => controller.abort(), ELV_TIMEOUT_MS);
+  try {
+    const response = await fetch(elvCheckUrl(email, apiKey), { signal: controller.signal });
+    if (!response.ok) { recordElvOutcome('http_error', email); return null; }
+    const status = normaliseElvStatus((await response.text()).trim().toLowerCase());
+    const known  = ELV_BLOCK.includes(status) || ELV_PASS.includes(status) || ELV_INDETERMINATE.includes(status);
+    recordElvOutcome(known ? status : 'unknown', email);
+    const valid = !ELV_BLOCK.includes(status);
+    elvCacheSet(email, valid, status);
+    persistElvVerdict(email, status, valid, 'submit_recheck');
+    console.log(`[ELV] re-checked ${email} at submit time → "${status}"`);
+    // Indeterminate stays unwritten and unreturned, same rule as everywhere.
+    return ELV_BLOCK.includes(status) || ELV_PASS.includes(status) ? { status, valid } : null;
+  } catch (err) {
+    recordElvOutcome(err && err.name === 'AbortError' ? 'timeout' : 'network_error', email);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/* Read the stored verdict. DB first — that is the source of truth. The
+   memory cache is second and covers only the sub-second window where a
+   fire-and-forget write has not landed yet. Never calls ELV: the
+   re-check runs off the critical path, after the response. */
+async function lookupElvStatus(email) {
+  if (!email) return null;
+  try {
+    const r = await pool.query('SELECT status, checked_at FROM email_verifications WHERE email=$1', [email]);
+    if (r.rows[0]) return { status: r.rows[0].status, checked_at: r.rows[0].checked_at, from: 'db' };
+  } catch (err) {
+    console.warn(`[ELV] verdict lookup failed for ${email} (continuing):`, err.message);
+  }
+  const hit = elvCacheGet(email);
+  if (hit) return { status: hit.status, checked_at: new Date(hit.at), from: 'memory' };
+  return null;
+}
+
+/* The flag. Fires once, from /submit, when BOTH checks came back unable
+   to tell us anything — see isUnverifiablePair(). Never blocks, never
+   touches Meta: it adds a line an SDR can act on before the call. */
+function alertUnverifiablePair(row) {
+  if (!isUnverifiablePair(row)) return false;
+  if (elvIsInternal(row.email)) return false; // our own testing is not an incident
+  console.warn(`[Form] ⚠ ${row.email} — catch-all mailbox (${row.elv_status}) AND website unreachable (${row.website_check_reason}); nothing verified`);
+  alertOps('warning', 'Form', 'Nothing verified this lead', {
+    'Email': row.email,
+    'Why': UNVERIFIABLE_PAIR_NOTE,
+    'Email check': `${row.elv_status} — mail server accepts every address`,
+    'Website check': websiteReasonLabel(row.website_check_reason),
+    'Impact': 'The lead passed and can book, exactly as before. Worth a look before the call — this is the shape the yo@yoyo.com lead had.',
+  });
+  return true;
+}
+
+/* Fills leads.elv_status when nothing was stored by verify time. Runs
+   AFTER the response has gone out: a lead is waiting on /submit and one
+   ELV call is up to 8 seconds. At 30-40 leads/day the extra credit on
+   the miss path is cheap; the wait is not. Writes only over NULL, so a
+   verdict that landed in the meantime wins. */
+async function finaliseElvVerdict({ session_id, email, website_check_reason }) {
+  if (!email || elvIsInternal(email)) return;
+  try {
+    const fresh = await elvRecheckStatusOnly(email);
+    if (!fresh) {
+      console.log(`[/submit] elv_status left empty for ${email} — the re-check did not conclude either`);
+      return;
+    }
+    await pool.query(
+      'UPDATE leads SET elv_status=$2, elv_checked_at=NOW(), updated_at=NOW() WHERE session_id=$1 AND elv_status IS NULL',
+      [session_id, fresh.status]
+    );
+    alertUnverifiablePair({ email, elv_status: fresh.status, website_check_reason });
+  } catch (err) {
+    console.warn(`[ELV] late verdict fill failed for ${email} (ignored):`, err.message);
+  }
+}
+
 /* ── Local pre-checks ──────────────────────────────────────────────
    Deliberately conservative: these only reject what cannot possibly be
    a working address. Anything arguable is handed to ELV. The point is
@@ -2549,34 +2822,49 @@ const ELV_MESSAGES = {
    This is a HINT, never a block. The address may genuinely be valid, and
    the person can ignore it. But mail sent to a squatted domain reaches
    the squatter rather than the lead, so it is worth surfacing. */
-/* ── Unverifiable mailbox at a household-name domain ──────────────
-   v5.6.0. 'ok_for_all' / 'accept_all' mean the mail server accepts EVERY
-   address without checking whether it exists. That is not verification —
-   it is the absence of it. Normally harmless (plenty of real companies
-   run catch-alls), but it is exactly how the 18 Aug spam lead got in:
-   blocked on a made-up domain, they retried on meta.com — a catch-all at
-   a household name — and it passed. Enrichment then returned Meta Inc's
-   real data and the lead looked impressive in the dashboard.
+/* ── Nothing verified this lead ────────────────────────────────────
+   'ok_for_all' / 'accept_all' mean the mail server accepts EVERY address
+   without checking whether it exists. That is not verification — it is
+   the absence of it. On its own it means nothing: plenty of real
+   companies run catch-alls, and B2B is full of them.
 
-   Nobody can verify a mailbox at a mega-brand's catch-all, so we stop
-   pretending we did. FLAG, never block: real people do work at Meta. */
+   v5.6.0 flagged this only at ~30 hand-listed household-name domains,
+   after the 18 Aug spam lead was blocked on a made-up domain, retried on
+   meta.com — a catch-all at a big brand — and passed. That list could
+   never be finished, the same way the free-email list could not before
+   edit-distance matching replaced it.
+
+   yo@yoyo.com is what the gap looked like from the other side. ELV
+   returned 'ok_for_all' (yoyo.com accepts anything through
+   amazon-smtp.amazon.com). The website check timed out and failed open,
+   correctly. Neither half verified a thing, both halves passed, no flag
+   anywhere, and the lead got a follow-up email.
+
+   So the rule is not about which domain it is. It is: the email check
+   could not confirm the mailbox AND the website check could not reach
+   the site. Two "we could not tell"s at once, at ANY domain. Either
+   signal alone is ordinary and stays silent.
+
+   FLAG, NEVER BLOCK. Real people work at companies with catch-all mail
+   and flaky websites, and both checks still fail open exactly as before.
+   Derived at read time, never stored as a boolean: the recheck tool can
+   change website_check_reason later, and a flag that has quietly gone
+   stale is worse than no flag — you would trust its absence. */
 const CATCHALL_STATUSES = ['ok_for_all', 'accept_all'];
 
-const BRAND_MAILBOX_DOMAINS = [
-  'google.com', 'youtube.com', 'facebook.com', 'fb.com', 'meta.com',
-  'instagram.com', 'linkedin.com', 'twitter.com', 'x.com', 'amazon.com',
-  'amazon.in', 'microsoft.com', 'apple.com', 'netflix.com', 'whatsapp.com',
-  'tiktok.com', 'reddit.com', 'openai.com', 'chatgpt.com', 'flipkart.com',
-  'tesla.com', 'nvidia.com', 'oracle.com', 'salesforce.com', 'adobe.com',
-  'ibm.com', 'intel.com', 'spotify.com', 'uber.com', 'airbnb.com',
-];
-
-function isUnverifiableBrandMailbox(email, status) {
-  if (!CATCHALL_STATUSES.includes(status)) return null;
-  const domain = String(email || '').split('@')[1] || '';
-  const d = domain.toLowerCase();
-  return BRAND_MAILBOX_DOMAINS.includes(d) ? d : null;
+function isUnverifiablePair(row) {
+  if (!row) return false;
+  const elv = normaliseElvStatus(row.elv_status);
+  if (!CATCHALL_STATUSES.includes(elv)) return false;
+  const reason = row.website_check_reason;
+  if (!reason) return false; // no verdict is not a verdict
+  return WEBSITE_UNREACHABLE_REASONS.includes(reason);
 }
+
+// One sentence, plain English, for Slack and the dashboard. SDRs read this.
+const UNVERIFIABLE_PAIR_NOTE =
+  'Their mail server accepts any address, so we could not confirm this mailbox exists — '
+  + 'and we could not reach their website either. Nothing has verified this lead.';
 
 function elvSoftTypoHint(email) {
   const raw       = String(email || '');
@@ -2657,8 +2945,7 @@ app.post('/verify-email', async (req, res) => {
     //     domain is rejected in ~50ms instead of after the full ELV wait.
     const controller = new AbortController();
     const timeout    = setTimeout(() => controller.abort(), ELV_TIMEOUT_MS);
-    const url        = `https://apps.emaillistverify.com/api/verifyEmail?secret=${apiKey}&email=${encodeURIComponent(email)}`;
-    const elvPromise = fetch(url, { signal: controller.signal });
+    const elvPromise = fetch(elvCheckUrl(email, apiKey), { signal: controller.signal });
     const mxPromise  = localMxCheck(domain);
 
     // A definitive NXDOMAIN is enough on its own — the domain does not
@@ -2673,6 +2960,7 @@ app.post('/verify-email', async (req, res) => {
       elvPromise.catch(() => {}); // discard the aborted request quietly
       console.log(`[ELV] BLOCKED ${email} — local: nxdomain | ${Date.now() - startedAt}ms`);
       elvCacheSet(email, false, 'domain_error');
+      persistElvVerdict(email, 'domain_error', false, 'local');
       return res.json(Object.assign(elvRejection(email, 'domain_error'), { source: 'local' }));
     }
 
@@ -2717,26 +3005,23 @@ app.post('/verify-email', async (req, res) => {
     if (!valid) console.log(`[ELV] BLOCKED ${email} — status: "${status}"`);
     recordElvOutcome(known ? status : 'unknown', email);
     elvCacheSet(email, valid, status);
+    // Written here so /partial and /submit can read back HOW a lead passed,
+    // not just that it did. Not awaited — the lead is waiting on this call.
+    persistElvVerdict(email, status, valid, 'elv');
     if (valid) {
       // v5.7.1 — the user-facing hint now lives in gushwork-form.js, computed
       // locally so an ELV timeout cannot swallow it (gmailc.com timed out at
       // 8002ms on 20 Aug and no hint appeared). Kept here purely as a log
       // line: one source of truth for what the lead sees, and still visible
       // to us in Railway.
-      const hint  = elvSoftTypoHint(email);
-      const brand = isUnverifiableBrandMailbox(email, status);
+      const hint = elvSoftTypoHint(email);
       if (hint) console.log(`[ELV] 💡 ${email} passed but looks like a typo of ${hint.suggestedDomain}`);
-      if (brand && !elvIsInternal(email)) {
-        // Flag, don't block — real employees exist. But a catch-all at a
-        // household name is unverifiable by definition, so a human should
-        // glance at it before the call.
-        console.warn(`[ELV] ⚠ ${email} — catch-all mailbox at ${brand}, existence NOT verified`);
-        alertOps('warning', 'Form', 'Unverifiable mailbox at a well-known domain', {
-          'Email': email,
-          'Domain': brand,
-          'Why': 'The mail server accepts every address without checking it exists, so we cannot confirm this mailbox is real.',
-          'Impact': 'The lead passed and can book. Worth a look before the call — this pattern was used by a spam booking on 18 Aug.',
-        });
+      // A catch-all no longer alerts from here. It cannot: on its own it
+      // means nothing, and the website check that decides whether it means
+      // anything has not run yet at email-blur time. The verdict is stored
+      // above and the pair is judged in /submit — see isUnverifiablePair.
+      if (CATCHALL_STATUSES.includes(status)) {
+        console.log(`[ELV] ${email} — catch-all domain, mailbox existence NOT verified (stored; judged with the website check at submit)`);
       }
       return res.json({ valid: true, status, ms });
     }
@@ -3781,9 +4066,15 @@ app.post('/partial', async (req, res) => {
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
   try {
+    /* How this lead's email verified, read back from the durable store.
+       /verify-email ran on blur — before this row existed — so the verdict
+       could not be written here at the time. A primary-key lookup on a tiny
+       table; no ELV call, nothing that can slow the form down. */
+    const elv = await lookupElvStatus(email);
+
     await pool.query(`
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW(),$29,$30)
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW(),$29,$30,$31,$32)
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -3814,8 +4105,10 @@ app.post('/partial', async (req, res) => {
         step_reached          = GREATEST(EXCLUDED.step_reached,          leads.step_reached),
         updated_at            = NOW(),
         website_check_failed  = EXCLUDED.website_check_failed,
-        website_check_reason  = COALESCE(EXCLUDED.website_check_reason,  leads.website_check_reason)
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hear_about_us||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null]);
+        website_check_reason  = COALESCE(EXCLUDED.website_check_reason,  leads.website_check_reason),
+        elv_status            = COALESCE(EXCLUDED.elv_status,            leads.elv_status),
+        elv_checked_at        = COALESCE(EXCLUDED.elv_checked_at,        leads.elv_checked_at)
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hear_about_us||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null]);
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/partial] Enrichment sync failed (non-blocking):', err.message));
 
@@ -3881,9 +4174,15 @@ app.post('/submit', async (req, res) => {
     const enrichRow       = await pool.query('SELECT * FROM enrichment_data WHERE session_id=$1', [session_id]);
     const enrich          = enrichRow.rows[0] || {};
 
+    /* The stored ELV verdict. This is the half of the picture the DB never
+       had: with website_check_reason it answers "did anything actually
+       verify this lead?" rather than only "did it pass?". A miss is filled
+       by a re-check after the response — see finaliseElvVerdict. */
+    const elv = await lookupElvStatus(email);
+
     await pool.query(`
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW(),$28,$29)
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW(),$28,$29,$30,$31)
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -3916,15 +4215,17 @@ app.post('/submit', async (req, res) => {
         submitted_at          = NOW(),
         updated_at            = NOW(),
         website_check_failed  = EXCLUDED.website_check_failed,
-        website_check_reason  = COALESCE(EXCLUDED.website_check_reason,  leads.website_check_reason)
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hear_about_us||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null]);
+        website_check_reason  = COALESCE(EXCLUDED.website_check_reason,  leads.website_check_reason),
+        elv_status            = COALESCE(EXCLUDED.elv_status,            leads.elv_status),
+        elv_checked_at        = COALESCE(EXCLUDED.elv_checked_at,        leads.elv_checked_at)
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hear_about_us||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null]);
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/submit] Enrichment sync failed (non-blocking):', err.message));
 
     syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true});
 
     if (!alreadyCompleted) {
-      slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
+      slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,elv_status:elv?.status||null,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
 
       pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'form completed', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
 
@@ -3937,11 +4238,18 @@ app.post('/submit', async (req, res) => {
         console.log(`[/submit] ⏭ Meta CAPI Lead skipped — website not verified (${website_check_reason || 'failed'}): ${email}`);
       }
 
-      console.log(`[/submit] ✅ Lead completed: ${email} | session: ${session_id}`);
+      // Both checks came back unable to tell us anything. Informational
+      // only: everything above has already fired, Meta included.
+      alertUnverifiablePair({ email, elv_status: elv?.status, website_check_reason });
+
+      console.log(`[/submit] ✅ Lead completed: ${email} | session: ${session_id} | email check: ${elv?.status || 'not stored'}`);
     } else {
       console.log(`[/submit] ⏭ Slack skipped — already completed: ${email} | session: ${session_id}`);
     }
     res.json({ ok: true });
+
+    // Off the critical path on purpose — the lead is no longer waiting.
+    if (!elv && !alreadyCompleted) finaliseElvVerdict({ session_id, email, website_check_reason });
   } catch (err) { console.error('[/submit]', err.message); res.status(500).json({ error: 'Submit failed' }); }
 });
 
@@ -4125,6 +4433,9 @@ app.post('/cron/send-partials', async (req, res) => {
              l.utm_source, l.utm_medium, l.utm_campaign, l.utm_content, l.referrer, l.page_url,
              l.landing_page, l.previous_page,
              l.disqualified, l.disqualified_reason, l.completed,
+             -- Both halves of "did anything verify this lead?", so slackPartial
+             -- can flag the pair. Neither was selected here before.
+             l.elv_status, l.website_check_failed, l.website_check_reason,
              l.enriched_title, l.enriched_company_size, l.enriched_industry, l.enriched_linkedin,
              l.enriched_city, l.enriched_state, l.enriched_country, l.enriched_seniority,
              l.enriched_departments, l.enriched_email_status, l.enriched_founded_year,
