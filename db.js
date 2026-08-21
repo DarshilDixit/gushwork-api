@@ -238,6 +238,56 @@ async function initDB() {
     }
 
     /* -------------------------------------------------------
+       EMAIL VERIFICATIONS — the ELV verdict, keyed by email
+
+       /verify-email computed a rich verdict, returned it to the browser
+       and threw it away. yo@yoyo.com is what that costs: ELV said
+       'ok_for_all' (yoyo.com runs a catch-all through
+       amazon-smtp.amazon.com and accepts any address), the website check
+       timed out and failed open, and the lead looked clean because
+       neither half of what we knew was written down anywhere.
+
+       Keyed by EMAIL, not session_id, for two reasons that are not going
+       to change:
+         - /verify-email runs on email BLUR, before /partial has created
+           any lead row. There is nothing to UPDATE yet, and inserting a
+           bare row into `leads` would break the "a row means someone
+           reached step 1" invariant that form_sessions exists to protect.
+         - the blur prewarm verifies more than one address per session
+           (type a typo, tab away, fix it, tab away). Session-keyed
+           storage is last-write-wins and would sometimes keep the
+           verdict for an address the lead abandoned.
+
+       Only DEFINITIVE verdicts are ever written here — see
+       persistElvVerdict() in index.js. A timeout is not a fact about
+       someone's mailbox, so it is absent rather than recorded, and an
+       empty column means "we deliberately did not know".
+
+       Wrapped in try/catch for the same reason as the two blocks above:
+       start() exits the process if initDB throws, so an unwrapped
+       failure here would take the live form down with it. If this table
+       is missing, /submit's fallback re-check still fills
+       leads.elv_status — degraded, not broken.
+    ------------------------------------------------------- */
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS email_verifications (
+          email       TEXT PRIMARY KEY,
+          status      TEXT NOT NULL,
+          valid       BOOLEAN,
+          source      TEXT,          -- 'elv' | 'local' | 'submit_recheck'
+          checked_at  TIMESTAMPTZ DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS email_verifications_checked_idx
+          ON email_verifications (checked_at);
+      `);
+      console.log('[DB] Email-verifications table ready');
+    } catch (err) {
+      console.error('[DB] Email-verifications table init FAILED (non-fatal):', err.message);
+    }
+
+    /* -------------------------------------------------------
        MIGRATIONS — runs on every startup, safe due to IF NOT EXISTS
     ------------------------------------------------------- */
     const migrations = [
@@ -298,6 +348,15 @@ async function initDB() {
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS website_check_reason TEXT`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS website_check_reason_prev TEXT`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS website_rechecked_at TIMESTAMPTZ`,
+      /* Email verification — batch 2.
+         The ELV verdict copied onto the lead row from email_verifications,
+         so the DB records not just that a lead passed but HOW. Read with
+         website_check_reason it answers the question that matters: did
+         anything actually verify this person? Declared here rather than
+         self-created at write time — see the website_check note above for
+         what that omission cost last time. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS elv_status TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS elv_checked_at TIMESTAMPTZ`,
       // enrichment_data table new fields
       `ALTER TABLE enrichment_data ADD COLUMN IF NOT EXISTS enriched_city TEXT`,
       `ALTER TABLE enrichment_data ADD COLUMN IF NOT EXISTS enriched_state TEXT`,
