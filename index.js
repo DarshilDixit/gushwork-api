@@ -408,10 +408,24 @@ function bContext(text) { return { type: 'context', elements: [{ type: 'mrkdwn',
 //   nxdomain_contradicted   Website domain == the lead's own verified email
 //                           domain, so the domain provably exists and the
 //                           NXDOMAIN was a resolver blip.
+//   check_blocked           The site's bot protection served us an interstitial
+//                           instead of the page (SiteGround captcha and the
+//                           like). VERIFIED ON PURPOSE, and this is a revenue
+//                           decision worth stating plainly: these leads land on
+//                           'thin_content' today, which fires Meta, so keeping
+//                           check_blocked verified changes the WORDING an SDR
+//                           reads and nothing else. Moving it out of this list
+//                           would silently stop Meta events for real
+//                           businesses — marathontechnology.com and reiser.com
+//                           are both live sites. A captcha wall is also
+//                           positive evidence: nobody puts bot protection in
+//                           front of a parked domain. Move it if the team
+//                           decides otherwise; it is a one-line change.
 const WEBSITE_VERIFIED_REASONS = [
   'resolved', 'mx_only', 'content_clean', 'test_email_skipped', 'ok',
   'forwarded_to_live_site', 'live_despite_dns_hint',
   'thin_content', 'thin_content_wildcard', 'nxdomain_contradicted',
+  'check_blocked',
 ];
 
 // Reasons that mean "we looked and it is genuinely not a company website".
@@ -438,6 +452,8 @@ const WEBSITE_REASON_LABELS = {
   social_profile_url:     'Gave a social profile instead of a website',
   thin_content:           'Page looked mostly empty to us — worth a manual look',
   thin_content_wildcard:  'Page looked mostly empty to us — worth a manual look',
+  check_blocked:          'Site blocked our check — the page itself looks fine',
+  dns_unresolved:         'Could not look up the domain — DNS gave no answer',
   forwarded_to_live_site: 'Redirects to their live site — checked OK',
   live_despite_dns_hint:  'Live site (an early parking signal was overruled)',
   mx_only:                'Email-only company — no website, but mail works',
@@ -1043,6 +1059,49 @@ async function sendFollowUpEmail(email, firstName) {
   }
 }
 
+/* ── Booking integrity check ──────────────────────────────────────
+   v5.8.0. A booking should always be preceded by /submit. On 18 Aug a spam
+   lead (aasnj@meta.com, "lol noway", heard-about-us "porn hub") booked a demo
+   with NO /submit and NO website check — and because the Slack notification
+   is built inside /submit, nothing was announced. A colleague found it the
+   next morning from the calendar invite.
+
+   v5.5.0 added this check to /booking-confirmed only. That endpoint is fired
+   by the BROWSER. Bookings also arrive server-to-server from the Cal webhook
+   and the RevenueHero webhook, and neither checked anything — so a booking
+   that never touched the browser still slipped in silently. Since we still do
+   not know how step 2 was bypassed, the honest move is to watch every door
+   rather than guess which one was used.
+
+   Read-only and non-blocking. The booking is always honoured; a failure here
+   is swallowed. */
+async function alertIfBookingWithoutSubmit(session_id, source) {
+  if (!session_id) return;
+  try {
+    // submitted_at is the column /submit stamps. `completed` is ALSO set by
+    // the booking write itself, so it must never be used for this test.
+    const pre = await pool.query(
+      'SELECT email, step_reached, submitted_at, website, website_check_reason FROM leads WHERE session_id=$1',
+      [session_id]
+    );
+    const row = pre.rows[0];
+    if (!row || row.submitted_at) return;
+
+    alertOps('warning', 'Form', 'Booking without completed form', {
+      'Email': row.email || '(unknown)',
+      'Session': session_id,
+      'Arrived via': source,
+      'Reached step': row.step_reached == null ? '(unknown)' : String(row.step_reached),
+      'Website': row.website || '(never entered)',
+      'Website check': row.website_check_reason ? websiteReasonLabel(row.website_check_reason) : '(never ran)',
+      'Impact': 'This demo was booked without passing step 2, so the website check never ran and no lead notification was posted. Verify it is genuine before the call.',
+    });
+    console.warn(`[${source}] ⚠ Booking with no completed submit — session ${session_id} | email ${row.email} | step ${row.step_reached}`);
+  } catch (err) {
+    console.warn(`[${source}] pre-booking integrity check failed (ignored):`, err.message);
+  }
+}
+
 function formatRevenue(amount) {
   if (!amount) return null; const n = parseFloat(amount);
   if (isNaN(n)) return amount.toString();
@@ -1195,6 +1254,81 @@ app.get('/monitor/metrics', async (req, res) => {
   } catch (err) {
     console.error('[/monitor/metrics]', err.message);
     res.status(500).json({ error: 'Metrics query failed', detail: err.message });
+  }
+});
+
+/* ── Top-of-funnel, day by day ────────────────────────────────────
+   v5.8.0. Reads form_sessions (page loads) against leads (everything from
+   step 1 onward). Nothing here existed before /session started writing, so
+   days prior to that show sessions=0 — the go_live date below tells you
+   where the real data starts, rather than leaving someone to conclude the
+   site had no traffic in July.
+
+   For the period BEFORE go-live, GA4 pageviews on /demo are the
+   denominator. This route deliberately does not try to blend the two. */
+app.get('/monitor/funnel', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const days = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 180);
+  // Obvious automated traffic, excluded at READ time so the rule can change
+  // without losing rows. Empty user agents are kept and counted separately.
+  const BOT_RE = "(bot|crawl|spider|slurp|headless|python-requests|curl|wget|monitor|preview|scrape|lighthouse|pingdom|semrush|ahrefs)";
+  try {
+    const [byDay, totals] = await Promise.all([
+      pool.query(`
+        WITH s AS (
+          SELECT date_trunc('day', created_at) AS d,
+                 COUNT(*) FILTER (WHERE user_agent IS NULL OR user_agent !~* $2) AS sessions,
+                 COUNT(*) FILTER (WHERE user_agent ~* $2)                        AS bot_sessions
+            FROM form_sessions
+           WHERE created_at > NOW() - ($1 || ' days')::interval
+           GROUP BY 1
+        ),
+        l AS (
+          SELECT date_trunc('day', created_at) AS d,
+                 COUNT(*) FILTER (WHERE email IS NOT NULL AND email <> '') AS step1,
+                 COUNT(*) FILTER (WHERE submitted_at IS NOT NULL)          AS submitted,
+                 COUNT(*) FILTER (WHERE booking_uid IS NOT NULL)           AS booked
+            FROM leads
+           WHERE created_at > NOW() - ($1 || ' days')::interval
+           GROUP BY 1
+        )
+        SELECT COALESCE(s.d, l.d) AS day,
+               COALESCE(s.sessions, 0)     AS sessions,
+               COALESCE(s.bot_sessions, 0) AS bot_sessions,
+               COALESCE(l.step1, 0)        AS step1,
+               COALESCE(l.submitted, 0)    AS submitted,
+               COALESCE(l.booked, 0)       AS booked
+          FROM s FULL OUTER JOIN l ON s.d = l.d
+         ORDER BY 1 DESC
+      `, [String(days), BOT_RE]),
+      pool.query(`SELECT MIN(created_at) AS go_live, COUNT(*) AS total_sessions FROM form_sessions`),
+    ]);
+
+    const rows = byDay.rows.map((r) => {
+      const sessions = Number(r.sessions), step1 = Number(r.step1);
+      return {
+        day: r.day, sessions, bot_sessions: Number(r.bot_sessions),
+        step1, submitted: Number(r.submitted), booked: Number(r.booked),
+        // Only meaningful once sessions are being recorded. Null, not 0 —
+        // "we have no denominator" is not "nobody converted".
+        step1_rate: sessions > 0 ? +(step1 / sessions * 100).toFixed(1) : null,
+        submit_rate: step1 > 0 ? +(Number(r.submitted) / step1 * 100).toFixed(1) : null,
+      };
+    });
+
+    res.json({
+      days,
+      session_tracking_live_since: totals.rows[0].go_live,
+      total_sessions_recorded: Number(totals.rows[0].total_sessions),
+      note: 'sessions are only recorded from session_tracking_live_since onward; use GA4 /demo pageviews for earlier periods',
+      rows,
+    });
+  } catch (err) {
+    console.error('[/monitor/funnel]', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -1736,7 +1870,7 @@ app.get('/monitor', (req, res) => {
   'var API=window.location.origin;' +
   'var lChart=null,curPage=1,stimer=null,curSort="created_at",curDir="desc",filterOptsLoaded=false;' +
   'function showTab(n){["overview","leads","sdr","dupes","health","lm"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();}' +
-  'var WLBL={"nxdomain": "Domain doesn\'t exist \u2014 likely a typo", "no_dns_records": "Domain registered but nothing set up on it", "hosting_placeholder": "No website yet \u2014 domain points to a hosting setup page", "parked_confirmed": "Domain registered but no website on it", "parked": "Domain registered but no website on it", "parked_ns": "Domain registered but no website on it", "parked_suspect": "Looks like a parked domain \u2014 could not confirm", "for_sale_lander": "Domain is listed for sale", "marketplace_redirect": "Domain is for sale on a domain marketplace", "mailbox_domain": "Typed an email provider instead of their website", "brand_mismatch": "Typed a well-known brand\'s site, not their own", "social_profile_url": "Gave a social profile instead of a website", "thin_content": "Page looked mostly empty to us \u2014 worth a manual look", "thin_content_wildcard": "Page looked mostly empty to us \u2014 worth a manual look", "forwarded_to_live_site": "Redirects to their live site \u2014 checked OK", "live_despite_dns_hint": "Live site (an early parking signal was overruled)", "mx_only": "Email-only company \u2014 no website, but mail works", "nxdomain_contradicted": "DNS blip \u2014 domain matches their verified email domain", "content_clean": "Live website", "resolved": "Domain resolves", "dns_indeterminate": "Could not reach the site to check it", "doh_error": "Could not reach the site to check it", "timeout": "Could not reach the site to check it", "unreachable": "Could not reach the site to check it", "non_html": "Address did not return a web page", "backend_error": "Our check errored \u2014 not the website\u2019s fault", "fetch_error": "Our check errored \u2014 not the website\u2019s fault", "skipped_no_backend": "Check was skipped", "skipped_unsafe_target": "Address pointed at an internal network \u2014 skipped", "test_email_skipped": "Internal test \u2014 check skipped", "ok": "Website checked OK"};' +
+  'var WLBL={"nxdomain": "Domain doesn\'t exist \u2014 likely a typo", "no_dns_records": "Domain registered but nothing set up on it", "hosting_placeholder": "No website yet \u2014 domain points to a hosting setup page", "parked_confirmed": "Domain registered but no website on it", "parked": "Domain registered but no website on it", "parked_ns": "Domain registered but no website on it", "parked_suspect": "Looks like a parked domain \u2014 could not confirm", "for_sale_lander": "Domain is listed for sale", "marketplace_redirect": "Domain is for sale on a domain marketplace", "mailbox_domain": "Typed an email provider instead of their website", "brand_mismatch": "Typed a well-known brand\'s site, not their own", "social_profile_url": "Gave a social profile instead of a website", "thin_content": "Page looked mostly empty to us \u2014 worth a manual look", "thin_content_wildcard": "Page looked mostly empty to us \u2014 worth a manual look", "check_blocked": "Site blocked our check \u2014 the page itself looks fine", "dns_unresolved": "Could not look up the domain \u2014 DNS gave no answer", "forwarded_to_live_site": "Redirects to their live site \u2014 checked OK", "live_despite_dns_hint": "Live site (an early parking signal was overruled)", "mx_only": "Email-only company \u2014 no website, but mail works", "nxdomain_contradicted": "DNS blip \u2014 domain matches their verified email domain", "content_clean": "Live website", "resolved": "Domain resolves", "dns_indeterminate": "Could not reach the site to check it", "doh_error": "Could not reach the site to check it", "timeout": "Could not reach the site to check it", "unreachable": "Could not reach the site to check it", "non_html": "Address did not return a web page", "backend_error": "Our check errored \u2014 not the website\u2019s fault", "fetch_error": "Our check errored \u2014 not the website\u2019s fault", "skipped_no_backend": "Check was skipped", "skipped_unsafe_target": "Address pointed at an internal network \u2014 skipped", "test_email_skipped": "Internal test \u2014 check skipped", "ok": "Website checked OK"};' +
   'function wlabel(r){if(!r)return"Unknown";if(WLBL[r])return WLBL[r];if(String(r).indexOf("http_")===0){var c=String(r).slice(5);return ["999","403","401","429"].indexOf(c)>=0?("Site blocked our check ("+c+")"):("Site returned an error ("+c+")");}return String(r).replace(/_/g," ");}' +
   'function badge(id,text,cls){var el=document.getElementById(id);if(!el)return;el.textContent=text;el.className="badge "+cls;}' +
   'function set(id,v){var el=document.getElementById(id);if(el)el.textContent=v;}' +
@@ -2796,6 +2930,89 @@ function findPhrase(list, visibleLower) {
   return list.find((p) => visibleLower.includes(p)) || null;
 }
 
+/* ── Search-result URL unwrapping ─────────────────────────────────
+   v5.8.0. A lead pasted this into the website field:
+
+     https://www.google.com/url?q=https://phpagency.com/&sa=u&ved=...
+
+   That is what you get when you copy a link out of a Google results page
+   instead of the address bar. The verdict was 'brand_mismatch' — we told a
+   real agency they had typed a well-known brand's site. Their actual
+   domain was sitting inside the URL the whole time.
+
+   Only unwraps when the wrapper is a KNOWN redirector and the extracted
+   target is an absolute http(s) URL. Anything else is returned untouched,
+   so a normal address can never be rewritten into something else.
+
+   NOTE: the form blocks 'brand_mismatch' client-side, so for live traffic
+   the same unwrap has to happen in gushwork-form.js to spare the lead the
+   error. This copy covers /verify-website, /resolve-website and the
+   historical recheck. */
+const REDIRECT_WRAPPERS = {
+  'google.com': ['q', 'url'],
+  'www.google.com': ['q', 'url'],
+  'l.facebook.com': ['u'],
+  'lm.facebook.com': ['u'],
+  'l.instagram.com': ['u'],
+  't.umblr.com': ['z'],
+  'out.reddit.com': ['url'],
+  'href.li': [],
+};
+
+function unwrapRedirectUrl(raw) {
+  const value = String(raw || '').trim();
+  if (!value) return value;
+  let u;
+  try { u = new URL(value.startsWith('http') ? value : 'https://' + value); }
+  catch { return value; }
+
+  const params = REDIRECT_WRAPPERS[u.hostname.toLowerCase()];
+  if (!params) return value;
+
+  const candidates = params.map((p) => u.searchParams.get(p)).filter(Boolean);
+  for (const c of candidates) {
+    try {
+      const target = new URL(c);
+      if (target.protocol === 'http:' || target.protocol === 'https:') return target.toString();
+    } catch { /* not a usable URL — keep looking */ }
+  }
+  return value;
+}
+
+/* ── Bot wall detection ───────────────────────────────────────────
+   v5.8.0. marathontechnology.com and reiser.com — both real, both live in
+   a browser — were labelled "page looked mostly empty". They were not
+   empty. SiteGround's bot protection had intercepted us and served a
+   168-byte interstitial whose entire content is a meta refresh:
+
+     status=202  server=nginx  html(168)
+     <meta http-equiv="refresh" content="0;/.well-known/sgcaptcha/?r=%2F&y=ipr:...">
+
+   Note the 202: it passes response.ok, so the ladder above never catches
+   it and the stub falls through to the thin-content branch.
+
+   Two rules, narrow to broad:
+     1. a refresh pointing at SiteGround's captcha path — unambiguous
+     2. ANY page small enough that the refresh IS the whole page
+
+   Rule 2 can also match an old-fashioned "we moved" redirect stub. That
+   costs nothing: both land on the same ok:true verdict thin content
+   would have produced, so a wrong match changes the wording in Slack and
+   nothing else. Returns null for a normal page. */
+function detectCheckWall(html) {
+  const s = String(html || '');
+  const tag = s.match(/<meta[^>]+http-equiv\s*=\s*["']?refresh["']?[^>]*>/i);
+  if (!tag) return null;
+  /* Matched against the WHOLE tag, not a parsed url= parameter. SiteGround
+     writes content="0;/.well-known/sgcaptcha/?r=%2F&y=ipr:..." — a bare path
+     after the semicolon with no url= at all, which an url=-based parser
+     misses entirely. Testing the tag also survives single quotes, missing
+     quotes and upper-case attributes without a parser for each variation. */
+  if (/\/\.well-known\/sgcaptcha\//i.test(tag[0])) return 'sgcaptcha';
+  if (s.length <= 1024) return 'meta_refresh_stub';
+  return null;
+}
+
 // Blocks requests aimed at internal/private infrastructure so this route
 // can't be used as an SSRF pivot into Railway's own network.
 function isPrivateOrLocalHost(hostname) {
@@ -2869,8 +3086,12 @@ function flipWww(hostname) {
 
    Returns the verdict object the route used to res.json() directly.
    ───────────────────────────────────────────────────────────────── */
-async function evaluateWebsite({ raw, parkingHint = null, hasMX = false }) {
+async function evaluateWebsite({ raw: rawInput, parkingHint = null, hasMX = false }) {
   const startedAt = Date.now(); // budgets the optional wildcard probe below
+  // Repeated here because /verify-website calls this directly, bypassing
+  // serverSideWebsiteCheck. unwrapRedirectUrl is idempotent — a plain
+  // address is returned untouched — so unwrapping twice is harmless.
+  const raw = unwrapRedirectUrl(rawInput);
   if (!raw) return ({ ok: true, reason: 'empty' }); // fail open, form's own required-check owns this
   let url;
   try {
@@ -2957,6 +3178,17 @@ async function evaluateWebsite({ raw, parkingHint = null, hasMX = false }) {
   if (!contentType.includes('html')) return ({ ok: true, reason: 'non_html', canonical_url }); // fail open — not a page we can scan
 
   const rawHtml = (await response.text()).slice(0, 200000); // cap read size
+
+  /* Tested BEFORE any content measurement. A bot wall is not a thin page —
+     it is the site declining to show us the page at all, which says nothing
+     about the business. Measuring it produces a verdict about our own
+     blocked request. */
+  const wall = detectCheckWall(rawHtml);
+  if (wall) {
+    console.log(`[verify-website] BLOCKED-BY-SITE ${url.hostname} — ${wall} (status=${response.status}, html=${rawHtml.length}) — site refused our check`);
+    return ({ ok: true, reason: 'check_blocked', matched: wall, canonical_url });
+  }
+
   const sub = analyzeSubstance(rawHtml, finalHost);
   const visibleLower = sub.visible.toLowerCase();
 
@@ -3108,8 +3340,28 @@ async function resolveWebsiteDns(domain) {
   if (!out.ips.length) {
     try { if ((await dnsPromises.resolve6(domain)).length) return out; } catch { /* no AAAA */ }
     if (out.hasMX) { out.status = 'mx_only'; return out; } // email-only company — legitimate
-    // Both lookups must agree the name is absent before we call it NXDOMAIN.
-    out.status = (apexCode === 'ENOTFOUND' && wwwCode === 'ENOTFOUND') ? 'nxdomain' : 'no_dns_records';
+
+    /* v5.8.0 — three outcomes, not two. 'no_dns_records' used to be the
+       catch-all for "not ENOTFOUND on both", which quietly merged a FACT
+       with a NON-ANSWER:
+
+         ENODATA    the domain exists, its nameservers answered, and there
+                    is no address record. gslgraphics.com: live NS at
+                    Media Temple, real SOA, no A record. A real finding.
+         ESERVFAIL  the resolver could not get an answer at all — usually
+                    dead or misconfigured nameservers, sometimes a resolver
+                    hiccup. rosaainslie.com and nowebsite.com both do this.
+
+       The second is not a fact about the domain, and 'no_dns_records'
+       returns ok:false, so a momentary resolver failure was being written
+       to the database as a verdict. That is the one rule this system is
+       built on: we could not check must never be stored as we checked and
+       it is bad. 'dns_unresolved' fails open and is deliberately absent
+       from RECHECK_WRITEABLE, so it can never be persisted. */
+    const NO_ANSWER = ['ESERVFAIL', 'ETIMEOUT', 'ETIMEDOUT', 'EREFUSED', 'ECONNREFUSED', 'EAI_AGAIN'];
+    if (apexCode === 'ENOTFOUND' && wwwCode === 'ENOTFOUND') out.status = 'nxdomain';
+    else if (NO_ANSWER.includes(apexCode) || NO_ANSWER.includes(wwwCode)) out.status = 'dns_unresolved';
+    else out.status = 'no_dns_records';
     return out;
   }
 
@@ -3160,7 +3412,9 @@ const RECHECK_PROTECTED = ['brand_mismatch', 'mailbox_domain', 'social_profile_u
    Both are real businesses with live sites and live mail. Railway has no
    such restrictions, so when the browser lookup fails we ask the server. */
 async function serverSideWebsiteCheck(website) {
-  const raw = String(website || '').trim();
+  // Unwrapped once, HERE, so the DNS lookup and the page fetch below both
+  // operate on the lead's real domain rather than the redirector's.
+  const raw = unwrapRedirectUrl(String(website || '').trim());
   if (!raw) return { ok: true, reason: 'empty' };
 
   let host;
@@ -3173,6 +3427,10 @@ async function serverSideWebsiteCheck(website) {
   const dns = await resolveWebsiteDns(host);
   if (dns.status === 'nxdomain')       return { ok: false, reason: 'nxdomain', matched: 'ENOTFOUND on apex + www', hint: dns.parkingHint };
   if (dns.status === 'no_dns_records') return { ok: false, reason: 'no_dns_records', hint: dns.parkingHint };
+  // Fails OPEN. Meta is still suppressed (dns_unresolved is not in
+  // WEBSITE_VERIFIED_REASONS, exactly like doh_error and timeout), so this
+  // costs attribution, never a lead.
+  if (dns.status === 'dns_unresolved')  return { ok: true,  reason: 'dns_unresolved', matched: 'DNS gave no answer on apex + www', hint: dns.parkingHint };
   if (dns.status === 'mx_only')        return { ok: true,  reason: 'mx_only', matched: 'MX only — email-only company', hint: dns.parkingHint };
 
   const verdict = await evaluateWebsite({ raw, parkingHint: dns.parkingHint, hasMX: dns.hasMX });
@@ -3398,10 +3656,59 @@ ${results.map((r) => `<tr class="${r.changed ? 'chg' : ''}"><td>${esc(r.email)}<
 
 
 
+/* v5.8.0 — /session used to validate the id and reply 'ok' without writing
+   anything, so the first record of any visitor was /partial, AFTER they had
+   typed an email. Everyone who saw the form and left was invisible, which
+   meant top-of-funnel drop-off could not be measured at all — the long
+   verification wait was SUSPECTED to be costing leads and there was no way
+   to prove it either way.
+
+   Both form.js and the ads variant already call this on init with exactly
+   these fields, so nothing on the frontend has to change.
+
+   The reply goes out BEFORE the write. This runs on page load, on the
+   critical path of a visitor who has not yet given us anything, and no
+   amount of analytics is worth adding latency there. A failed write costs
+   one row of reporting; a slow one could cost the lead. */
 app.post('/session', async (req, res) => {
   const session_id = (req.body.session_id || '').toString().trim().slice(0, 100);
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
   res.json({ ok: true });
+
+  const s = (v, n) => (v || '').toString().trim().slice(0, n) || null;
+  try {
+    await pool.query(
+      `INSERT INTO form_sessions
+         (session_id, page_url, referrer, utm_source, utm_medium, utm_campaign, utm_content, utm_term, user_agent)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       ON CONFLICT (session_id) DO UPDATE SET
+         hits         = form_sessions.hits + 1,
+         page_url     = COALESCE(form_sessions.page_url,     EXCLUDED.page_url),
+         referrer     = COALESCE(form_sessions.referrer,     EXCLUDED.referrer),
+         utm_source   = COALESCE(form_sessions.utm_source,   EXCLUDED.utm_source),
+         utm_medium   = COALESCE(form_sessions.utm_medium,   EXCLUDED.utm_medium),
+         utm_campaign = COALESCE(form_sessions.utm_campaign, EXCLUDED.utm_campaign),
+         utm_content  = COALESCE(form_sessions.utm_content,  EXCLUDED.utm_content),
+         utm_term     = COALESCE(form_sessions.utm_term,     EXCLUDED.utm_term),
+         user_agent   = COALESCE(form_sessions.user_agent,   EXCLUDED.user_agent),
+         updated_at   = NOW()`,
+      [
+        session_id,
+        s(req.body.page_url, 500),
+        s(req.body.referrer, 500),
+        s(req.body.utm_source, 100),
+        s(req.body.utm_medium, 100),
+        s(req.body.utm_campaign, 100),
+        s(req.body.utm_content, 100),
+        s(req.body.utm_term, 100),
+        s(req.headers['user-agent'], 500),
+      ]
+    );
+  } catch (err) {
+    // Response already sent — never rethrow, and never alert: a reporting
+    // row is not worth waking anyone up for.
+    console.warn('[/session] visit not recorded (ignored):', err.message);
+  }
 });
 
 app.post('/enrich', async (req, res) => {
@@ -3441,7 +3748,7 @@ app.post('/enrich', async (req, res) => {
 app.post('/partial', async (req, res) => {
   _lastLeadAt = Date.now(); // heartbeat: form traffic is flowing
   const session_id         = (req.body.session_id         || '').toString().trim().slice(0, 100);
-  const page_url           = (req.body.page_url           || '').toString().trim().slice(0, 500);
+  const page_url           = (req.body.page_url           || '').toString().trim().slice(0, 1000);
   const email              = (req.body.email              || '').toString().trim().slice(0, 254).toLowerCase();
   const website            = (req.body.website            || '').toString().trim().slice(0, 500);
   const sell_to            = (req.body.sell_to            || '').toString().trim().slice(0, 50);
@@ -3455,12 +3762,12 @@ app.post('/partial', async (req, res) => {
   const utm_campaign       = (req.body.utm_campaign       || '').toString().trim().slice(0, 100);
   const utm_content        = (req.body.utm_content        || '').toString().trim().slice(0, 100);
   const utm_term           = (req.body.utm_term           || '').toString().trim().slice(0, 100);
-  const referrer           = (req.body.referrer           || '').toString().trim().slice(0, 500);
+  const referrer           = (req.body.referrer           || '').toString().trim().slice(0, 1000);
   const prefill_source     = (req.body.prefill_source     || '').toString().trim().slice(0, 100);
-  const fbc                = (req.body.fbc                || '').toString().trim().slice(0, 500);
+  const fbc                = (req.body.fbc                || '').toString().trim().slice(0, 1000);
   const fbp                = (req.body.fbp                || '').toString().trim().slice(0, 200);
-  const landing_page       = (req.body.landing_page       || '').toString().trim().slice(0, 500);
-  const previous_page      = (req.body.previous_page      || '').toString().trim().slice(0, 500);
+  const landing_page       = (req.body.landing_page       || '').toString().trim().slice(0, 1000);
+  const previous_page      = (req.body.previous_page      || '').toString().trim().slice(0, 1000);
   const enriched_title     = (req.body.enriched_title     || '').toString().trim().slice(0, 200);
   const enriched_company_size = (req.body.enriched_company_size || '').toString().trim().slice(0, 50);
   const enriched_industry  = (req.body.enriched_industry  || '').toString().trim().slice(0, 200);
@@ -3537,7 +3844,7 @@ app.post('/partial', async (req, res) => {
 
 app.post('/submit', async (req, res) => {
   const session_id         = (req.body.session_id         || '').toString().trim().slice(0, 100);
-  const page_url           = (req.body.page_url           || '').toString().trim().slice(0, 500);
+  const page_url           = (req.body.page_url           || '').toString().trim().slice(0, 1000);
   const email              = (req.body.email              || '').toString().trim().slice(0, 254).toLowerCase();
   const website            = (req.body.website            || '').toString().trim().slice(0, 500);
   const sell_to            = (req.body.sell_to            || '').toString().trim().slice(0, 50);
@@ -3551,12 +3858,12 @@ app.post('/submit', async (req, res) => {
   const utm_campaign       = (req.body.utm_campaign       || '').toString().trim().slice(0, 100);
   const utm_content        = (req.body.utm_content        || '').toString().trim().slice(0, 100);
   const utm_term           = (req.body.utm_term           || '').toString().trim().slice(0, 100);
-  const referrer           = (req.body.referrer           || '').toString().trim().slice(0, 500);
+  const referrer           = (req.body.referrer           || '').toString().trim().slice(0, 1000);
   const prefill_source     = (req.body.prefill_source     || '').toString().trim().slice(0, 100);
-  const fbc                = (req.body.fbc                || '').toString().trim().slice(0, 500);
+  const fbc                = (req.body.fbc                || '').toString().trim().slice(0, 1000);
   const fbp                = (req.body.fbp                || '').toString().trim().slice(0, 200);
-  const landing_page       = (req.body.landing_page       || '').toString().trim().slice(0, 500);
-  const previous_page      = (req.body.previous_page      || '').toString().trim().slice(0, 500);
+  const landing_page       = (req.body.landing_page       || '').toString().trim().slice(0, 1000);
+  const previous_page      = (req.body.previous_page      || '').toString().trim().slice(0, 1000);
   const enriched_title     = (req.body.enriched_title     || '').toString().trim().slice(0, 200);
   const enriched_company_size = (req.body.enriched_company_size || '').toString().trim().slice(0, 50);
   const enriched_industry  = (req.body.enriched_industry  || '').toString().trim().slice(0, 200);
@@ -3654,34 +3961,8 @@ app.post('/booking-confirmed', async (req, res) => {
       return res.json({ ok: true, skipped: true, reason: 'already_booked' });
     }
 
-    /* ── Booking with no completed step 2 ─────────────────────────
-       v5.5.0. A booking should always be preceded by /submit. On 18 Aug a
-       spam lead (aasnj@meta.com, "lol noway", heard-about-us "porn hub")
-       booked a demo with NO /submit and NO website check — and because the
-       Slack notification is built in /submit, nothing was announced. It was
-       found the next morning by a colleague seeing the calendar invite.
-       We still do not know how step 2 was bypassed, so rather than guess at
-       a block, surface it the moment it happens.
-       Read-only and non-blocking: the booking is always honoured. */
-    try {
-      // submitted_at is the column /submit stamps. `completed` is also set
-      // by the booking write itself, so it must NOT be used here.
-      const pre = await pool.query('SELECT email, step_reached, submitted_at, website, website_check_reason FROM leads WHERE session_id=$1', [session_id]);
-      const row = pre.rows[0];
-      if (row && !row.submitted_at) {
-        alertOps('warning', 'Form', 'Booking without completed form', {
-          'Email': row.email || '(unknown)',
-          'Session': session_id,
-          'Reached step': row.step_reached == null ? '(unknown)' : String(row.step_reached),
-          'Website': row.website || '(never entered)',
-          'Website check': row.website_check_reason ? websiteReasonLabel(row.website_check_reason) : '(never ran)',
-          'Impact': 'This demo was booked without passing step 2, so the website check never ran and no lead notification was posted. Verify it is genuine before the call.',
-        });
-        console.warn(`[/booking-confirmed] ⚠ Booking with no completed submit — session ${session_id} | email ${row.email} | step ${row.step_reached}`);
-      }
-    } catch (err) {
-      console.warn('[/booking-confirmed] pre-booking integrity check failed (ignored):', err.message);
-    }
+    // Booking with no completed step 2 — see alertIfBookingWithoutSubmit.
+    await alertIfBookingWithoutSubmit(session_id, '/booking-confirmed');
 
     await pool.query('UPDATE leads SET booking_uid=$2,start_time=$3,end_time=$4,event_type=$5,completed=true,booked_at=NOW(),updated_at=NOW() WHERE session_id=$1', [session_id,booking_uid,start_time,end_time,event_type||null]);
     syncBookingToAWS(session_id,booking_uid,start_time,end_time,event_type);
@@ -3756,6 +4037,9 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
     if (existingLead.rows.length > 0) {
       const lead = existingLead.rows[0];
       if (!lead.booking_uid) {
+        // Checked BEFORE the update — the write below sets completed=true,
+        // which would mask the very thing we are looking for.
+        await alertIfBookingWithoutSubmit(lead.session_id, '/cal-webhook');
         await pool.query('UPDATE leads SET booking_uid=$2,start_time=$3,end_time=$4,event_type=$5,completed=true,booked_at=NOW(),updated_at=NOW() WHERE session_id=$1', [lead.session_id, bookingUid, startTime || null, endTime || null, eventType || null]);
         syncBookingToAWS(lead.session_id, bookingUid, startTime, endTime, eventType);
         findSFLeadByEmail(email).then(leadId => {
@@ -4033,6 +4317,9 @@ if (payload.router_name && payload.router_name !== 'Inbound Router - Website') {
       const lead = existingLead.rows[0];
       if (!lead.booking_uid) {
         console.log(`[/rh-webhook] ✏️ No existing booking_uid on this lead — writing booking_uid: ${bookingUid}`);
+        // Checked BEFORE the update — the write below sets completed=true,
+        // which would mask the very thing we are looking for.
+        await alertIfBookingWithoutSubmit(lead.session_id, '/rh-webhook');
         await pool.query('UPDATE leads SET booking_uid=$2,start_time=$3,event_type=$4,completed=true,booked_at=NOW(),updated_at=NOW() WHERE session_id=$1', [lead.session_id, bookingUid, startTime || null, eventType || null]);
         syncBookingToAWS(lead.session_id, bookingUid, startTime, null, eventType);
 
