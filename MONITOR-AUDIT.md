@@ -15,6 +15,52 @@ what a correct versus broken result looks like, and what it costs if it's broken
 
 ---
 
+## Batch A status — what has been fixed
+
+**Added 25 Aug 2026, after Batch A.** The body of this document below is the
+audit as written and is deliberately left unedited — it is the record of what
+was found. This section says what has since changed. Branch
+`feat/monitor-batch-a`, seven commits, not yet merged.
+
+| # | Audit finding | Status |
+|---|---|---|
+| 1 | Seven of nine System Health rows are lifetime counters wearing health-check clothing | **Fixed.** All seven rebuilt as real windowed probes behind a new `GET /monitor/health`, each returning green / amber / red / insufficient_data. API uptime and ELV were already real and are unchanged |
+| 2 | "This is exactly the SDR List" is false | **Fixed.** Tooltip and alert prose now name the asymmetry. The SDR route keeps no completed filter; a test asserts that, so adding one makes the tooltip wrong the other way and fails |
+| 3 | Overview chart labelled "sessions" while counting leads | **Fixed** in the ET commit — relabelled "Form entries per day (ET)". Repointing it at `form_sessions` is Batch B, by the owner's decision |
+| 4 | Day boundaries disagree; the session timezone is `Etc/UTC` | **Fixed.** Whole dashboard moved to `America/New_York` end to end, IANA name so DST moves on its own. `/monitor/funnel` keeps UTC buckets deliberately and says why |
+| 5 | Add `COALESCE(booked_at, created_at)` to the Pending recovery query | **Superseded, deliberately not done.** That card mirrors the recovery cron's population on purpose, and the cron must NOT COALESCE: production has zero rows with a null `booked_at`, so there is nothing to defend against, and adding one would re-introduce ever-booked behaviour by the back door. See Decision 1 in `BATCH-A-PLAN.md` and the Definitions section of `CLAUDE.md` |
+| 6 | Stage filters overlap and disagree with `stageBadge` | **Fixed.** Rewritten onto the four-stage ladder, `IS TRUE` / `IS NOT TRUE` throughout. A test evaluates the predicates as SQL three-valued logic over all 18 flag combinations including nulls and asserts they partition |
+| 7 | Return a total from `/monitor/lm-leads` and show "N of M" | **Fixed**, and the status pills now read true totals from the server instead of counting the loaded 500 |
+| 8 | Pass the search term to the SDR CSV export | **Fixed.** Both field lists are lifted in a test and asserted equal |
+| 9 | `GROUP BY LOWER(l.email)` in Duplicates, plus `COUNT(DISTINCT booking_uid)` | **Not done.** Out of scope for Batch A — it is adjacent to the duplicate-booking guard the owner has deliberately deferred |
+| 10 | Index on `LOWER(email)` for `leads` | **Not done.** A schema change, and Batch A is read-path correctness only |
+| 11 | Token-gate `/monitor/elv-health` | **Fixed**, and the test now sweeps every `/monitor*` route rather than naming this one, so a new ungated route fails too |
+| 12 | Wire up `/monitor/funnel` and `/monitor/lm-loops-health`, or document them as curl-only | **Not done.** Wiring up `/monitor/funnel` is a feature, not a correctness fix |
+| 13 | Move `/monitor/website-recheck?apply=1` to POST | **Fixed** |
+
+Also fixed, found while doing the above and not in the original list:
+
+- The Overview alerts panel rendered a green tick reading **"All systems
+  healthy."** whenever five specific Overview metrics happened to be quiet. It is
+  not a statement about system health and no longer claims to be.
+- The **ELV row painted a calm grey "Unknown"** when its probe could not be
+  reached, and never checked `r.ok`, so a 401 would have rendered from an error
+  body. Both fixed — it is red now.
+- The **cron health row** could read green for three hours after every redeploy,
+  because `_lastCronRunAt` is seeded to boot time. "Has run" is now tracked
+  separately from "has just started".
+
+**Still open after Batch A:** items 9, 10 and 12 above; the duplicate-booking
+guard (`CLAUDE.md` records it as deliberately deferred); repointing the Overview
+chart at `form_sessions`; and the inclusion of internal and test addresses in
+every `leads` number, which is documented as a known distortion rather than a
+decision anyone made.
+
+**Nothing in Batch A changed which leads get blocked or which fire Meta CAPI
+events.**
+
+---
+
 ## Contents
 
 1. [The five things that are actually wrong](#1-the-five-things-that-are-actually-wrong)
@@ -1167,14 +1213,16 @@ change, not a check.
 
 ## Summary of everything I'd change, in order
 
-1. Make the seven fake health checks either real or clearly labelled as counters
+Statuses added 25 Aug 2026. See [Batch A status](#batch-a-status--what-has-been-fixed).
+
+1. **[FIXED]** Make the seven fake health checks either real or clearly labelled as counters
    (`index.js:2300`, `1990-1997`).
-2. Fix the "This is exactly the SDR List" tooltip and alert, or add
+2. **[FIXED]** Fix the "This is exactly the SDR List" tooltip and alert, or add
    `completed = true` to `/monitor/sdr` — one or the other, not both
    (`index.js:1922`, `2075`, `1783-1791`).
-3. Relabel the Overview chart to "Leads per day" or repoint it at `form_sessions`
+3. **[FIXED — relabelled]** Relabel the Overview chart to "Leads per day" or repoint it at `form_sessions`
    (`index.js:1932`, `1199-1207`). Same for the "No new sessions" alert.
-4. Make the day boundaries agree. Now that the session timezone is confirmed
+4. **[FIXED — moved to America/New_York]** Make the day boundaries agree. Now that the session timezone is confirmed
    `Etc/UTC`, the All Leads date filter breaks days at 05:30 IST while the chart
    above it breaks them at 00:00 IST, so "Today" provably drops leads the table
    labels as today. Either add `AT TIME ZONE 'Asia/Kolkata'` to the date filter
@@ -1182,24 +1230,27 @@ change, not a check.
    `lead-magnet.js:514-517`), or pin the session timezone once at connection
    (`db.js:2-5`). Also switch the presets off the viewer's local clock
    (`index.js:2135`).
-5. `COALESCE(booked_at, created_at)` in the Pending recovery query
+5. **[SUPERSEDED — deliberately not done, see Batch A status]** `COALESCE(booked_at, created_at)` in the Pending recovery query
    (`index.js:1228`) to match `index.js:1193`.
-6. Reconcile the stage filters with `stageBadge`, or make the filters mutually
+6. **[FIXED]** Reconcile the stage filters with `stageBadge`, or make the filters mutually
    exclusive (`index.js:1592-1595`, `2078`).
-7. Return a total from `/monitor/lm-leads` and show "N of M" (`lead-magnet.js:544`,
+7. **[FIXED]** Return a total from `/monitor/lm-leads` and show "N of M" (`lead-magnet.js:544`,
    `index.js:2222`).
-8. Pass the search term to the SDR CSV export (`index.js:2354`).
-9. `GROUP BY LOWER(l.email)` alone in Duplicates, and add
+8. **[FIXED]** Pass the search term to the SDR CSV export (`index.js:2354`).
+9. **[OPEN]** `GROUP BY LOWER(l.email)` alone in Duplicates, and add
    `COUNT(DISTINCT booking_uid)` so the tab can detect the known open bug
    (`index.js:1546`, `1528`).
-10. Add an index on `LOWER(email)` for `leads`.
-11. Token-gate `/monitor/elv-health` (`index.js:3089`).
-12. Either wire up `/monitor/funnel` and `/monitor/lm-loops-health` or note in
+10. **[OPEN]** Add an index on `LOWER(email)` for `leads`.
+11. **[FIXED]** Token-gate `/monitor/elv-health` (`index.js:3089`).
+12. **[OPEN]** Either wire up `/monitor/funnel` and `/monitor/lm-loops-health` or note in
     `CLAUDE.md` that they're deliberately curl-only.
-13. Move `/monitor/website-recheck?apply=1` to POST (`index.js:3831`).
+13. **[FIXED]** Move `/monitor/website-recheck?apply=1` to POST (`index.js:3831`).
 
 Items 6 and 9 touch behaviour `CLAUDE.md` flags as deliberate or deferred — the
 duplicate-booking guard is the owner's known open bug, so item 9 is a
 *visibility* change only and does not alter the guard. **Nothing here affects
-which leads get blocked or which fire Meta CAPI events.** No file in this repo was
-modified other than the creation of this document.
+which leads get blocked or which fire Meta CAPI events.**
+
+*Original note, true when this was written: no file in this repo was modified
+other than the creation of this document. Batch A has since acted on items 1, 2,
+3, 4, 6, 7, 8, 11 and 13 — see [Batch A status](#batch-a-status--what-has-been-fixed).*

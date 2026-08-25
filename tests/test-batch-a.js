@@ -1124,6 +1124,43 @@ function liftClientJs(startMarker, endMarker) {
          !/badge\("s-elv","Unknown","bx"\)/.test(src));
     }
 
+
+    /* ============================================================
+       14. FINAL PASS — labels match their source
+
+       todayCount is COUNT(*) over leads in the last 24 hours. The alert
+       called them "sessions", which is the same mislabel the chart above it
+       had already had fixed to "Form entries per day (ET)".
+       ============================================================ */
+    {
+      ok('final: the 24h alert calls them form entries, matching the chart',
+         /No new form entries in the last 24 hours/.test(src));
+      ok('final: and no longer calls a leads row count a session count',
+         !/No new sessions in the last 24 hours/.test(src));
+
+      /* The source of that number, asserted so the label and the query cannot
+         drift apart again. */
+      const metrics = between(src, "app.get('/monitor/metrics'", "app.get('/monitor/funnel'");
+      ok('final: todayCount really is a leads row count',
+         /SELECT COUNT\(\*\) AS count FROM leads WHERE created_at >= NOW\(\) - INTERVAL '24 hours'/.test(metrics));
+
+      /* Batch A's own invariant, stated once: nothing here touches the lead path.
+         The three blocking verdicts are decided client-side in gushwork-form.js
+         and must not appear as server-side blocking decisions, and no health or
+         monitor code may reach for a Meta event. */
+      const healthBlock = between(src, '/* ══ SYSTEM HEALTH', "app.get('/monitor/health'");
+      ok('final: the health checks fire no Meta events',
+         !/sendMetaEvent|metaCapi|meta-capi/i.test(healthBlock));
+      ok('final: and write nothing',
+         !/\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bALTER\b/.test(healthBlock), healthBlock.slice(0, 200));
+
+      /* The health route is read-only by construction — assert every query in it
+         is a SELECT, so a future "while we are here" write cannot slip in. */
+      const verbs = (healthBlock.match(/\b(SELECT|INSERT|UPDATE|DELETE|ALTER|DROP|CREATE)\b/g) || []);
+      ok('final: every SQL verb in the health block is SELECT',
+         verbs.length > 0 && verbs.every((v) => v === 'SELECT'), verbs.join(','));
+    }
+
     /* ============================================================ */
     console.log('');
     if (failures.length) {

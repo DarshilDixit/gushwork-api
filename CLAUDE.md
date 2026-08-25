@@ -254,6 +254,29 @@ sent to the browser. Both need updating, and the string one uses `\u2014` for em
 dashes with a **single** backslash. Getting that wrong renders a literal `\u2014`
 in the dashboard.
 
+**Two more pairs that must stay in sync.** Same shape as the label map above:
+
+- `SDR_SEARCH_COLUMNS` (server, in the `/monitor/sdr` route) and
+  `SDR_SEARCH_FIELDS` (client, in the dashboard JS) are the fields the SDR
+  search matches. The table filters in the browser; the CSV export filters on
+  the server. If they drift, the export silently stops matching what is on
+  screen. A test lifts both and asserts they are equal.
+- The System Health check ids in `HEALTH_SEVERITY` / `HEALTH_ALERT_META`
+  (server) and `HIDS` (client) map checks to dashboard rows. A check with no
+  entry in `HIDS` renders nowhere; a row id with no check paints red as
+  "No result". Both are asserted.
+
+**`/monitor/health` is a real probe, and slow on purpose.** It queries the AWS
+mirror across a WAN, so it is deliberately kept OFF the dashboard's 60-second
+poll — it runs at load, every five minutes, on tab open and on the Re-check
+button. The same checks run from `startHeartbeat()` every 30 minutes so a
+failure alerts with the tab closed. Do not fold it into `/monitor/metrics`.
+
+**`/monitor/website-recheck` is a POST.** It was a GET that rewrites lead rows
+and runs two `ALTER TABLE`s, which a link prefetch or an unfurled URL could
+have fired. Nothing in the UI calls it; run it with
+`curl -X POST`.
+
 **`/monitor` is not one page.** It's the dashboard plus several sub-routes that
 feed it data. A reader who greps for a single `/monitor` handler expecting to find
 everything will miss most of it.

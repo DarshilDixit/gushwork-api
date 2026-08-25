@@ -2,17 +2,22 @@
 
 ## SESSION STATE — read this first
 
+**BATCH A IS COMPLETE.** Updated 25 Aug 2026. Everything specified below has
+been implemented. The plan text is left in place as the record of what was
+asked for; this table is the current state.
+
 | | |
 |---|---|
-| **Branch** | `feat/monitor-batch-a` (pushed to origin as a backup; **not** merged, no PR) |
-| **Last code commit** | `216687a` — funnel top stage + window toggle |
+| **Branch** | `feat/monitor-batch-a` — **not** merged, no PR, not pushed since the backup |
+| **Commits** | 7. Definitions, Eastern Time, funnel top stage, System Health, stage ladder, three mislabelled numbers, route hardening (final pass folded in) |
 | **`main`** | untouched at `60a2ea8` |
-| **Tests** | 109 + 179 + 94 passing (`test-batch1`, `test-batch2`, `test-batch-a`) |
-| **Next up** | **Commit 3 — System Health rebuild.** Nine real checks; seven currently pass a hardcoded green class. The AWS mirror check is the owner's top priority and must go **red** on a connection error, never grey |
-| **Before writing code** | Propose the plan and wait for approval. That is how this batch has been run |
+| **Tests** | 109 + 179 + **268** passing (`test-batch1`, `test-batch2`, `test-batch-a`). Was 109 + 179 + 94 |
+| **Mutation tests** | 59 applied across the four code commits, every one caught by a named assertion |
+| **Next** | Owner review of the diff, then merge |
 
-Three commits are done: Definitions in `CLAUDE.md`, the Eastern Time migration,
-and the Overview funnel top stage. Commits 3–7 are specified below.
+The one place this document contradicted itself — whether the Pending recovery
+card moves onto the no-time-comparison booking rule — was settled with the owner
+on 25 Aug 2026 and corrected in the Commit 4 section below. It does not move.
 
 ---
 
@@ -281,6 +286,21 @@ that lifts both field lists and asserts they match**, so the two cannot drift.
 
 Re-run everything, re-read the diff end to end, and update `MONITOR-AUDIT.md`
 to mark what Batch A fixed and what remains. Report every number that moved.
+
+**Done.** `MONITOR-AUDIT.md` has a "Batch A status" section and every item in
+its summary list is marked FIXED, OPEN or SUPERSEDED. The audit body itself is
+deliberately unedited — it is the record of what was found.
+
+One extra fix landed here, the second half of audit item 3: the "No new
+sessions in the last 24 hours" alert was counting rows in `leads`, so it now
+says "form entries", matching the chart relabel. The broader sessions/people
+vocabulary on the Overview is untouched — the recon line explains it and proper
+session-based charting is Batch B.
+
+Still open, listed in the audit's Batch A status section: Duplicates
+`GROUP BY LOWER(email)` and `COUNT(DISTINCT booking_uid)`; an index on
+`LOWER(email)`; wiring up `/monitor/funnel`; the duplicate-booking guard; and
+the inclusion of internal and test addresses in every `leads` number.
 
 ---
 
