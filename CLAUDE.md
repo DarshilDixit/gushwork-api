@@ -240,6 +240,14 @@ deciding its place in all three:
 - **`RECHECK_PROTECTED`** → verdicts that depend on the lead's email and can't be
   re-derived from the domain alone.
 
+**Backticks inside SQL comments break the file.** The SQL in this repo lives in
+JS template literals, and the house style is a long `/* ... */` comment inside the
+query explaining the incident behind it. A backtick in that comment — writing
+`` `leads` `` or quoting an expression — **terminates the template literal**, and
+the error surfaces as `SyntaxError: missing ) after argument list` pointing at the
+`pool.query(` line, not at the comment. Four of these happened in one sitting. Use
+plain words inside SQL comments, and run `node --check index.js` before committing.
+
 **Two copies of the label map.** `WEBSITE_REASON_LABELS` is a normal JS object.
 The monitor dashboard has a second copy (`var WLBL=`) inside a JS string that gets
 sent to the browser. Both need updating, and the string one uses `\u2014` for em

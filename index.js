@@ -1198,7 +1198,7 @@ app.get('/monitor/metrics', async (req, res) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   try {
-    const [totals, people, recovered, byDay, enrichCount, enrichCoverage, pendingPartials, noBooking, recent, today] = await Promise.all([
+    const [totals, people, recovered, byDay, enrichCount, enrichCoverage, pendingPartials, noBooking, recent, today, topFunnel] = await Promise.all([
       pool.query(`
         SELECT
           COUNT(*)                                                          AS total,
@@ -1306,7 +1306,41 @@ app.get('/monitor/metrics', async (req, res) => {
                completed, booking_uid, disqualified, created_at, page_url
         FROM leads ORDER BY created_at DESC LIMIT 50
       `),
-      pool.query(`SELECT COUNT(*) AS count FROM leads WHERE created_at >= NOW() - INTERVAL '24 hours'`)
+      pool.query(`SELECT COUNT(*) AS count FROM leads WHERE created_at >= NOW() - INTERVAL '24 hours'`),
+      /* ── Top-of-funnel, for the Overview funnel widget ──
+         Scoped to the SESSION-TRACKED WINDOW, not all time, and that is the
+         whole point. form_sessions starts at go_live (21 Aug 2026 10:32 UTC);
+         `leads` goes back to July. Comparing an all-time step-1 count against
+         a since-August session count is what produced step1_rate = 266.7 on
+         /monitor/funnel — the numerator outliving its denominator. So every
+         stage here is measured from go_live forward, and when there is no
+         go_live at all the route returns nulls rather than zeros: "not
+         tracked" and "nobody converted" are different statements.
+
+         UNIT CHANGE AT THE FIRST STAGE, stated on screen. Sessions are VISITS
+         (form_sessions has no email, so it cannot be deduped to people);
+         everything below is PEOPLE. Sessions -> Step 1 is therefore
+         visits-to-people and is not a pure conversion rate. Same denominator
+         /monitor/funnel uses, same caveat. */
+      pool.query(`
+        WITH gl AS (SELECT MIN(created_at) AS go_live FROM form_sessions),
+        s AS (
+          SELECT COUNT(*) FILTER (WHERE user_agent IS NULL OR user_agent !~* $1) AS sessions,
+                 COUNT(*) FILTER (WHERE user_agent ~* $1)                        AS bot_sessions
+            FROM form_sessions
+        ),
+        p AS (
+          SELECT COUNT(DISTINCT LOWER(l.email))                                         AS step1,
+                 COUNT(DISTINCT LOWER(l.email)) FILTER (WHERE l.completed IS TRUE)       AS completed,
+                 COUNT(DISTINCT LOWER(l.email)) FILTER (WHERE l.booking_uid IS NOT NULL) AS booked
+            FROM leads l CROSS JOIN gl
+           WHERE l.email IS NOT NULL
+             AND gl.go_live IS NOT NULL
+             AND l.created_at >= gl.go_live
+        )
+        SELECT gl.go_live, s.sessions, s.bot_sessions, p.step1, p.completed, p.booked
+          FROM gl CROSS JOIN s CROSS JOIN p
+      `, [BOT_RE])
     ]);
 
     const t = totals.rows[0];
@@ -1331,6 +1365,24 @@ app.get('/monitor/metrics', async (req, res) => {
     const noBookingUid = parseInt(noBooking.rows[0].count) || 0;
     const todayCount   = parseInt(today.rows[0].count) || 0;
 
+    /* Nulls, not zeros, when session tracking never ran for this period.
+       A zero here reads as "nobody visited", which is a claim about demand;
+       the truth is "we were not counting". Same rule /monitor/funnel applies
+       to its orphan_leads and step1_rate. */
+    const tf = topFunnel.rows[0] || {};
+    const topFunnelOut = tf.go_live
+      ? {
+          coverage:    'full',
+          since:       tf.go_live,
+          sessions:    parseInt(tf.sessions)      || 0,
+          botSessions: parseInt(tf.bot_sessions)  || 0,
+          step1:       parseInt(tf.step1)         || 0,
+          completed:   parseInt(tf.completed)     || 0,
+          booked:      parseInt(tf.booked)        || 0,
+        }
+      : { coverage: 'none', since: null, sessions: null, botSessions: null,
+          step1: null, completed: null, booked: null };
+
     const ec = enrichCoverage.rows[0];
     const ecTotal    = parseInt(ec.total) || 0;
     const titlePct   = ecTotal ? Math.round(parseInt(ec.has_title) / ecTotal * 100) : 0;
@@ -1345,6 +1397,7 @@ app.get('/monitor/metrics', async (req, res) => {
       peopleTotal, peopleCompleted, peopleBooked, peopleDisqualified,
       peopleNoBooking: noBookingUid,
       recoveredBookings,
+      topFunnel: topFunnelOut,
       leadsByDay,
       recentLeads: recent.rows, generatedAt: new Date().toISOString()
     });
@@ -1436,15 +1489,22 @@ app.get('/monitor/metrics', async (req, res) => {
 // added column away from being ambiguous.
 const WEBHOOK_LEAD_SQL = "COALESCE(l.prefill_source, '') IN ('rh_webhook', 'cal_webhook')";
 
+/* Obvious automated traffic, excluded at READ time so the rule can change
+   without losing rows. Empty user agents are KEPT and counted separately — an
+   empty UA is more often a privacy-hardened browser than a crawler, and
+   throwing those away would quietly shrink the top of the funnel.
+
+   Module scope so the Overview funnel and /monitor/funnel share ONE regex. A
+   second copy would drift, and the two would then disagree about how many
+   sessions exist while both claiming to exclude bots. */
+const BOT_RE = "(bot|crawl|spider|slurp|headless|python-requests|curl|wget|monitor|preview|scrape|lighthouse|pingdom|semrush|ahrefs)";
+
 app.get('/monitor/funnel', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   const days = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 180);
-  // Obvious automated traffic, excluded at READ time so the rule can change
-  // without losing rows. Empty user agents are kept and counted separately.
-  const BOT_RE = "(bot|crawl|spider|slurp|headless|python-requests|curl|wget|monitor|preview|scrape|lighthouse|pingdom|semrush|ahrefs)";
   try {
     const [byDay, totals] = await Promise.all([
       pool.query(`
@@ -2014,7 +2074,7 @@ app.get('/monitor', (req, res) => {
   '<div class="recon" id="recon">&#8212;</div>' +
   '<div class="g2">' +
   '<div><div class="sl">Alerts</div><div id="alerts"><div class="alertbox" style="background:#f5f5f5;color:#999;border:1px solid #eee">Loading...</div></div></div>' +
-  '<div><div class="sl">Conversion funnel (people)</div><div class="card"><div id="funnel">Loading...</div></div></div>' +
+  '<div><div class="sl">Conversion funnel <span id="fnl-toggle" style="float:right;font-weight:400"></span></div><div class="card"><div id="funnel">Loading...</div></div></div>' +
   '</div>' +
   /* "Form entries" not "sessions": this counts rows in `leads`, i.e. everyone
      who reached step 1. It was labelled "sessions" while querying leads, which
@@ -2176,7 +2236,57 @@ app.get('/monitor', (req, res) => {
   'async function checkApi(){try{var r=await fetch(API+"/health",{signal:AbortSignal.timeout(5000)});if(r.ok){document.getElementById("apidot").className="dot dot-green";document.getElementById("apist").textContent="API online";badge("s-api","Online","bg");return true;}throw new Error("HTTP "+r.status);}catch(e){document.getElementById("apidot").className="dot dot-red";document.getElementById("apist").textContent="API offline";badge("s-api","Offline","br");return false;}}' +
   'async function checkElv(){try{var r=await fetch(API+"/monitor/elv-health",{signal:AbortSignal.timeout(5000)});var d=await r.json();var age=(d.minutesSinceLastCheck!=null&&d.minutesSinceLastCheck>=60)?" \\u00b7 last check "+Math.round(d.minutesSinceLastCheck/60)+"h ago":"";if(d.state==="degraded"){badge("s-elv","Degraded \\u2014 "+d.rate+"% of "+d.checks+" inconclusive"+age,"br");}else if(d.state==="insufficient_data"){if(d.rate>=50||d.consecutiveInconclusive>=2){badge("s-elv","Low traffic \\u2014 "+d.rate+"% of "+d.checks+" inconclusive"+age,"ba");}else{badge("s-elv","Quiet \\u2014 "+d.checks+" checks, "+d.rate+"% inconclusive"+age,"bx");}}else{badge("s-elv","Healthy ("+d.rate+"% inconclusive)","bg");}}catch(e){badge("s-elv","Unknown","bx");}}' +
   'function renderAlerts(d){var a=[];if(d.pendingPartials>0)a.push({c:"aw",i:"!",m:d.pendingPartials+" session(s) waiting >2 hours without booking \\u2014 recovery cron will pick them up."});if(d.noBookingUid>0)a.push({c:"aw",i:"!",m:d.noBookingUid+" people (deduped, qualified B2B) completed the form but have no booking on any session \\u2014 see SDR List."});if(!d.awsSynced)a.push({c:"ae",i:"x",m:"AWS sync disabled."});if(d.total>5&&d.enriched<d.total*0.3)a.push({c:"aw",i:"!",m:"Low enrichment rate ("+Math.round(d.enriched/d.total*100)+"% of sessions)."});if(d.todayCount===0)a.push({c:"aw",i:"o",m:"No new sessions in the last 24 hours."});if(a.length===0)a.push({c:"ao",i:"\\u2713",m:"All systems healthy."});document.getElementById("alerts").innerHTML=a.map(function(x){return"<div class=\\"alertbox "+x.c+"\\"><span>"+x.i+"</span><span>"+x.m+"</span></div>";}).join("");}' +
-  'function renderFunnel(t,c,b,d){var steps=[{l:"People entered (Step 1)",v:t,p:100,col:"#818cf8"},{l:"People completed (Step 2)",v:c,p:t?Math.round(c/t*100):0,col:"#38bdf8"},{l:"People booked",v:b,p:t?Math.round(b/t*100):0,col:"#34d399"},{l:"People disqualified",v:d,p:t?Math.round(d/t*100):0,col:"#fb923c"}];document.getElementById("funnel").innerHTML=steps.map(function(s){return"<div class=\\"fr\\"><div class=\\"fl\\"><span>"+s.l+"</span><span style=\\"font-weight:500\\">"+s.v+" <span style=\\"color:#aaa\\">("+s.p+"%)</span></span></div><div class=\\"fb\\"><div class=\\"ff\\" style=\\"width:"+s.p+"%;background:"+s.col+"\\"></div></div></div>";}).join("");}' +
+  /* Four stages, one window, one top-of-funnel denominator.
+     Was: four bars all measured as a % of step 1, with "disqualified" sitting
+     below "booked" as if it were a later stage — it is not a stage, a
+     disqualified person can also be booked, so the bars overlapped and did not
+     sum. Disqualified moved out to its own card; the funnel is now a real
+     ladder. Every bar is a % of the top so the widths are comparable.
+     coverage==="none" renders "not tracked" rather than zeros. */
+  'function fRow(label,unit,val,top,col,note,nullMsg){' +
+  'if(val===null||val===undefined)return"<div class=\\"fr\\"><div class=\\"fl\\"><span>"+label+" <span style=\\"color:#aaa;font-size:11px\\">"+unit+"</span></span><span style=\\"color:#999\\">"+(nullMsg||"not tracked")+"</span></div><div class=\\"fb\\"></div></div>";' +
+  'var p=(top&&top>0)?Math.round(val/top*100):0;' +
+  'return"<div class=\\"fr\\"><div class=\\"fl\\"><span>"+label+" <span style=\\"color:#aaa;font-size:11px\\">"+unit+"</span>"+(note?" <span style=\\"color:#aaa;font-size:11px\\">"+note+"</span>":"")+"</span><span style=\\"font-weight:500\\">"+val+" <span style=\\"color:#aaa\\">("+p+"%)</span></span></div><div class=\\"fb\\"><div class=\\"ff\\" style=\\"width:"+p+"%;background:"+col+"\\"></div></div></div>";}' +
+  /* TWO MODES, TWO DENOMINATORS, and the denominator is printed because the
+     percentages are NOT comparable across modes. "Since 21 Aug" divides by
+     sessions; "All time" divides by step 1, which is what the widget has
+     always done. Someone reading 12% in one mode and 48% in the other is
+     looking at the same people over different bases.
+
+     Default is "Since 21 Aug" so the top-of-funnel loss is what you see
+     first. All-time stays one click away because it is the only view that
+     covers the full history (roughly March 2026 onward) and those are the
+     numbers people already know.
+
+     ALL-TIME IS BYTE-FOR-BYTE THE OLD CALCULATION: peopleTotal at 100%, the
+     other two as a share of it, straight off the same payload fields. No new
+     query, nothing re-derived, so the existing numbers still reconcile.
+     Deliberately not "improved" while it was open. */
+  'var funnelMode="tracked",lastMetrics=null;' +
+  'function setFunnelMode(m){funnelMode=m;if(lastMetrics)renderFunnel(lastMetrics);}' +
+  'function renderFunnelToggle(){var el=document.getElementById("fnl-toggle");if(!el)return;' +
+  'el.innerHTML=[["tracked","Since 21 Aug"],["all","All time"]].map(function(o){var on=funnelMode===o[0];' +
+  'return "<button onclick=\\"setFunnelMode(\'"+o[0]+"\')\\" style=\\"padding:3px 9px;margin-left:5px;border-radius:99px;font-size:11px;cursor:pointer;border:1px solid "+(on?"#1a1a1a":"#e5e5e5")+";background:"+(on?"#1a1a1a":"#fff")+";color:"+(on?"#fff":"#666")+"\\">"+o[1]+"</button>";}).join("");}' +
+  'function renderFunnel(d){d=d||{};lastMetrics=d;var f=d.topFunnel||{};var html,sub;' +
+  'if(funnelMode==="all"){' +
+  'var t=d.peopleTotal;' +
+  'html=fRow("Sessions","visits",null,null,"#a5b4fc","","not tracked before 21 Aug 2026")' +
+  '+fRow("Entered step 1","people",t,t,"#818cf8","")' +
+  '+fRow("Completed step 2","people",d.peopleCompleted,t,"#38bdf8","")' +
+  '+fRow("Booked","people",d.peopleBooked,t,"#34d399","");' +
+  'sub="All leads, full history (the form predates session tracking by about five months). <b>Percentages are % of step 1</b> \\u2014 not comparable with the Since-21-Aug view, which divides by sessions.";' +
+  '}else{' +
+  'var top=f.sessions;' +
+  'html=fRow("Sessions","visits",f.sessions,top,"#a5b4fc",(f.botSessions?"&#183; "+f.botSessions+" bots excluded":""))' +
+  '+fRow("Entered step 1","people",f.step1,top,"#818cf8","&#183; visits &rarr; people")' +
+  '+fRow("Completed step 2","people",f.completed,top,"#38bdf8","")' +
+  '+fRow("Booked","people",f.booked,top,"#34d399","");' +
+  'sub=(f.coverage==="none")' +
+  '?"Session tracking was not running for this period \\u2014 the top of the funnel cannot be measured. Switch to All time for the full history."' +
+  ':"Since session tracking began, "+et(f.since)+". <b>Percentages are % of sessions</b> \\u2014 not comparable with the All-time view. Sessions are visits; the three stages below are distinct people, so the first rate compares visits to people.";' +
+  '}' +
+  'renderFunnelToggle();' +
+  'document.getElementById("funnel").innerHTML=html+"<div class=\\"ms\\" style=\\"margin-top:10px\\">"+sub+"</div>";}' +
   'function renderChart(rows){var labels=(rows||[]).map(function(r){return r.day_label;}),data=(rows||[]).map(function(r){return parseInt(r.count)||0;});if(lChart)lChart.destroy();var ctx=document.getElementById("lchart").getContext("2d");lChart=new Chart(ctx,{type:"bar",data:{labels:labels,datasets:[{data:data,backgroundColor:"#818cf8",borderRadius:4,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{stepSize:1,color:"#aaa"},grid:{color:"#f0f0f0"}},x:{ticks:{color:"#aaa",maxRotation:45,autoSkip:false},grid:{display:false}}}}});}' +
   'function stageBadge(l){if(l.booking_uid)return"<span class=\\"badge bg\\">Booked</span>";if(l.disqualified)return"<span class=\\"badge br\\">Disqualified</span>";if(l.completed)return"<span class=\\"badge bb\\">Completed</span>";return"<span class=\\"badge ba\\">Step 1</span>";}' +
   'function enrichBadge(l){return(l.enriched_title||l.enriched_company_size||l.e_company)?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>";}' +
@@ -2402,7 +2512,7 @@ app.get('/monitor', (req, res) => {
   'var er=d.total?Math.round(d.enriched/d.total*100):0,brP=d.peopleCompleted?Math.round(d.peopleBooked/d.peopleCompleted*100):0;' +
   'badge("s-partial",d.total+" sessions saved","bg");badge("s-submit",d.completed>0?d.completed+" completed sessions":"No completions",d.completed>0?"bg":"ba");badge("s-enrich",er+"% enriched",er>=60?"bg":er>=30?"ba":"br");badge("s-cal",brP+"% booking rate (people)",brP>=50?"bg":brP>=20?"ba":"bx");badge("s-cron",d.pendingPartials===0?"No pending":d.pendingPartials+" pending",d.pendingPartials===0?"bg":"ba");badge("s-aws",d.awsSynced?"Active":"Disabled",d.awsSynced?"bg":"br");badge("s-loops",d.loopsSent+" emails sent",d.loopsSent>0?"bg":"bx");' +
   'set("h-enr",d.enriched);set("h-tit",d.enrichTitlePct!==undefined?d.enrichTitlePct+"%":"\\u2014");set("h-fun",d.enrichFundingPct!==undefined?d.enrichFundingPct+"%":"\\u2014");set("h-loc",d.enrichLocationPct!==undefined?d.enrichLocationPct+"%":"\\u2014");' +
-  'renderAlerts(d);renderFunnel(d.peopleTotal,d.peopleCompleted,d.peopleBooked,d.peopleDisqualified);renderChart(d.leadsByDay||[]);' +
+  'renderAlerts(d);renderFunnel(d);renderChart(d.leadsByDay||[]);' +
   'set("lupd","Updated "+new Date().toLocaleTimeString("en-US",{timeZone:TZ})+" ET");' +
   '}catch(e){document.getElementById("alerts").innerHTML="<div class=\\"alertbox ae\\"><span>x</span><span>Failed: "+esc(e.message)+"</span></div>";set("lupd","Error");}' +
   'if(document.getElementById("tp-leads").classList.contains("act"))loadLeads(curPage);}' +

@@ -200,8 +200,158 @@ function between(s, startMarker, endMarker) {
   ok('tz-alerts: no toISOString in a filename', !/filename="[^"]*toISOString/.test(src));
 }
 
+/* ── Lift client-side JS out of the dashboard's concatenated string ──
+   The dashboard ships its JS as a run of single-quoted literals joined with
+   '+'. Each line is a real JS string literal, so letting JS itself unquote
+   it gives back exactly what the browser executes — escapes and all. Beats
+   asserting on source text: these tests then run the SHIPPED function. */
+function liftClientJs(startMarker, endMarker) {
+  const block = between(src, startMarker, endMarker);
+  return block.split('\n').map((line) => {
+    const m = line.match(/^\s*'(.*)'\s*\+\s*$/);
+    if (!m) return '';
+    return (new Function('return \'' + m[1] + '\''))();
+  }).join('');
+}
+
 /* ============================================================
-   5. THE RECOVERY CRON IS NOT PART OF THIS BATCH
+   5. OVERVIEW FUNNEL — a real ladder, and "not tracked" is not zero
+   ============================================================ */
+{
+  const metrics = between(src, "app.get('/monitor/metrics'", "app.get('/monitor/funnel'");
+
+  // Scoped to the tracked window, or the numerator outlives its denominator.
+  ok('funnel: top-of-funnel is scoped to go_live',
+     /gl\.go_live IS NOT NULL/.test(metrics) && /l\.created_at >= gl\.go_live/.test(metrics));
+  ok('funnel: go_live comes from form_sessions',
+     /MIN\(created_at\) AS go_live FROM form_sessions/.test(metrics));
+  ok('funnel: sessions come from form_sessions, not leads',
+     /COUNT\(\*\) FILTER \(WHERE user_agent IS NULL OR user_agent !~\* \$1\) AS sessions/.test(metrics));
+  ok('funnel: bots counted separately, empty UA kept as human',
+     /COUNT\(\*\) FILTER \(WHERE user_agent ~\* \$1\)\s+AS bot_sessions/.test(metrics));
+  ok('funnel: people stages dedupe on lower(email)',
+     (metrics.match(/COUNT\(DISTINCT LOWER\(l\.email\)\)/g) || []).length >= 3);
+  ok('funnel: stage flags use IS TRUE, not = true',
+     /l\.completed IS TRUE/.test(metrics));
+
+  // ONE bot regex for the whole file.
+  eq('funnel: exactly one BOT_RE definition', (src.match(/const BOT_RE\s*=/g) || []).length, 1);
+  ok('funnel: BOT_RE lives at module scope', /^const BOT_RE\s*=/m.test(src));
+  eq('funnel: both routes consume it', (src.match(/\[BOT_RE\]|BOT_RE\]/g) || []).length, 2);
+
+  // Nulls, not zeros, with no tracking.
+  ok('funnel: no-coverage branch returns nulls',
+     /coverage: 'none'[\s\S]{0,200}sessions: null/.test(metrics));
+  ok('funnel: covered branch is gated on go_live', /tf\.go_live\s*\?/.test(metrics));
+
+  /* Execute the shipped renderer. */
+  const clientSrc = liftClientJs("'function fRow(label,unit,val,top,col,note,nullMsg){'", "'function renderChart(rows)");
+  const sink = {};
+  const doc = { getElementById: (id) => ({ set innerHTML(v) { sink[id] = v; }, get innerHTML() { return sink[id]; } }) };
+  const C = (new Function('document', 'et',
+    clientSrc + '\n return { fRow, renderFunnel, setFunnelMode };'))(doc, () => '21/08/2026, 10:32');
+
+  // A null stage must never render as 0 — that reads as "nobody", which is a
+  // claim about demand rather than about our instrumentation.
+  const nullRow = C.fRow('Sessions', 'visits', null, null, '#000', '');
+  ok('funnel: null stage renders "not tracked"', /not tracked/.test(nullRow), nullRow);
+  ok('funnel: null stage never prints 0 or 0%', !/>0</.test(nullRow) && !/0%/.test(nullRow), nullRow);
+
+  const realRow = C.fRow('Entered step 1', 'people', 25, 100, '#000', '');
+  ok('funnel: real stage shows count and % of top', /25/.test(realRow) && /25%/.test(realRow), realRow);
+
+  /* REGRESSION. `note` decorates a MEASURED row; a null row needs its own
+     message. Collapsing them onto one parameter (which I did, briefly) made
+     "Entered step 1" render its decoration — "· visits → people" — as its
+     VALUE whenever coverage was missing, which is worse than the zero it
+     replaced: it looks like a real reading. */
+  const nullWithNote = C.fRow('Entered step 1', 'people', null, null, '#000', '&#183; visits &rarr; people');
+  ok('funnel: a null stage with a decorative note still says not tracked',
+     /not tracked/.test(nullWithNote), nullWithNote);
+  ok('funnel: a null stage never renders its decoration as a value',
+     !/visits &rarr; people/.test(nullWithNote), nullWithNote);
+  const nullCustom = C.fRow('Sessions', 'visits', null, null, '#000', '', 'not tracked before 21 Aug 2026');
+  ok('funnel: a null stage can carry a specific reason',
+     /not tracked before 21 Aug 2026/.test(nullCustom), nullCustom);
+
+  // coverage none — every stage not tracked, and an explanation.
+  C.renderFunnel({ topFunnel: { coverage: 'none', since: null, sessions: null, botSessions: null,
+                                step1: null, completed: null, booked: null } });
+  const none = sink.funnel;
+  eq('funnel: all four stages read not-tracked with no coverage',
+     (none.match(/not tracked/g) || []).length, 4);
+  ok('funnel: no-coverage explains itself', /was not running/.test(none), none.slice(-160));
+
+  // coverage full — four stages, bot exclusion stated, unit change stated.
+  C.renderFunnel({ topFunnel: { coverage: 'full', since: '2026-08-21T10:32:00Z', sessions: 1000,
+                                botSessions: 90, step1: 250, completed: 120, booked: 40 } });
+  const full = sink.funnel;
+  ok('funnel: four stages in ladder order',
+     full.indexOf('Sessions') < full.indexOf('Entered step 1')
+     && full.indexOf('Entered step 1') < full.indexOf('Completed step 2')
+     && full.indexOf('Completed step 2') < full.indexOf('Booked'), 'order wrong');
+  ok('funnel: bot exclusion is visible, not silent', /90 bots excluded/.test(full), full.slice(0, 200));
+  ok('funnel: the visits-to-people unit change is stated', /visits/.test(full) && /people/.test(full));
+  ok('funnel: every bar is a % of the top', /25%/.test(full) && /12%/.test(full) && /4%/.test(full), full);
+  ok('funnel: no stage reads not-tracked when covered', !/not tracked/.test(full));
+
+  /* "Disqualified" is OUT of the funnel on purpose: it is not a later stage
+     than booked, and a disqualified person can also be booked, so the bars
+     overlapped and never summed. It stays as its own Overview card. */
+  ok('funnel: disqualified is no longer a funnel stage', !/disqualified/i.test(full));
+  ok('funnel: disqualified still has its own card', /id="m-disq"/.test(src));
+
+  /* ── ALL-TIME MODE ──
+     Three stages, no sessions bar (form_sessions does not exist before
+     go-live), and the missing bar must EXPLAIN itself rather than showing a
+     blank row or a zero-width bar that reads as "no traffic". */
+  const payload = {
+    peopleTotal: 500, peopleCompleted: 200, peopleBooked: 50,
+    topFunnel: { coverage: 'full', since: '2026-08-21T10:32:00Z', sessions: 1000,
+                 botSessions: 90, step1: 250, completed: 120, booked: 40 },
+  };
+  C.setFunnelMode('all');
+  C.renderFunnel(payload);
+  const allT = sink.funnel;
+
+  ok('all-time: sessions stage is not tracked, not zero',
+     /not tracked before 21 Aug 2026/.test(allT), allT.slice(0, 260));
+  ok('all-time: the missing sessions bar has no zero-width bar drawn',
+     !/width:0%/.test(allT.slice(0, allT.indexOf('Entered step 1'))), allT.slice(0, 300));
+  eq('all-time: exactly three measured stages',
+     (allT.match(/font-weight:500/g) || []).length, 3);
+
+  /* Byte-for-byte the pre-existing calculation: step 1 at 100%, the other two
+     as a share of it. 200/500 = 40%, 50/500 = 10%. If this drifts, historical
+     numbers stop reconciling and that is the one thing all-time mode is for. */
+  ok('all-time: step 1 is the denominator at 100%', /500 <span style="color:#aaa">\(100%\)/.test(allT), allT);
+  ok('all-time: completed is % of step 1',          /200 <span style="color:#aaa">\(40%\)/.test(allT), allT);
+  ok('all-time: booked is % of step 1',             /50 <span style="color:#aaa">\(10%\)/.test(allT), allT);
+  ok('all-time: does NOT use the windowed figures',
+     !/250/.test(allT) && !/1000/.test(allT), 'windowed numbers leaked into all-time');
+
+  // The two modes divide by different things. Say so, in both.
+  ok('all-time: names its denominator', /Percentages are % of step 1/.test(allT), allT.slice(-260));
+  ok('all-time: warns the modes are not comparable', /not comparable/.test(allT));
+  C.setFunnelMode('tracked');
+  C.renderFunnel(payload);
+  ok('tracked: names its denominator', /Percentages are % of sessions/.test(sink.funnel));
+  ok('tracked: warns the modes are not comparable', /not comparable/.test(sink.funnel));
+
+  // Default on load must be the tracked view, so top-of-funnel loss leads.
+  ok('funnel: defaults to the tracked window', /var funnelMode="tracked"/.test(src));
+  ok('funnel: toggle offers both windows',
+     /Since 21 Aug/.test(src) && /All time/.test(src) && /setFunnelMode/.test(src));
+
+  /* No-coverage in tracked mode should point at the view that does have data,
+     rather than leaving a dead end. */
+  C.renderFunnel({ topFunnel: { coverage: 'none', sessions: null, botSessions: null,
+                                step1: null, completed: null, booked: null, since: null } });
+  ok('funnel: no-coverage points at the All-time view', /All time/.test(sink.funnel), sink.funnel.slice(-200));
+}
+
+/* ============================================================
+   6. THE RECOVERY CRON IS NOT PART OF THIS BATCH
    Guard, not a feature test. The booked_at >= l.created_at comparison in
    the cron is deliberate (May 2026): a booking that PREDATES a session
    does not resolve that session's drop-off, so relaxing it to
