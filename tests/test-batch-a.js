@@ -1050,6 +1050,80 @@ function liftClientJs(startMarker, endMarker) {
          /table shows the most recent "\+lmLeads\.length\+" of "\+lmShownOf/.test(src));
     }
 
+
+    /* ============================================================
+       13. ROUTE HARDENING
+       ============================================================ */
+    {
+      /* A GET that rewrites lead rows and runs two ALTER TABLEs. A link
+         prefetch, a chat client unfurling the URL, or a browser restoring the
+         tab is enough to fire a GET — with apply=1 still in the query string. */
+      ok('routes: website-recheck is a POST',
+         /app\.post\('\/monitor\/website-recheck'/.test(src));
+      ok('routes: and no GET for it survives',
+         !/app\.get\('\/monitor\/website-recheck'/.test(src));
+
+      const recheckDoc = between(src, 'HISTORICAL WEBSITE RECHECK', 'not look like a burst of scraping');
+      ok('routes: the doc block above it says POST',
+         /POST \/monitor\/website-recheck/.test(recheckDoc) && !/GET \/monitor\/website-recheck/.test(recheckDoc),
+         recheckDoc);
+      ok('routes: and gives the curl that actually works',
+         /curl -X POST/.test(recheckDoc));
+      ok('routes: the dry-run default is still documented',
+         /Dry run is the default/.test(recheckDoc));
+
+      const recheckBody = between(src, 'burst of scraping', 'const scope');
+      ok('routes: it still refuses outright when MONITOR_TOKEN is unset',
+         /MONITOR_TOKEN must be set before using this endpoint/.test(recheckBody), recheckBody);
+
+      /* Nothing in the UI fetched it, so the method change has no client half.
+         If that ever stops being true, this catches it. */
+      {
+        // Scoped to the dashboard's client JS, not a count of mentions in
+        // the file — the doc block above the route names it three times.
+        const clientBlock = between(src, "  const js = '<script>' +", "<\\/script></body></html>");
+        ok('routes: the dashboard never fetches website-recheck',
+           !/website-recheck/.test(clientBlock));
+        const htmlBlock = between(src, "'</style></head><body>' +", "  const js = '<script>' +");
+        ok('routes: and no link or form in the page points at it',
+           !/website-recheck/.test(htmlBlock));
+      }
+
+      /* elv-health was the only /monitor* route with no token check. */
+      const elvRoute = between(src, "app.get('/monitor/elv-health'", 'verify-website');
+      ok('routes: elv-health is token-gated',
+         /MONITOR_TOKEN/.test(elvRoute) && /Unauthorized/.test(elvRoute), elvRoute);
+      ok('routes: and the dashboard sends the token',
+         /fetch\(API\+"\/monitor\/elv-health"\+TP/.test(src));
+
+      /* EVERY /monitor route, enumerated from the source, must check the token.
+         Stated as a sweep rather than one assertion per route so a NEW ungated
+         route fails this too — which is how elv-health slipped through. */
+      const monitorRoutes = [...src.matchAll(/app\.(get|post)\('(\/monitor[^']*)'/g)]
+        .map((m) => ({ method: m[1], path: m[2], at: m.index }));
+      ok('routes: the sweep found the expected number of monitor routes',
+         monitorRoutes.length >= 8, String(monitorRoutes.length));
+      const ungated = monitorRoutes.filter((r, i) => {
+        // Bounded at the NEXT handler, not a fixed window: a 700-char slice
+        // ran past the end of a short route and picked up its neighbour's
+        // token check, so an ungated route read as gated.
+        const end = i + 1 < monitorRoutes.length ? monitorRoutes[i + 1].at : r.at + 700;
+        return !/MONITOR_TOKEN/.test(src.slice(r.at, end));
+      }).map((r) => r.method + ' ' + r.path);
+      eq('routes: every monitor route checks MONITOR_TOKEN', ungated, []);
+
+      /* The ELV row used to paint a calm grey "Unknown" when the probe could
+         not be reached — the same "we could not check, styled as fine" the
+         health tab was rebuilt to remove. It also never checked r.ok, so a 401
+         would have rendered from an error body. */
+      const elvClient = between(src, "'async function checkElv(){", "'var HCLS=");
+      ok('routes: the ELV row checks the response status', /if\(!r\.ok\)throw/.test(elvClient), elvClient);
+      ok('routes: an unreachable ELV probe paints red, not grey',
+         /catch\(e\)\{badge\("s-elv","Could not check","br"\)/.test(elvClient), elvClient);
+      ok('routes: no grey "Unknown" left on the ELV row',
+         !/badge\("s-elv","Unknown","bx"\)/.test(src));
+    }
+
     /* ============================================================ */
     console.log('');
     if (failures.length) {

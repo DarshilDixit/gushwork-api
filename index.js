@@ -2778,7 +2778,7 @@ app.get('/monitor', (req, res) => {
   'function etDayShift(n){var p=etDay(new Date()).split("-");var d=new Date(Date.UTC(+p[0],+p[1]-1,+p[2],12,0,0));d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10);}' +
   'function esc(s){if(!s)return"";return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}' +
   'async function checkApi(){try{var r=await fetch(API+"/health",{signal:AbortSignal.timeout(5000)});if(r.ok){document.getElementById("apidot").className="dot dot-green";document.getElementById("apist").textContent="API online";badge("s-api","Online","bg");return true;}throw new Error("HTTP "+r.status);}catch(e){document.getElementById("apidot").className="dot dot-red";document.getElementById("apist").textContent="API offline";badge("s-api","Offline","br");return false;}}' +
-  'async function checkElv(){try{var r=await fetch(API+"/monitor/elv-health",{signal:AbortSignal.timeout(5000)});var d=await r.json();var age=(d.minutesSinceLastCheck!=null&&d.minutesSinceLastCheck>=60)?" \\u00b7 last check "+Math.round(d.minutesSinceLastCheck/60)+"h ago":"";if(d.state==="degraded"){badge("s-elv","Degraded \\u2014 "+d.rate+"% of "+d.checks+" inconclusive"+age,"br");}else if(d.state==="insufficient_data"){if(d.rate>=50||d.consecutiveInconclusive>=2){badge("s-elv","Low traffic \\u2014 "+d.rate+"% of "+d.checks+" inconclusive"+age,"ba");}else{badge("s-elv","Quiet \\u2014 "+d.checks+" checks, "+d.rate+"% inconclusive"+age,"bx");}}else{badge("s-elv","Healthy ("+d.rate+"% inconclusive)","bg");}}catch(e){badge("s-elv","Unknown","bx");}}' +
+  'async function checkElv(){try{var r=await fetch(API+"/monitor/elv-health"+TP,{signal:AbortSignal.timeout(5000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();var age=(d.minutesSinceLastCheck!=null&&d.minutesSinceLastCheck>=60)?" \\u00b7 last check "+Math.round(d.minutesSinceLastCheck/60)+"h ago":"";if(d.state==="degraded"){badge("s-elv","Degraded \\u2014 "+d.rate+"% of "+d.checks+" inconclusive"+age,"br");}else if(d.state==="insufficient_data"){if(d.rate>=50||d.consecutiveInconclusive>=2){badge("s-elv","Low traffic \\u2014 "+d.rate+"% of "+d.checks+" inconclusive"+age,"ba");}else{badge("s-elv","Quiet \\u2014 "+d.checks+" checks, "+d.rate+"% inconclusive"+age,"bx");}}else{badge("s-elv","Healthy ("+d.rate+"% inconclusive)","bg");}}catch(e){badge("s-elv","Could not check","br");}}' +
   /* SEVEN LIVE CHECKS, one round trip. Deliberately NOT on the 60-second
      loadAll poll: the AWS row queries a database across a WAN and would
      make every refresh wait on it. Runs at load, every five minutes, when
@@ -3890,6 +3890,14 @@ app.post('/verify-email', async (req, res) => {
 
 // Live ELV health for the dashboard's System Health tab.
 app.get('/monitor/elv-health', (req, res) => {
+  /* Was the only /monitor* route with no token check. It reports
+     verification volume, the inconclusive rate and whether the upstream is
+     degraded right now — operational state, and a map of when we are least
+     able to verify an address. Gated like the rest. */
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
   res.setHeader('Cache-Control', 'no-store');
   res.json(elvHealthSnapshot());
 });
@@ -4622,16 +4630,23 @@ app.post('/verify-website', async (req, res) => {
    Corrects BOTH directions: false positives sitting in "Not verified", and
    genuinely-parked domains sitting in "Passed" as content_clean.
 
-     GET /monitor/website-recheck?token=…               dry run (DEFAULT)
-     GET /monitor/website-recheck?token=…&apply=1       writes
+     POST /monitor/website-recheck?token=…              dry run (DEFAULT)
+     POST /monitor/website-recheck?token=…&apply=1      writes
      &scope=unverified|clean|all   default all
      &limit=200   &offset=0   &format=json
+
+   POST, not GET, and that is the point. It was a GET that rewrites lead
+   rows and runs two ALTER TABLEs, so a link prefetch, a chat client
+   unfurling the URL or a browser restoring the tab could have fired it
+   with apply=1 still in the query string. Nothing in the UI calls it, so
+   the change costs nothing on the client. Run it with:
+     curl -X POST "https://…/monitor/website-recheck?token=…&apply=1"
 
    Dry run is the default and the ONLY thing that writes is apply=1.
    Never touches social_profile_url rows or rows with no reason recorded.
    Sequential with a delay — this must not look like a burst of scraping.
    ======================================================= */
-app.get('/monitor/website-recheck', async (req, res) => {
+app.post('/monitor/website-recheck', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) {
     return res.status(401).json({ error: 'Unauthorized' });
