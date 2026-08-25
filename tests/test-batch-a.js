@@ -731,6 +731,160 @@ function liftClientJs(startMarker, endMarker) {
     ok('health: it points at the tab that does the checking',
        /Live service checks are on the System Health tab/.test(src));
 
+
+    /* ============================================================
+       8. THE STAGE LADDER — four stages that actually partition
+
+       CLAUDE.md Definitions: four stages, mutually exclusive and exhaustive,
+       resolved in priority order, so the four always sum to the total.
+
+       What was there did not do that. 'disqualified' was a bare
+       disqualified = true, so a disqualified lead who booked appeared under
+       BOTH Booked and Disqualified. 'step1' was
+       completed = false AND disqualified = false, which let booked leads
+       through and dropped every row where the flag is NULL — those rows were
+       in none of the four and could not be found under any stage.
+
+       The predicates are lifted from index.js and evaluated as SQL three-
+       valued logic against every combination of the three flags INCLUDING
+       NULLS: 2 booking states x 3 disqualified x 3 completed = 18 rows.
+       ============================================================ */
+    {
+      const filters = between(src, "  if (stage === 'booked')", '  if (sellTo ===');
+      const grab = (name) => {
+        const m = filters.match(new RegExp("stage === '" + name + "'\\)\\s*conditions\\.push\\('([^']+)'\\)"));
+        if (!m) throw new Error('stage predicate not found: ' + name);
+        return m[1];
+      };
+      const PREDS = { booked: grab('booked'), disqualified: grab('disqualified'),
+                      completed: grab('completed'), step1: grab('step1') };
+
+      /* A tiny SQL three-valued-logic evaluator. NULL is null, and the point of
+         the whole exercise is that `null IS TRUE` is false while
+         `null IS NOT TRUE` is true — which is why = false loses rows and
+         IS NOT TRUE does not. */
+      function evalPred(sql, row) {
+        return sql.split(' AND ').every((clause) => {
+          const c = clause.trim();
+          let m;
+          if ((m = c.match(/^l\.(\w+) IS NOT NULL$/)))  return row[m[1]] !== null;
+          if ((m = c.match(/^l\.(\w+) IS NULL$/)))      return row[m[1]] === null;
+          if ((m = c.match(/^l\.(\w+) IS NOT TRUE$/)))  return row[m[1]] !== true;
+          if ((m = c.match(/^l\.(\w+) IS TRUE$/)))      return row[m[1]] === true;
+          if ((m = c.match(/^l\.(\w+) = true$/)))       return row[m[1]] === true;
+          if ((m = c.match(/^l\.(\w+) = false$/)))      return row[m[1]] === false;
+          throw new Error('unhandled clause: ' + c);
+        });
+      }
+
+      const TRI = [true, false, null];
+      const matrix = [];
+      for (const booking_uid of ['uid-1', null])
+        for (const disqualified of TRI)
+          for (const completed of TRI)
+            matrix.push({ booking_uid, disqualified, completed });
+
+      eq('ladder: the matrix covers every flag combination including nulls', matrix.length, 18);
+
+      let everyRowInExactlyOne = true;
+      const orphans = [];
+      const doubles = [];
+      for (const row of matrix) {
+        const hits = Object.keys(PREDS).filter((k) => evalPred(PREDS[k], row));
+        if (hits.length !== 1) {
+          everyRowInExactlyOne = false;
+          const desc = JSON.stringify(row) + ' -> [' + hits.join(',') + ']';
+          (hits.length === 0 ? orphans : doubles).push(desc);
+        }
+      }
+      ok('ladder: every row lands in exactly one stage', everyRowInExactlyOne,
+         'orphans: ' + orphans.join(' | ') + '  doubles: ' + doubles.join(' | '));
+      ok('ladder: no row falls out of all four stages', orphans.length === 0, orphans.join(' | '));
+      ok('ladder: no row is counted under two stages', doubles.length === 0, doubles.join(' | '));
+
+      /* The four counts sum to the row count for every combination — the
+         "exhaustive" half stated as arithmetic rather than as set membership. */
+      const summed = Object.keys(PREDS)
+        .reduce((n, k) => n + matrix.filter((r) => evalPred(PREDS[k], r)).length, 0);
+      eq('ladder: the four stage counts sum to the total', summed, matrix.length);
+
+      // Priority order, named case by case, so a regression says which rule broke.
+      const stageOf = (row) => Object.keys(PREDS).find((k) => evalPred(PREDS[k], row));
+      eq('ladder: booked beats disqualified',
+         stageOf({ booking_uid: 'u', disqualified: true, completed: true }), 'booked');
+      eq('ladder: disqualified beats completed',
+         stageOf({ booking_uid: null, disqualified: true, completed: true }), 'disqualified');
+      eq('ladder: completed beats step 1',
+         stageOf({ booking_uid: null, disqualified: false, completed: true }), 'completed');
+      eq('ladder: everything else is step 1',
+         stageOf({ booking_uid: null, disqualified: false, completed: false }), 'step1');
+
+      /* THE NULL CASE, named on its own. An old row with a null flag used to be
+         unreachable from every filter. */
+      eq('ladder: a null disqualified flag still lands in a stage',
+         stageOf({ booking_uid: null, disqualified: null, completed: null }), 'step1');
+      eq('ladder: a null disqualified flag does not hide a completion',
+         stageOf({ booking_uid: null, disqualified: null, completed: true }), 'completed');
+
+      ok('ladder: no filter uses = true or = false',
+         !/= true|= false/.test(filters), filters);
+
+      /* The client badge is the same ladder in the same order. If the two
+         disagree, a row can be filtered under one stage and badged as another. */
+      const badge = between(src, "'function stageBadge(l){", 'Step 1</span>');
+      const badgeOrder = (badge.match(/booking_uid|disqualified|completed/g) || []);
+      eq('ladder: the badge resolves in the same priority order',
+         badgeOrder.slice(0, 3), ['booking_uid', 'disqualified', 'completed']);
+    }
+
+    /* ============================================================
+       9. BOOKINGS — one definition of "holds a call slot"
+       ============================================================ */
+    {
+      /* Question 1: "is this person an SDR target?" — no time comparison.
+         One fragment, two call sites, so the SDR List and the "No booking yet"
+         headline cannot drift into disagreeing about who has a booking while
+         both claim to exclude bookers. */
+      ok('booking: there is exactly one has-any-booking fragment',
+         (src.match(/const noBookingAnywhereSql\s*=/g) || []).length === 1);
+      const frag = between(src, 'const noBookingAnywhereSql', 'app.get(\'/monitor/metrics\'');
+      ok('booking: the shared fragment has no time comparison',
+         !/booked_at/.test(frag), frag);
+      ok('booking: it dedupes on lower(email), never raw email',
+         /LOWER\(booked\.email\) = LOWER\(/.test(frag));
+
+      const uses = (src.match(/\$\{noBookingAnywhereSql\(/g) || []).length;
+      eq('booking: both question-1 sites use it', uses, 2);
+
+      const sdrRoute = between(src, "app.get('/monitor/sdr'", 'const leads = result.rows');
+      ok('booking: the SDR route consumes the fragment',
+         /\$\{noBookingAnywhereSql\('l\.email'\)\}/.test(sdrRoute), sdrRoute.slice(-400));
+      ok('booking: and has no hand-rolled copy left behind',
+         !/SELECT 1 FROM leads booked/.test(sdrRoute));
+
+      const metrics = between(src, "app.get('/monitor/metrics'", "app.get('/monitor/funnel'");
+      ok('booking: the no-booking-yet headline consumes the fragment',
+         /\$\{noBookingAnywhereSql\('leads\.email'\)\}/.test(metrics));
+
+      /* Question 3, "recovered bookings", is a THIRD shape and keeps its
+         COALESCE: it is definitionally about ordering, and it reads the full
+         history including rows that predate the booked_at column, where
+         comparing a null yields null and the row quietly counts as un-booked. */
+      ok('booking: recovered bookings still COALESCEs booked_at with created_at',
+         /COALESCE\(booked\.booked_at, booked\.created_at\)|COALESCE\(b\.booked_at, b\.created_at\)/.test(metrics),
+         (metrics.match(/COALESCE\([^)]*booked_at[^)]*\)/g) || []).join(' | '));
+
+      /* The Pending recovery card asks question 2 and now says so. The old
+         tooltip claimed "no booking on any other session of that email", which
+         would make it agree with the SDR List — it does not, deliberately. */
+      ok('booking: the pending-recovery tooltip no longer claims any-session',
+         !/no booking on any other session of that email/.test(src));
+      ok('booking: it names the since-the-session rule in words',
+         /SINCE the session started/.test(src));
+      ok('booking: and explains why it can disagree with the SDR List',
+         /SDR List can disagree/.test(src));
+    }
+
     /* ============================================================ */
     console.log('');
     if (failures.length) {

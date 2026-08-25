@@ -1677,6 +1677,27 @@ app.get('/monitor/health', async (req, res) => {
 });
 
 
+/* ── "Does this person hold a call slot?" ────────────────────────────
+   Question 1 of the two in the Definitions section of CLAUDE.md, and the
+   one with NO time comparison. An SDR ringing someone who already has a
+   call on the calendar is wrong whether that call was booked yesterday or
+   in May, so when they booked is irrelevant here.
+
+   Do not reach for this at the recovery cron. That asks a different
+   question — "does THIS session's drop-off still need an email" — where
+   the time comparison is required and deliberate. The cron has a long
+   comment saying so and a test guarding it.
+
+   Takes the outer email expression because the two call sites alias the
+   leads table differently. One definition so the SDR List and the "No
+   booking yet" headline cannot drift into disagreeing about who has a
+   booking while both claiming to exclude bookers. */
+const noBookingAnywhereSql = (emailExpr) => `NOT EXISTS (
+              SELECT 1 FROM leads booked
+              WHERE LOWER(booked.email) = LOWER(${emailExpr})
+                AND booked.booking_uid IS NOT NULL
+            )`;
+
 app.get('/monitor/metrics', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) {
@@ -1778,11 +1799,7 @@ app.get('/monitor/metrics', async (req, res) => {
             AND booking_uid IS NULL
             AND disqualified = false
             AND sell_to ILIKE 'B2B%'
-            AND NOT EXISTS (
-              SELECT 1 FROM leads booked
-              WHERE LOWER(booked.email) = LOWER(leads.email)
-                AND booked.booking_uid IS NOT NULL
-            )
+            AND ${noBookingAnywhereSql('leads.email')}
           ORDER BY LOWER(email), created_at DESC
         ) deduped
       `),
@@ -2210,10 +2227,26 @@ app.get('/monitor/leads', async (req, res) => {
   let conditions = [];
   const params = [];
 
+  /* THE STAGE LADDER — the one in the Definitions section of CLAUDE.md.
+     Four stages, mutually exclusive and exhaustive, resolved in priority
+     order, so every lead is in exactly one and the four always sum to the
+     total.
+
+     What was here did not do that. 'disqualified' was a bare
+     disqualified = true, so a lead who was disqualified AND booked appeared
+     under both Booked and Disqualified. 'completed' did not exclude
+     disqualified, so it overlapped too. And 'step1' was
+     completed = false AND disqualified = false, which both let booked leads
+     through and dropped every row where the flag is NULL rather than false —
+     those rows fell out of all four filters and could not be found under any
+     stage.
+
+     Hence IS TRUE / IS NOT TRUE throughout, never = true / = false: a null
+     flag on an old row has to land in a stage rather than vanishing. */
   if (stage === 'booked')       conditions.push('l.booking_uid IS NOT NULL');
-  if (stage === 'completed')    conditions.push('l.completed = true AND l.booking_uid IS NULL');
-  if (stage === 'step1')        conditions.push('l.completed = false AND l.disqualified = false');
-  if (stage === 'disqualified') conditions.push('l.disqualified = true');
+  if (stage === 'disqualified') conditions.push('l.booking_uid IS NULL AND l.disqualified IS TRUE');
+  if (stage === 'completed')    conditions.push('l.booking_uid IS NULL AND l.disqualified IS NOT TRUE AND l.completed IS TRUE');
+  if (stage === 'step1')        conditions.push('l.booking_uid IS NULL AND l.disqualified IS NOT TRUE AND l.completed IS NOT TRUE');
 
   if (sellTo === '__clarified') {
     // any lead that flipped B2C/Mixed -> B2B at the disqualified step
@@ -2415,11 +2448,7 @@ app.get('/monitor/sdr', async (req, res) => {
         WHERE l.email IS NOT NULL
           AND l.disqualified = false
           AND l.sell_to ILIKE 'B2B%'
-          AND NOT EXISTS (
-            SELECT 1 FROM leads booked
-            WHERE LOWER(booked.email) = LOWER(l.email)
-              AND booked.booking_uid IS NOT NULL
-          )
+          AND ${noBookingAnywhereSql('l.email')}
         ORDER BY LOWER(l.email), l.created_at DESC
       ) deduped
       ORDER BY created_at DESC
@@ -2553,7 +2582,7 @@ app.get('/monitor', (req, res) => {
   '<div class="g4">' +
   '<div class="mc" title="Distinct qualified B2B people who completed the form but have NO booking on ANY of their sessions. This is exactly the SDR List."><div class="ml">No booking yet (SDR)</div><div class="mv" id="m-nb">&#8212;</div><div class="ms" id="m-nbs">&#8212;</div></div>' +
   '<div class="mc" title="People who completed the form without booking, and later booked on another session &#8212; your follow-up emails / prefill links / SDR nudges working."><div class="ml">Recovered bookings</div><div class="mv" id="m-rec">&#8212;</div><div class="ms">booked on a later session</div></div>' +
-  '<div class="mc" title="Sessions older than 2 hours with no booking (and no booking on any other session of that email) that the recovery cron has not processed yet."><div class="ml">Pending recovery</div><div class="mv" id="m-pend">&#8212;</div><div class="ms">&gt;2h, awaiting follow-up</div></div>' +
+  '<div class="mc" title="Sessions older than 2 hours, not yet emailed, where nobody has booked with that address SINCE the session started. A booking made before the session does not count as resolving it &#8212; the person came back, started again and dropped again. That is why this number and the SDR List can disagree about the same address."><div class="ml">Pending recovery</div><div class="mv" id="m-pend">&#8212;</div><div class="ms">&gt;2h, no booking since the session</div></div>' +
   '<div class="mc" title="Sessions where the drop-off recovery email has been sent (loops_sent = true)."><div class="ml">Recovery emails sent</div><div class="mv" id="m-mail">&#8212;</div><div class="ms">follow-ups dispatched</div></div>' +
   '</div>' +
   '<div class="recon" id="recon">&#8212;</div>' +
@@ -2571,7 +2600,7 @@ app.get('/monitor', (req, res) => {
   '<div class="tp" id="tp-leads">' +
   '<div class="filters">' +
   '<input type="text" id="fsearch" placeholder="Search email, company..." oninput="debounce()">' +
-  '<select id="fstage" onchange="loadLeads(1)"><option value="all">All stages</option><option value="booked">Booked</option><option value="completed">Completed (no booking)</option><option value="step1">Step 1 only</option><option value="disqualified">Disqualified</option></select>' +
+  '<select id="fstage" onchange="loadLeads(1)"><option value="all">All stages</option><option value="booked">Booked</option><option value="completed">Completed (not booked, not disqualified)</option><option value="step1">Step 1 only</option><option value="disqualified">Disqualified (not booked)</option></select>' +
   '<select id="fsellto" onchange="loadLeads(1)"><option value="all">All sell-to</option><option value="B2B">B2B</option><option value="B2B (clarified from B2C)">B2B (clarified from B2C)</option><option value="B2B (clarified from Mixed)">B2B (clarified from Mixed)</option><option value="B2C">B2C</option><option value="Mixed">Mixed</option><option value="__clarified">Clarified (any)</option></select>' +
   '<select id="fsource" onchange="loadLeads(1)"><option value="all">All sources</option></select>' +
   '<select id="fenrich" onchange="loadLeads(1)"><option value="all">Enrichment: all</option><option value="yes">Enriched</option><option value="no">Not enriched</option></select>' +
