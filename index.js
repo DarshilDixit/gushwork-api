@@ -2403,11 +2403,37 @@ app.get('/monitor/filter-options', async (req, res) => {
   }
 });
 
+/* The four fields the SDR search matches on. The dashboard's client-side
+   filter reads the same four out of SDR_SEARCH_FIELDS, and a test lifts both
+   lists and asserts they are equal.
+
+   Applied server-side ONLY for the CSV export. The table keeps its
+   client-side filter: this query is unbounded and a round trip per keystroke
+   would be worse than filtering rows already in the browser. Before this,
+   exportSDR sent format=csv and nothing else, so someone who searched "acme",
+   saw four rows and hit Export got the entire list. */
+const SDR_SEARCH_COLUMNS = ['email', 'company', 'first_name', 'enriched_industry'];
+
 app.get('/monitor/sdr', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
 
   const format = req.query.format || 'json';
+  const search = String(req.query.search || '').trim().toLowerCase();
+
+  /* Filtered in an outer SELECT over the deduped set, not inside it. Pushing
+     it in would change WHICH row survives DISTINCT ON per email, so a search
+     could return a different row than the unsearched table shows for the same
+     person. Parameterised, never interpolated. */
+  const searchParams = [];
+  let searchSql = '';
+  if (search) {
+    searchParams.push('%' + search + '%');
+    const ph = '$' + searchParams.length;
+    searchSql = 'WHERE (' + SDR_SEARCH_COLUMNS
+      .map((c) => 'LOWER(COALESCE(' + c + ", '')) LIKE " + ph)
+      .join(' OR ') + ')';
+  }
 
   try {
     const result = await pool.query(`
@@ -2451,8 +2477,9 @@ app.get('/monitor/sdr', async (req, res) => {
           AND ${noBookingAnywhereSql('l.email')}
         ORDER BY LOWER(l.email), l.created_at DESC
       ) deduped
+      ${searchSql}
       ORDER BY created_at DESC
-    `);
+    `, searchParams);
 
     const leads = result.rows;
 
@@ -2580,7 +2607,7 @@ app.get('/monitor', (req, res) => {
   '<div class="mc" title="People marked disqualified (B2C / Mixed) on at least one session."><div class="ml">Disqualified</div><div class="mv" id="m-disq">&#8212;</div><div class="ms" id="m-dsq">B2C / Mixed</div></div>' +
   '</div>' +
   '<div class="g4">' +
-  '<div class="mc" title="Distinct qualified B2B people who completed the form but have NO booking on ANY of their sessions. This is exactly the SDR List."><div class="ml">No booking yet (SDR)</div><div class="mv" id="m-nb">&#8212;</div><div class="ms" id="m-nbs">&#8212;</div></div>' +
+  '<div class="mc" title="Distinct qualified B2B people who COMPLETED the form and have no booking on any of their sessions. The SDR List is deliberately wider &#8212; it has no completed filter, so it also carries people who entered an email and never finished. Expect the SDR List to be the larger number."><div class="ml">No booking yet (SDR)</div><div class="mv" id="m-nb">&#8212;</div><div class="ms" id="m-nbs">&#8212;</div></div>' +
   '<div class="mc" title="People who completed the form without booking, and later booked on another session &#8212; your follow-up emails / prefill links / SDR nudges working."><div class="ml">Recovered bookings</div><div class="mv" id="m-rec">&#8212;</div><div class="ms">booked on a later session</div></div>' +
   '<div class="mc" title="Sessions older than 2 hours, not yet emailed, where nobody has booked with that address SINCE the session started. A booking made before the session does not count as resolving it &#8212; the person came back, started again and dropped again. That is why this number and the SDR List can disagree about the same address."><div class="ml">Pending recovery</div><div class="mv" id="m-pend">&#8212;</div><div class="ms">&gt;2h, no booking since the session</div></div>' +
   '<div class="mc" title="Sessions where the drop-off recovery email has been sent (loops_sent = true)."><div class="ml">Recovery emails sent</div><div class="mv" id="m-mail">&#8212;</div><div class="ms">follow-ups dispatched</div></div>' +
@@ -2778,7 +2805,7 @@ app.get('/monitor', (req, res) => {
      healthy." — a claim about the whole system made by a box that has
      never looked at one. Now it says what it actually knows and points at
      the tab that does the checking. */
-  'function renderAlerts(d){var a=[];if(d.pendingPartials>0)a.push({c:"aw",i:"!",m:d.pendingPartials+" session(s) waiting >2 hours without booking \\u2014 recovery cron will pick them up."});if(d.noBookingUid>0)a.push({c:"aw",i:"!",m:d.noBookingUid+" people (deduped, qualified B2B) completed the form but have no booking on any session \\u2014 see SDR List."});if(!d.awsSynced)a.push({c:"ae",i:"x",m:"AWS sync disabled \\u2014 AWS_PG_HOST is not set, so nothing is reaching the gw_form_leads mirror."});if(d.total>5&&d.enriched<d.total*0.3)a.push({c:"aw",i:"!",m:"Low enrichment rate ("+Math.round(d.enriched/d.total*100)+"% of sessions)."});if(d.todayCount===0)a.push({c:"aw",i:"o",m:"No new sessions in the last 24 hours."});if(a.length===0)a.push({c:"an",i:"\\u00b7",m:"Nothing flagged by the Overview metrics. Live service checks are on the System Health tab."});document.getElementById("alerts").innerHTML=a.map(function(x){return"<div class=\\"alertbox "+x.c+"\\"><span>"+x.i+"</span><span>"+x.m+"</span></div>";}).join("");}' +
+  'function renderAlerts(d){var a=[];if(d.pendingPartials>0)a.push({c:"aw",i:"!",m:d.pendingPartials+" session(s) waiting >2 hours without booking \\u2014 recovery cron will pick them up."});if(d.noBookingUid>0)a.push({c:"aw",i:"!",m:d.noBookingUid+" people (deduped, qualified B2B) completed the form but have no booking on any session. The SDR List is wider still \\u2014 it does not filter on completed."});if(!d.awsSynced)a.push({c:"ae",i:"x",m:"AWS sync disabled \\u2014 AWS_PG_HOST is not set, so nothing is reaching the gw_form_leads mirror."});if(d.total>5&&d.enriched<d.total*0.3)a.push({c:"aw",i:"!",m:"Low enrichment rate ("+Math.round(d.enriched/d.total*100)+"% of sessions)."});if(d.todayCount===0)a.push({c:"aw",i:"o",m:"No new sessions in the last 24 hours."});if(a.length===0)a.push({c:"an",i:"\\u00b7",m:"Nothing flagged by the Overview metrics. Live service checks are on the System Health tab."});document.getElementById("alerts").innerHTML=a.map(function(x){return"<div class=\\"alertbox "+x.c+"\\"><span>"+x.i+"</span><span>"+x.m+"</span></div>";}).join("");}' +
   /* Four stages, one window, one top-of-funnel denominator.
      Was: four bars all measured as a % of step 1, with "disqualified" sitting
      below "booked" as if it were a later stage — it is not a stage, a
@@ -2907,6 +2934,11 @@ app.get('/monitor', (req, res) => {
   'function renderPag(pg,pages){if(pages<=1){document.getElementById("lpag").innerHTML="";return;}var h="";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg-1)+")\\""+(pg<=1?" disabled":"")+">&larr;</button>";var s=Math.max(1,pg-2),e=Math.min(pages,pg+2);if(s>1)h+="<button class=\\"pb\\" onclick=\\"loadLeads(1)\\">1</button>"+(s>2?"<span class=\\"pi\\">&#8230;</span>":"");for(var i=s;i<=e;i++)h+="<button class=\\"pb"+(i===pg?" act":"")+ "\\" onclick=\\"loadLeads("+i+")\\" >"+i+"</button>";if(e<pages)h+=(e<pages-1?"<span class=\\"pi\\">&#8230;</span>":"")+"<button class=\\"pb\\" onclick=\\"loadLeads("+pages+")\\" >"+pages+"</button>";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg+1)+")\\"" +(pg>=pages?" disabled":"")+">&rarr;</button><span class=\\"pi\\">Page "+pg+" of "+pages+"</span>";document.getElementById("lpag").innerHTML=h;}' +
   'var lmLeads=[],lmChart=null,lmFilter="all";' +
   'var lmPillDefs=[["all","All"],["awaiting","Awaiting send"],["sent","Sent"],["abandoned","Abandoned"],["internal","Internal tests"]];' +
+  /* TRUE TOTALS, from the server. These used to be counted client-side over
+     whatever /monitor/lm-leads returned — and that route is LIMIT 500 while
+     the dashboard never sends a limit, so past 500 rows in the window every
+     pill silently understated while reading as a total of the whole funnel. */
+  'var lmTotals=null,lmShownOf=null;' +
   'function lmPct(a,b){return b>0?Math.round(a/b*100)+"%":"\\u2014";}' +
   'function lmET(t){if(!t)return "\\u2014";return new Date(t).toLocaleString("en-US",{timeZone:TZ,day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"});}' +
   'function lmBars(rows,total){if(!rows.length)return "<div class=\\"nd\\">No data yet</div>";' +
@@ -2949,6 +2981,7 @@ app.get('/monitor', (req, res) => {
   'document.getElementById("lm-custom").innerHTML=cc.length?cc.map(function(x){' +
   'return "<div style=\\"display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0f0;font-size:13px\\"><span>"+esc(x.label)+"</span><span style=\\"color:#888\\">"+x.n+"</span></div>";}).join(""):' +
   '"<div class=\\"nd\\">None yet \\u2014 the dropdown is covering everyone so far.</div>";' +
+  'lmTotals=d.statusTotals||null;' +
   'var dy=d.daily||[],cv=document.getElementById("lm-chart");' +
   'if(cv&&window.Chart){if(lmChart)lmChart.destroy();lmChart=new Chart(cv,{type:"line",data:{labels:dy.map(function(x){return x.day.slice(5);}),' +
   'datasets:[{label:"Views",data:dy.map(function(x){return x.views;}),borderColor:"#d4d4d4",backgroundColor:"#d4d4d4",tension:0.25,pointRadius:0,borderWidth:2},' +
@@ -2956,7 +2989,8 @@ app.get('/monitor', (req, res) => {
   '{label:"Submitted",data:dy.map(function(x){return x.submitted;}),borderColor:"#1a1a1a",backgroundColor:"#1a1a1a",tension:0.25,pointRadius:0,borderWidth:2}]},' +
   'options:{responsive:true,interaction:{mode:"index",intersect:false},plugins:{legend:{display:true,labels:{boxWidth:10,font:{size:11}}}},scales:{y:{beginAtZero:true,ticks:{precision:0}}}}});}' +
   '}catch(err){console.warn("[LM] metrics failed",err);}' +
-  'try{var r2=await fetch(API+"/monitor/lm-leads"+dq,{cache:"no-store"});var d2=await r2.json();lmLeads=d2.leads||[];lmRender();' +
+  'try{var r2=await fetch(API+"/monitor/lm-leads"+dq,{cache:"no-store"});var d2=await r2.json();lmLeads=d2.leads||[];' +
+  'lmShownOf=(typeof d2.total==="number")?d2.total:null;lmRender();' +
   '}catch(e2){document.getElementById("lm-tbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\">Failed to load</td></tr>";}}' +
 
   'function lmMatch(l){' +
@@ -2970,14 +3004,21 @@ app.get('/monitor', (req, res) => {
   'function lmSetFilter(k){lmFilter=k;lmRender();}' +
 
   'function lmRender(){' +
-  'var counts={all:0,awaiting:0,sent:0,abandoned:0,internal:0};' +
-  'lmLeads.forEach(function(l){if(l.is_internal){counts.internal++;return;}counts.all++;if(counts[l.status]!==undefined)counts[l.status]++;});' +
+  /* Server totals when we have them. The client fallback counts only the
+     loaded page, so it is LABELLED as such rather than presented as a total —
+     which is the whole failure this replaces. */
+  'var counts,fromPage=!lmTotals;' +
+  'if(lmTotals){counts={all:lmTotals.all,awaiting:lmTotals.awaiting,sent:lmTotals.sent,abandoned:lmTotals.abandoned,internal:lmTotals.internal};}' +
+  'else{counts={all:0,awaiting:0,sent:0,abandoned:0,internal:0};' +
+  'lmLeads.forEach(function(l){if(l.is_internal){counts.internal++;return;}counts.all++;if(counts[l.status]!==undefined)counts[l.status]++;});}' +
   'document.getElementById("lm-pills").innerHTML=lmPillDefs.map(function(p){var on=lmFilter===p[0];' +
   'return "<button onclick=\\"lmSetFilter(\'"+p[0]+"\')\\" style=\\"padding:5px 11px;border-radius:99px;font-size:12px;cursor:pointer;border:1px solid "+' +
   '(on?"#1a1a1a":"#e5e5e5")+";background:"+(on?"#1a1a1a":"#fff")+";color:"+(on?"#fff":"#444")+' +
   '"\\">"+p[1]+" <span style=\\"opacity:.6\\">"+(counts[p[0]]||0)+"</span></button>";}).join("");' +
   'var rows=lmSearched();var tb=document.getElementById("lm-tbody");' +
-  'set("lm-count",rows.length+" shown");' +
+  /* "N shown" next to a 500-row page reads as "N exist". */
+  'var cap=(lmShownOf!==null&&lmShownOf>lmLeads.length)?" \u00b7 table shows the most recent "+lmLeads.length+" of "+lmShownOf+" \u2014 the pill counts above are full totals":"";' +
+  'set("lm-count",rows.length+" shown"+(fromPage?" \u00b7 pill counts are for the loaded rows only, totals unavailable":"")+cap);' +
   'if(!rows.length){tb.innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\">Nothing matches</td></tr>";return;}' +
   'tb.innerHTML=rows.map(function(l,i){' +
   'var badge=l.is_internal?"<span style=\\"color:#888\\">internal</span>":' +
@@ -3090,7 +3131,8 @@ app.get('/monitor', (req, res) => {
   'function toggleSDRRow(idx){var row=document.getElementById("sdr-er-"+idx);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=document.getElementById("sdr-xbtn-"+idx);if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";}' +
   'function renderSDRTable(allLeads){' +
   'var q=(document.getElementById("sdr-search")||{}).value||"";' +
-  'var leads=q?allLeads.filter(function(l){var s=q.toLowerCase();return(l.email||"").toLowerCase().includes(s)||(l.company||"").toLowerCase().includes(s)||(l.first_name||"").toLowerCase().includes(s)||(l.enriched_industry||"").toLowerCase().includes(s);}):allLeads;' +
+  'var leads=q?allLeads.filter(function(l){var s=q.toLowerCase();' +
+  'return SDR_SEARCH_FIELDS.some(function(f){return String(l[f]||"").toLowerCase().includes(s);});}):allLeads;' +
   'set("sdr-count",leads.length+" lead"+(leads.length!==1?"s":""));' +
   'if(!leads.length){document.getElementById("sdr-tbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\">No leads found.</td></tr>";return;}' +
   'var html=leads.map(function(l,i){' +
@@ -3101,7 +3143,13 @@ app.get('/monitor', (req, res) => {
   '+"<tr class=\\"erow\\" id=\\"sdr-er-"+i+"\\" style=\\"display:none\\"><td></td><td colspan=\\"9\\">"+sdrPanel(l)+"</td></tr>";' +
   '}).join("");' +
   'document.getElementById("sdr-tbody").innerHTML=html;}' +
-  'function exportSDR(){window.location.href=API+"/monitor/sdr"+(TP||"?")+(TP?"&":"")+"format=csv";}' +
+  /* SDR_SEARCH_FIELDS — the client half. The server half is
+     SDR_SEARCH_COLUMNS in the /monitor/sdr route, and the tests lift both
+     lists and assert they are equal. Two copies of a field list is exactly
+     how an export quietly stops matching what is on screen. */
+  'var SDR_SEARCH_FIELDS=["email","company","first_name","enriched_industry"];' +
+  'function exportSDR(){var q=((document.getElementById("sdr-search")||{}).value||"").trim();' +
+  'window.location.href=API+"/monitor/sdr"+(TP||"?")+(TP?"&":"")+"format=csv"+(q?"&search="+encodeURIComponent(q):"");}' +
   'async function loadDupes(){' +
   'document.getElementById("dupes-tbody").innerHTML="<tr><td colspan=\\"7\\" class=\\"nd\\">Loading...</td></tr>";' +
   'try{' +

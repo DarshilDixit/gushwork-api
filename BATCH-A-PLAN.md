@@ -219,19 +219,27 @@ old row lands in a stage instead of vanishing from all four.
   every combination.
 
 **Booking definitions.** One shared SQL fragment for "has any booking" (no time
-comparison), used by:
+comparison), used by the two sites that ask question 1:
 
 - "No booking yet (SDR)" — `index.js:1290`
-- "Pending recovery" — `index.js:1274`–`1285`
 - the SDR route — `index.js:1888`
+
+**"Pending recovery" is NOT one of them.** An earlier draft of this list
+included it and predicted its number would drop, which contradicted both
+Decision 1 above and the Definitions section of `CLAUDE.md`. Settled with the
+owner, 25 Aug 2026: the card's job is to size the queue the recovery cron will
+actually send to, so it must count the cron's population — question 2, with the
+time comparison. It keeps its query and gets a truthful label. **Its number does
+not move.**
 
 "Recovered bookings" (`index.js:1222`) keeps `COALESCE(booked_at, created_at) >=
 l.created_at` as the documented exception — it is definitionally about ordering.
 
-**Numbers that move:** Pending recovery drops (people who already booked stop
-counting). The "Disqualified" filter drops (now excludes booked). "Step 1 only"
-may rise (`IS NOT TRUE` includes rows `= false` excluded). Relabel the Pending
-recovery card per Decision 1.
+**Numbers that move:** the "Disqualified" filter drops (now excludes booked).
+"Completed" drops (now excludes disqualified). "Step 1 only" may rise
+(`IS NOT TRUE` includes rows `= false` excluded, and rows with a null flag that
+were previously in no stage at all). Relabel the Pending recovery card per
+Decision 1.
 
 ---
 

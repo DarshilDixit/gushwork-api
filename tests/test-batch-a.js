@@ -885,6 +885,171 @@ function liftClientJs(startMarker, endMarker) {
          /SDR List can disagree/.test(src));
     }
 
+
+    /* ============================================================
+       10. CLAIMS THE DASHBOARD MAKES ABOUT ITSELF
+       ============================================================ */
+    {
+      /* The Overview card said "This is exactly the SDR List." It is not. The
+         Overview number filters completed = true; the SDR route has no completed
+         filter, so the SDR List is a strict SUPERSET. Anyone reconciling the two
+         would have found them off by that group and gone hunting for a bug. */
+      ok('claims: the card no longer says it is exactly the SDR List',
+         !/This is exactly the SDR List/.test(src));
+      ok('claims: it says which way the two differ',
+         /SDR List is deliberately wider/.test(src) && /no completed filter/.test(src));
+      ok('claims: the alert prose drops the same implication',
+         !/have no booking on any session \\u2014 see SDR List/.test(src));
+
+      /* The claim is only false because of this asymmetry — assert it still
+         holds, so if someone adds a completed filter to the SDR route the
+         tooltip becomes wrong in the other direction. */
+      const sdrRoute = between(src, "app.get('/monitor/sdr'", 'const leads = result.rows');
+      const metrics  = between(src, "app.get('/monitor/metrics'", "app.get('/monitor/funnel'");
+      ok('claims: the SDR route still has no completed filter',
+         !/l\.completed = true|l\.completed IS TRUE/.test(sdrRoute), sdrRoute.slice(0, 400));
+      ok('claims: the Overview number still has one',
+         /completed = true/.test(metrics));
+    }
+
+    /* ============================================================
+       11. SDR EXPORT MATCHES WHAT IS ON SCREEN
+
+       exportSDR sent format=csv and nothing else, so someone who searched
+       "acme", saw four rows and hit Export got the entire list.
+       ============================================================ */
+    {
+      // Both halves of the field list, lifted, and asserted equal.
+      const serverList = (() => {
+        const m = src.match(/const SDR_SEARCH_COLUMNS = (\[[^\]]+\]);/);
+        if (!m) throw new Error('SDR_SEARCH_COLUMNS not found');
+        return (new Function('return ' + m[1]))();
+      })();
+      const clientList = (() => {
+        const m = src.match(/'var SDR_SEARCH_FIELDS=(\[[^\]]+\]);'/);
+        if (!m) throw new Error('SDR_SEARCH_FIELDS not found');
+        return (new Function('return ' + m[1]))();
+      })();
+      eq('sdr: the export searches the same four fields as the table',
+         serverList.slice().sort(), clientList.slice().sort());
+      eq('sdr: and it is the four the audit named', serverList.slice().sort(),
+         ['company', 'email', 'enriched_industry', 'first_name']);
+
+      const sdrRoute = between(src, 'const SDR_SEARCH_COLUMNS', 'const leads = result.rows');
+      /* The placeholder is built as a string, not interpolated into a
+         template literal. A first attempt wrote it as an interpolation and
+         the "$" was eaten by String.replace's special patterns, producing
+         "LIKE 1" instead of "LIKE $1" — so this asserts the generated SQL,
+         not just the shape of the source. */
+      ok('sdr: the search term is parameterised, never interpolated',
+         /searchParams\.push\('%' \+ search \+ '%'\)/.test(sdrRoute)
+         && /const ph = '\$' \+ searchParams\.length/.test(sdrRoute), sdrRoute.slice(0, 900));
+      {
+        // Build the clause with the real column list and check the output.
+        const built = 'WHERE (' + serverList
+          .map((c) => 'LOWER(COALESCE(' + c + ", '')) LIKE " + '$1')
+          .join(' OR ') + ')';
+        ok('sdr: the generated clause carries a real $1 placeholder',
+           /LIKE \$1/.test(built) && !/LIKE 1\b/.test(built), built);
+        eq('sdr: one placeholder per searched column',
+           (built.match(/\$1/g) || []).length, serverList.length);
+      }
+      ok('sdr: the query receives the params array',
+         /\`, searchParams\);/.test(sdrRoute));
+      /* Filtering inside the deduped set would change WHICH row survives
+         DISTINCT ON per email, so a search could return a different row than the
+         unsearched table shows for the same person. */
+      ok('sdr: the filter is applied outside the DISTINCT ON, not inside it',
+         sdrRoute.indexOf('${searchSql}') > sdrRoute.indexOf(') deduped'), 'searchSql moved inside the dedupe');
+      ok('sdr: an empty search adds no WHERE clause at all',
+         /let searchSql = '';/.test(sdrRoute) && /if \(search\) \{/.test(sdrRoute));
+
+      // And the export actually sends it.
+      ok('sdr: export sends the search term',
+         /format=csv"\+\(q\?"&search="\+encodeURIComponent\(q\)/.test(src));
+      ok('sdr: the table search stays client-side',
+         /function renderSDRTable\(allLeads\)\{'/.test(src) && /SDR_SEARCH_FIELDS\.some/.test(src));
+    }
+
+    /* ============================================================
+       12. LEAD MAGNET — pill counts are totals, not a page
+
+       The pills were computed client-side over whatever /monitor/lm-leads
+       returned. That route is LIMIT 500 and the dashboard never sends a
+       limit, so it is always 500 — and the pills read as totals. Past 500
+       rows in the window every pill silently understated.
+       ============================================================ */
+    {
+      const metricsRoute = between(lmsrc, "router.get('/monitor/lm-metrics'", "router.get('/monitor/lm-leads'");
+      const leadsRoute   = between(lmsrc, "router.get('/monitor/lm-leads'", "router.post('/monitor/lm-delivered");
+
+      ok('lm: the metrics route returns real status totals',
+         /statusTotals:/.test(metricsRoute) && /AS all_count/.test(metricsRoute));
+      const totalsQuery = between(metricsRoute, 'AS all_count', "SELECT COALESCE(entry_point");
+      const leadsWhere  = between(leadsRoute, 'FROM lead_magnet_leads l', 'ORDER BY');
+      ok('lm: the totals cover the same population as the leads route',
+         /WHERE email IS NOT NULL/.test(totalsQuery)
+         && /created_at > NOW\(\) - INTERVAL '\$\{days\} days'/.test(totalsQuery), totalsQuery);
+      /* Stated as a comparison rather than two separate greps: if the leads
+         route's window or email guard changes, the totals have to follow or
+         the pills start describing a different set of people than the table. */
+      const norm = (s) => s.replace(/\s+/g, ' ').replace(/\bl\./g, '').trim();
+      ok('lm: and the two WHERE clauses agree, not just each look plausible',
+         norm(leadsWhere).includes('email IS NOT NULL')
+         && norm(totalsQuery).includes('email IS NOT NULL')
+         && norm(leadsWhere).includes("created_at > NOW() - INTERVAL '${days} days'")
+         && norm(totalsQuery).includes("created_at > NOW() - INTERVAL '${days} days'"),
+         norm(leadsWhere) + '  ||  ' + norm(totalsQuery));
+
+      /* The pills bucket by the status the leads route derives, so the two must
+         agree about the null cases. delivered can be null, and the CASE lets a
+         null fall through to 'awaiting'; a plain NOT delivered in the totals
+         would have counted it nowhere. */
+      ok('lm: sent is delivered IS TRUE, matching the CASE',
+         /completed IS TRUE\s*\n?\s*AND delivered IS TRUE\)?\s*AS sent/.test(metricsRoute.replace(/\s+/g, ' '))
+         || /AND delivered IS TRUE\)\s+AS sent/.test(metricsRoute.replace(/\s+/g, ' ')),
+         metricsRoute.replace(/\s+/g, ' ').match(/COUNT[^)]*delivered[^)]*\)[^A]*AS \w+/g));
+      ok('lm: awaiting is everything else that completed',
+         /AND delivered IS NOT TRUE\) AS awaiting/.test(metricsRoute.replace(/\s+/g, ' ')));
+      ok('lm: abandoned uses IS NOT TRUE so a null completed still lands somewhere',
+         /completed IS NOT TRUE\) AS abandoned/.test(metricsRoute.replace(/\s+/g, ' ')));
+      ok('lm: internal is split out, matching the pill that shows it',
+         /is_internal IS TRUE\) AS internal/.test(metricsRoute.replace(/\s+/g, ' ')));
+
+      /* Every bucket the client renders has to exist in the payload, or a pill
+         silently reads zero. */
+      const pillKeys = (() => {
+        const m = src.match(/'var lmPillDefs=(\[.*?\]);'/);
+        return (new Function('return ' + m[1]))().map((p) => p[0]);
+      })();
+      const payloadKeys = (metricsRoute.match(/^\s{10}(\w+):\s+parseInt/gm) || [])
+        .map((s) => s.trim().split(':')[0]);
+      ok('lm: every pill has a matching total in the payload',
+         pillKeys.every((k) => payloadKeys.includes(k)),
+         'pills ' + pillKeys.join(',') + ' vs payload ' + payloadKeys.join(','));
+
+      ok('lm: the leads route reports the matching total, not just a page',
+         /res\.json\(\{ leads: rows, total: totalRows\[0\]\.total, limit \}\)/.test(leadsRoute));
+      ok('lm: the LIMIT is still there — this fixes the label, not the pagination',
+         /LIMIT \$1/.test(leadsRoute));
+
+      // Client side: pills read the server totals, and say so when they cannot.
+      ok('lm: the totals are captured from the metrics payload',
+         /'lmTotals=d\.statusTotals\|\|null;'/.test(src));
+      {
+        const render = between(src, "'function lmRender(){'", "'var rows=lmSearched()");
+        ok('lm: and the pills actually READ them',
+           /counts=\{all:lmTotals\.all,awaiting:lmTotals\.awaiting,sent:lmTotals\.sent,abandoned:lmTotals\.abandoned,internal:lmTotals\.internal\}/.test(render),
+           render);
+        ok('lm: the page-count fallback only runs when the totals are missing',
+           /var counts,fromPage=!lmTotals;/.test(render) && /if\(lmTotals\)\{/.test(render), render);
+      }
+      ok('lm: a missing totals payload is labelled, not passed off as a total',
+         /pill counts are for the loaded rows only, totals unavailable/.test(src));
+      ok('lm: the table says how many of how many it is showing',
+         /table shows the most recent "\+lmLeads\.length\+" of "\+lmShownOf/.test(src));
+    }
+
     /* ============================================================ */
     console.log('');
     if (failures.length) {

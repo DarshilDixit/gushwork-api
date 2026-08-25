@@ -464,7 +464,7 @@ module.exports = function createLeadMagnetRouter(deps) {
     const days = Math.min(parseInt(req.query.days, 10) || 30, 365);
     const scope = `created_at > NOW() - INTERVAL '${days} days' AND is_internal IS NOT TRUE`;
     try {
-      const [funnel, industries, custom, daily, entries] = await Promise.all([
+      const [funnel, industries, custom, daily, statusTotals, entries] = await Promise.all([
         pool.query(`
           SELECT
             COUNT(*)                                                AS views,
@@ -528,6 +528,19 @@ module.exports = function createLeadMagnetRouter(deps) {
              AND l.is_internal IS NOT TRUE
            GROUP BY d.day ORDER BY d.day`),
         pool.query(`
+          SELECT
+            COUNT(*) FILTER (WHERE is_internal IS NOT TRUE)                                     AS all_count,
+            COUNT(*) FILTER (WHERE is_internal IS NOT TRUE AND completed IS TRUE
+                               AND delivered IS TRUE)                                           AS sent,
+            COUNT(*) FILTER (WHERE is_internal IS NOT TRUE AND completed IS TRUE
+                               AND delivered IS NOT TRUE)                                       AS awaiting,
+            COUNT(*) FILTER (WHERE is_internal IS NOT TRUE AND completed IS NOT TRUE)           AS abandoned,
+            COUNT(*) FILTER (WHERE is_internal IS TRUE)                                         AS internal,
+            COUNT(*)                                                                            AS total
+            FROM lead_magnet_leads
+           WHERE email IS NOT NULL
+             AND created_at > NOW() - INTERVAL '${days} days'`),
+        pool.query(`
           SELECT COALESCE(entry_point, 'unknown') AS label,
                  COUNT(*)::int                             AS n,
                  COUNT(*) FILTER (WHERE completed)::int    AS completed
@@ -535,8 +548,19 @@ module.exports = function createLeadMagnetRouter(deps) {
            WHERE ${scope} AND step_reached >= 2
            GROUP BY 1 ORDER BY n DESC LIMIT 10`),
       ]);
+      const stc = statusTotals.rows[0];
       res.json({
         funnel: funnel.rows[0],
+        /* Keyed to match the pill ids on the dashboard so the two cannot be
+           wired up to different things by accident. */
+        statusTotals: {
+          all:        parseInt(stc.all_count) || 0,
+          awaiting:   parseInt(stc.awaiting)  || 0,
+          sent:       parseInt(stc.sent)      || 0,
+          abandoned:  parseInt(stc.abandoned) || 0,
+          internal:   parseInt(stc.internal)  || 0,
+          total:      parseInt(stc.total)     || 0,
+        },
         industries: industries.rows,
         custom_categories: custom.rows,
         daily: daily.rows,
@@ -581,7 +605,16 @@ module.exports = function createLeadMagnetRouter(deps) {
           LIMIT $1`,
         [limit]
       );
-      res.json({ leads: rows });
+      /* The caller has no way to tell a 500-row page from a 500-row table.
+         Reporting the matching total is what lets the dashboard say
+         "showing 500 of 1,240" rather than presenting a page as a total. */
+      const { rows: totalRows } = await pool.query(
+        `SELECT COUNT(*)::int AS total
+           FROM lead_magnet_leads l
+          WHERE l.email IS NOT NULL
+            AND l.created_at > NOW() - INTERVAL '${days} days'`
+      );
+      res.json({ leads: rows, total: totalRows[0].total, limit });
     } catch (err) {
       console.error('[LM /monitor/lm-leads]', err.message);
       res.status(500).json({ error: err.message });
