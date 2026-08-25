@@ -237,7 +237,14 @@ function liftClientJs(startMarker, endMarker) {
   // ONE bot regex for the whole file.
   eq('funnel: exactly one BOT_RE definition', (src.match(/const BOT_RE\s*=/g) || []).length, 1);
   ok('funnel: BOT_RE lives at module scope', /^const BOT_RE\s*=/m.test(src));
-  eq('funnel: both routes consume it', (src.match(/\[BOT_RE\]|BOT_RE\]/g) || []).length, 2);
+  /* Three consumers now: the Overview funnel, /monitor/funnel, and the
+     Step 1 health check — which needs it, because a night of crawler traffic
+     would otherwise push the session denominator over the floor and
+     manufacture a red. The count is asserted as a floor and the definition as
+     exactly one, so the thing that matters (no second copy of the regex)
+     still fails loudly. */
+  ok('funnel: every consumer passes the shared const',
+     (src.match(/\[BOT_RE\]|BOT_RE\]/g) || []).length >= 3);
 
   // Nulls, not zeros, with no tracking.
   ok('funnel: no-coverage branch returns nulls',
@@ -370,14 +377,370 @@ function liftClientJs(startMarker, endMarker) {
      /SDR target/i.test(cron) && /drop-off/i.test(cron));
 }
 
-/* ============================================================ */
-console.log('');
-if (failures.length) {
-  console.log('  FAILURES:');
-  failures.forEach((f) => console.log('   ✗ ' + f));
-  console.log('');
+
+/* ============================================================
+   7. SYSTEM HEALTH — nine rows that check something
+
+   Seven of the nine used to pass a hardcoded green class. The
+   canonical line was:
+
+     badge("s-partial", d.total+" sessions saved", "bg")
+
+   These tests drive the REAL check functions, lifted out of index.js,
+   against stubbed query results. No database and no network.
+
+   The AWS row carries an extra obligation: it must be structurally
+   incapable of returning insufficient_data, because a mirror we cannot
+   reach is indistinguishable from one that has gone stale and both
+   starve the sdr-calling dialer. That is asserted twice — once by
+   reading the function's own source, once by driving it.
+   ============================================================ */
+{
+  const healthSrc = between(src, '/* ══ SYSTEM HEALTH', "app.get('/monitor/health'");
+
+  // Everything the block reaches for that lives elsewhere in the file.
+  const sentAlerts = [];
+  const sentSlack  = [];
+  const H = (new Function(
+    'pool', 'awsPool', 'BOT_RE', 'CRON_STALE_MS',
+    '_lastCronRunAt', '_cronRanThisProcess', '_processStartedAt',
+    'alertOps', 'sendOpsSlack', 'bHeader', 'bDivider', 'bFields', 'bContext', 'etStamp',
+    healthSrc + `
+    return { checkPartialHealth, checkSubmitHealth, checkApolloHealth, checkBookingHealth,
+             checkCronHealth, checkAwsHealth, checkRecoveryHealth,
+             evaluateHealthAlerts, runHealthChecks, withTimeout, fmtAge,
+             HEALTH_SEVERITY, HEALTH_MIN_SAMPLE, HEALTH_SUBMIT_MIN_STEP1,
+             HEALTH_BOOKING_MIN_COMPLETED, HEALTH_RECOVERY_STUCK_H, HEALTH_AWS_TIMEOUT_MS };`
+  ))(
+    null, null, '(bot|crawl)', 3 * 60 * 60 * 1000,
+    Date.now(), false, Date.now(),
+    (sev, source, title, details) => { sentAlerts.push({ sev, source, title, details }); return true; },
+    (blocks, text) => { sentSlack.push(text); },
+    (t) => ({ t }), () => ({ d: 1 }), (f) => ({ f }), (c) => ({ c }), () => '25/08/2026, 12:00 ET'
+  );
+
+  const rowsPool  = (row) => ({ query: async () => ({ rows: [row] }) });
+  const deadPool  = (msg) => ({ query: async () => { throw new Error(msg); } });
+  const st = async (p) => (await p).state;
+
+  /* ── Step 1 — /partial ── */
+  (async () => {
+    eq('health/partial: sessions arriving with zero leads is RED',
+       await st(H.checkPartialHealth(rowsPool({ sessions: 40, leads: 0 }))), 'red');
+    eq('health/partial: a quiet window is grey, not red',
+       await st(H.checkPartialHealth(rowsPool({ sessions: 3, leads: 0 }))), 'insufficient_data');
+    eq('health/partial: leads flowing is green',
+       await st(H.checkPartialHealth(rowsPool({ sessions: 40, leads: 12 }))), 'green');
+    eq('health/partial: an empty window is grey, never green',
+       await st(H.checkPartialHealth(rowsPool({ sessions: 0, leads: 0 }))), 'insufficient_data');
+    eq('health/partial: a failed query is RED, not grey',
+       await st(H.checkPartialHealth(deadPool('connection refused'))), 'red');
+
+    /* ── Step 2 — /submit ── */
+    eq('health/submit: step-1 traffic with zero completions is RED',
+       await st(H.checkSubmitHealth(rowsPool({ step1: 60, completions: 0 }))), 'red');
+    eq('health/submit: below the step-1 floor is grey',
+       await st(H.checkSubmitHealth(rowsPool({ step1: 4, completions: 0 }))), 'insufficient_data');
+    eq('health/submit: completions in the window is green',
+       await st(H.checkSubmitHealth(rowsPool({ step1: 60, completions: 9 }))), 'green');
+    eq('health/submit: a failed query is RED',
+       await st(H.checkSubmitHealth(deadPool('timeout'))), 'red');
+
+    /* The old row asked whether there had EVER been a completion, so it went
+       green in July and had no way back. */
+    const submitFn = between(healthSrc, 'async function checkSubmitHealth', 'Apollo enrichment');
+    ok('health/submit: the window is in the query, not a lifetime count',
+       (submitFn.match(/INTERVAL '\$\{HEALTH_SUBMIT_WINDOW_H\} hours'/g) || []).length === 2
+       && /submitted_at >= NOW\(\)/.test(submitFn), submitFn.slice(0, 300));
+
+    /* ── Apollo ── */
+    eq('health/apollo: zero enrichments against a real sample is RED',
+       await st(H.checkApolloHealth(rowsPool({ leads: 100, enriched: 0, last_enriched: null }))), 'red');
+    eq('health/apollo: a healthy rate is green',
+       await st(H.checkApolloHealth(rowsPool({ leads: 100, enriched: 80, last_enriched: new Date() }))), 'green');
+    eq('health/apollo: a middling rate is amber',
+       await st(H.checkApolloHealth(rowsPool({ leads: 100, enriched: 40, last_enriched: new Date() }))), 'amber');
+    eq('health/apollo: a bad rate is red',
+       await st(H.checkApolloHealth(rowsPool({ leads: 100, enriched: 10, last_enriched: new Date() }))), 'red');
+    eq('health/apollo: below the lead floor is grey',
+       await st(H.checkApolloHealth(rowsPool({ leads: 3, enriched: 0, last_enriched: null }))), 'insufficient_data');
+    eq('health/apollo: a failed query is RED',
+       await st(H.checkApolloHealth(deadPool('relation does not exist'))), 'red');
+
+    /* ── Booking ── */
+    eq('health/booking: zero bookings against real completions is RED',
+       await st(H.checkBookingHealth(rowsPool({ completed_people: 60, booked_people: 0 }))), 'red');
+    eq('health/booking: a healthy rate is green',
+       await st(H.checkBookingHealth(rowsPool({ completed_people: 60, booked_people: 40 }))), 'green');
+    /* A low booking rate is a business outcome, not an outage. Amber keeps it
+       off the alerting path, which only ever fires on green to red. */
+    eq('health/booking: a low rate is amber, not red',
+       await st(H.checkBookingHealth(rowsPool({ completed_people: 60, booked_people: 12 }))), 'amber');
+    eq('health/booking: below the completions floor is grey',
+       await st(H.checkBookingHealth(rowsPool({ completed_people: 4, booked_people: 0 }))), 'insufficient_data');
+    eq('health/booking: a failed query is RED',
+       await st(H.checkBookingHealth(deadPool('boom'))), 'red');
+
+    /* ── Cron — pure function of the clock ── */
+    const NOW = 1_800_000_000_000;
+    const H3  = 3 * 60 * 60 * 1000;
+    eq('health/cron: a recent run is green',
+       H.checkCronHealth(NOW, NOW - 10 * 60 * 1000, true, NOW - H3).state, 'green');
+    eq('health/cron: a stale run is RED — the old row could not go red at all',
+       H.checkCronHealth(NOW, NOW - 5 * H3, true, NOW - 6 * H3).state, 'red');
+    /* _lastCronRunAt is seeded to boot time. Without the ran-this-process flag
+       this case would read green for three hours after every redeploy. */
+    eq('health/cron: not yet run, inside the window, is grey — never green',
+       H.checkCronHealth(NOW, NOW, false, NOW - 10 * 60 * 1000).state, 'insufficient_data');
+    eq('health/cron: not yet run, past the window, is RED',
+       H.checkCronHealth(NOW, NOW, false, NOW - 2 * H3).state, 'red');
+    ok('health/cron: a never-run cron can never be green',
+       [10 * 60 * 1000, H3 - 1, H3 + 1, 50 * H3]
+         .every((up) => H.checkCronHealth(NOW, NOW, false, NOW - up).state !== 'green'));
+
+    /* ── AWS mirror — the owner's top priority ──
+       Requirement, verbatim: it must fail red on a connection error, not
+       degrade to grey. Asserted structurally AND behaviourally. */
+    const awsFn = between(healthSrc, 'async function checkAwsHealth', 'Email recovery');
+    ok('health/aws: the function body contains no insufficient_data at all',
+       !/insufficient_data/.test(awsFn), 'a grey path was added to the AWS check');
+    ok('health/aws: the function body contains no amber either — green or red only',
+       !/'amber'/.test(awsFn));
+    ok('health/aws: it really queries the mirror table',
+       /FROM gw_form_leads/.test(awsFn) && /awsDb\.query/.test(awsFn));
+    ok('health/aws: it compares against leads over the same window',
+       /FROM leads/.test(awsFn) && /railwayDb\.query/.test(awsFn)
+       && (awsFn.match(/INTERVAL '\$\{HEALTH_AWS_WINDOW_H\} hours'/g) || []).length === 2);
+    ok('health/aws: the query is bounded by a timeout',
+       /withTimeout\(/.test(awsFn) && /HEALTH_AWS_TIMEOUT_MS/.test(awsFn));
+    ok('health/aws: and the bound is short enough to matter',
+       H.HEALTH_AWS_TIMEOUT_MS > 0 && H.HEALTH_AWS_TIMEOUT_MS <= 15000, String(H.HEALTH_AWS_TIMEOUT_MS));
+    ok('health/aws: the reason grey is banned is written down where it can be read',
+       /indistinguishable/.test(awsFn) && /dialer/.test(awsFn));
+
+    const railway = (n) => rowsPool({ recent: n });
+    const mirror  = (n, lastWrite) => rowsPool({ recent: n, last_write: lastWrite === undefined ? new Date() : lastWrite });
+
+    eq('health/aws: an unreachable mirror is RED, not grey',
+       await st(H.checkAwsHealth(deadPool('ECONNREFUSED'), railway(40))), 'red');
+    eq('health/aws: an auth failure is RED',
+       await st(H.checkAwsHealth(deadPool('password authentication failed'), railway(40))), 'red');
+    eq('health/aws: AWS_PG_HOST unset is RED, not green and not grey',
+       await st(H.checkAwsHealth(null, railway(40))), 'red');
+    eq('health/aws: a Railway-side failure is RED too',
+       await st(H.checkAwsHealth(mirror(40), deadPool('railway down'))), 'red');
+    eq('health/aws: leads on Railway and nothing mirrored is RED',
+       await st(H.checkAwsHealth(mirror(0), railway(40))), 'red');
+    eq('health/aws: drift past tolerance is RED',
+       await st(H.checkAwsHealth(mirror(28), railway(40))), 'red');
+    eq('health/aws: a couple of in-flight writes are not an incident',
+       await st(H.checkAwsHealth(mirror(39), railway(40))), 'green');
+    eq('health/aws: in sync is green',
+       await st(H.checkAwsHealth(mirror(40), railway(40))), 'green');
+
+    /* Both zero is a VERIFIED positive — we connected, we queried, the two
+       agree — so it is green, and the text has to say what was verified
+       rather than implying traffic we did not see. */
+    const quiet = await H.checkAwsHealth(mirror(0), railway(0));
+    eq('health/aws: reachable with nothing to mirror is green', quiet.state, 'green');
+    ok('health/aws: and says reachable rather than implying traffic',
+       /Reachable/.test(quiet.text) && !/In sync/.test(quiet.text), quiet.text);
+
+    /* Every reachable outcome, driven end to end: none of them is grey. */
+    const awsCases = [
+      [deadPool('x'), railway(40)], [null, railway(40)], [mirror(40), deadPool('x')],
+      [mirror(0), railway(40)], [mirror(28), railway(40)], [mirror(39), railway(40)],
+      [mirror(40), railway(40)], [mirror(0), railway(0)],
+    ];
+    const awsStates = [];
+    for (const [a, r] of awsCases) awsStates.push(await st(H.checkAwsHealth(a, r)));
+    ok('health/aws: no driven case returns insufficient_data',
+       awsStates.every((s) => s === 'green' || s === 'red'), awsStates.join(','));
+
+    // The timeout wrapper itself, so "bounded by a timeout" is not just a grep.
+    let timedOut = false;
+    try { await H.withTimeout(new Promise(() => {}), 20, 'stub'); }
+    catch (e) { timedOut = /timed out/.test(e.message); }
+    ok('health/aws: withTimeout rejects a hung query', timedOut);
+
+    /* ── Email recovery ── */
+    eq('health/recovery: a stuck queue is RED',
+       await st(H.checkRecoveryHealth(rowsPool({ processed: 20, stuck: 3 }))), 'red');
+    eq('health/recovery: sends happening and nothing stuck is green',
+       await st(H.checkRecoveryHealth(rowsPool({ processed: 20, stuck: 0 }))), 'green');
+    eq('health/recovery: nothing to do is grey, not green',
+       await st(H.checkRecoveryHealth(rowsPool({ processed: 0, stuck: 0 }))), 'insufficient_data');
+    eq('health/recovery: a failed query is RED',
+       await st(H.checkRecoveryHealth(deadPool('boom'))), 'red');
+
+    /* This row asks whether the CRON is clearing its own queue, so it has to
+       count the rows the cron would actually pick up. Widen the predicate and
+       a row the cron never selects sits red here forever. */
+    const recFn = between(healthSrc, 'async function checkRecoveryHealth', 'One place that runs them all');
+    ok('health/recovery: mirrors the cron predicate exactly',
+       /disqualified = false/.test(recFn) && /loops_sent = false/.test(recFn)
+       && /booked\.booked_at >= l\.created_at/.test(recFn), recFn);
+    ok('health/recovery: does NOT widen the cron predicate to IS NOT TRUE',
+       !/IS NOT TRUE/.test(recFn));
+    ok('health/recovery: stuck is measured past the cron staleness window, not at 2h',
+       H.HEALTH_RECOVERY_STUCK_H === 5);
+
+    /* ── Minimum denominators everywhere but AWS ── */
+    const windowed = { partial: 'checkPartialHealth', submit: 'checkSubmitHealth',
+                       apollo: 'checkApolloHealth', booking: 'checkBookingHealth' };
+    Object.keys(windowed).forEach((id) => {
+      const fn = between(healthSrc, 'async function ' + windowed[id], '/* ──');
+      ok('health/' + id + ': has a minimum denominator, so a quiet night is grey',
+         /HEALTH_MIN_SAMPLE|HEALTH_SUBMIT_MIN_STEP1|HEALTH_BOOKING_MIN_COMPLETED/.test(fn)
+         && /insufficient_data/.test(fn), fn.slice(0, 120));
+    });
+
+    /* ── ALERTING — transitions only, through the existing alertOps ── */
+    const red   = (id) => ({ [id]: { id, state: 'red',   text: 'broken', detail: 'd' } });
+    const green = (id) => ({ [id]: { id, state: 'green', text: 'fine',   detail: 'd' } });
+    const grey  = (id) => ({ [id]: { id, state: 'insufficient_data', text: 'quiet', detail: 'd' } });
+
+    sentAlerts.length = 0; sentSlack.length = 0;
+    H.evaluateHealthAlerts(red('partial'));
+    eq('health/alert: green to red fires once', sentAlerts.length, 1);
+    H.evaluateHealthAlerts(red('partial'));
+    H.evaluateHealthAlerts(red('partial'));
+    eq('health/alert: staying red does not re-fire on every poll', sentAlerts.length, 1);
+    eq('health/alert: /partial is critical — Slack and email', sentAlerts[0].sev, 'critical');
+
+    /* Grey is inert. It means "not enough evidence", and alerting on an
+       absence of evidence is the same mistake as recording "we could not
+       check" as "we checked and it is bad". */
+    H.evaluateHealthAlerts(grey('partial'));
+    eq('health/alert: grey neither alerts nor clears', sentAlerts.length + sentSlack.length, 1);
+
+    H.evaluateHealthAlerts(green('partial'));
+    eq('health/alert: red to green sends a recovery message', sentSlack.length, 1);
+    ok('health/alert: the recovery message is not another alert', sentAlerts.length === 1);
+    ok('health/alert: and it names the row that recovered',
+       /Step 1 \/partial/.test(sentSlack[0]) && /recovered/.test(sentSlack[0]), sentSlack[0]);
+    H.evaluateHealthAlerts(green('partial'));
+    eq('health/alert: staying green does not repeat the recovery', sentSlack.length, 1);
+
+    // A row that is green from the first observation has not "recovered".
+    sentAlerts.length = 0; sentSlack.length = 0;
+    H.evaluateHealthAlerts(green('booking'));
+    eq('health/alert: a first-ever green is silent', sentAlerts.length + sentSlack.length, 0);
+
+    // A row that is red on the first observation after a restart must alert.
+    sentAlerts.length = 0;
+    H.evaluateHealthAlerts(red('aws'));
+    eq('health/alert: red on the first observation still alerts', sentAlerts.length, 1);
+    eq('health/alert: AWS is critical', sentAlerts[0].sev, 'critical');
+
+    // Severity split — the owner's decision, Aug 2026.
+    eq('health/alert: /submit is critical',   H.HEALTH_SEVERITY.submit,   'critical');
+    eq('health/alert: Apollo is a warning',   H.HEALTH_SEVERITY.apollo,   'warning');
+    eq('health/alert: Booking is a warning',  H.HEALTH_SEVERITY.booking,  'warning');
+    eq('health/alert: Cron is a warning',     H.HEALTH_SEVERITY.cron,     'warning');
+    eq('health/alert: Recovery is a warning', H.HEALTH_SEVERITY.recovery, 'warning');
+    eq('health/alert: exactly three rows page by email',
+       Object.keys(H.HEALTH_SEVERITY).filter((k) => H.HEALTH_SEVERITY[k] === 'critical').sort(),
+       ['aws', 'partial', 'submit']);
+
+    /* ── No second alerting system ── */
+    ok('health: alerting goes through the existing alertOps',
+       /alertOps\(HEALTH_SEVERITY\[id\]/.test(healthSrc));
+    ok('health: recovery goes through the existing sendOpsSlack',
+       /sendOpsSlack\(/.test(healthSrc));
+    ok('health: no private cooldown map was introduced',
+       !/_healthLastSent|HEALTH_COOLDOWN/.test(healthSrc));
+
+    /* ── Wired into the EXISTING heartbeat, not a new timer ── */
+    const hb = between(src, 'function startHeartbeat()', 'PHASE 3: startup configuration audit');
+    ok('health: the heartbeat runs the checks', /runHealthChecks\(\)/.test(hb));
+    ok('health: and evaluates transitions', /evaluateHealthAlerts/.test(hb));
+    ok('health: no second setInterval was added for health',
+       (hb.match(/setInterval/g) || []).length === 1, hb);
+
+    /* ── The route ── */
+    const route = between(src, "app.get('/monitor/health'", "app.get('/monitor/metrics'");
+    ok('health: the route is token-gated like every other monitor route',
+       /MONITOR_TOKEN/.test(route) && /Unauthorized/.test(route), route);
+
+    /* ── The dashboard: no literal green class survives ── */
+    const rows = between(src, "'<div class=\"tp\" id=\"tp-health\">'", "'<div class=\"sl\">Enrichment coverage</div>'");
+    ok('health: the hardcoded green badge for /partial is gone',
+       !/badge\("s-partial",d\.total/.test(src));
+    ok('health: no health badge is assigned from a lifetime counter',
+       !/badge\("s-submit",d\.completed>0/.test(src) && !/badge\("s-aws",d\.awsSynced/.test(src)
+       && !/badge\("s-loops",d\.loopsSent/.test(src));
+    ok('health: /partial no longer claims to cover the AWS write',
+       !/Email \+ lead saved to Railway \+ AWS/.test(rows), rows);
+    ok('health: /submit no longer claims Slack fired',
+       !/Lead completed &#43; Slack fired|Lead completed \+ Slack fired/.test(rows), rows);
+    ok('health: the AWS row says it queries the mirror',
+       /queried live against Railway/.test(rows), rows);
+
+    /* ── The client badge renderer, executed ── */
+    const clientSrc = liftClientJs("'var HCLS={green:\"bg\",amber:\"ba\",red:\"br\",insufficient_data:\"bx\"};'",
+                                   "'function renderAlerts(d){");
+    const painted = {};
+    const cdoc = { getElementById: (id) => (painted[id] = painted[id] || { textContent: '', className: '', title: '' }) };
+    const lastSet = {};
+    const CB = (new Function('document', 'fetch', 'API', 'TP', 'TZ', 'AbortSignal', 'set',
+      'function badge(id,text,cls){var el=document.getElementById(id);if(!el)return;el.textContent=text;el.className="badge "+cls;}'
+      + clientSrc + '\n return { paintHealth, checkHealth, HCLS, HIDS };'))(
+      cdoc,
+      async () => { throw new Error('NetworkError'); },
+      'http://x', '', 'America/New_York', { timeout: () => null },
+      (id, v) => { lastSet[id] = v; }
+    );
+
+    eq('health/ui: grey renders grey, never the green class', CB.HCLS.insufficient_data, 'bx');
+    eq('health/ui: red renders red', CB.HCLS.red, 'br');
+    eq('health/ui: every check id maps to a row', Object.keys(CB.HIDS).sort(),
+       ['apollo', 'aws', 'booking', 'cron', 'partial', 'recovery', 'submit']);
+
+    CB.paintHealth({ checks: {
+      partial: { state: 'green', text: 'ok', detail: 'why' },
+      aws:     { state: 'red',   text: 'unreachable', detail: 'why' },
+      cron:    { state: 'insufficient_data', text: 'quiet', detail: 'why' },
+    } });
+    eq('health/ui: a green check paints green', painted['s-partial'].className, 'badge bg');
+    eq('health/ui: a red check paints red',     painted['s-aws'].className,     'badge br');
+    eq('health/ui: a grey check paints grey',   painted['s-cron'].className,    'badge bx');
+    /* A row with no result is not a quiet row. It has to look wrong. */
+    eq('health/ui: a missing check paints RED, not grey', painted['s-enrich'].className, 'badge br');
+    eq('health/ui: and says so', painted['s-enrich'].textContent, 'No result');
+
+    /* THE FETCH ITSELF FAILING IS NOT A QUIET NIGHT. Grey on this tab means
+       "not enough traffic to judge"; it must never also mean "we could not
+       ask". Driven through the real checkHealth with a fetch that throws. */
+    await CB.checkHealth();
+    ok('health/ui: an unreachable health route paints every row RED',
+       Object.values(CB.HIDS).every((rid) => painted[rid].className === 'badge br'),
+       Object.values(CB.HIDS).map((rid) => rid + '=' + painted[rid].className).join(' '));
+    ok('health/ui: and none of them is left grey or green',
+       !Object.values(CB.HIDS).some((rid) => /badge (bx|bg|ba)$/.test(painted[rid].className)));
+    ok('health/ui: the timestamp line says the check did not happen',
+       /unreachable/i.test(lastSet.hupd || ''), lastSet.hupd);
+
+    // An unknown state from the server must not fall through to green.
+    CB.paintHealth({ checks: { booking: { state: 'wat', text: 'x' } } });
+    eq('health/ui: an unrecognised state paints RED', painted['s-cal'].className, 'badge br');
+
+    /* ── The Overview alerts panel ── */
+    ok('health: the alerts panel no longer claims "All systems healthy"',
+       !/All systems healthy/.test(src));
+    ok('health: it points at the tab that does the checking',
+       /Live service checks are on the System Health tab/.test(src));
+
+    /* ============================================================ */
+    console.log('');
+    if (failures.length) {
+      console.log('  FAILURES:');
+      failures.forEach((f) => console.log('   ✗ ' + f));
+      console.log('');
+    }
+    console.log(`  passed: ${pass}`);
+    console.log(`  failed: ${fail}`);
+    console.log('');
+    process.exit(fail ? 1 : 0);
+  })();
 }
-console.log(`  passed: ${pass}`);
-console.log(`  failed: ${fail}`);
-console.log('');
-process.exit(fail ? 1 : 0);

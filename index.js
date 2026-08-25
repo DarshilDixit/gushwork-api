@@ -866,6 +866,13 @@ function recordFailure(source, id, error) {
    ─────────────────────────────────────────────────────────────────── */
 let _lastLeadAt    = Date.now();
 let _lastCronRunAt = Date.now();
+/* _lastCronRunAt is seeded to boot time so the heartbeat does not alert the
+   instant an instance starts. That seeding is fine for an alert with a 3h
+   window and wrong for a health BADGE, which would read green for three hours
+   after every redeploy without the scheduler ever having called us. These two
+   let the health check tell "has run" apart from "has just started". */
+let _cronRanThisProcess = false;
+const _processStartedAt = Date.now();
 const HEARTBEAT_CHECK_MS   = 30 * 60 * 1000;      // self-check cadence
 const CRON_STALE_MS        = 3 * 60 * 60 * 1000;  // cron should run well within 3h
 const NO_LEADS_STALE_MS    = 12 * 60 * 60 * 1000; // 12h with zero leads is anomalous
@@ -893,8 +900,14 @@ function startHeartbeat() {
     } catch (err) {
       console.warn('[heartbeat] error (ignored):', err && err.message);
     }
+    /* The nine System Health rows run here rather than on the dashboard's
+       60-second poll, so a failure notifies with the tab closed. Transitions
+       only — see evaluateHealthAlerts. */
+    runHealthChecks()
+      .then(h => evaluateHealthAlerts(h.checks))
+      .catch(err => console.warn('[heartbeat] health checks failed (ignored):', err && err.message));
   }, HEARTBEAT_CHECK_MS);
-  console.log('[heartbeat] ✅ Monitoring started (cron staleness + lead flow)');
+  console.log('[heartbeat] ✅ Monitoring started (cron staleness + lead flow + system health)');
 }
 
 /* ── PHASE 3: startup configuration audit ──────────────────────────
@@ -1191,6 +1204,478 @@ function formatRevenue(amount) {
 }
 
 app.get('/health', (req, res) => { res.json({ status: 'ok', timestamp: new Date().toISOString() }); });
+
+/* ══ SYSTEM HEALTH — nine rows that now check something ═══════════════
+   Seven of the nine rows on the Health tab were lifetime counters wearing
+   health-check clothing. The whole story was one line:
+
+     badge("s-partial", d.total+" sessions saved", "bg")
+
+   A literal green class with no condition attached. /partial read healthy
+   whether it worked or had been 500ing for a week. /submit went green on
+   the first submission in July and had no way back. AWS sync was
+   !!awsPool — true whenever an env var was set, so wrong credentials, an
+   unreachable host and every mirror write failing all read "Active".
+
+   THIS IS THE INVERSION OF THE FAIL-OPEN RULE, AND IT IS DELIBERATE.
+   Checkers on the lead path fail open because a lead is worth more than a
+   verdict. No lead depends on a health probe, so these fail LOUD instead:
+   a probe that cannot verify reports red, never green and never a calm
+   grey. See "Health checks fail LOUD" in CLAUDE.md.
+
+   Every windowed check carries a minimum denominator — the same idea as
+   ELV_MIN_SAMPLE, which exists so a couple of unlucky checks cannot cry
+   wolf. Below the floor the answer is insufficient_data, so a quiet night
+   reads grey rather than a green nobody earned or a red nothing supports.
+   The AWS check is the deliberate exception and cannot return grey at
+   all; its own comment says why.
+
+   Two rows are NOT rebuilt here because they were already real: API
+   uptime (the browser's own fetch of /health is the only honest probe of
+   "can a client reach this") and ELV (elvHealthSnapshot, which already
+   owns its enter/exit alerting in recordElvOutcome — routing it through
+   this path as well would alert twice for one incident).
+   ═══════════════════════════════════════════════════════════════════ */
+
+const HEALTH_MIN_SAMPLE            = Number(process.env.HEALTH_MIN_SAMPLE) || 8;  // ELV_MIN_SAMPLE is the precedent
+const HEALTH_PARTIAL_WINDOW_H      = 2;
+const HEALTH_SUBMIT_WINDOW_H       = 24;
+const HEALTH_SUBMIT_MIN_STEP1      = 10;
+const HEALTH_APOLLO_WINDOW_H       = 24;
+const HEALTH_BOOKING_WINDOW_D      = 7;
+const HEALTH_BOOKING_MIN_COMPLETED = 10;
+const HEALTH_AWS_WINDOW_H          = 24;
+const HEALTH_AWS_DRIFT_MIN         = 2;     // absolute floor, so one in-flight write is not an incident
+const HEALTH_AWS_DRIFT_PCT         = 0.10;
+const HEALTH_AWS_TIMEOUT_MS        = 8000;  // a hung mirror must resolve to red, not hang the dashboard
+const HEALTH_RECOVERY_LOOKBACK_D   = 7;
+/* 2h to become eligible for a follow-up, plus the 3h window in which the cron
+   is expected to have run. Anything still unsent past that was not picked up. */
+const HEALTH_RECOVERY_STUCK_H      = 5;
+
+function hc(id, state, text, detail) {
+  return { id, state, text, detail: detail || null };
+}
+
+function fmtAge(ms) {
+  const min = Math.round(ms / 60000);
+  if (min < 90) return min + ' min';
+  const h = Math.round(min / 60);
+  if (h < 48) return h + 'h';
+  return Math.round(h / 24) + 'd';
+}
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(label + ' timed out after ' + ms + 'ms')), ms); }),
+  ]);
+}
+
+/* ── Step 1 — /partial ──────────────────────────────────────────────
+   Sessions arriving with zero leads created means the form is broken at
+   the very top, which is where most volume is already lost. Bots are
+   excluded with the same BOT_RE the funnel uses, because a night of
+   crawler traffic would otherwise push the denominator over the floor
+   and manufacture a red. */
+async function checkPartialHealth(db) {
+  try {
+    const r = await db.query(`
+      SELECT
+        (SELECT COUNT(*) FROM form_sessions
+           WHERE created_at >= NOW() - INTERVAL '${HEALTH_PARTIAL_WINDOW_H} hours'
+             AND (user_agent IS NULL OR user_agent !~* $1))            AS sessions,
+        (SELECT COUNT(*) FROM leads
+           WHERE created_at >= NOW() - INTERVAL '${HEALTH_PARTIAL_WINDOW_H} hours') AS leads
+    `, [BOT_RE]);
+    const sessions = parseInt(r.rows[0].sessions) || 0;
+    const leads    = parseInt(r.rows[0].leads)    || 0;
+    const win      = HEALTH_PARTIAL_WINDOW_H + 'h';
+
+    if (leads > 0) return hc('partial', 'green', leads + ' leads saved in the last ' + win, sessions + ' sessions in the same window');
+    if (sessions >= HEALTH_MIN_SAMPLE) {
+      return hc('partial', 'red', sessions + ' sessions, 0 leads in the last ' + win,
+        'Visitors are reaching the form and nothing is being written. Check POST /partial.');
+    }
+    return hc('partial', 'insufficient_data', 'Quiet — ' + sessions + ' sessions, no leads in the last ' + win,
+      'Below the ' + HEALTH_MIN_SAMPLE + '-session floor, so this is not evidence either way.');
+  } catch (err) {
+    return hc('partial', 'red', 'Could not check', err && err.message);
+  }
+}
+
+/* ── Step 2 — /submit ───────────────────────────────────────────────
+   The old row asked whether there had EVER been a completion, so it went
+   green in July and stayed there. This asks about the last 24 hours, and
+   only calls it red when enough people reached step 1 for zero
+   completions to mean something. */
+async function checkSubmitHealth(db) {
+  try {
+    const r = await db.query(`
+      SELECT
+        (SELECT COUNT(*) FROM leads
+           WHERE created_at >= NOW() - INTERVAL '${HEALTH_SUBMIT_WINDOW_H} hours')   AS step1,
+        (SELECT COUNT(*) FROM leads
+           WHERE submitted_at >= NOW() - INTERVAL '${HEALTH_SUBMIT_WINDOW_H} hours') AS completions
+    `);
+    const step1       = parseInt(r.rows[0].step1)       || 0;
+    const completions = parseInt(r.rows[0].completions) || 0;
+    const win         = HEALTH_SUBMIT_WINDOW_H + 'h';
+
+    if (completions > 0) return hc('submit', 'green', completions + ' completions in the last ' + win, step1 + ' reached step 1 in the same window');
+    if (step1 >= HEALTH_SUBMIT_MIN_STEP1) {
+      return hc('submit', 'red', step1 + ' step-1 leads, 0 completions in the last ' + win,
+        'People are entering an email and nobody is getting through step 2. Check POST /submit.');
+    }
+    return hc('submit', 'insufficient_data', 'Quiet — ' + step1 + ' step-1 leads, no completions in the last ' + win,
+      'Below the ' + HEALTH_SUBMIT_MIN_STEP1 + '-lead floor, so this is not evidence either way.');
+  } catch (err) {
+    return hc('submit', 'red', 'Could not check', err && err.message);
+  }
+}
+
+/* ── Apollo enrichment ──────────────────────────────────────────────
+   Was a lifetime ratio of enrichment_data rows to leads rows: if Apollo
+   died today, a year of good history kept it green indefinitely. Now
+   scoped to a window, so yesterday cannot vouch for today. */
+async function checkApolloHealth(db) {
+  try {
+    const r = await db.query(`
+      SELECT
+        (SELECT COUNT(*) FROM leads
+           WHERE created_at >= NOW() - INTERVAL '${HEALTH_APOLLO_WINDOW_H} hours'
+             AND email IS NOT NULL)                                                   AS leads,
+        (SELECT COUNT(*) FROM enrichment_data
+           WHERE enriched_at >= NOW() - INTERVAL '${HEALTH_APOLLO_WINDOW_H} hours')   AS enriched,
+        (SELECT MAX(enriched_at) FROM enrichment_data)                                AS last_enriched
+    `);
+    const leads    = parseInt(r.rows[0].leads)    || 0;
+    const enriched = parseInt(r.rows[0].enriched) || 0;
+    const last     = r.rows[0].last_enriched ? new Date(r.rows[0].last_enriched).getTime() : null;
+    const win      = HEALTH_APOLLO_WINDOW_H + 'h';
+    const lastNote = last ? 'Last enrichment ' + fmtAge(Date.now() - last) + ' ago' : 'Nothing has ever been enriched';
+
+    if (leads < HEALTH_MIN_SAMPLE) {
+      return hc('apollo', 'insufficient_data', 'Quiet — ' + leads + ' leads in the last ' + win, lastNote);
+    }
+    const rate = Math.round(enriched / leads * 100);
+    if (enriched === 0)  return hc('apollo', 'red',   '0 of ' + leads + ' enriched in the last ' + win, lastNote);
+    if (rate >= 60)      return hc('apollo', 'green', rate + '% enriched in the last ' + win, enriched + ' of ' + leads + ' · ' + lastNote);
+    if (rate >= 30)      return hc('apollo', 'amber', rate + '% enriched in the last ' + win, enriched + ' of ' + leads + ' · ' + lastNote);
+    return hc('apollo', 'red', rate + '% enriched in the last ' + win, enriched + ' of ' + leads + ' · ' + lastNote);
+  } catch (err) {
+    return hc('apollo', 'red', 'Could not check', err && err.message);
+  }
+}
+
+/* ── Booking — RevenueHero ──────────────────────────────────────────
+   Also a lifetime ratio before, and inflated on both sides by webhook
+   rows. Now a 7-day window over people, not sessions.
+
+   Only ONE thing here is red: zero bookings recorded against a real
+   sample of completions, which is what a dead booking webhook looks
+   like. A merely low booking rate is a business outcome, not an outage,
+   so it is amber and stays out of the alerting path. */
+async function checkBookingHealth(db) {
+  try {
+    const r = await db.query(`
+      SELECT
+        COUNT(DISTINCT LOWER(email)) FILTER (
+          WHERE submitted_at >= NOW() - INTERVAL '${HEALTH_BOOKING_WINDOW_D} days'
+        ) AS completed_people,
+        COUNT(DISTINCT LOWER(email)) FILTER (
+          WHERE booking_uid IS NOT NULL
+            AND COALESCE(booked_at, created_at) >= NOW() - INTERVAL '${HEALTH_BOOKING_WINDOW_D} days'
+        ) AS booked_people
+      FROM leads
+      WHERE email IS NOT NULL
+    `);
+    const completed = parseInt(r.rows[0].completed_people) || 0;
+    const booked    = parseInt(r.rows[0].booked_people)    || 0;
+    const win       = HEALTH_BOOKING_WINDOW_D + 'd';
+
+    if (completed < HEALTH_BOOKING_MIN_COMPLETED) {
+      return hc('booking', 'insufficient_data', 'Quiet — ' + completed + ' people completed in the last ' + win,
+        booked + ' bookings recorded in the same window');
+    }
+    const rate = Math.round(booked / completed * 100);
+    if (booked === 0) {
+      return hc('booking', 'red', '0 bookings in the last ' + win + ', from ' + completed + ' completions',
+        'No booking has been recorded by any of the three routes. Check the RevenueHero and Cal webhooks.');
+    }
+    const text = rate + '% booked in the last ' + win;
+    const detail = booked + ' of ' + completed + ' people';
+    if (rate >= 50) return hc('booking', 'green', text, detail);
+    return hc('booking', 'amber', text, detail);
+  } catch (err) {
+    return hc('booking', 'red', 'Could not check', err && err.message);
+  }
+}
+
+/* ── Cron — drop-off recovery ───────────────────────────────────────
+   The old row was green whenever pendingPartials was 0, which is exactly
+   what a dead cron looks like on a quiet night: nothing arrives, nothing
+   is pending, the row says fine. It could not go red at all.
+
+   This reads the heartbeat timestamp instead. Pure function of the
+   clock so it can be tested without a database.
+
+   _lastCronRunAt is seeded to boot time, so "recent" alone would read
+   green for three hours after every redeploy without the scheduler ever
+   calling us. _cronRanThisProcess separates "has run" from "has just
+   started", and the not-yet-run case is grey until the window elapses
+   and then red — never green. */
+function checkCronHealth(now, lastRunAt, ranThisProcess, startedAt) {
+  const staleH = Math.round(CRON_STALE_MS / 3600000);
+  if (!ranThisProcess) {
+    const up = now - startedAt;
+    if (up > CRON_STALE_MS) {
+      return hc('cron', 'red', 'No run in ' + fmtAge(up) + ' since restart',
+        'The scheduler has not called POST /cron/send-partials since this instance started. Drop-off follow-ups are not going out.');
+    }
+    return hc('cron', 'insufficient_data', 'No run yet — restarted ' + fmtAge(up) + ' ago',
+      'Expected within ' + staleH + 'h of a restart.');
+  }
+  const age = now - lastRunAt;
+  if (age > CRON_STALE_MS) {
+    return hc('cron', 'red', 'Last run ' + fmtAge(age) + ' ago',
+      'Expected within ' + staleH + 'h. Check the scheduler that calls POST /cron/send-partials.');
+  }
+  return hc('cron', 'green', 'Last run ' + fmtAge(age) + ' ago', 'Expected within ' + staleH + 'h.');
+}
+
+/* ── AWS sync — the mirror the dialer reads ─────────────────────────
+   THIS FUNCTION RETURNS green OR red AND NOTHING ELSE. There is no code
+   path to insufficient_data and there must never be one; a test asserts
+   it, both by reading this source and by driving the function with a
+   pool that throws.
+
+   The reason is the whole point of the row. A mirror we cannot reach is
+   indistinguishable from a mirror that has gone stale, and both starve
+   the sdr-calling dialer with no error anywhere else in the system:
+   syncToAWS is fire-and-forget at all five call sites and only
+   console.warns what it drops. Grey here would render as a calm "we are
+   not sure", next to eight rows where grey means "quiet night".
+
+   Both zero IS green, and the text says why: we connected, we queried,
+   and the two sides agree. That is a verified positive about the mirror,
+   just not one about traffic. */
+async function checkAwsHealth(awsDb, railwayDb) {
+  if (!awsDb) {
+    return hc('aws', 'red', 'Disabled — AWS_PG_HOST is not set',
+      'No mirror is being written at all. The sdr-calling dialer reads gw_form_leads and will never see a new lead.');
+  }
+  let mirror, railway;
+  try {
+    [mirror, railway] = await withTimeout(Promise.all([
+      awsDb.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '${HEALTH_AWS_WINDOW_H} hours') AS recent,
+          MAX(updated_at) AS last_write
+        FROM gw_form_leads
+      `),
+      railwayDb.query(`
+        SELECT COUNT(*) AS recent
+        FROM leads
+        WHERE created_at >= NOW() - INTERVAL '${HEALTH_AWS_WINDOW_H} hours'
+      `),
+    ]), HEALTH_AWS_TIMEOUT_MS, 'AWS mirror query');
+  } catch (err) {
+    return hc('aws', 'red', 'Cannot reach the mirror',
+      (err && err.message ? err.message + ' — ' : '') + 'A mirror we cannot query is indistinguishable from one that has stopped being written.');
+  }
+
+  const mirrorRows  = parseInt(mirror.rows[0].recent)  || 0;
+  const railwayRows = parseInt(railway.rows[0].recent) || 0;
+  const lastWrite   = mirror.rows[0].last_write ? new Date(mirror.rows[0].last_write).getTime() : null;
+  const win         = HEALTH_AWS_WINDOW_H + 'h';
+  const missing     = railwayRows - mirrorRows;
+  const tolerance   = Math.max(HEALTH_AWS_DRIFT_MIN, Math.ceil(railwayRows * HEALTH_AWS_DRIFT_PCT));
+
+  if (railwayRows === 0 && mirrorRows === 0) {
+    return hc('aws', 'green', 'Reachable — no leads in the last ' + win + ' to mirror',
+      lastWrite ? 'Last mirror write ' + fmtAge(Date.now() - lastWrite) + ' ago' : 'The mirror has never been written');
+  }
+  if (railwayRows > 0 && mirrorRows === 0) {
+    return hc('aws', 'red', 'Mirror empty — ' + railwayRows + ' leads on Railway in the last ' + win + ', 0 mirrored',
+      'Every mirror write in the window was lost. syncToAWS swallows its errors, so this is the only place it shows.');
+  }
+  if (missing > tolerance) {
+    return hc('aws', 'red', missing + ' rows behind in the last ' + win,
+      mirrorRows + ' mirrored of ' + railwayRows + ' on Railway · tolerance ' + tolerance);
+  }
+  return hc('aws', 'green', 'In sync — ' + mirrorRows + ' of ' + railwayRows + ' rows in the last ' + win,
+    lastWrite ? 'Last mirror write ' + fmtAge(Date.now() - lastWrite) + ' ago' : null);
+}
+
+/* ── Email recovery ─────────────────────────────────────────────────
+   Was d.loopsSent > 0 — a lifetime count, green forever after the first
+   send in July.
+
+   The predicate below deliberately MIRRORS the recovery cron's own
+   SELECT, including the booked_at >= created_at test and including
+   equals-false rather than IS NOT TRUE. That is not sloppiness inherited
+   from the cron: this row asks whether the cron is clearing its own
+   queue, so it has to count the same rows the cron would pick up. Widen
+   it to IS NOT TRUE and a row with a null flag would count as stuck here
+   while the cron never selects it, and the row would sit red forever.
+
+   Stuck means eligible for longer than the cron's own staleness window,
+   so a lead that crossed the 2h line a minute after the last run is not
+   an incident. */
+async function checkRecoveryHealth(db) {
+  try {
+    const r = await db.query(`
+      SELECT
+        (SELECT COUNT(*) FROM leads
+           WHERE loops_sent = true
+             AND created_at >= NOW() - INTERVAL '${HEALTH_RECOVERY_LOOKBACK_D} days') AS processed,
+        (SELECT COUNT(*) FROM leads l
+           WHERE l.email IS NOT NULL
+             AND l.disqualified = false
+             AND l.booking_uid IS NULL
+             AND l.loops_sent = false
+             AND l.created_at < NOW() - INTERVAL '${HEALTH_RECOVERY_STUCK_H} hours'
+             AND NOT EXISTS (
+               SELECT 1 FROM leads booked
+               WHERE LOWER(booked.email) = LOWER(l.email)
+                 AND booked.booking_uid IS NOT NULL
+                 AND booked.booked_at >= l.created_at
+             )) AS stuck
+    `);
+    const processed = parseInt(r.rows[0].processed) || 0;
+    const stuck     = parseInt(r.rows[0].stuck)     || 0;
+
+    if (stuck > 0) {
+      return hc('recovery', 'red', stuck + ' waiting more than ' + HEALTH_RECOVERY_STUCK_H + 'h',
+        'These are eligible for a follow-up and have not been picked up. Either the cron is not running or the sends are failing.');
+    }
+    if (processed > 0) {
+      return hc('recovery', 'green', processed + ' follow-ups processed in the last ' + HEALTH_RECOVERY_LOOKBACK_D + 'd', 'Nothing stuck in the queue');
+    }
+    return hc('recovery', 'insufficient_data', 'No drop-offs to follow up in the last ' + HEALTH_RECOVERY_LOOKBACK_D + 'd', 'Nothing stuck in the queue');
+  } catch (err) {
+    return hc('recovery', 'red', 'Could not check', err && err.message);
+  }
+}
+
+/* One place that runs them all. Each check already catches its own
+   failure and reports red; the wrapper is a second net so one broken
+   probe cannot take the other six down with it. */
+function safeCheck(id, fn) {
+  return Promise.resolve().then(fn).catch(err => hc(id, 'red', 'Could not check', err && err.message));
+}
+
+async function runHealthChecks() {
+  const now = Date.now();
+  const results = await Promise.all([
+    safeCheck('partial',  () => checkPartialHealth(pool)),
+    safeCheck('submit',   () => checkSubmitHealth(pool)),
+    safeCheck('apollo',   () => checkApolloHealth(pool)),
+    safeCheck('booking',  () => checkBookingHealth(pool)),
+    safeCheck('cron',     () => checkCronHealth(now, _lastCronRunAt, _cronRanThisProcess, _processStartedAt)),
+    safeCheck('aws',      () => checkAwsHealth(awsPool, pool)),
+    safeCheck('recovery', () => checkRecoveryHealth(pool)),
+  ]);
+  const checks = {};
+  for (const c of results) checks[c.id] = c;
+  return { checks, generatedAt: new Date().toISOString() };
+}
+
+/* ── Alerting on state transitions ──────────────────────────────────
+   Mirrors the ELV enter/exit pattern exactly, and goes through the same
+   alertOps that already carries per-key cooldown and suppression
+   counting. No second alerting system.
+
+   Only green and red move state. amber and insufficient_data are inert
+   on purpose: grey means "not enough evidence", and alerting on an
+   absence of evidence is the same mistake as recording "we could not
+   check" as "we checked and it is bad".
+
+   Severity split is the owner's, Aug 2026: sessions arriving with zero
+   leads means the form is broken at the very top, which is where most
+   volume is already lost, so /partial and /submit page by email. The AWS
+   mirror joins them because the sdr-calling dialer reads it and nothing
+   else in the system notices when it stops. */
+const HEALTH_SEVERITY = {
+  partial:  'critical',
+  submit:   'critical',
+  aws:      'critical',
+  apollo:   'warning',
+  booking:  'warning',
+  cron:     'warning',
+  recovery: 'warning',
+};
+
+const HEALTH_ALERT_META = {
+  partial:  { source: 'Step 1 /partial',  title: 'Leads are not being saved',        impact: 'Visitors are reaching the form and nothing is being written to Railway.', action: 'Check POST /partial in the Railway logs.' },
+  submit:   { source: 'Step 2 /submit',   title: 'Nobody is completing the form',    impact: 'People are entering an email and none are getting through step 2.',      action: 'Check POST /submit in the Railway logs.' },
+  aws:      { source: 'AWS sync',         title: 'Mirror is not being written',      impact: 'The sdr-calling dialer reads gw_form_leads and is not seeing new leads.', action: 'Check the AWS_PG_* credentials and that the host is reachable.' },
+  apollo:   { source: 'Apollo',           title: 'Enrichment has stopped',           impact: 'New leads are arriving with no enrichment attached.',                    action: 'Check the Apollo API key and credit balance.' },
+  booking:  { source: 'Booking',          title: 'No bookings are being recorded',   impact: 'People are completing the form and no booking is landing on any lead.',  action: 'Check the RevenueHero and Cal webhooks — booking arrives by three routes.' },
+  cron:     { source: 'Recovery cron',    title: 'Has not run recently',             impact: 'Drop-off follow-up emails are not being sent.',                          action: 'Check the scheduler that calls POST /cron/send-partials.' },
+  recovery: { source: 'Email recovery',   title: 'Follow-ups are stuck in the queue', impact: 'Leads are eligible for a follow-up and are not being picked up.',        action: 'Check the Gmail credentials and the cron logs.' },
+};
+
+const _healthState = new Map(); // check id -> the last state we reported on: 'green' or 'red'
+
+function evaluateHealthAlerts(checks) {
+  try {
+    for (const id of Object.keys(checks || {})) {
+      const c    = checks[id];
+      const meta = HEALTH_ALERT_META[id];
+      if (!c || !meta) continue;
+      if (c.state !== 'green' && c.state !== 'red') continue;
+
+      const prev = _healthState.get(id);
+      if (prev === c.state) continue;   // unchanged — fires once, not once per poll
+      _healthState.set(id, c.state);
+
+      if (c.state === 'red') {
+        alertOps(HEALTH_SEVERITY[id] || 'warning', meta.source, meta.title, {
+          'Signal': c.text,
+          'Detail': c.detail || '—',
+          'Impact': meta.impact,
+          'Action': meta.action,
+        });
+      } else if (prev === 'red') {
+        /* Recovery is informational, so it goes straight to Slack rather
+           than through alertOps — same as the ELV exit path, and for the
+           same reason: a cooldown on a recovery message can swallow the
+           one line that tells you the incident is over. */
+        const heading = '✅ ' + meta.source + ' — recovered';
+        sendOpsSlack([
+          bHeader(heading),
+          bDivider(),
+          bFields([
+            { label: 'Now', value: c.text },
+            c.detail ? { label: 'Detail', value: c.detail } : null,
+          ].filter(Boolean)),
+          bContext('Severity: *info* · ' + etStamp()),
+        ].filter(Boolean), heading);
+        console.log('[health] ✅ ' + meta.source + ' recovered — ' + c.text);
+      }
+    }
+  } catch (err) {
+    console.warn('[health] alert evaluation error (ignored):', err && err.message);
+  }
+}
+
+app.get('/monitor/health', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const out = await runHealthChecks();
+    res.json(out);
+  } catch (err) {
+    console.error('[/monitor/health]', err.message);
+    res.status(500).json({ error: 'Health checks failed', detail: err.message });
+  }
+});
+
 
 app.get('/monitor/metrics', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
@@ -2009,7 +2494,7 @@ app.get('/monitor', (req, res) => {
   '.badge{font-size:11px;font-weight:500;padding:3px 9px;border-radius:5px;white-space:nowrap}' +
   '.bg{background:#f0fdf4;color:#15803d}.br{background:#fef2f2;color:#b91c1c}.ba{background:#fffbeb;color:#b45309}.bx{background:#f5f5f5;color:#666}.bb{background:#eff6ff;color:#1d4ed8}' +
   '.alertbox{border-radius:8px;padding:10px 14px;margin-bottom:8px;font-size:13px;display:flex;align-items:flex-start;gap:8px}' +
-  '.ao{background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0}.aw{background:#fffbeb;color:#b45309;border:1px solid #fde68a}.ae{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca}' +
+  '.an{background:#fafafa;color:#666;border:1px solid #eee}.ao{background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0}.aw{background:#fffbeb;color:#b45309;border:1px solid #fde68a}.ae{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca}' +
   '.fr{margin-bottom:10px}.fl{display:flex;justify-content:space-between;font-size:12px;color:#666;margin-bottom:4px}' +
   '.fb{height:7px;border-radius:4px;background:#f0f0f0;overflow:hidden}.ff{height:100%;border-radius:4px;transition:width 0.6s ease}' +
   '.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px}' +
@@ -2135,18 +2620,21 @@ app.get('/monitor', (req, res) => {
   '</tr></thead><tbody id="dupes-tbody"><tr><td colspan="7" class="nd">Loading...</td></tr></tbody></table></div></div>' +
   '</div>' +
   '<div class="tp" id="tp-health">' +
-  '<div class="sl">Step health</div>' +
+  '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
+  '<div class="sl" style="margin:0">Step health</div>' +
+  '<button class="btn" onclick="checkHealth()">&#8635; Re-check</button></div>' +
   '<div class="card" style="margin-bottom:24px">' +
   '<div class="sr"><div><div class="sn">API uptime</div><div class="sd">/health responding</div></div><span class="badge bx" id="s-api">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Step 1 &#8212; /partial</div><div class="sd">Email + lead saved to Railway + AWS</div></div><span class="badge bx" id="s-partial">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Step 2 &#8212; /submit</div><div class="sd">Lead completed + Slack fired</div></div><span class="badge bx" id="s-submit">Checking...</span></div>' +
+  '<div class="sr"><div><div class="sn">Step 1 &#8212; /partial</div><div class="sd">Leads written in the last 2 hours, against form sessions</div></div><span class="badge bx" id="s-partial">Checking...</span></div>' +
+  '<div class="sr"><div><div class="sn">Step 2 &#8212; /submit</div><div class="sd">Completions in the last 24 hours</div></div><span class="badge bx" id="s-submit">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">ELV email verification</div><div class="sd">Inconclusive rate, rolling 90-minute window</div></div><span class="badge bx" id="s-elv">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Apollo enrichment</div><div class="sd">enrichment_data populated per session</div></div><span class="badge bx" id="s-enrich">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Booking &#8212; RevenueHero</div><div class="sd">People booked / people completed</div></div><span class="badge bx" id="s-cal">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Cron &#8212; drop-off recovery</div><div class="sd">Leads waiting &gt;2 hours without booking</div></div><span class="badge bx" id="s-cron">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">AWS sync</div><div class="sd">gw_form_leads mirror</div></div><span class="badge bx" id="s-aws">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Email recovery</div><div class="sd">Follow-up emails sent to partial leads</div></div><span class="badge bx" id="s-loops">Checking...</span></div>' +
+  '<div class="sr"><div><div class="sn">Apollo enrichment</div><div class="sd">Leads enriched in the last 24 hours</div></div><span class="badge bx" id="s-enrich">Checking...</span></div>' +
+  '<div class="sr"><div><div class="sn">Booking &#8212; RevenueHero</div><div class="sd">People booked / people completed, last 7 days</div></div><span class="badge bx" id="s-cal">Checking...</span></div>' +
+  '<div class="sr"><div><div class="sn">Cron &#8212; drop-off recovery</div><div class="sd">Time since the scheduler last called us</div></div><span class="badge bx" id="s-cron">Checking...</span></div>' +
+  '<div class="sr"><div><div class="sn">AWS sync</div><div class="sd">gw_form_leads mirror, queried live against Railway</div></div><span class="badge bx" id="s-aws">Checking...</span></div>' +
+  '<div class="sr"><div><div class="sn">Email recovery</div><div class="sd">Follow-up queue &#8212; anything stuck past 5 hours</div></div><span class="badge bx" id="s-loops">Checking...</span></div>' +
   '</div>' +
+  '<div class="ms" style="margin:-16px 0 24px 2px"><span id="hupd">&#8212;</span> &#183; grey means there was not enough traffic to judge, never that a check was skipped.</div>' +
   '<div class="sl">Enrichment coverage</div>' +
   '<div class="g4" style="margin-bottom:24px">' +
   '<div class="mc"><div class="ml">Enriched sessions</div><div class="mv" id="h-enr">&#8212;</div><div class="ms">in enrichment_data</div></div>' +
@@ -2217,7 +2705,7 @@ app.get('/monitor', (req, res) => {
   'var TZ="' + DASH_TZ + '";' +
   'var API=window.location.origin;' +
   'var lChart=null,curPage=1,stimer=null,curSort="created_at",curDir="desc",filterOptsLoaded=false;' +
-  'function showTab(n){["overview","leads","sdr","dupes","health","lm"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();}' +
+  'function showTab(n){["overview","leads","sdr","dupes","health","lm"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();if(n==="health")checkHealth();}' +
   'var WLBL={"nxdomain": "Domain doesn\'t exist \u2014 likely a typo", "no_dns_records": "Domain registered but nothing set up on it", "hosting_placeholder": "No website yet \u2014 domain points to a hosting setup page", "parked_confirmed": "Domain registered but no website on it", "parked": "Domain registered but no website on it", "parked_ns": "Domain registered but no website on it", "parked_suspect": "Looks like a parked domain \u2014 could not confirm", "for_sale_lander": "Domain is listed for sale", "marketplace_redirect": "Domain is for sale on a domain marketplace", "mailbox_domain": "Typed an email provider instead of their website", "brand_mismatch": "Typed a well-known brand\'s site, not their own", "social_profile_url": "Gave a social profile instead of a website", "thin_content": "Page looked mostly empty to us \u2014 worth a manual look", "thin_content_wildcard": "Page looked mostly empty to us \u2014 worth a manual look", "check_blocked": "Site blocked our check \u2014 the page itself looks fine", "dns_unresolved": "Could not look up the domain \u2014 DNS gave no answer", "forwarded_to_live_site": "Redirects to their live site \u2014 checked OK", "live_despite_dns_hint": "Live site (an early parking signal was overruled)", "mx_only": "Email-only company \u2014 no website, but mail works", "nxdomain_contradicted": "DNS blip \u2014 domain matches their verified email domain", "content_clean": "Live website", "resolved": "Domain resolves", "dns_indeterminate": "Could not reach the site to check it", "doh_error": "Could not reach the site to check it", "timeout": "Could not reach the site to check it", "unreachable": "Could not reach the site to check it", "non_html": "Address did not return a web page", "backend_error": "Our check errored \u2014 not the website\u2019s fault", "fetch_error": "Our check errored \u2014 not the website\u2019s fault", "skipped_no_backend": "Check was skipped", "skipped_unsafe_target": "Address pointed at an internal network \u2014 skipped", "test_email_skipped": "Internal test \u2014 check skipped", "ok": "Website checked OK"};' +
   'function wlabel(r){if(!r)return"Unknown";if(WLBL[r])return WLBL[r];if(String(r).indexOf("http_")===0){var c=String(r).slice(5);return ["999","403","401","429"].indexOf(c)>=0?("Site blocked our check ("+c+")"):("Site returned an error ("+c+")");}return String(r).replace(/_/g," ");}' +
   'function badge(id,text,cls){var el=document.getElementById(id);if(!el)return;el.textContent=text;el.className="badge "+cls;}' +
@@ -2235,7 +2723,33 @@ app.get('/monitor', (req, res) => {
   'function esc(s){if(!s)return"";return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}' +
   'async function checkApi(){try{var r=await fetch(API+"/health",{signal:AbortSignal.timeout(5000)});if(r.ok){document.getElementById("apidot").className="dot dot-green";document.getElementById("apist").textContent="API online";badge("s-api","Online","bg");return true;}throw new Error("HTTP "+r.status);}catch(e){document.getElementById("apidot").className="dot dot-red";document.getElementById("apist").textContent="API offline";badge("s-api","Offline","br");return false;}}' +
   'async function checkElv(){try{var r=await fetch(API+"/monitor/elv-health",{signal:AbortSignal.timeout(5000)});var d=await r.json();var age=(d.minutesSinceLastCheck!=null&&d.minutesSinceLastCheck>=60)?" \\u00b7 last check "+Math.round(d.minutesSinceLastCheck/60)+"h ago":"";if(d.state==="degraded"){badge("s-elv","Degraded \\u2014 "+d.rate+"% of "+d.checks+" inconclusive"+age,"br");}else if(d.state==="insufficient_data"){if(d.rate>=50||d.consecutiveInconclusive>=2){badge("s-elv","Low traffic \\u2014 "+d.rate+"% of "+d.checks+" inconclusive"+age,"ba");}else{badge("s-elv","Quiet \\u2014 "+d.checks+" checks, "+d.rate+"% inconclusive"+age,"bx");}}else{badge("s-elv","Healthy ("+d.rate+"% inconclusive)","bg");}}catch(e){badge("s-elv","Unknown","bx");}}' +
-  'function renderAlerts(d){var a=[];if(d.pendingPartials>0)a.push({c:"aw",i:"!",m:d.pendingPartials+" session(s) waiting >2 hours without booking \\u2014 recovery cron will pick them up."});if(d.noBookingUid>0)a.push({c:"aw",i:"!",m:d.noBookingUid+" people (deduped, qualified B2B) completed the form but have no booking on any session \\u2014 see SDR List."});if(!d.awsSynced)a.push({c:"ae",i:"x",m:"AWS sync disabled."});if(d.total>5&&d.enriched<d.total*0.3)a.push({c:"aw",i:"!",m:"Low enrichment rate ("+Math.round(d.enriched/d.total*100)+"% of sessions)."});if(d.todayCount===0)a.push({c:"aw",i:"o",m:"No new sessions in the last 24 hours."});if(a.length===0)a.push({c:"ao",i:"\\u2713",m:"All systems healthy."});document.getElementById("alerts").innerHTML=a.map(function(x){return"<div class=\\"alertbox "+x.c+"\\"><span>"+x.i+"</span><span>"+x.m+"</span></div>";}).join("");}' +
+  /* SEVEN LIVE CHECKS, one round trip. Deliberately NOT on the 60-second
+     loadAll poll: the AWS row queries a database across a WAN and would
+     make every refresh wait on it. Runs at load, every five minutes, when
+     the Health tab is opened, and on the Re-check button.
+
+     A failed fetch paints every row RED, not grey. Grey on this tab means
+     "not enough traffic to judge"; it must never also mean "we could not
+     ask". Same rule the server side follows. */
+  'var HCLS={green:"bg",amber:"ba",red:"br",insufficient_data:"bx"};' +
+  'var HIDS={partial:"s-partial",submit:"s-submit",apollo:"s-enrich",booking:"s-cal",cron:"s-cron",aws:"s-aws",recovery:"s-loops"};' +
+  'function hkeys(){return Object.keys(HIDS);}' +
+  'function paintHealth(d){hkeys().forEach(function(k){var c=d&&d.checks&&d.checks[k];' +
+  'if(!c||!HCLS[c.state]){badge(HIDS[k],"No result","br");return;}' +
+  'var el=document.getElementById(HIDS[k]);if(el&&c.detail)el.title=c.detail;' +
+  'badge(HIDS[k],c.text,HCLS[c.state]);});}' +
+  'async function checkHealth(){' +
+  'try{var r=await fetch(API+"/monitor/health"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(20000)});' +
+  'if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();paintHealth(d);' +
+  'set("hupd","Checked "+new Date().toLocaleTimeString("en-US",{timeZone:TZ})+" ET");' +
+  '}catch(e){hkeys().forEach(function(k){badge(HIDS[k],"Could not check","br");});' +
+  'set("hupd","Health check unreachable: "+e.message);}}' +
+  /* The Overview alerts panel is fed by five Overview metrics. When all
+     five are quiet it used to render a green tick reading "All systems
+     healthy." — a claim about the whole system made by a box that has
+     never looked at one. Now it says what it actually knows and points at
+     the tab that does the checking. */
+  'function renderAlerts(d){var a=[];if(d.pendingPartials>0)a.push({c:"aw",i:"!",m:d.pendingPartials+" session(s) waiting >2 hours without booking \\u2014 recovery cron will pick them up."});if(d.noBookingUid>0)a.push({c:"aw",i:"!",m:d.noBookingUid+" people (deduped, qualified B2B) completed the form but have no booking on any session \\u2014 see SDR List."});if(!d.awsSynced)a.push({c:"ae",i:"x",m:"AWS sync disabled \\u2014 AWS_PG_HOST is not set, so nothing is reaching the gw_form_leads mirror."});if(d.total>5&&d.enriched<d.total*0.3)a.push({c:"aw",i:"!",m:"Low enrichment rate ("+Math.round(d.enriched/d.total*100)+"% of sessions)."});if(d.todayCount===0)a.push({c:"aw",i:"o",m:"No new sessions in the last 24 hours."});if(a.length===0)a.push({c:"an",i:"\\u00b7",m:"Nothing flagged by the Overview metrics. Live service checks are on the System Health tab."});document.getElementById("alerts").innerHTML=a.map(function(x){return"<div class=\\"alertbox "+x.c+"\\"><span>"+x.i+"</span><span>"+x.m+"</span></div>";}).join("");}' +
   /* Four stages, one window, one top-of-funnel denominator.
      Was: four bars all measured as a % of step 1, with "disqualified" sitting
      below "booked" as if it were a later stage — it is not a stage, a
@@ -2509,8 +3023,6 @@ app.get('/monitor', (req, res) => {
   'set("m-nb",d.peopleNoBooking);set("m-nbs",d.completedNoBookingSessions+" completed sessions w/o booking");' +
   'set("m-rec",d.recoveredBookings);set("m-pend",d.pendingPartials);set("m-mail",d.loopsSent);' +
   'set("recon","Sessions = form visits \\u00B7 People = distinct emails. "+d.completedNoBookingSessions+" completed sessions without a booking \\u2192 "+d.noBookingUid+" actionable people after dedup, cross-session bookings & B2B filter.");' +
-  'var er=d.total?Math.round(d.enriched/d.total*100):0,brP=d.peopleCompleted?Math.round(d.peopleBooked/d.peopleCompleted*100):0;' +
-  'badge("s-partial",d.total+" sessions saved","bg");badge("s-submit",d.completed>0?d.completed+" completed sessions":"No completions",d.completed>0?"bg":"ba");badge("s-enrich",er+"% enriched",er>=60?"bg":er>=30?"ba":"br");badge("s-cal",brP+"% booking rate (people)",brP>=50?"bg":brP>=20?"ba":"bx");badge("s-cron",d.pendingPartials===0?"No pending":d.pendingPartials+" pending",d.pendingPartials===0?"bg":"ba");badge("s-aws",d.awsSynced?"Active":"Disabled",d.awsSynced?"bg":"br");badge("s-loops",d.loopsSent+" emails sent",d.loopsSent>0?"bg":"bx");' +
   'set("h-enr",d.enriched);set("h-tit",d.enrichTitlePct!==undefined?d.enrichTitlePct+"%":"\\u2014");set("h-fun",d.enrichFundingPct!==undefined?d.enrichFundingPct+"%":"\\u2014");set("h-loc",d.enrichLocationPct!==undefined?d.enrichLocationPct+"%":"\\u2014");' +
   'renderAlerts(d);renderFunnel(d);renderChart(d.leadsByDay||[]);' +
   'set("lupd","Updated "+new Date().toLocaleTimeString("en-US",{timeZone:TZ})+" ET");' +
@@ -2593,6 +3105,7 @@ app.get('/monitor', (req, res) => {
   '}catch(e){document.getElementById("dupes-tbody").innerHTML="<tr><td colspan=\\"7\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function toggleDupeRow(i){var row=document.getElementById("dupe-er-"+i);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=document.getElementById("dupe-xbtn-"+i);if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";}' +
   'renderSortArrows();loadAll();setInterval(loadAll,60000);' +
+  'checkHealth();setInterval(checkHealth,300000);' +
   '<\/script></body></html>';
 
   res.setHeader('Content-Type', 'text/html');
@@ -4738,6 +5251,7 @@ app.post('/cron/send-partials', async (req, res) => {
 
     const leads = result.rows;
     _lastCronRunAt = Date.now(); // heartbeat: the scheduler reached us
+    _cronRanThisProcess = true;  // and the health badge can now say so honestly
     console.log(`[Cron] Found ${leads.length} leads to process`);
 
     for (const lead of leads) {
