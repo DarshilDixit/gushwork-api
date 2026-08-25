@@ -89,6 +89,144 @@ delete the file.
 
 ---
 
+## Definitions
+
+Every number on the monitor dashboard must conform to this section. Where a number
+deliberately departs from it, the label on screen has to say so in words a
+non-engineer reads correctly. Added because the dashboard had accumulated numbers
+whose labels and calculations disagreed — a chart called "sessions" that counted
+leads, a tooltip claiming two different populations were identical.
+
+### The four nouns
+
+**Session** — one row in `form_sessions`. One visitor arriving on a form page.
+The id lives in `sessionStorage`, so a landing-page → `/demo` journey in one tab is
+**one** session with `hits` incremented, not two. Keys on `form_sessions.created_at`
+(first seen). Session recording only began **21 Aug 2026, 10:32 UTC**; there is no
+session data before that and queries must say "not tracked" rather than 0.
+
+**Lead** — one row in `leads`. A session that got as far as entering an email
+(step 1). Keys on `leads.created_at`. One person can have several leads. A lead is
+never deleted, so counts only go up.
+
+**Completed** — `leads.completed = true`. The visitor reached step 2 and `/submit`
+succeeded. Keys on **`submitted_at`**. Caveat that has bitten us: the Cal and
+RevenueHero safety-net branches create rows with `completed = true` and
+`submitted_at` already set for someone who booked without ever touching the form.
+They are real leads and they are not form completions.
+
+**Booked** — `leads.booking_uid IS NOT NULL`. Keys on **`booked_at`**, falling back
+to `created_at` where `booked_at` is null (rows predating that column). Always use
+`COALESCE(booked_at, created_at)` when ordering by when a booking happened —
+comparing a null `booked_at` yields null, the comparison quietly fails, and the row
+is counted as un-booked.
+
+### The stage ladder
+
+Exactly four stages, **mutually exclusive and exhaustive**, resolved in this
+priority order. Any lead is in exactly one, so the four always sum to the total:
+
+1. **Booked** — `booking_uid IS NOT NULL`
+2. **Disqualified** — not booked, and `disqualified IS TRUE`
+3. **Completed** — not booked, not disqualified, and `completed IS TRUE`
+4. **Step 1** — everything else
+
+Use `IS TRUE` / `IS NOT TRUE`, never `= true` / `= false`: a null flag on an old row
+must land in a stage rather than vanishing from all four. The stage filter, the
+stage badge and any stage count all read from this one ladder. If you add a stage,
+it goes in the ladder or it doesn't exist.
+
+### Bookings: two different questions, and they are not interchangeable
+
+These look like one question and are not. Collapsing them onto a single rule
+breaks whichever one you didn't have in mind.
+
+**1. "Is this person an SDR target?" — no time comparison.**
+Does any lead row sharing this `lower(email)` have a `booking_uid`? If yes, they
+have a booking; don't call them. When they booked is irrelevant — an SDR ringing
+someone who already has a call on the calendar is wrong whether that call was
+booked yesterday or in May. Used by the SDR List and by "No booking yet".
+
+**2. "Should this session get a drop-off recovery email?" — the time comparison is
+required.** `NOT EXISTS (a booking by this email with booked_at >= this session's
+created_at)`. A booking that *predates* the session does not resolve that session's
+drop-off: the person came back, started again, and dropped again. Suppressing on
+"has ever booked" would silently kill legitimate follow-ups. This is deliberate,
+dates from a May 2026 fix, and lives at the recovery cron (`index.js` ~4499) with a
+comment saying so. **Do not "unify" it.**
+
+**3. "Recovered bookings"** is a third shape — a completed session with no booking,
+followed *later* by one — and uses `COALESCE(booked_at, created_at) >= l.created_at`.
+
+Note the asymmetry between 2 and 3: the cron compares bare `booked_at` and does
+**not** COALESCE, because production has zero rows with a null `booked_at` and
+there is nothing to defend against. Recovered bookings does COALESCE because it
+reads the full history including rows that predate the column. Both are correct for
+what they ask.
+
+The dashboard's "Pending recovery" card reports question 2's population, so its
+label says what it counts and no longer claims to mirror the cron's exact rule.
+
+### Default population for dashboard numbers
+
+Unless a label says otherwise:
+
+| Question | Default |
+|---|---|
+| All leads, or completed only? | **All leads.** Filter to completed only where the label says "completed" |
+| Deduped by email, or by session? | **Headline numbers are people** — `COUNT(DISTINCT lower(email))`. Session counts are legitimate but must be labelled "sessions" every time they appear |
+| Named exception | **"Form entries per day"** on Overview is a deliberate ROW count — see below |
+| Dedup key | `lower(email)`, always. Never raw `email` |
+| Internal / test addresses | **Included.** See below |
+| Webhook-origin leads | **Included**, except `/monitor/funnel` |
+
+**Internal and test addresses are currently INCLUDED in every `leads` number.**
+`ELV_EXCLUDED_DOMAINS` (`gushwork.ai`, `test.com`, `example.com`, `example.org`) and
+the `b@g.ai` test address are excluded from ELV health and from alerting, and from
+nothing else. So Overview, All Leads, SDR List and Duplicates all count our own
+testing. This is a known distortion, not a decision anyone made — flag it, don't
+quietly "fix" it, because excluding them moves every historical number at once.
+
+**"Form entries per day" is deliberately a row count, not a people count.** It
+counts rows in `leads` per ET day — everyone who reached step 1, undeduped, all
+stages. That is a departure from the people-by-default rule and it is intentional:
+the chart's job is daily inbound volume, and deduping by email would flatten the
+repeat-attempt spikes that make a bad day visible. The label says "entries", not
+"people" and not "sessions", so it reads correctly. Do not "fix" it to
+`COUNT(DISTINCT lower(email))`. Proper session-based charting is separate work.
+
+**Webhook-origin leads** (`prefill_source IN ('rh_webhook','cal_webhook')`) are
+included everywhere except `/monitor/funnel`, which excludes them from step1,
+submitted and booked and explains why at length. They never touched the form, so
+they inflate any form-conversion rate from both sides. Only 9 rows today; left in
+deliberately.
+
+### Timezone
+
+**The dashboard is Eastern Time.** Use the IANA name `America/New_York`, never a
+fixed offset — DST has to move on its own.
+
+- Every displayed timestamp and every day boundary is ET.
+- The Postgres session timezone is `Etc/UTC` (confirmed). So a bare `date_trunc`
+  or `::date` buckets in UTC, which is **not** a correct day boundary for this
+  dashboard. Write `AT TIME ZONE 'America/New_York'` explicitly.
+- Never derive a calendar date in browser code from `getFullYear/getMonth/getDate`
+  — those read the viewer's laptop. Format through
+  `Intl.DateTimeFormat` with an explicit `timeZone`.
+- `/monitor/funnel` is the one deliberate exception and keeps UTC day buckets. Its
+  go-live and coverage reasoning is anchored to a UTC instant, and re-bucketing it
+  would silently change which day counts as partially covered. Its comments say so.
+
+### Health checks fail LOUD
+
+"A lead is worth more than a verdict" governs the lead path: checkers fail open.
+**Health checks are the opposite and must be, because no lead depends on them.** A
+health probe that cannot reach its dependency reports red, never green and never
+"unknown-styled-as-fine". A green badge means "verified working, just now". If it
+can't verify, it must not be green.
+
+---
+
 ## Things that will bite you
 
 **The three lists.** `WEBSITE_VERIFIED_REASONS` (line ~424), `RECHECK_WRITEABLE`
@@ -102,11 +240,42 @@ deciding its place in all three:
 - **`RECHECK_PROTECTED`** → verdicts that depend on the lead's email and can't be
   re-derived from the domain alone.
 
+**Backticks inside SQL comments break the file.** The SQL in this repo lives in
+JS template literals, and the house style is a long `/* ... */` comment inside the
+query explaining the incident behind it. A backtick in that comment — writing
+`` `leads` `` or quoting an expression — **terminates the template literal**, and
+the error surfaces as `SyntaxError: missing ) after argument list` pointing at the
+`pool.query(` line, not at the comment. Four of these happened in one sitting. Use
+plain words inside SQL comments, and run `node --check index.js` before committing.
+
 **Two copies of the label map.** `WEBSITE_REASON_LABELS` is a normal JS object.
 The monitor dashboard has a second copy (`var WLBL=`) inside a JS string that gets
 sent to the browser. Both need updating, and the string one uses `\u2014` for em
 dashes with a **single** backslash. Getting that wrong renders a literal `\u2014`
 in the dashboard.
+
+**Two more pairs that must stay in sync.** Same shape as the label map above:
+
+- `SDR_SEARCH_COLUMNS` (server, in the `/monitor/sdr` route) and
+  `SDR_SEARCH_FIELDS` (client, in the dashboard JS) are the fields the SDR
+  search matches. The table filters in the browser; the CSV export filters on
+  the server. If they drift, the export silently stops matching what is on
+  screen. A test lifts both and asserts they are equal.
+- The System Health check ids in `HEALTH_SEVERITY` / `HEALTH_ALERT_META`
+  (server) and `HIDS` (client) map checks to dashboard rows. A check with no
+  entry in `HIDS` renders nowhere; a row id with no check paints red as
+  "No result". Both are asserted.
+
+**`/monitor/health` is a real probe, and slow on purpose.** It queries the AWS
+mirror across a WAN, so it is deliberately kept OFF the dashboard's 60-second
+poll — it runs at load, every five minutes, on tab open and on the Re-check
+button. The same checks run from `startHeartbeat()` every 30 minutes so a
+failure alerts with the tab closed. Do not fold it into `/monitor/metrics`.
+
+**`/monitor/website-recheck` is a POST.** It was a GET that rewrites lead rows
+and runs two `ALTER TABLE`s, which a link prefetch or an unfurled URL could
+have fired. Nothing in the UI calls it; run it with
+`curl -X POST`.
 
 **`/monitor` is not one page.** It's the dashboard plus several sub-routes that
 feed it data. A reader who greps for a single `/monitor` handler expecting to find

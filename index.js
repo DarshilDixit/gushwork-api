@@ -536,6 +536,44 @@ function websiteCheckNote(row) {
   return '';
 }
 
+/* ── Eastern Time, everywhere ──────────────────────────────────────
+   The dashboard, the Slack alerts and the export filenames are all read
+   by people on US Eastern time. Before this, three different zones were
+   in play at once: the Postgres session is Etc/UTC (confirmed), so a bare
+   date_trunc bucketed days at 05:30 IST; the dashboard rendered every
+   timestamp in Asia/Kolkata; and the date-preset buttons used
+   getFullYear/getMonth/getDate, which read whatever the viewer's laptop
+   was set to. Same lead, three different "days".
+
+   ALWAYS the IANA name, never a fixed offset. 'EST' and '-05:00' are
+   wrong for eight months of the year, and a hardcoded offset is the
+   classic way a report silently shifts by an hour on the second Sunday
+   in March. */
+const DASH_TZ = 'America/New_York';
+
+// 'en-CA' because it formats as YYYY-MM-DD, which is what filenames and
+// SQL date literals want. Built once — Intl construction is not cheap and
+// these run per request.
+const _etDateFmt  = new Intl.DateTimeFormat('en-CA', { timeZone: DASH_TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
+const _etStampFmt = new Intl.DateTimeFormat('en-CA', {
+  timeZone: DASH_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+});
+
+// Calendar date in ET. Used for CSV filenames, which used to be
+// toISOString().slice(0,10) — so a 02:00 ET export was stamped with the
+// previous day.
+function etDateOnly(d) {
+  return _etDateFmt.format(d instanceof Date ? d : new Date(d || Date.now()));
+}
+
+// Human timestamp for Slack and alert emails. Replaces toISOString(), which
+// put UTC next to a dashboard showing ET and made cross-referencing an
+// incident an arithmetic exercise.
+function etStamp(d) {
+  return _etStampFmt.format(d instanceof Date ? d : new Date(d || Date.now())) + ' ET';
+}
+
 const ALERT_COOLDOWN_MS   = { critical: 3 * 60 * 60 * 1000, warning: 60 * 60 * 1000 };
 const ALERT_EMAIL_TO      = ['darshil.dixit@gushwork.ai', 'darshil@darshildixit.com'];
 const _alertLastSent      = new Map(); // `${severity}:${source}:${title}` -> ms
@@ -566,7 +604,7 @@ async function sendAlertEmail(subject, details) {
       from:    `"Gushwork Alerts" <${process.env.GMAIL_USER}>`,
       to:      ALERT_EMAIL_TO.join(', '),
       subject,
-      text:    `${subject}\n\n${lines}\n\nTime: ${new Date().toISOString()}`,
+      text:    `${subject}\n\n${lines}\n\nTime: ${etStamp()}`,
     });
     console.log(`[alertOps] ✅ Alert email sent | messageId: ${result.messageId}`);
   } catch (err) {
@@ -615,7 +653,7 @@ function alertOps(severity, source, title, details) {
     const blocks = [bHeader(heading), bDivider()];
     const f = bFields(fieldList);
     if (f) blocks.push(f);
-    blocks.push(bContext(`Severity: *${sev}* · ${new Date().toISOString()}`));
+    blocks.push(bContext(`Severity: *${sev}* · ${etStamp()}`));
     sendOpsSlack(blocks, heading);
 
     if (sev === 'critical') sendAlertEmail(heading, Object.assign({}, details, hidden > 0 ? { 'Also occurred': `${hidden} more time(s)` } : {})).catch(() => {});
@@ -828,6 +866,13 @@ function recordFailure(source, id, error) {
    ─────────────────────────────────────────────────────────────────── */
 let _lastLeadAt    = Date.now();
 let _lastCronRunAt = Date.now();
+/* _lastCronRunAt is seeded to boot time so the heartbeat does not alert the
+   instant an instance starts. That seeding is fine for an alert with a 3h
+   window and wrong for a health BADGE, which would read green for three hours
+   after every redeploy without the scheduler ever having called us. These two
+   let the health check tell "has run" apart from "has just started". */
+let _cronRanThisProcess = false;
+const _processStartedAt = Date.now();
 const HEARTBEAT_CHECK_MS   = 30 * 60 * 1000;      // self-check cadence
 const CRON_STALE_MS        = 3 * 60 * 60 * 1000;  // cron should run well within 3h
 const NO_LEADS_STALE_MS    = 12 * 60 * 60 * 1000; // 12h with zero leads is anomalous
@@ -855,8 +900,14 @@ function startHeartbeat() {
     } catch (err) {
       console.warn('[heartbeat] error (ignored):', err && err.message);
     }
+    /* The nine System Health rows run here rather than on the dashboard's
+       60-second poll, so a failure notifies with the tab closed. Transitions
+       only — see evaluateHealthAlerts. */
+    runHealthChecks()
+      .then(h => evaluateHealthAlerts(h.checks))
+      .catch(err => console.warn('[heartbeat] health checks failed (ignored):', err && err.message));
   }, HEARTBEAT_CHECK_MS);
-  console.log('[heartbeat] ✅ Monitoring started (cron staleness + lead flow)');
+  console.log('[heartbeat] ✅ Monitoring started (cron staleness + lead flow + system health)');
 }
 
 /* ── PHASE 3: startup configuration audit ──────────────────────────
@@ -1154,13 +1205,506 @@ function formatRevenue(amount) {
 
 app.get('/health', (req, res) => { res.json({ status: 'ok', timestamp: new Date().toISOString() }); });
 
+/* ══ SYSTEM HEALTH — nine rows that now check something ═══════════════
+   Seven of the nine rows on the Health tab were lifetime counters wearing
+   health-check clothing. The whole story was one line:
+
+     badge("s-partial", d.total+" sessions saved", "bg")
+
+   A literal green class with no condition attached. /partial read healthy
+   whether it worked or had been 500ing for a week. /submit went green on
+   the first submission in July and had no way back. AWS sync was
+   !!awsPool — true whenever an env var was set, so wrong credentials, an
+   unreachable host and every mirror write failing all read "Active".
+
+   THIS IS THE INVERSION OF THE FAIL-OPEN RULE, AND IT IS DELIBERATE.
+   Checkers on the lead path fail open because a lead is worth more than a
+   verdict. No lead depends on a health probe, so these fail LOUD instead:
+   a probe that cannot verify reports red, never green and never a calm
+   grey. See "Health checks fail LOUD" in CLAUDE.md.
+
+   Every windowed check carries a minimum denominator — the same idea as
+   ELV_MIN_SAMPLE, which exists so a couple of unlucky checks cannot cry
+   wolf. Below the floor the answer is insufficient_data, so a quiet night
+   reads grey rather than a green nobody earned or a red nothing supports.
+   The AWS check is the deliberate exception and cannot return grey at
+   all; its own comment says why.
+
+   Two rows are NOT rebuilt here because they were already real: API
+   uptime (the browser's own fetch of /health is the only honest probe of
+   "can a client reach this") and ELV (elvHealthSnapshot, which already
+   owns its enter/exit alerting in recordElvOutcome — routing it through
+   this path as well would alert twice for one incident).
+   ═══════════════════════════════════════════════════════════════════ */
+
+const HEALTH_MIN_SAMPLE            = Number(process.env.HEALTH_MIN_SAMPLE) || 8;  // ELV_MIN_SAMPLE is the precedent
+const HEALTH_PARTIAL_WINDOW_H      = 2;
+const HEALTH_SUBMIT_WINDOW_H       = 24;
+const HEALTH_SUBMIT_MIN_STEP1      = 10;
+const HEALTH_APOLLO_WINDOW_H       = 24;
+const HEALTH_BOOKING_WINDOW_D      = 7;
+const HEALTH_BOOKING_MIN_COMPLETED = 10;
+const HEALTH_AWS_WINDOW_H          = 24;
+const HEALTH_AWS_DRIFT_MIN         = 2;     // absolute floor, so one in-flight write is not an incident
+const HEALTH_AWS_DRIFT_PCT         = 0.10;
+const HEALTH_AWS_TIMEOUT_MS        = 8000;  // a hung mirror must resolve to red, not hang the dashboard
+const HEALTH_RECOVERY_LOOKBACK_D   = 7;
+/* 2h to become eligible for a follow-up, plus the 3h window in which the cron
+   is expected to have run. Anything still unsent past that was not picked up. */
+const HEALTH_RECOVERY_STUCK_H      = 5;
+
+function hc(id, state, text, detail) {
+  return { id, state, text, detail: detail || null };
+}
+
+function fmtAge(ms) {
+  const min = Math.round(ms / 60000);
+  if (min < 90) return min + ' min';
+  const h = Math.round(min / 60);
+  if (h < 48) return h + 'h';
+  return Math.round(h / 24) + 'd';
+}
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(label + ' timed out after ' + ms + 'ms')), ms); }),
+  ]);
+}
+
+/* ── Step 1 — /partial ──────────────────────────────────────────────
+   Sessions arriving with zero leads created means the form is broken at
+   the very top, which is where most volume is already lost. Bots are
+   excluded with the same BOT_RE the funnel uses, because a night of
+   crawler traffic would otherwise push the denominator over the floor
+   and manufacture a red. */
+async function checkPartialHealth(db) {
+  try {
+    const r = await db.query(`
+      SELECT
+        (SELECT COUNT(*) FROM form_sessions
+           WHERE created_at >= NOW() - INTERVAL '${HEALTH_PARTIAL_WINDOW_H} hours'
+             AND (user_agent IS NULL OR user_agent !~* $1))            AS sessions,
+        (SELECT COUNT(*) FROM leads
+           WHERE created_at >= NOW() - INTERVAL '${HEALTH_PARTIAL_WINDOW_H} hours') AS leads
+    `, [BOT_RE]);
+    const sessions = parseInt(r.rows[0].sessions) || 0;
+    const leads    = parseInt(r.rows[0].leads)    || 0;
+    const win      = HEALTH_PARTIAL_WINDOW_H + 'h';
+
+    if (leads > 0) return hc('partial', 'green', leads + ' leads saved in the last ' + win, sessions + ' sessions in the same window');
+    if (sessions >= HEALTH_MIN_SAMPLE) {
+      return hc('partial', 'red', sessions + ' sessions, 0 leads in the last ' + win,
+        'Visitors are reaching the form and nothing is being written. Check POST /partial.');
+    }
+    return hc('partial', 'insufficient_data', 'Quiet — ' + sessions + ' sessions, no leads in the last ' + win,
+      'Below the ' + HEALTH_MIN_SAMPLE + '-session floor, so this is not evidence either way.');
+  } catch (err) {
+    return hc('partial', 'red', 'Could not check', err && err.message);
+  }
+}
+
+/* ── Step 2 — /submit ───────────────────────────────────────────────
+   The old row asked whether there had EVER been a completion, so it went
+   green in July and stayed there. This asks about the last 24 hours, and
+   only calls it red when enough people reached step 1 for zero
+   completions to mean something. */
+async function checkSubmitHealth(db) {
+  try {
+    const r = await db.query(`
+      SELECT
+        (SELECT COUNT(*) FROM leads
+           WHERE created_at >= NOW() - INTERVAL '${HEALTH_SUBMIT_WINDOW_H} hours')   AS step1,
+        (SELECT COUNT(*) FROM leads
+           WHERE submitted_at >= NOW() - INTERVAL '${HEALTH_SUBMIT_WINDOW_H} hours') AS completions
+    `);
+    const step1       = parseInt(r.rows[0].step1)       || 0;
+    const completions = parseInt(r.rows[0].completions) || 0;
+    const win         = HEALTH_SUBMIT_WINDOW_H + 'h';
+
+    if (completions > 0) return hc('submit', 'green', completions + ' completions in the last ' + win, step1 + ' reached step 1 in the same window');
+    if (step1 >= HEALTH_SUBMIT_MIN_STEP1) {
+      return hc('submit', 'red', step1 + ' step-1 leads, 0 completions in the last ' + win,
+        'People are entering an email and nobody is getting through step 2. Check POST /submit.');
+    }
+    return hc('submit', 'insufficient_data', 'Quiet — ' + step1 + ' step-1 leads, no completions in the last ' + win,
+      'Below the ' + HEALTH_SUBMIT_MIN_STEP1 + '-lead floor, so this is not evidence either way.');
+  } catch (err) {
+    return hc('submit', 'red', 'Could not check', err && err.message);
+  }
+}
+
+/* ── Apollo enrichment ──────────────────────────────────────────────
+   Was a lifetime ratio of enrichment_data rows to leads rows: if Apollo
+   died today, a year of good history kept it green indefinitely. Now
+   scoped to a window, so yesterday cannot vouch for today. */
+async function checkApolloHealth(db) {
+  try {
+    const r = await db.query(`
+      SELECT
+        (SELECT COUNT(*) FROM leads
+           WHERE created_at >= NOW() - INTERVAL '${HEALTH_APOLLO_WINDOW_H} hours'
+             AND email IS NOT NULL)                                                   AS leads,
+        (SELECT COUNT(*) FROM enrichment_data
+           WHERE enriched_at >= NOW() - INTERVAL '${HEALTH_APOLLO_WINDOW_H} hours')   AS enriched,
+        (SELECT MAX(enriched_at) FROM enrichment_data)                                AS last_enriched
+    `);
+    const leads    = parseInt(r.rows[0].leads)    || 0;
+    const enriched = parseInt(r.rows[0].enriched) || 0;
+    const last     = r.rows[0].last_enriched ? new Date(r.rows[0].last_enriched).getTime() : null;
+    const win      = HEALTH_APOLLO_WINDOW_H + 'h';
+    const lastNote = last ? 'Last enrichment ' + fmtAge(Date.now() - last) + ' ago' : 'Nothing has ever been enriched';
+
+    if (leads < HEALTH_MIN_SAMPLE) {
+      return hc('apollo', 'insufficient_data', 'Quiet — ' + leads + ' leads in the last ' + win, lastNote);
+    }
+    const rate = Math.round(enriched / leads * 100);
+    if (enriched === 0)  return hc('apollo', 'red',   '0 of ' + leads + ' enriched in the last ' + win, lastNote);
+    if (rate >= 60)      return hc('apollo', 'green', rate + '% enriched in the last ' + win, enriched + ' of ' + leads + ' · ' + lastNote);
+    if (rate >= 30)      return hc('apollo', 'amber', rate + '% enriched in the last ' + win, enriched + ' of ' + leads + ' · ' + lastNote);
+    return hc('apollo', 'red', rate + '% enriched in the last ' + win, enriched + ' of ' + leads + ' · ' + lastNote);
+  } catch (err) {
+    return hc('apollo', 'red', 'Could not check', err && err.message);
+  }
+}
+
+/* ── Booking — RevenueHero ──────────────────────────────────────────
+   Also a lifetime ratio before, and inflated on both sides by webhook
+   rows. Now a 7-day window over people, not sessions.
+
+   Only ONE thing here is red: zero bookings recorded against a real
+   sample of completions, which is what a dead booking webhook looks
+   like. A merely low booking rate is a business outcome, not an outage,
+   so it is amber and stays out of the alerting path. */
+async function checkBookingHealth(db) {
+  try {
+    const r = await db.query(`
+      SELECT
+        COUNT(DISTINCT LOWER(email)) FILTER (
+          WHERE submitted_at >= NOW() - INTERVAL '${HEALTH_BOOKING_WINDOW_D} days'
+        ) AS completed_people,
+        COUNT(DISTINCT LOWER(email)) FILTER (
+          WHERE booking_uid IS NOT NULL
+            AND COALESCE(booked_at, created_at) >= NOW() - INTERVAL '${HEALTH_BOOKING_WINDOW_D} days'
+        ) AS booked_people
+      FROM leads
+      WHERE email IS NOT NULL
+    `);
+    const completed = parseInt(r.rows[0].completed_people) || 0;
+    const booked    = parseInt(r.rows[0].booked_people)    || 0;
+    const win       = HEALTH_BOOKING_WINDOW_D + 'd';
+
+    if (completed < HEALTH_BOOKING_MIN_COMPLETED) {
+      return hc('booking', 'insufficient_data', 'Quiet — ' + completed + ' people completed in the last ' + win,
+        booked + ' bookings recorded in the same window');
+    }
+    const rate = Math.round(booked / completed * 100);
+    if (booked === 0) {
+      return hc('booking', 'red', '0 bookings in the last ' + win + ', from ' + completed + ' completions',
+        'No booking has been recorded by any of the three routes. Check the RevenueHero and Cal webhooks.');
+    }
+    const text = rate + '% booked in the last ' + win;
+    const detail = booked + ' of ' + completed + ' people';
+    if (rate >= 50) return hc('booking', 'green', text, detail);
+    return hc('booking', 'amber', text, detail);
+  } catch (err) {
+    return hc('booking', 'red', 'Could not check', err && err.message);
+  }
+}
+
+/* ── Cron — drop-off recovery ───────────────────────────────────────
+   The old row was green whenever pendingPartials was 0, which is exactly
+   what a dead cron looks like on a quiet night: nothing arrives, nothing
+   is pending, the row says fine. It could not go red at all.
+
+   This reads the heartbeat timestamp instead. Pure function of the
+   clock so it can be tested without a database.
+
+   _lastCronRunAt is seeded to boot time, so "recent" alone would read
+   green for three hours after every redeploy without the scheduler ever
+   calling us. _cronRanThisProcess separates "has run" from "has just
+   started", and the not-yet-run case is grey until the window elapses
+   and then red — never green. */
+function checkCronHealth(now, lastRunAt, ranThisProcess, startedAt) {
+  const staleH = Math.round(CRON_STALE_MS / 3600000);
+  if (!ranThisProcess) {
+    const up = now - startedAt;
+    if (up > CRON_STALE_MS) {
+      return hc('cron', 'red', 'No run in ' + fmtAge(up) + ' since restart',
+        'The scheduler has not called POST /cron/send-partials since this instance started. Drop-off follow-ups are not going out.');
+    }
+    return hc('cron', 'insufficient_data', 'No run yet — restarted ' + fmtAge(up) + ' ago',
+      'Expected within ' + staleH + 'h of a restart.');
+  }
+  const age = now - lastRunAt;
+  if (age > CRON_STALE_MS) {
+    return hc('cron', 'red', 'Last run ' + fmtAge(age) + ' ago',
+      'Expected within ' + staleH + 'h. Check the scheduler that calls POST /cron/send-partials.');
+  }
+  return hc('cron', 'green', 'Last run ' + fmtAge(age) + ' ago', 'Expected within ' + staleH + 'h.');
+}
+
+/* ── AWS sync — the mirror the dialer reads ─────────────────────────
+   THIS FUNCTION RETURNS green OR red AND NOTHING ELSE. There is no code
+   path to insufficient_data and there must never be one; a test asserts
+   it, both by reading this source and by driving the function with a
+   pool that throws.
+
+   The reason is the whole point of the row. A mirror we cannot reach is
+   indistinguishable from a mirror that has gone stale, and both starve
+   the sdr-calling dialer with no error anywhere else in the system:
+   syncToAWS is fire-and-forget at all five call sites and only
+   console.warns what it drops. Grey here would render as a calm "we are
+   not sure", next to eight rows where grey means "quiet night".
+
+   Both zero IS green, and the text says why: we connected, we queried,
+   and the two sides agree. That is a verified positive about the mirror,
+   just not one about traffic. */
+async function checkAwsHealth(awsDb, railwayDb) {
+  if (!awsDb) {
+    return hc('aws', 'red', 'Disabled — AWS_PG_HOST is not set',
+      'No mirror is being written at all. The sdr-calling dialer reads gw_form_leads and will never see a new lead.');
+  }
+  let mirror, railway;
+  try {
+    [mirror, railway] = await withTimeout(Promise.all([
+      awsDb.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '${HEALTH_AWS_WINDOW_H} hours') AS recent,
+          MAX(updated_at) AS last_write
+        FROM gw_form_leads
+      `),
+      railwayDb.query(`
+        SELECT COUNT(*) AS recent
+        FROM leads
+        WHERE created_at >= NOW() - INTERVAL '${HEALTH_AWS_WINDOW_H} hours'
+      `),
+    ]), HEALTH_AWS_TIMEOUT_MS, 'AWS mirror query');
+  } catch (err) {
+    return hc('aws', 'red', 'Cannot reach the mirror',
+      (err && err.message ? err.message + ' — ' : '') + 'A mirror we cannot query is indistinguishable from one that has stopped being written.');
+  }
+
+  const mirrorRows  = parseInt(mirror.rows[0].recent)  || 0;
+  const railwayRows = parseInt(railway.rows[0].recent) || 0;
+  const lastWrite   = mirror.rows[0].last_write ? new Date(mirror.rows[0].last_write).getTime() : null;
+  const win         = HEALTH_AWS_WINDOW_H + 'h';
+  const missing     = railwayRows - mirrorRows;
+  const tolerance   = Math.max(HEALTH_AWS_DRIFT_MIN, Math.ceil(railwayRows * HEALTH_AWS_DRIFT_PCT));
+
+  if (railwayRows === 0 && mirrorRows === 0) {
+    return hc('aws', 'green', 'Reachable — no leads in the last ' + win + ' to mirror',
+      lastWrite ? 'Last mirror write ' + fmtAge(Date.now() - lastWrite) + ' ago' : 'The mirror has never been written');
+  }
+  if (railwayRows > 0 && mirrorRows === 0) {
+    return hc('aws', 'red', 'Mirror empty — ' + railwayRows + ' leads on Railway in the last ' + win + ', 0 mirrored',
+      'Every mirror write in the window was lost. syncToAWS swallows its errors, so this is the only place it shows.');
+  }
+  if (missing > tolerance) {
+    return hc('aws', 'red', missing + ' rows behind in the last ' + win,
+      mirrorRows + ' mirrored of ' + railwayRows + ' on Railway · tolerance ' + tolerance);
+  }
+  return hc('aws', 'green', 'In sync — ' + mirrorRows + ' of ' + railwayRows + ' rows in the last ' + win,
+    lastWrite ? 'Last mirror write ' + fmtAge(Date.now() - lastWrite) + ' ago' : null);
+}
+
+/* ── Email recovery ─────────────────────────────────────────────────
+   Was d.loopsSent > 0 — a lifetime count, green forever after the first
+   send in July.
+
+   The predicate below deliberately MIRRORS the recovery cron's own
+   SELECT, including the booked_at >= created_at test and including
+   equals-false rather than IS NOT TRUE. That is not sloppiness inherited
+   from the cron: this row asks whether the cron is clearing its own
+   queue, so it has to count the same rows the cron would pick up. Widen
+   it to IS NOT TRUE and a row with a null flag would count as stuck here
+   while the cron never selects it, and the row would sit red forever.
+
+   Stuck means eligible for longer than the cron's own staleness window,
+   so a lead that crossed the 2h line a minute after the last run is not
+   an incident. */
+async function checkRecoveryHealth(db) {
+  try {
+    const r = await db.query(`
+      SELECT
+        (SELECT COUNT(*) FROM leads
+           WHERE loops_sent = true
+             AND created_at >= NOW() - INTERVAL '${HEALTH_RECOVERY_LOOKBACK_D} days') AS processed,
+        (SELECT COUNT(*) FROM leads l
+           WHERE l.email IS NOT NULL
+             AND l.disqualified = false
+             AND l.booking_uid IS NULL
+             AND l.loops_sent = false
+             AND l.created_at < NOW() - INTERVAL '${HEALTH_RECOVERY_STUCK_H} hours'
+             AND NOT EXISTS (
+               SELECT 1 FROM leads booked
+               WHERE LOWER(booked.email) = LOWER(l.email)
+                 AND booked.booking_uid IS NOT NULL
+                 AND booked.booked_at >= l.created_at
+             )) AS stuck
+    `);
+    const processed = parseInt(r.rows[0].processed) || 0;
+    const stuck     = parseInt(r.rows[0].stuck)     || 0;
+
+    if (stuck > 0) {
+      return hc('recovery', 'red', stuck + ' waiting more than ' + HEALTH_RECOVERY_STUCK_H + 'h',
+        'These are eligible for a follow-up and have not been picked up. Either the cron is not running or the sends are failing.');
+    }
+    if (processed > 0) {
+      return hc('recovery', 'green', processed + ' follow-ups processed in the last ' + HEALTH_RECOVERY_LOOKBACK_D + 'd', 'Nothing stuck in the queue');
+    }
+    return hc('recovery', 'insufficient_data', 'No drop-offs to follow up in the last ' + HEALTH_RECOVERY_LOOKBACK_D + 'd', 'Nothing stuck in the queue');
+  } catch (err) {
+    return hc('recovery', 'red', 'Could not check', err && err.message);
+  }
+}
+
+/* One place that runs them all. Each check already catches its own
+   failure and reports red; the wrapper is a second net so one broken
+   probe cannot take the other six down with it. */
+function safeCheck(id, fn) {
+  return Promise.resolve().then(fn).catch(err => hc(id, 'red', 'Could not check', err && err.message));
+}
+
+async function runHealthChecks() {
+  const now = Date.now();
+  const results = await Promise.all([
+    safeCheck('partial',  () => checkPartialHealth(pool)),
+    safeCheck('submit',   () => checkSubmitHealth(pool)),
+    safeCheck('apollo',   () => checkApolloHealth(pool)),
+    safeCheck('booking',  () => checkBookingHealth(pool)),
+    safeCheck('cron',     () => checkCronHealth(now, _lastCronRunAt, _cronRanThisProcess, _processStartedAt)),
+    safeCheck('aws',      () => checkAwsHealth(awsPool, pool)),
+    safeCheck('recovery', () => checkRecoveryHealth(pool)),
+  ]);
+  const checks = {};
+  for (const c of results) checks[c.id] = c;
+  return { checks, generatedAt: new Date().toISOString() };
+}
+
+/* ── Alerting on state transitions ──────────────────────────────────
+   Mirrors the ELV enter/exit pattern exactly, and goes through the same
+   alertOps that already carries per-key cooldown and suppression
+   counting. No second alerting system.
+
+   Only green and red move state. amber and insufficient_data are inert
+   on purpose: grey means "not enough evidence", and alerting on an
+   absence of evidence is the same mistake as recording "we could not
+   check" as "we checked and it is bad".
+
+   Severity split is the owner's, Aug 2026: sessions arriving with zero
+   leads means the form is broken at the very top, which is where most
+   volume is already lost, so /partial and /submit page by email. The AWS
+   mirror joins them because the sdr-calling dialer reads it and nothing
+   else in the system notices when it stops. */
+const HEALTH_SEVERITY = {
+  partial:  'critical',
+  submit:   'critical',
+  aws:      'critical',
+  apollo:   'warning',
+  booking:  'warning',
+  cron:     'warning',
+  recovery: 'warning',
+};
+
+const HEALTH_ALERT_META = {
+  partial:  { source: 'Step 1 /partial',  title: 'Leads are not being saved',        impact: 'Visitors are reaching the form and nothing is being written to Railway.', action: 'Check POST /partial in the Railway logs.' },
+  submit:   { source: 'Step 2 /submit',   title: 'Nobody is completing the form',    impact: 'People are entering an email and none are getting through step 2.',      action: 'Check POST /submit in the Railway logs.' },
+  aws:      { source: 'AWS sync',         title: 'Mirror is not being written',      impact: 'The sdr-calling dialer reads gw_form_leads and is not seeing new leads.', action: 'Check the AWS_PG_* credentials and that the host is reachable.' },
+  apollo:   { source: 'Apollo',           title: 'Enrichment has stopped',           impact: 'New leads are arriving with no enrichment attached.',                    action: 'Check the Apollo API key and credit balance.' },
+  booking:  { source: 'Booking',          title: 'No bookings are being recorded',   impact: 'People are completing the form and no booking is landing on any lead.',  action: 'Check the RevenueHero and Cal webhooks — booking arrives by three routes.' },
+  cron:     { source: 'Recovery cron',    title: 'Has not run recently',             impact: 'Drop-off follow-up emails are not being sent.',                          action: 'Check the scheduler that calls POST /cron/send-partials.' },
+  recovery: { source: 'Email recovery',   title: 'Follow-ups are stuck in the queue', impact: 'Leads are eligible for a follow-up and are not being picked up.',        action: 'Check the Gmail credentials and the cron logs.' },
+};
+
+const _healthState = new Map(); // check id -> the last state we reported on: 'green' or 'red'
+
+function evaluateHealthAlerts(checks) {
+  try {
+    for (const id of Object.keys(checks || {})) {
+      const c    = checks[id];
+      const meta = HEALTH_ALERT_META[id];
+      if (!c || !meta) continue;
+      if (c.state !== 'green' && c.state !== 'red') continue;
+
+      const prev = _healthState.get(id);
+      if (prev === c.state) continue;   // unchanged — fires once, not once per poll
+      _healthState.set(id, c.state);
+
+      if (c.state === 'red') {
+        alertOps(HEALTH_SEVERITY[id] || 'warning', meta.source, meta.title, {
+          'Signal': c.text,
+          'Detail': c.detail || '—',
+          'Impact': meta.impact,
+          'Action': meta.action,
+        });
+      } else if (prev === 'red') {
+        /* Recovery is informational, so it goes straight to Slack rather
+           than through alertOps — same as the ELV exit path, and for the
+           same reason: a cooldown on a recovery message can swallow the
+           one line that tells you the incident is over. */
+        const heading = '✅ ' + meta.source + ' — recovered';
+        sendOpsSlack([
+          bHeader(heading),
+          bDivider(),
+          bFields([
+            { label: 'Now', value: c.text },
+            c.detail ? { label: 'Detail', value: c.detail } : null,
+          ].filter(Boolean)),
+          bContext('Severity: *info* · ' + etStamp()),
+        ].filter(Boolean), heading);
+        console.log('[health] ✅ ' + meta.source + ' recovered — ' + c.text);
+      }
+    }
+  } catch (err) {
+    console.warn('[health] alert evaluation error (ignored):', err && err.message);
+  }
+}
+
+app.get('/monitor/health', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const out = await runHealthChecks();
+    res.json(out);
+  } catch (err) {
+    console.error('[/monitor/health]', err.message);
+    res.status(500).json({ error: 'Health checks failed', detail: err.message });
+  }
+});
+
+
+/* ── "Does this person hold a call slot?" ────────────────────────────
+   Question 1 of the two in the Definitions section of CLAUDE.md, and the
+   one with NO time comparison. An SDR ringing someone who already has a
+   call on the calendar is wrong whether that call was booked yesterday or
+   in May, so when they booked is irrelevant here.
+
+   Do not reach for this at the recovery cron. That asks a different
+   question — "does THIS session's drop-off still need an email" — where
+   the time comparison is required and deliberate. The cron has a long
+   comment saying so and a test guarding it.
+
+   Takes the outer email expression because the two call sites alias the
+   leads table differently. One definition so the SDR List and the "No
+   booking yet" headline cannot drift into disagreeing about who has a
+   booking while both claiming to exclude bookers. */
+const noBookingAnywhereSql = (emailExpr) => `NOT EXISTS (
+              SELECT 1 FROM leads booked
+              WHERE LOWER(booked.email) = LOWER(${emailExpr})
+                AND booked.booking_uid IS NOT NULL
+            )`;
+
 app.get('/monitor/metrics', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   try {
-    const [totals, people, recovered, byDay, enrichCount, enrichCoverage, pendingPartials, noBooking, recent, today] = await Promise.all([
+    const [totals, people, recovered, byDay, enrichCount, enrichCoverage, pendingPartials, noBooking, recent, today, topFunnel] = await Promise.all([
       pool.query(`
         SELECT
           COUNT(*)                                                          AS total,
@@ -1197,13 +1741,31 @@ app.get('/monitor/metrics', async (req, res) => {
         ) x
       `),
       pool.query(`
-        SELECT to_char(created_at AT TIME ZONE 'Asia/Kolkata', 'Mon DD') AS day_label,
-               date_trunc('day', created_at AT TIME ZONE 'Asia/Kolkata') AS day,
-               COUNT(*) AS count
-        FROM leads
-        WHERE created_at >= NOW() - INTERVAL '14 days'
-        GROUP BY 1, 2
-        ORDER BY 2 ASC
+        /* "Form entries per day" — a deliberate ROW count over the leads table,
+           people count and not a session count. Daily inbound volume is the
+           question; deduping by email would flatten exactly the repeat-attempt
+           spikes that make a bad day visible. Named as an exception in
+           CLAUDE.md's Definitions so it doesn't read as a rule violation.
+
+           Two fixes here beyond the ET move:
+           1. generate_series zero-fills. Without it a day with no entries was
+              ABSENT rather than zero, so the bars either side sat adjacent and
+              a dead day looked like continuity. Same fix the lead-magnet chart
+              already had.
+           2. Exactly 14 ET calendar days. The old rolling NOW() minus 14 days
+              window was 336 hours, so it drew 15 bars with the oldest one
+              starting mid-day — a partial bucket that read as a real one. */
+        SELECT to_char(d.day, 'Mon DD')  AS day_label,
+               d.day                     AS day,
+               COALESCE(COUNT(l.id), 0)::int AS count
+        FROM generate_series(
+               date_trunc('day', (NOW() AT TIME ZONE '${DASH_TZ}') - INTERVAL '13 days'),
+               date_trunc('day', (NOW() AT TIME ZONE '${DASH_TZ}')),
+               INTERVAL '1 day') AS d(day)
+        LEFT JOIN leads l
+          ON date_trunc('day', l.created_at AT TIME ZONE '${DASH_TZ}') = d.day
+        GROUP BY d.day
+        ORDER BY d.day ASC
       `),
       pool.query(`SELECT COUNT(*) AS count FROM enrichment_data`),
       pool.query(`
@@ -1237,11 +1799,7 @@ app.get('/monitor/metrics', async (req, res) => {
             AND booking_uid IS NULL
             AND disqualified = false
             AND sell_to ILIKE 'B2B%'
-            AND NOT EXISTS (
-              SELECT 1 FROM leads booked
-              WHERE LOWER(booked.email) = LOWER(leads.email)
-                AND booked.booking_uid IS NOT NULL
-            )
+            AND ${noBookingAnywhereSql('leads.email')}
           ORDER BY LOWER(email), created_at DESC
         ) deduped
       `),
@@ -1250,7 +1808,41 @@ app.get('/monitor/metrics', async (req, res) => {
                completed, booking_uid, disqualified, created_at, page_url
         FROM leads ORDER BY created_at DESC LIMIT 50
       `),
-      pool.query(`SELECT COUNT(*) AS count FROM leads WHERE created_at >= NOW() - INTERVAL '24 hours'`)
+      pool.query(`SELECT COUNT(*) AS count FROM leads WHERE created_at >= NOW() - INTERVAL '24 hours'`),
+      /* ── Top-of-funnel, for the Overview funnel widget ──
+         Scoped to the SESSION-TRACKED WINDOW, not all time, and that is the
+         whole point. form_sessions starts at go_live (21 Aug 2026 10:32 UTC);
+         `leads` goes back to July. Comparing an all-time step-1 count against
+         a since-August session count is what produced step1_rate = 266.7 on
+         /monitor/funnel — the numerator outliving its denominator. So every
+         stage here is measured from go_live forward, and when there is no
+         go_live at all the route returns nulls rather than zeros: "not
+         tracked" and "nobody converted" are different statements.
+
+         UNIT CHANGE AT THE FIRST STAGE, stated on screen. Sessions are VISITS
+         (form_sessions has no email, so it cannot be deduped to people);
+         everything below is PEOPLE. Sessions -> Step 1 is therefore
+         visits-to-people and is not a pure conversion rate. Same denominator
+         /monitor/funnel uses, same caveat. */
+      pool.query(`
+        WITH gl AS (SELECT MIN(created_at) AS go_live FROM form_sessions),
+        s AS (
+          SELECT COUNT(*) FILTER (WHERE user_agent IS NULL OR user_agent !~* $1) AS sessions,
+                 COUNT(*) FILTER (WHERE user_agent ~* $1)                        AS bot_sessions
+            FROM form_sessions
+        ),
+        p AS (
+          SELECT COUNT(DISTINCT LOWER(l.email))                                         AS step1,
+                 COUNT(DISTINCT LOWER(l.email)) FILTER (WHERE l.completed IS TRUE)       AS completed,
+                 COUNT(DISTINCT LOWER(l.email)) FILTER (WHERE l.booking_uid IS NOT NULL) AS booked
+            FROM leads l CROSS JOIN gl
+           WHERE l.email IS NOT NULL
+             AND gl.go_live IS NOT NULL
+             AND l.created_at >= gl.go_live
+        )
+        SELECT gl.go_live, s.sessions, s.bot_sessions, p.step1, p.completed, p.booked
+          FROM gl CROSS JOIN s CROSS JOIN p
+      `, [BOT_RE])
     ]);
 
     const t = totals.rows[0];
@@ -1275,6 +1867,24 @@ app.get('/monitor/metrics', async (req, res) => {
     const noBookingUid = parseInt(noBooking.rows[0].count) || 0;
     const todayCount   = parseInt(today.rows[0].count) || 0;
 
+    /* Nulls, not zeros, when session tracking never ran for this period.
+       A zero here reads as "nobody visited", which is a claim about demand;
+       the truth is "we were not counting". Same rule /monitor/funnel applies
+       to its orphan_leads and step1_rate. */
+    const tf = topFunnel.rows[0] || {};
+    const topFunnelOut = tf.go_live
+      ? {
+          coverage:    'full',
+          since:       tf.go_live,
+          sessions:    parseInt(tf.sessions)      || 0,
+          botSessions: parseInt(tf.bot_sessions)  || 0,
+          step1:       parseInt(tf.step1)         || 0,
+          completed:   parseInt(tf.completed)     || 0,
+          booked:      parseInt(tf.booked)        || 0,
+        }
+      : { coverage: 'none', since: null, sessions: null, botSessions: null,
+          step1: null, completed: null, booked: null };
+
     const ec = enrichCoverage.rows[0];
     const ecTotal    = parseInt(ec.total) || 0;
     const titlePct   = ecTotal ? Math.round(parseInt(ec.has_title) / ecTotal * 100) : 0;
@@ -1289,6 +1899,7 @@ app.get('/monitor/metrics', async (req, res) => {
       peopleTotal, peopleCompleted, peopleBooked, peopleDisqualified,
       peopleNoBooking: noBookingUid,
       recoveredBookings,
+      topFunnel: topFunnelOut,
       leadsByDay,
       recentLeads: recent.rows, generatedAt: new Date().toISOString()
     });
@@ -1380,19 +1991,45 @@ app.get('/monitor/metrics', async (req, res) => {
 // added column away from being ambiguous.
 const WEBHOOK_LEAD_SQL = "COALESCE(l.prefill_source, '') IN ('rh_webhook', 'cal_webhook')";
 
+/* Obvious automated traffic, excluded at READ time so the rule can change
+   without losing rows. Empty user agents are KEPT and counted separately — an
+   empty UA is more often a privacy-hardened browser than a crawler, and
+   throwing those away would quietly shrink the top of the funnel.
+
+   Module scope so the Overview funnel and /monitor/funnel share ONE regex. A
+   second copy would drift, and the two would then disagree about how many
+   sessions exist while both claiming to exclude bots. */
+const BOT_RE = "(bot|crawl|spider|slurp|headless|python-requests|curl|wget|monitor|preview|scrape|lighthouse|pingdom|semrush|ahrefs)";
+
 app.get('/monitor/funnel', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   const days = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 180);
-  // Obvious automated traffic, excluded at READ time so the rule can change
-  // without losing rows. Empty user agents are kept and counted separately.
-  const BOT_RE = "(bot|crawl|spider|slurp|headless|python-requests|curl|wget|monitor|preview|scrape|lighthouse|pingdom|semrush|ahrefs)";
   try {
     const [byDay, totals] = await Promise.all([
       pool.query(`
         WITH s AS (
+          /* ── THIS ROUTE STAYS ON UTC DAY BUCKETS. DELIBERATE. ──
+             Everything else on the dashboard moved to America/New_York. This
+             one did not, and must not be "brought into line" without redoing
+             the coverage logic below.
+
+             Why: every judgement in this query is anchored to a single UTC
+             INSTANT — go_live, the moment session recording started (21 Aug
+             2026, 10:32 UTC). session_coverage, the null-ing of step1_rate on
+             a partial day, and the orphan_leads cutoff all ask "was recording
+             already running at the START of this day". Re-bucketing to ET moves
+             every day boundary 4-5 hours earlier, which changes WHICH day is
+             the partial one and silently makes a covered day read partial (or
+             worse, the reverse). The instant comparisons stay correct because
+             pg hands both sides back as absolute times.
+
+             Consequence to know when reading this next to the dashboard: this
+             route's per-day rows will NOT line up with the Overview chart. That
+             is expected, not a bug. Proper ET session charting is separate work
+             and this route is not fetched by the UI today. */
           SELECT date_trunc('day', created_at) AS d,
                  COUNT(*) FILTER (WHERE user_agent IS NULL OR user_agent !~* $2) AS sessions,
                  COUNT(*) FILTER (WHERE user_agent ~* $2)                        AS bot_sessions,
@@ -1410,6 +2047,9 @@ app.get('/monitor/funnel', async (req, res) => {
         -- anything.
         gl AS (SELECT MIN(created_at) AS go_live FROM form_sessions),
         l AS (
+          // UTC day buckets on purpose — see the note on the sessions CTE above.
+          // Both CTEs must use the SAME zone or the FULL OUTER JOIN on s.d = l.d
+          // silently stops matching and every day splits into two half-rows.
           SELECT date_trunc('day', l.created_at) AS d,
                  COUNT(*) FILTER (WHERE l.email IS NOT NULL AND l.email <> '' AND NOT (${WEBHOOK_LEAD_SQL})) AS step1,
                  COUNT(*) FILTER (WHERE l.submitted_at IS NOT NULL AND NOT (${WEBHOOK_LEAD_SQL}))            AS submitted,
@@ -1587,10 +2227,26 @@ app.get('/monitor/leads', async (req, res) => {
   let conditions = [];
   const params = [];
 
+  /* THE STAGE LADDER — the one in the Definitions section of CLAUDE.md.
+     Four stages, mutually exclusive and exhaustive, resolved in priority
+     order, so every lead is in exactly one and the four always sum to the
+     total.
+
+     What was here did not do that. 'disqualified' was a bare
+     disqualified = true, so a lead who was disqualified AND booked appeared
+     under both Booked and Disqualified. 'completed' did not exclude
+     disqualified, so it overlapped too. And 'step1' was
+     completed = false AND disqualified = false, which both let booked leads
+     through and dropped every row where the flag is NULL rather than false —
+     those rows fell out of all four filters and could not be found under any
+     stage.
+
+     Hence IS TRUE / IS NOT TRUE throughout, never = true / = false: a null
+     flag on an old row has to land in a stage rather than vanishing. */
   if (stage === 'booked')       conditions.push('l.booking_uid IS NOT NULL');
-  if (stage === 'completed')    conditions.push('l.completed = true AND l.booking_uid IS NULL');
-  if (stage === 'step1')        conditions.push('l.completed = false AND l.disqualified = false');
-  if (stage === 'disqualified') conditions.push('l.disqualified = true');
+  if (stage === 'disqualified') conditions.push('l.booking_uid IS NULL AND l.disqualified IS TRUE');
+  if (stage === 'completed')    conditions.push('l.booking_uid IS NULL AND l.disqualified IS NOT TRUE AND l.completed IS TRUE');
+  if (stage === 'step1')        conditions.push('l.booking_uid IS NULL AND l.disqualified IS NOT TRUE AND l.completed IS NOT TRUE');
 
   if (sellTo === '__clarified') {
     // any lead that flipped B2C/Mixed -> B2B at the disqualified step
@@ -1618,8 +2274,16 @@ app.get('/monitor/leads', async (req, res) => {
   if (repeatAttempts === 'yes') conditions.push(`EXISTS (SELECT 1 FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at)`);
   if (repeatAttempts === 'no')  conditions.push(`NOT EXISTS (SELECT 1 FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at)`);
 
-  if (dateFrom) { params.push(dateFrom); conditions.push(`l.created_at >= $${params.length}::date`); }
-  if (dateTo)   { params.push(dateTo);   conditions.push(`l.created_at < ($${params.length}::date + INTERVAL '1 day')`); }
+  /* The picked date is an ET calendar day, so the boundary has to be ET
+     midnight. `$n::date` alone produced a naive date that Postgres resolved in
+     the session zone — Etc/UTC — putting the cut at 20:00 the previous evening
+     ET. A lead at 21:00 ET on the 24th was labelled "24" in the table and
+     returned by a "25" filter, and a "Today" filter dropped everything from
+     20:00 the night before. Applying AT TIME ZONE to the naive timestamp
+     INTERPRETS it as ET and hands back a timestamptz, which is the comparison
+     we actually want. */
+  if (dateFrom) { params.push(dateFrom); conditions.push(`l.created_at >= ($${params.length}::date::timestamp AT TIME ZONE '${DASH_TZ}')`); }
+  if (dateTo)   { params.push(dateTo);   conditions.push(`l.created_at < (($${params.length}::date + INTERVAL '1 day')::timestamp AT TIME ZONE '${DASH_TZ}')`); }
   if (search) {
     params.push(`%${search.toLowerCase()}%`);
     const i = params.length;
@@ -1691,7 +2355,7 @@ app.get('/monitor/leads', async (req, res) => {
         ...allRows.rows.map(r => cols.map(c => escape(c === 'unverifiable_pair' ? isUnverifiablePair(r) : r[c])).join(','))
       ].join('\n');
       res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', `attachment; filename="leads-${new Date().toISOString().slice(0,10)}.csv"`);
+      res.setHeader('Content-Disposition', `attachment; filename="leads-${etDateOnly()}.csv"`);
       return res.send(csv);
     }
 
@@ -1739,11 +2403,37 @@ app.get('/monitor/filter-options', async (req, res) => {
   }
 });
 
+/* The four fields the SDR search matches on. The dashboard's client-side
+   filter reads the same four out of SDR_SEARCH_FIELDS, and a test lifts both
+   lists and asserts they are equal.
+
+   Applied server-side ONLY for the CSV export. The table keeps its
+   client-side filter: this query is unbounded and a round trip per keystroke
+   would be worse than filtering rows already in the browser. Before this,
+   exportSDR sent format=csv and nothing else, so someone who searched "acme",
+   saw four rows and hit Export got the entire list. */
+const SDR_SEARCH_COLUMNS = ['email', 'company', 'first_name', 'enriched_industry'];
+
 app.get('/monitor/sdr', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
 
   const format = req.query.format || 'json';
+  const search = String(req.query.search || '').trim().toLowerCase();
+
+  /* Filtered in an outer SELECT over the deduped set, not inside it. Pushing
+     it in would change WHICH row survives DISTINCT ON per email, so a search
+     could return a different row than the unsearched table shows for the same
+     person. Parameterised, never interpolated. */
+  const searchParams = [];
+  let searchSql = '';
+  if (search) {
+    searchParams.push('%' + search + '%');
+    const ph = '$' + searchParams.length;
+    searchSql = 'WHERE (' + SDR_SEARCH_COLUMNS
+      .map((c) => 'LOWER(COALESCE(' + c + ", '')) LIKE " + ph)
+      .join(' OR ') + ')';
+  }
 
   try {
     const result = await pool.query(`
@@ -1784,15 +2474,12 @@ app.get('/monitor/sdr', async (req, res) => {
         WHERE l.email IS NOT NULL
           AND l.disqualified = false
           AND l.sell_to ILIKE 'B2B%'
-          AND NOT EXISTS (
-            SELECT 1 FROM leads booked
-            WHERE LOWER(booked.email) = LOWER(l.email)
-              AND booked.booking_uid IS NOT NULL
-          )
+          AND ${noBookingAnywhereSql('l.email')}
         ORDER BY LOWER(l.email), l.created_at DESC
       ) deduped
+      ${searchSql}
       ORDER BY created_at DESC
-    `);
+    `, searchParams);
 
     const leads = result.rows;
 
@@ -1816,7 +2503,7 @@ app.get('/monitor/sdr', async (req, res) => {
         ...leads.map(r => cols.map(c => escape(r[c])).join(','))
       ].join('\n');
       res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', `attachment; filename="sdr-list-${new Date().toISOString().slice(0,10)}.csv"`);
+      res.setHeader('Content-Disposition', `attachment; filename="sdr-list-${etDateOnly()}.csv"`);
       return res.send(csv);
     }
 
@@ -1863,7 +2550,7 @@ app.get('/monitor', (req, res) => {
   '.badge{font-size:11px;font-weight:500;padding:3px 9px;border-radius:5px;white-space:nowrap}' +
   '.bg{background:#f0fdf4;color:#15803d}.br{background:#fef2f2;color:#b91c1c}.ba{background:#fffbeb;color:#b45309}.bx{background:#f5f5f5;color:#666}.bb{background:#eff6ff;color:#1d4ed8}' +
   '.alertbox{border-radius:8px;padding:10px 14px;margin-bottom:8px;font-size:13px;display:flex;align-items:flex-start;gap:8px}' +
-  '.ao{background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0}.aw{background:#fffbeb;color:#b45309;border:1px solid #fde68a}.ae{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca}' +
+  '.an{background:#fafafa;color:#666;border:1px solid #eee}.ao{background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0}.aw{background:#fffbeb;color:#b45309;border:1px solid #fde68a}.ae{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca}' +
   '.fr{margin-bottom:10px}.fl{display:flex;justify-content:space-between;font-size:12px;color:#666;margin-bottom:4px}' +
   '.fb{height:7px;border-radius:4px;background:#f0f0f0;overflow:hidden}.ff{height:100%;border-radius:4px;transition:width 0.6s ease}' +
   '.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px}' +
@@ -1898,7 +2585,8 @@ app.get('/monitor', (req, res) => {
   '@media(max-width:700px){.g4{grid-template-columns:repeat(2,1fr)}.g2{grid-template-columns:1fr}}' +
   '</style></head><body>' +
   '<div class="topbar"><div style="display:flex;align-items:center;gap:12px"><span class="logo">Gushwork &#8212; Form Monitor</span>' +
-  '<div class="apill"><span class="dot" id="apidot"></span><span id="apist">Checking...</span></div></div>' +
+  '<div class="apill"><span class="dot" id="apidot"></span><span id="apist">Checking...</span></div>' +
+  '<div class="apill" title="Every timestamp and every day boundary on this dashboard is US Eastern, and follows daylight saving automatically.">&#128340; All times ET</div></div>' +
   '<div style="display:flex;align-items:center;gap:10px"><span class="lu" id="lupd">&#8212;</span>' +
   '<button class="btn" onclick="loadAll()">&#8635; Refresh</button></div></div>' +
   '<div class="page">' +
@@ -1919,23 +2607,27 @@ app.get('/monitor', (req, res) => {
   '<div class="mc" title="People marked disqualified (B2C / Mixed) on at least one session."><div class="ml">Disqualified</div><div class="mv" id="m-disq">&#8212;</div><div class="ms" id="m-dsq">B2C / Mixed</div></div>' +
   '</div>' +
   '<div class="g4">' +
-  '<div class="mc" title="Distinct qualified B2B people who completed the form but have NO booking on ANY of their sessions. This is exactly the SDR List."><div class="ml">No booking yet (SDR)</div><div class="mv" id="m-nb">&#8212;</div><div class="ms" id="m-nbs">&#8212;</div></div>' +
+  '<div class="mc" title="Distinct qualified B2B people who COMPLETED the form and have no booking on any of their sessions. The SDR List is deliberately wider &#8212; it has no completed filter, so it also carries people who entered an email and never finished. Expect the SDR List to be the larger number."><div class="ml">No booking yet (SDR)</div><div class="mv" id="m-nb">&#8212;</div><div class="ms" id="m-nbs">&#8212;</div></div>' +
   '<div class="mc" title="People who completed the form without booking, and later booked on another session &#8212; your follow-up emails / prefill links / SDR nudges working."><div class="ml">Recovered bookings</div><div class="mv" id="m-rec">&#8212;</div><div class="ms">booked on a later session</div></div>' +
-  '<div class="mc" title="Sessions older than 2 hours with no booking (and no booking on any other session of that email) that the recovery cron has not processed yet."><div class="ml">Pending recovery</div><div class="mv" id="m-pend">&#8212;</div><div class="ms">&gt;2h, awaiting follow-up</div></div>' +
+  '<div class="mc" title="Sessions older than 2 hours, not yet emailed, where nobody has booked with that address SINCE the session started. A booking made before the session does not count as resolving it &#8212; the person came back, started again and dropped again. That is why this number and the SDR List can disagree about the same address."><div class="ml">Pending recovery</div><div class="mv" id="m-pend">&#8212;</div><div class="ms">&gt;2h, no booking since the session</div></div>' +
   '<div class="mc" title="Sessions where the drop-off recovery email has been sent (loops_sent = true)."><div class="ml">Recovery emails sent</div><div class="mv" id="m-mail">&#8212;</div><div class="ms">follow-ups dispatched</div></div>' +
   '</div>' +
   '<div class="recon" id="recon">&#8212;</div>' +
   '<div class="g2">' +
   '<div><div class="sl">Alerts</div><div id="alerts"><div class="alertbox" style="background:#f5f5f5;color:#999;border:1px solid #eee">Loading...</div></div></div>' +
-  '<div><div class="sl">Conversion funnel (people)</div><div class="card"><div id="funnel">Loading...</div></div></div>' +
+  '<div><div class="sl">Conversion funnel <span id="fnl-toggle" style="float:right;font-weight:400"></span></div><div class="card"><div id="funnel">Loading...</div></div></div>' +
   '</div>' +
-  '<div class="sl">Form sessions per day &#8212; last 14 days (IST)</div>' +
+  /* "Form entries" not "sessions": this counts rows in `leads`, i.e. everyone
+     who reached step 1. It was labelled "sessions" while querying leads, which
+     is a different table with a deliberately different meaning. */
+  '<div class="sl">Form entries per day &#8212; last 14 days (ET)</div>' +
+  '<div class="ms" style="margin:-6px 0 8px">One bar per person who reached step 1 that day. Not deduplicated &#8212; a repeat attempt counts again.</div>' +
   '<div class="card" style="margin-bottom:24px"><div class="cw"><canvas id="lchart"></canvas></div></div>' +
   '</div>' +
   '<div class="tp" id="tp-leads">' +
   '<div class="filters">' +
   '<input type="text" id="fsearch" placeholder="Search email, company..." oninput="debounce()">' +
-  '<select id="fstage" onchange="loadLeads(1)"><option value="all">All stages</option><option value="booked">Booked</option><option value="completed">Completed (no booking)</option><option value="step1">Step 1 only</option><option value="disqualified">Disqualified</option></select>' +
+  '<select id="fstage" onchange="loadLeads(1)"><option value="all">All stages</option><option value="booked">Booked</option><option value="completed">Completed (not booked, not disqualified)</option><option value="step1">Step 1 only</option><option value="disqualified">Disqualified (not booked)</option></select>' +
   '<select id="fsellto" onchange="loadLeads(1)"><option value="all">All sell-to</option><option value="B2B">B2B</option><option value="B2B (clarified from B2C)">B2B (clarified from B2C)</option><option value="B2B (clarified from Mixed)">B2B (clarified from Mixed)</option><option value="B2C">B2C</option><option value="Mixed">Mixed</option><option value="__clarified">Clarified (any)</option></select>' +
   '<select id="fsource" onchange="loadLeads(1)"><option value="all">All sources</option></select>' +
   '<select id="fenrich" onchange="loadLeads(1)"><option value="all">Enrichment: all</option><option value="yes">Enriched</option><option value="no">Not enriched</option></select>' +
@@ -1957,7 +2649,7 @@ app.get('/monitor', (req, res) => {
   '<th class="sortable" onclick="sortBy(\'company\')">Company <span class="sar" id="sar-company"></span></th>' +
   '<th class="sortable" onclick="sortBy(\'sell_to\')">Sells to <span class="sar" id="sar-sell_to"></span></th>' +
   '<th>Stage</th><th>Booked</th><th>Enrichment</th>' +
-  '<th class="sortable" onclick="sortBy(\'created_at\')">Created (IST) <span class="sar" id="sar-created_at"></span></th>' +
+  '<th class="sortable" onclick="sortBy(\'created_at\')">Created (ET) <span class="sar" id="sar-created_at"></span></th>' +
   '<th>Source</th>' +
   '</tr></thead><tbody id="ltbody"><tr><td colspan="10" class="nd">Loading leads...</td></tr></tbody></table></div></div>' +
   '<div class="pg" id="lpag"></div>' +
@@ -1971,7 +2663,7 @@ app.get('/monitor', (req, res) => {
   '<button class="btn" onclick="exportSDR()" style="background:#1a1a1a;color:#fff;border-color:#1a1a1a">&#8595; Export CSV</button>' +
   '</div></div>' +
   '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
-  '<th style="width:30px"></th><th>Email</th><th>Name</th><th>Company</th><th>Title</th><th>Industry</th><th>Company Size</th><th>Stage</th><th>LinkedIn</th><th>Date (IST)</th>' +
+  '<th style="width:30px"></th><th>Email</th><th>Name</th><th>Company</th><th>Title</th><th>Industry</th><th>Company Size</th><th>Stage</th><th>LinkedIn</th><th>Date (ET)</th>' +
   '</tr></thead><tbody id="sdr-tbody"><tr><td colspan="9" class="nd">Loading...</td></tr></tbody></table></div></div>' +
   '</div>' +
   '<div class="tp" id="tp-dupes">' +
@@ -1980,22 +2672,25 @@ app.get('/monitor', (req, res) => {
   '<span id="dupes-count" style="font-size:12px;color:#888"></span>' +
   '</div>' +
   '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
-  '<th style="width:30px"></th><th>Email</th><th>Sessions</th><th>Booked?</th><th>Completed?</th><th>First Seen (IST)</th><th>Last Seen (IST)</th>' +
+  '<th style="width:30px"></th><th>Email</th><th>Sessions</th><th>Booked?</th><th>Completed?</th><th>First Seen (ET)</th><th>Last Seen (ET)</th>' +
   '</tr></thead><tbody id="dupes-tbody"><tr><td colspan="7" class="nd">Loading...</td></tr></tbody></table></div></div>' +
   '</div>' +
   '<div class="tp" id="tp-health">' +
-  '<div class="sl">Step health</div>' +
+  '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
+  '<div class="sl" style="margin:0">Step health</div>' +
+  '<button class="btn" onclick="checkHealth()">&#8635; Re-check</button></div>' +
   '<div class="card" style="margin-bottom:24px">' +
   '<div class="sr"><div><div class="sn">API uptime</div><div class="sd">/health responding</div></div><span class="badge bx" id="s-api">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Step 1 &#8212; /partial</div><div class="sd">Email + lead saved to Railway + AWS</div></div><span class="badge bx" id="s-partial">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Step 2 &#8212; /submit</div><div class="sd">Lead completed + Slack fired</div></div><span class="badge bx" id="s-submit">Checking...</span></div>' +
+  '<div class="sr"><div><div class="sn">Step 1 &#8212; /partial</div><div class="sd">Leads written in the last 2 hours, against form sessions</div></div><span class="badge bx" id="s-partial">Checking...</span></div>' +
+  '<div class="sr"><div><div class="sn">Step 2 &#8212; /submit</div><div class="sd">Completions in the last 24 hours</div></div><span class="badge bx" id="s-submit">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">ELV email verification</div><div class="sd">Inconclusive rate, rolling 90-minute window</div></div><span class="badge bx" id="s-elv">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Apollo enrichment</div><div class="sd">enrichment_data populated per session</div></div><span class="badge bx" id="s-enrich">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Booking &#8212; RevenueHero</div><div class="sd">People booked / people completed</div></div><span class="badge bx" id="s-cal">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Cron &#8212; drop-off recovery</div><div class="sd">Leads waiting &gt;2 hours without booking</div></div><span class="badge bx" id="s-cron">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">AWS sync</div><div class="sd">gw_form_leads mirror</div></div><span class="badge bx" id="s-aws">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Email recovery</div><div class="sd">Follow-up emails sent to partial leads</div></div><span class="badge bx" id="s-loops">Checking...</span></div>' +
+  '<div class="sr"><div><div class="sn">Apollo enrichment</div><div class="sd">Leads enriched in the last 24 hours</div></div><span class="badge bx" id="s-enrich">Checking...</span></div>' +
+  '<div class="sr"><div><div class="sn">Booking &#8212; RevenueHero</div><div class="sd">People booked / people completed, last 7 days</div></div><span class="badge bx" id="s-cal">Checking...</span></div>' +
+  '<div class="sr"><div><div class="sn">Cron &#8212; drop-off recovery</div><div class="sd">Time since the scheduler last called us</div></div><span class="badge bx" id="s-cron">Checking...</span></div>' +
+  '<div class="sr"><div><div class="sn">AWS sync</div><div class="sd">gw_form_leads mirror, queried live against Railway</div></div><span class="badge bx" id="s-aws">Checking...</span></div>' +
+  '<div class="sr"><div><div class="sn">Email recovery</div><div class="sd">Follow-up queue &#8212; anything stuck past 5 hours</div></div><span class="badge bx" id="s-loops">Checking...</span></div>' +
   '</div>' +
+  '<div class="ms" style="margin:-16px 0 24px 2px"><span id="hupd">&#8212;</span> &#183; grey means there was not enough traffic to judge, never that a check was skipped.</div>' +
   '<div class="sl">Enrichment coverage</div>' +
   '<div class="g4" style="margin-bottom:24px">' +
   '<div class="mc"><div class="ml">Enriched sessions</div><div class="mv" id="h-enr">&#8212;</div><div class="ms">in enrichment_data</div></div>' +
@@ -2051,7 +2746,7 @@ app.get('/monitor', (req, res) => {
   '</div>' +
   '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
   '<th style="width:28px"></th><th>Email</th><th>Industry</th><th>Product / service</th><th>Sells to</th>' +
-  '<th>Website</th><th>Source</th><th>Status</th><th>When (IST)</th><th></th>' +
+  '<th>Website</th><th>Source</th><th>Status</th><th>When (ET)</th><th></th>' +
   '</tr></thead><tbody id="lm-tbody"><tr><td colspan="10" class="nd">Loading...</td></tr></tbody></table></div></div>' +
   '<div class="ms" id="lm-count" style="margin-top:8px"></div>' +
 
@@ -2060,20 +2755,108 @@ app.get('/monitor', (req, res) => {
 
   const js = '<script>' +
   'var TP="' + tp + '";' +
+  /* One definition of the dashboard zone for every client-side formatter.
+     IANA name, never a fixed offset — 'EST' is wrong for eight months of the
+     year and a hardcoded -05:00 shifts everything by an hour each March. */
+  'var TZ="' + DASH_TZ + '";' +
   'var API=window.location.origin;' +
   'var lChart=null,curPage=1,stimer=null,curSort="created_at",curDir="desc",filterOptsLoaded=false;' +
-  'function showTab(n){["overview","leads","sdr","dupes","health","lm"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();}' +
+  'function showTab(n){["overview","leads","sdr","dupes","health","lm"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();if(n==="health")checkHealth();}' +
   'var WLBL={"nxdomain": "Domain doesn\'t exist \u2014 likely a typo", "no_dns_records": "Domain registered but nothing set up on it", "hosting_placeholder": "No website yet \u2014 domain points to a hosting setup page", "parked_confirmed": "Domain registered but no website on it", "parked": "Domain registered but no website on it", "parked_ns": "Domain registered but no website on it", "parked_suspect": "Looks like a parked domain \u2014 could not confirm", "for_sale_lander": "Domain is listed for sale", "marketplace_redirect": "Domain is for sale on a domain marketplace", "mailbox_domain": "Typed an email provider instead of their website", "brand_mismatch": "Typed a well-known brand\'s site, not their own", "social_profile_url": "Gave a social profile instead of a website", "thin_content": "Page looked mostly empty to us \u2014 worth a manual look", "thin_content_wildcard": "Page looked mostly empty to us \u2014 worth a manual look", "check_blocked": "Site blocked our check \u2014 the page itself looks fine", "dns_unresolved": "Could not look up the domain \u2014 DNS gave no answer", "forwarded_to_live_site": "Redirects to their live site \u2014 checked OK", "live_despite_dns_hint": "Live site (an early parking signal was overruled)", "mx_only": "Email-only company \u2014 no website, but mail works", "nxdomain_contradicted": "DNS blip \u2014 domain matches their verified email domain", "content_clean": "Live website", "resolved": "Domain resolves", "dns_indeterminate": "Could not reach the site to check it", "doh_error": "Could not reach the site to check it", "timeout": "Could not reach the site to check it", "unreachable": "Could not reach the site to check it", "non_html": "Address did not return a web page", "backend_error": "Our check errored \u2014 not the website\u2019s fault", "fetch_error": "Our check errored \u2014 not the website\u2019s fault", "skipped_no_backend": "Check was skipped", "skipped_unsafe_target": "Address pointed at an internal network \u2014 skipped", "test_email_skipped": "Internal test \u2014 check skipped", "ok": "Website checked OK"};' +
   'function wlabel(r){if(!r)return"Unknown";if(WLBL[r])return WLBL[r];if(String(r).indexOf("http_")===0){var c=String(r).slice(5);return ["999","403","401","429"].indexOf(c)>=0?("Site blocked our check ("+c+")"):("Site returned an error ("+c+")");}return String(r).replace(/_/g," ");}' +
   'function badge(id,text,cls){var el=document.getElementById(id);if(!el)return;el.textContent=text;el.className="badge "+cls;}' +
   'function set(id,v){var el=document.getElementById(id);if(el)el.textContent=v;}' +
   'function pct(a,b){return b?Math.round(a/b*100)+"%":"0%";}' +
-  'function ist(ts){if(!ts)return"\\u2014";return new Date(ts).toLocaleString("en-IN",{timeZone:"Asia/Kolkata",dateStyle:"short",timeStyle:"short"});}' +
+  'function et(ts){if(!ts)return"\\u2014";return new Date(ts).toLocaleString("en-US",{timeZone:TZ,dateStyle:"short",timeStyle:"short"});}' +
+  /* Calendar date in ET as YYYY-MM-DD. en-CA formats that way natively, which
+     is what the date inputs and the CSV filename both want. */
+  'function etDay(d){return new Intl.DateTimeFormat("en-CA",{timeZone:TZ,year:"numeric",month:"2-digit",day:"2-digit"}).format(d);}' +
+  /* Shift by whole calendar days from TODAY IN ET. Anchored at noon UTC on
+     purpose: shifting midnight by 24h multiples lands on the wrong date when
+     it crosses a DST change, and the presets are the one place a reader would
+     never notice being off by one. */
+  'function etDayShift(n){var p=etDay(new Date()).split("-");var d=new Date(Date.UTC(+p[0],+p[1]-1,+p[2],12,0,0));d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10);}' +
   'function esc(s){if(!s)return"";return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}' +
   'async function checkApi(){try{var r=await fetch(API+"/health",{signal:AbortSignal.timeout(5000)});if(r.ok){document.getElementById("apidot").className="dot dot-green";document.getElementById("apist").textContent="API online";badge("s-api","Online","bg");return true;}throw new Error("HTTP "+r.status);}catch(e){document.getElementById("apidot").className="dot dot-red";document.getElementById("apist").textContent="API offline";badge("s-api","Offline","br");return false;}}' +
-  'async function checkElv(){try{var r=await fetch(API+"/monitor/elv-health",{signal:AbortSignal.timeout(5000)});var d=await r.json();var age=(d.minutesSinceLastCheck!=null&&d.minutesSinceLastCheck>=60)?" \\u00b7 last check "+Math.round(d.minutesSinceLastCheck/60)+"h ago":"";if(d.state==="degraded"){badge("s-elv","Degraded \\u2014 "+d.rate+"% of "+d.checks+" inconclusive"+age,"br");}else if(d.state==="insufficient_data"){if(d.rate>=50||d.consecutiveInconclusive>=2){badge("s-elv","Low traffic \\u2014 "+d.rate+"% of "+d.checks+" inconclusive"+age,"ba");}else{badge("s-elv","Quiet \\u2014 "+d.checks+" checks, "+d.rate+"% inconclusive"+age,"bx");}}else{badge("s-elv","Healthy ("+d.rate+"% inconclusive)","bg");}}catch(e){badge("s-elv","Unknown","bx");}}' +
-  'function renderAlerts(d){var a=[];if(d.pendingPartials>0)a.push({c:"aw",i:"!",m:d.pendingPartials+" session(s) waiting >2 hours without booking \\u2014 recovery cron will pick them up."});if(d.noBookingUid>0)a.push({c:"aw",i:"!",m:d.noBookingUid+" people (deduped, qualified B2B) completed the form but have no booking on any session \\u2014 see SDR List."});if(!d.awsSynced)a.push({c:"ae",i:"x",m:"AWS sync disabled."});if(d.total>5&&d.enriched<d.total*0.3)a.push({c:"aw",i:"!",m:"Low enrichment rate ("+Math.round(d.enriched/d.total*100)+"% of sessions)."});if(d.todayCount===0)a.push({c:"aw",i:"o",m:"No new sessions in the last 24 hours."});if(a.length===0)a.push({c:"ao",i:"\\u2713",m:"All systems healthy."});document.getElementById("alerts").innerHTML=a.map(function(x){return"<div class=\\"alertbox "+x.c+"\\"><span>"+x.i+"</span><span>"+x.m+"</span></div>";}).join("");}' +
-  'function renderFunnel(t,c,b,d){var steps=[{l:"People entered (Step 1)",v:t,p:100,col:"#818cf8"},{l:"People completed (Step 2)",v:c,p:t?Math.round(c/t*100):0,col:"#38bdf8"},{l:"People booked",v:b,p:t?Math.round(b/t*100):0,col:"#34d399"},{l:"People disqualified",v:d,p:t?Math.round(d/t*100):0,col:"#fb923c"}];document.getElementById("funnel").innerHTML=steps.map(function(s){return"<div class=\\"fr\\"><div class=\\"fl\\"><span>"+s.l+"</span><span style=\\"font-weight:500\\">"+s.v+" <span style=\\"color:#aaa\\">("+s.p+"%)</span></span></div><div class=\\"fb\\"><div class=\\"ff\\" style=\\"width:"+s.p+"%;background:"+s.col+"\\"></div></div></div>";}).join("");}' +
+  'async function checkElv(){try{var r=await fetch(API+"/monitor/elv-health"+TP,{signal:AbortSignal.timeout(5000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();var age=(d.minutesSinceLastCheck!=null&&d.minutesSinceLastCheck>=60)?" \\u00b7 last check "+Math.round(d.minutesSinceLastCheck/60)+"h ago":"";if(d.state==="degraded"){badge("s-elv","Degraded \\u2014 "+d.rate+"% of "+d.checks+" inconclusive"+age,"br");}else if(d.state==="insufficient_data"){if(d.rate>=50||d.consecutiveInconclusive>=2){badge("s-elv","Low traffic \\u2014 "+d.rate+"% of "+d.checks+" inconclusive"+age,"ba");}else{badge("s-elv","Quiet \\u2014 "+d.checks+" checks, "+d.rate+"% inconclusive"+age,"bx");}}else{badge("s-elv","Healthy ("+d.rate+"% inconclusive)","bg");}}catch(e){badge("s-elv","Could not check","br");}}' +
+  /* SEVEN LIVE CHECKS, one round trip. Deliberately NOT on the 60-second
+     loadAll poll: the AWS row queries a database across a WAN and would
+     make every refresh wait on it. Runs at load, every five minutes, when
+     the Health tab is opened, and on the Re-check button.
+
+     A failed fetch paints every row RED, not grey. Grey on this tab means
+     "not enough traffic to judge"; it must never also mean "we could not
+     ask". Same rule the server side follows. */
+  'var HCLS={green:"bg",amber:"ba",red:"br",insufficient_data:"bx"};' +
+  'var HIDS={partial:"s-partial",submit:"s-submit",apollo:"s-enrich",booking:"s-cal",cron:"s-cron",aws:"s-aws",recovery:"s-loops"};' +
+  'function hkeys(){return Object.keys(HIDS);}' +
+  'function paintHealth(d){hkeys().forEach(function(k){var c=d&&d.checks&&d.checks[k];' +
+  'if(!c||!HCLS[c.state]){badge(HIDS[k],"No result","br");return;}' +
+  'var el=document.getElementById(HIDS[k]);if(el&&c.detail)el.title=c.detail;' +
+  'badge(HIDS[k],c.text,HCLS[c.state]);});}' +
+  'async function checkHealth(){' +
+  'try{var r=await fetch(API+"/monitor/health"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(20000)});' +
+  'if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();paintHealth(d);' +
+  'set("hupd","Checked "+new Date().toLocaleTimeString("en-US",{timeZone:TZ})+" ET");' +
+  '}catch(e){hkeys().forEach(function(k){badge(HIDS[k],"Could not check","br");});' +
+  'set("hupd","Health check unreachable: "+e.message);}}' +
+  /* The Overview alerts panel is fed by five Overview metrics. When all
+     five are quiet it used to render a green tick reading "All systems
+     healthy." — a claim about the whole system made by a box that has
+     never looked at one. Now it says what it actually knows and points at
+     the tab that does the checking. */
+  'function renderAlerts(d){var a=[];if(d.pendingPartials>0)a.push({c:"aw",i:"!",m:d.pendingPartials+" session(s) waiting >2 hours without booking \\u2014 recovery cron will pick them up."});if(d.noBookingUid>0)a.push({c:"aw",i:"!",m:d.noBookingUid+" people (deduped, qualified B2B) completed the form but have no booking on any session. The SDR List is wider still \\u2014 it does not filter on completed."});if(!d.awsSynced)a.push({c:"ae",i:"x",m:"AWS sync disabled \\u2014 AWS_PG_HOST is not set, so nothing is reaching the gw_form_leads mirror."});if(d.total>5&&d.enriched<d.total*0.3)a.push({c:"aw",i:"!",m:"Low enrichment rate ("+Math.round(d.enriched/d.total*100)+"% of sessions)."});if(d.todayCount===0)a.push({c:"aw",i:"o",m:"No new form entries in the last 24 hours."});if(a.length===0)a.push({c:"an",i:"\\u00b7",m:"Nothing flagged by the Overview metrics. Live service checks are on the System Health tab."});document.getElementById("alerts").innerHTML=a.map(function(x){return"<div class=\\"alertbox "+x.c+"\\"><span>"+x.i+"</span><span>"+x.m+"</span></div>";}).join("");}' +
+  /* Four stages, one window, one top-of-funnel denominator.
+     Was: four bars all measured as a % of step 1, with "disqualified" sitting
+     below "booked" as if it were a later stage — it is not a stage, a
+     disqualified person can also be booked, so the bars overlapped and did not
+     sum. Disqualified moved out to its own card; the funnel is now a real
+     ladder. Every bar is a % of the top so the widths are comparable.
+     coverage==="none" renders "not tracked" rather than zeros. */
+  'function fRow(label,unit,val,top,col,note,nullMsg){' +
+  'if(val===null||val===undefined)return"<div class=\\"fr\\"><div class=\\"fl\\"><span>"+label+" <span style=\\"color:#aaa;font-size:11px\\">"+unit+"</span></span><span style=\\"color:#999\\">"+(nullMsg||"not tracked")+"</span></div><div class=\\"fb\\"></div></div>";' +
+  'var p=(top&&top>0)?Math.round(val/top*100):0;' +
+  'return"<div class=\\"fr\\"><div class=\\"fl\\"><span>"+label+" <span style=\\"color:#aaa;font-size:11px\\">"+unit+"</span>"+(note?" <span style=\\"color:#aaa;font-size:11px\\">"+note+"</span>":"")+"</span><span style=\\"font-weight:500\\">"+val+" <span style=\\"color:#aaa\\">("+p+"%)</span></span></div><div class=\\"fb\\"><div class=\\"ff\\" style=\\"width:"+p+"%;background:"+col+"\\"></div></div></div>";}' +
+  /* TWO MODES, TWO DENOMINATORS, and the denominator is printed because the
+     percentages are NOT comparable across modes. "Since 21 Aug" divides by
+     sessions; "All time" divides by step 1, which is what the widget has
+     always done. Someone reading 12% in one mode and 48% in the other is
+     looking at the same people over different bases.
+
+     Default is "Since 21 Aug" so the top-of-funnel loss is what you see
+     first. All-time stays one click away because it is the only view that
+     covers the full history (roughly March 2026 onward) and those are the
+     numbers people already know.
+
+     ALL-TIME IS BYTE-FOR-BYTE THE OLD CALCULATION: peopleTotal at 100%, the
+     other two as a share of it, straight off the same payload fields. No new
+     query, nothing re-derived, so the existing numbers still reconcile.
+     Deliberately not "improved" while it was open. */
+  'var funnelMode="tracked",lastMetrics=null;' +
+  'function setFunnelMode(m){funnelMode=m;if(lastMetrics)renderFunnel(lastMetrics);}' +
+  'function renderFunnelToggle(){var el=document.getElementById("fnl-toggle");if(!el)return;' +
+  'el.innerHTML=[["tracked","Since 21 Aug"],["all","All time"]].map(function(o){var on=funnelMode===o[0];' +
+  'return "<button onclick=\\"setFunnelMode(\'"+o[0]+"\')\\" style=\\"padding:3px 9px;margin-left:5px;border-radius:99px;font-size:11px;cursor:pointer;border:1px solid "+(on?"#1a1a1a":"#e5e5e5")+";background:"+(on?"#1a1a1a":"#fff")+";color:"+(on?"#fff":"#666")+"\\">"+o[1]+"</button>";}).join("");}' +
+  'function renderFunnel(d){d=d||{};lastMetrics=d;var f=d.topFunnel||{};var html,sub;' +
+  'if(funnelMode==="all"){' +
+  'var t=d.peopleTotal;' +
+  'html=fRow("Sessions","visits",null,null,"#a5b4fc","","not tracked before 21 Aug 2026")' +
+  '+fRow("Entered step 1","people",t,t,"#818cf8","")' +
+  '+fRow("Completed step 2","people",d.peopleCompleted,t,"#38bdf8","")' +
+  '+fRow("Booked","people",d.peopleBooked,t,"#34d399","");' +
+  'sub="All leads, full history (the form predates session tracking by about five months). <b>Percentages are % of step 1</b> \\u2014 not comparable with the Since-21-Aug view, which divides by sessions.";' +
+  '}else{' +
+  'var top=f.sessions;' +
+  'html=fRow("Sessions","visits",f.sessions,top,"#a5b4fc",(f.botSessions?"&#183; "+f.botSessions+" bots excluded":""))' +
+  '+fRow("Entered step 1","people",f.step1,top,"#818cf8","&#183; visits &rarr; people")' +
+  '+fRow("Completed step 2","people",f.completed,top,"#38bdf8","")' +
+  '+fRow("Booked","people",f.booked,top,"#34d399","");' +
+  'sub=(f.coverage==="none")' +
+  '?"Session tracking was not running for this period \\u2014 the top of the funnel cannot be measured. Switch to All time for the full history."' +
+  ':"Since session tracking began, "+et(f.since)+". <b>Percentages are % of sessions</b> \\u2014 not comparable with the All-time view. Sessions are visits; the three stages below are distinct people, so the first rate compares visits to people.";' +
+  '}' +
+  'renderFunnelToggle();' +
+  'document.getElementById("funnel").innerHTML=html+"<div class=\\"ms\\" style=\\"margin-top:10px\\">"+sub+"</div>";}' +
   'function renderChart(rows){var labels=(rows||[]).map(function(r){return r.day_label;}),data=(rows||[]).map(function(r){return parseInt(r.count)||0;});if(lChart)lChart.destroy();var ctx=document.getElementById("lchart").getContext("2d");lChart=new Chart(ctx,{type:"bar",data:{labels:labels,datasets:[{data:data,backgroundColor:"#818cf8",borderRadius:4,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{stepSize:1,color:"#aaa"},grid:{color:"#f0f0f0"}},x:{ticks:{color:"#aaa",maxRotation:45,autoSkip:false},grid:{display:false}}}}});}' +
   'function stageBadge(l){if(l.booking_uid)return"<span class=\\"badge bg\\">Booked</span>";if(l.disqualified)return"<span class=\\"badge br\\">Disqualified</span>";if(l.completed)return"<span class=\\"badge bb\\">Completed</span>";return"<span class=\\"badge ba\\">Step 1</span>";}' +
   'function enrichBadge(l){return(l.enriched_title||l.enriched_company_size||l.e_company)?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>";}' +
@@ -2119,12 +2902,12 @@ app.get('/monitor', (req, res) => {
   '{lb:"\\uD83D\\uDCC4 Form Page",v:l.page_url,lnk:true},' +
   '{lb:"Meta fbc",v:l.fbc},' +
   '{lb:"Meta fbp",v:l.fbp},' +
-  '{lb:"Submitted",v:ist(l.submitted_at)},' +
-  '{lb:"Booked at",v:ist(l.booked_at)},' +
-  '{lb:"Meeting",v:l.start_time?ist(l.start_time):null},' +
+  '{lb:"Submitted",v:et(l.submitted_at)},' +
+  '{lb:"Booked at",v:et(l.booked_at)},' +
+  '{lb:"Meeting",v:l.start_time?et(l.start_time):null},' +
   '{lb:"Email sent",v:l.loops_sent?"Yes":"No"},' +
   '{lb:"Session ID",v:l.session_id,mono:true},' +
-  '{lb:"Enriched at",v:ist(l.enriched_at)}' +
+  '{lb:"Enriched at",v:et(l.enriched_at)}' +
   '].filter(function(f){return f.v;});' +
   'if(!fields.length)return"<div style=\\"color:#999;font-size:12px\\">No enrichment data.</div>";' +
   'return"<div class=\\"egrid\\">"+fields.map(function(f){var val=f.lnk&&f.v?"<a href=\\""+(f.v.startsWith("http")?"":"https://")+esc(f.v)+"\\" target=\\"_blank\\">"+esc(f.v)+"</a>":f.mono?"<code style=\\"font-size:10px\\">"+esc(f.v)+"</code>":esc(f.v);return"<div class=\\"ef\\"><div class=\\"efl\\">"+f.lb+"</div><div class=\\"efv\\">"+val+"</div></div>";}).join("")+"</div>";}' +
@@ -2132,7 +2915,7 @@ app.get('/monitor', (req, res) => {
   'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("fsellto").value="all";document.getElementById("fsource").value="all";document.getElementById("fenrich").value="all";document.getElementById("fwebsitecheck").value="all";document.getElementById("frepeat").value="all";document.getElementById("fhear").value="";document.getElementById("fpreset").value="";document.getElementById("ffrom").value="";document.getElementById("fto").value="";curSort="created_at";curDir="desc";renderSortArrows();loadLeads(1);}' +
   'function renderSortArrows(){["email","name","company","sell_to","created_at"].forEach(function(c){var el=document.getElementById("sar-"+c);if(el)el.textContent=(curSort===c)?(curDir==="asc"?"\\u25B2":"\\u25BC"):"";});}' +
   'function sortBy(c){if(curSort===c){curDir=(curDir==="asc")?"desc":"asc";}else{curSort=c;curDir=(c==="created_at")?"desc":"asc";}renderSortArrows();loadLeads(1);}' +
-  'function datePreset(v){var ff=document.getElementById("ffrom"),ft=document.getElementById("fto");if(!v){loadLeads(1);return;}function fmt(d){var y=d.getFullYear(),m=("0"+(d.getMonth()+1)).slice(-2),da=("0"+d.getDate()).slice(-2);return y+"-"+m+"-"+da;}var now=new Date(),to=fmt(now),from=to;if(v==="7d"){var d=new Date(now);d.setDate(d.getDate()-6);from=fmt(d);}else if(v==="30d"){var d2=new Date(now);d2.setDate(d2.getDate()-29);from=fmt(d2);}ff.value=from;ft.value=to;loadLeads(1);}' +
+  'function datePreset(v){var ff=document.getElementById("ffrom"),ft=document.getElementById("fto");if(!v){loadLeads(1);return;}var to=etDayShift(0),from=to;if(v==="7d")from=etDayShift(-6);else if(v==="30d")from=etDayShift(-29);ff.value=from;ft.value=to;loadLeads(1);}' +
   'function dateManual(){var p=document.getElementById("fpreset");if(p)p.value="";loadLeads(1);}' +
   'function exportLeads(){var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"format=csv&stage="+stage+"&sort="+curSort+"&dir="+curDir;if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;window.location.href=url;}' +
   'async function loadFilterOptions(){if(filterOptsLoaded)return;try{var r=await fetch(API+"/monitor/filter-options"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(10000)});if(!r.ok)return;var d=await r.json();var sel=document.getElementById("fsource");if(sel&&d.utmSource){d.utmSource.forEach(function(v){var o=document.createElement("option");o.value=v;o.textContent=v;sel.appendChild(o);});}var dl=document.getElementById("hearlist");if(dl&&d.hearAbout){dl.innerHTML=d.hearAbout.map(function(v){return"<option value=\\""+esc(v)+"\\"></option>";}).join("");}filterOptsLoaded=true;}catch(e){}}' +
@@ -2145,14 +2928,19 @@ app.get('/monitor', (req, res) => {
   'set("lcount",d.total+" lead"+(d.total!==1?"s":"")+" found");' +
   'if(!d.leads.length){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\">No leads match your filters.</td></tr>";document.getElementById("lpag").innerHTML="";return;}' +
   'var html=d.leads.map(function(l){var sid=esc(l.session_id),name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\\u2014",src=l.utm_source?esc(l.utm_source)+(l.utm_medium?" / "+esc(l.utm_medium):""):(l.referrer?"referral":"\\u2014");' +
-  'return"<tr><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+ist(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
+  'return"<tr><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
   '"<tr class=\\"erow\\" id=\\"er-"+sid+"\\" style=\\"display:none\\"><td></td><td colspan=\\"9\\">"+enrichPanel(l)+"</td></tr>";}).join("");' +
   'document.getElementById("ltbody").innerHTML=html;renderPag(d.page,d.pages);}catch(e){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function renderPag(pg,pages){if(pages<=1){document.getElementById("lpag").innerHTML="";return;}var h="";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg-1)+")\\""+(pg<=1?" disabled":"")+">&larr;</button>";var s=Math.max(1,pg-2),e=Math.min(pages,pg+2);if(s>1)h+="<button class=\\"pb\\" onclick=\\"loadLeads(1)\\">1</button>"+(s>2?"<span class=\\"pi\\">&#8230;</span>":"");for(var i=s;i<=e;i++)h+="<button class=\\"pb"+(i===pg?" act":"")+ "\\" onclick=\\"loadLeads("+i+")\\" >"+i+"</button>";if(e<pages)h+=(e<pages-1?"<span class=\\"pi\\">&#8230;</span>":"")+"<button class=\\"pb\\" onclick=\\"loadLeads("+pages+")\\" >"+pages+"</button>";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg+1)+")\\"" +(pg>=pages?" disabled":"")+">&rarr;</button><span class=\\"pi\\">Page "+pg+" of "+pages+"</span>";document.getElementById("lpag").innerHTML=h;}' +
   'var lmLeads=[],lmChart=null,lmFilter="all";' +
   'var lmPillDefs=[["all","All"],["awaiting","Awaiting send"],["sent","Sent"],["abandoned","Abandoned"],["internal","Internal tests"]];' +
+  /* TRUE TOTALS, from the server. These used to be counted client-side over
+     whatever /monitor/lm-leads returned — and that route is LIMIT 500 while
+     the dashboard never sends a limit, so past 500 rows in the window every
+     pill silently understated while reading as a total of the whole funnel. */
+  'var lmTotals=null,lmShownOf=null;' +
   'function lmPct(a,b){return b>0?Math.round(a/b*100)+"%":"\\u2014";}' +
-  'function lmIST(t){if(!t)return "\\u2014";return new Date(t).toLocaleString("en-IN",{timeZone:"Asia/Kolkata",day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"});}' +
+  'function lmET(t){if(!t)return "\\u2014";return new Date(t).toLocaleString("en-US",{timeZone:TZ,day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"});}' +
   'function lmBars(rows,total){if(!rows.length)return "<div class=\\"nd\\">No data yet</div>";' +
   'return rows.map(function(r){var p=total>0?Math.round(r.n/total*100):0;' +
   'return "<div style=\\"margin-bottom:8px\\"><div style=\\"display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px\\"><span>"+esc(r.label)+' +
@@ -2193,6 +2981,7 @@ app.get('/monitor', (req, res) => {
   'document.getElementById("lm-custom").innerHTML=cc.length?cc.map(function(x){' +
   'return "<div style=\\"display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0f0;font-size:13px\\"><span>"+esc(x.label)+"</span><span style=\\"color:#888\\">"+x.n+"</span></div>";}).join(""):' +
   '"<div class=\\"nd\\">None yet \\u2014 the dropdown is covering everyone so far.</div>";' +
+  'lmTotals=d.statusTotals||null;' +
   'var dy=d.daily||[],cv=document.getElementById("lm-chart");' +
   'if(cv&&window.Chart){if(lmChart)lmChart.destroy();lmChart=new Chart(cv,{type:"line",data:{labels:dy.map(function(x){return x.day.slice(5);}),' +
   'datasets:[{label:"Views",data:dy.map(function(x){return x.views;}),borderColor:"#d4d4d4",backgroundColor:"#d4d4d4",tension:0.25,pointRadius:0,borderWidth:2},' +
@@ -2200,7 +2989,8 @@ app.get('/monitor', (req, res) => {
   '{label:"Submitted",data:dy.map(function(x){return x.submitted;}),borderColor:"#1a1a1a",backgroundColor:"#1a1a1a",tension:0.25,pointRadius:0,borderWidth:2}]},' +
   'options:{responsive:true,interaction:{mode:"index",intersect:false},plugins:{legend:{display:true,labels:{boxWidth:10,font:{size:11}}}},scales:{y:{beginAtZero:true,ticks:{precision:0}}}}});}' +
   '}catch(err){console.warn("[LM] metrics failed",err);}' +
-  'try{var r2=await fetch(API+"/monitor/lm-leads"+dq,{cache:"no-store"});var d2=await r2.json();lmLeads=d2.leads||[];lmRender();' +
+  'try{var r2=await fetch(API+"/monitor/lm-leads"+dq,{cache:"no-store"});var d2=await r2.json();lmLeads=d2.leads||[];' +
+  'lmShownOf=(typeof d2.total==="number")?d2.total:null;lmRender();' +
   '}catch(e2){document.getElementById("lm-tbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\">Failed to load</td></tr>";}}' +
 
   'function lmMatch(l){' +
@@ -2214,14 +3004,21 @@ app.get('/monitor', (req, res) => {
   'function lmSetFilter(k){lmFilter=k;lmRender();}' +
 
   'function lmRender(){' +
-  'var counts={all:0,awaiting:0,sent:0,abandoned:0,internal:0};' +
-  'lmLeads.forEach(function(l){if(l.is_internal){counts.internal++;return;}counts.all++;if(counts[l.status]!==undefined)counts[l.status]++;});' +
+  /* Server totals when we have them. The client fallback counts only the
+     loaded page, so it is LABELLED as such rather than presented as a total —
+     which is the whole failure this replaces. */
+  'var counts,fromPage=!lmTotals;' +
+  'if(lmTotals){counts={all:lmTotals.all,awaiting:lmTotals.awaiting,sent:lmTotals.sent,abandoned:lmTotals.abandoned,internal:lmTotals.internal};}' +
+  'else{counts={all:0,awaiting:0,sent:0,abandoned:0,internal:0};' +
+  'lmLeads.forEach(function(l){if(l.is_internal){counts.internal++;return;}counts.all++;if(counts[l.status]!==undefined)counts[l.status]++;});}' +
   'document.getElementById("lm-pills").innerHTML=lmPillDefs.map(function(p){var on=lmFilter===p[0];' +
   'return "<button onclick=\\"lmSetFilter(\'"+p[0]+"\')\\" style=\\"padding:5px 11px;border-radius:99px;font-size:12px;cursor:pointer;border:1px solid "+' +
   '(on?"#1a1a1a":"#e5e5e5")+";background:"+(on?"#1a1a1a":"#fff")+";color:"+(on?"#fff":"#444")+' +
   '"\\">"+p[1]+" <span style=\\"opacity:.6\\">"+(counts[p[0]]||0)+"</span></button>";}).join("");' +
   'var rows=lmSearched();var tb=document.getElementById("lm-tbody");' +
-  'set("lm-count",rows.length+" shown");' +
+  /* "N shown" next to a 500-row page reads as "N exist". */
+  'var cap=(lmShownOf!==null&&lmShownOf>lmLeads.length)?" \u00b7 table shows the most recent "+lmLeads.length+" of "+lmShownOf+" \u2014 the pill counts above are full totals":"";' +
+  'set("lm-count",rows.length+" shown"+(fromPage?" \u00b7 pill counts are for the loaded rows only, totals unavailable":"")+cap);' +
   'if(!rows.length){tb.innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\">Nothing matches</td></tr>";return;}' +
   'tb.innerHTML=rows.map(function(l,i){' +
   'var badge=l.is_internal?"<span style=\\"color:#888\\">internal</span>":' +
@@ -2239,7 +3036,7 @@ app.get('/monitor', (req, res) => {
   '"<td>"+esc(l.website||"\\u2014")+(l.website_source==="derived_from_email"?" <span style=\\"color:#888\\">(from email)</span>":"")+"</td>"+' +
   '"<td>"+esc(l.utm_source||l.referrer||"direct")+"</td>"+' +
   '"<td>"+badge+"</td>"+' +
-  '"<td>"+lmIST(l.submitted_at||l.created_at)+"</td>"+' +
+  '"<td>"+lmET(l.submitted_at||l.created_at)+"</td>"+' +
   '"<td>"+act+"</td></tr>"+' +
   '"<tr class=\\"erow\\" id=\\"lm-er-"+i+"\\" style=\\"display:none\\"><td></td><td colspan=\\"9\\">"+lmDetail(l)+"</td></tr>";' +
   '}).join("");}' +
@@ -2258,10 +3055,10 @@ app.get('/monitor', (req, res) => {
   'lmCell("Landing page",l.landing_page,1)+lmCell("Previous page",l.previous_page,1)+lmCell("Form page",l.page_url,1)+' +
   'lmCell("Meta fbc",l.fbc)+lmCell("Meta fbp",l.fbp)+' +
   'lmCell("Meta Contact sent",l.capi_contact_sent?"Yes":"No")+' +
-  'lmCell("Loops",l.loops_sent?("Sent "+lmIST(l.loops_sent_at)):(l.loops_error?("Failed: "+l.loops_error):"Not sent"))+' +
+  'lmCell("Loops",l.loops_sent?("Sent "+lmET(l.loops_sent_at)):(l.loops_error?("Failed: "+l.loops_error):"Not sent"))+' +
   '(l.loops_error||(!l.loops_sent&&l.completed)?lmCell("Retry","<button class=\\"btn\\" onclick=\\"lmLoopsRetry("+l.id+")\\">Push to Loops</button>",0,1):"")+' +
-  'lmCell("Submitted",lmIST(l.submitted_at))+lmCell("First seen",lmIST(l.created_at))+' +
-  'lmCell("Delivered at",lmIST(l.delivered_at))+' +
+  'lmCell("Submitted",lmET(l.submitted_at))+lmCell("First seen",lmET(l.created_at))+' +
+  'lmCell("Delivered at",lmET(l.delivered_at))+' +
   'lmCell("Session ID",l.session_id)+"</div>";}' +
   'function lmToggle(i){var r=document.getElementById("lm-er-"+i);if(!r)return;' +
   'var vis=r.style.display!=="none";r.style.display=vis?"none":"table-row";' +
@@ -2286,7 +3083,7 @@ app.get('/monitor', (req, res) => {
   'var out=[cols.join(",")].concat(rows0.map(function(l){return cols.map(function(c){return q(l[c]);}).join(",");}));' +
   'var a=document.createElement("a");' +
   'a.href=URL.createObjectURL(new Blob([out.join(String.fromCharCode(10))],{type:"text/csv"}));' +
-  'a.download="lead-magnet-"+new Date().toISOString().slice(0,10)+".csv";a.click();}' +
+  'a.download="lead-magnet-"+etDay(new Date())+".csv";a.click();}' +
   'async function loadAll(){set("lupd","Refreshing...");var ok=await checkApi();if(!ok){document.getElementById("alerts").innerHTML="<div class=\\"alertbox ae\\"><span>x</span><span>API offline.</span></div>";set("lupd","API offline");return;}checkElv();' +
   'try{var r=await fetch(API+"/monitor/metrics"+TP,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
   'set("m-total",d.peopleTotal);set("m-totals",d.total+" sessions \\u00B7 "+d.todayCount+" in last 24h");' +
@@ -2296,11 +3093,9 @@ app.get('/monitor', (req, res) => {
   'set("m-nb",d.peopleNoBooking);set("m-nbs",d.completedNoBookingSessions+" completed sessions w/o booking");' +
   'set("m-rec",d.recoveredBookings);set("m-pend",d.pendingPartials);set("m-mail",d.loopsSent);' +
   'set("recon","Sessions = form visits \\u00B7 People = distinct emails. "+d.completedNoBookingSessions+" completed sessions without a booking \\u2192 "+d.noBookingUid+" actionable people after dedup, cross-session bookings & B2B filter.");' +
-  'var er=d.total?Math.round(d.enriched/d.total*100):0,brP=d.peopleCompleted?Math.round(d.peopleBooked/d.peopleCompleted*100):0;' +
-  'badge("s-partial",d.total+" sessions saved","bg");badge("s-submit",d.completed>0?d.completed+" completed sessions":"No completions",d.completed>0?"bg":"ba");badge("s-enrich",er+"% enriched",er>=60?"bg":er>=30?"ba":"br");badge("s-cal",brP+"% booking rate (people)",brP>=50?"bg":brP>=20?"ba":"bx");badge("s-cron",d.pendingPartials===0?"No pending":d.pendingPartials+" pending",d.pendingPartials===0?"bg":"ba");badge("s-aws",d.awsSynced?"Active":"Disabled",d.awsSynced?"bg":"br");badge("s-loops",d.loopsSent+" emails sent",d.loopsSent>0?"bg":"bx");' +
   'set("h-enr",d.enriched);set("h-tit",d.enrichTitlePct!==undefined?d.enrichTitlePct+"%":"\\u2014");set("h-fun",d.enrichFundingPct!==undefined?d.enrichFundingPct+"%":"\\u2014");set("h-loc",d.enrichLocationPct!==undefined?d.enrichLocationPct+"%":"\\u2014");' +
-  'renderAlerts(d);renderFunnel(d.peopleTotal,d.peopleCompleted,d.peopleBooked,d.peopleDisqualified);renderChart(d.leadsByDay||[]);' +
-  'set("lupd","Updated "+new Date().toLocaleTimeString("en-IN",{timeZone:"Asia/Kolkata"})+" IST");' +
+  'renderAlerts(d);renderFunnel(d);renderChart(d.leadsByDay||[]);' +
+  'set("lupd","Updated "+new Date().toLocaleTimeString("en-US",{timeZone:TZ})+" ET");' +
   '}catch(e){document.getElementById("alerts").innerHTML="<div class=\\"alertbox ae\\"><span>x</span><span>Failed: "+esc(e.message)+"</span></div>";set("lupd","Error");}' +
   'if(document.getElementById("tp-leads").classList.contains("act"))loadLeads(curPage);}' +
   'var sdrData=[],sdrTimer=null;' +
@@ -2329,25 +3124,32 @@ app.get('/monitor', (req, res) => {
   '{lb:"Annual Revenue",v:l.enriched_annual_revenue},' +
   '{lb:"Total Funding",v:l.enriched_total_funding},' +
   '{lb:"Funding Stage",v:l.enriched_funding_stage},' +
-  '{lb:"Submitted",v:ist(l.submitted_at)},' +
+  '{lb:"Submitted",v:et(l.submitted_at)},' +
   '].filter(function(f){return f.v;});' +
   'if(!fields.length)return"<div style=\\"color:#999;font-size:12px\\">No additional details.</div>";' +
   'return"<div class=\\"egrid\\">"+fields.map(function(f){var val=f.lnk&&f.v?"<a href=\\""+(f.v.startsWith("http")?"":"https://")+esc(f.v)+"\\" target=\\"_blank\\">"+esc(f.v)+"</a>":esc(f.v);return"<div class=\\"ef\\"><div class=\\"efl\\">"+f.lb+"</div><div class=\\"efv\\">"+val+"</div></div>";}).join("")+"</div>";}' +
   'function toggleSDRRow(idx){var row=document.getElementById("sdr-er-"+idx);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=document.getElementById("sdr-xbtn-"+idx);if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";}' +
   'function renderSDRTable(allLeads){' +
   'var q=(document.getElementById("sdr-search")||{}).value||"";' +
-  'var leads=q?allLeads.filter(function(l){var s=q.toLowerCase();return(l.email||"").toLowerCase().includes(s)||(l.company||"").toLowerCase().includes(s)||(l.first_name||"").toLowerCase().includes(s)||(l.enriched_industry||"").toLowerCase().includes(s);}):allLeads;' +
+  'var leads=q?allLeads.filter(function(l){var s=q.toLowerCase();' +
+  'return SDR_SEARCH_FIELDS.some(function(f){return String(l[f]||"").toLowerCase().includes(s);});}):allLeads;' +
   'set("sdr-count",leads.length+" lead"+(leads.length!==1?"s":""));' +
   'if(!leads.length){document.getElementById("sdr-tbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\">No leads found.</td></tr>";return;}' +
   'var html=leads.map(function(l,i){' +
   'var name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\\u2014";' +
   'var stage=l.completed?"<span class=\\"badge bb\\">Completed</span>":"<span class=\\"badge ba\\">Step 1</span>";' +
   'var li=l.enriched_linkedin?"<a href=\\""+esc(l.enriched_linkedin)+"\\" target=\\"_blank\\" style=\\"color:#2563eb;text-decoration:none\\">View</a>":"\\u2014";' +
-  'return"<tr><td class=\\"xbtn\\" id=\\"sdr-xbtn-"+i+"\\" onclick=\\"toggleSDRRow("+i+")\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td style=\\"color:#555\\">"+esc(l.enriched_title||"\\u2014")+"</td><td>"+esc(l.enriched_industry||"\\u2014")+"</td><td>"+esc(l.enriched_company_size||"\\u2014")+"</td><td>"+stage+"</td><td>"+li+"</td><td style=\\"color:#999;white-space:nowrap\\">"+ist(l.created_at)+"</td></tr>"' +
+  'return"<tr><td class=\\"xbtn\\" id=\\"sdr-xbtn-"+i+"\\" onclick=\\"toggleSDRRow("+i+")\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td style=\\"color:#555\\">"+esc(l.enriched_title||"\\u2014")+"</td><td>"+esc(l.enriched_industry||"\\u2014")+"</td><td>"+esc(l.enriched_company_size||"\\u2014")+"</td><td>"+stage+"</td><td>"+li+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td></tr>"' +
   '+"<tr class=\\"erow\\" id=\\"sdr-er-"+i+"\\" style=\\"display:none\\"><td></td><td colspan=\\"9\\">"+sdrPanel(l)+"</td></tr>";' +
   '}).join("");' +
   'document.getElementById("sdr-tbody").innerHTML=html;}' +
-  'function exportSDR(){window.location.href=API+"/monitor/sdr"+(TP||"?")+(TP?"&":"")+"format=csv";}' +
+  /* SDR_SEARCH_FIELDS — the client half. The server half is
+     SDR_SEARCH_COLUMNS in the /monitor/sdr route, and the tests lift both
+     lists and assert they are equal. Two copies of a field list is exactly
+     how an export quietly stops matching what is on screen. */
+  'var SDR_SEARCH_FIELDS=["email","company","first_name","enriched_industry"];' +
+  'function exportSDR(){var q=((document.getElementById("sdr-search")||{}).value||"").trim();' +
+  'window.location.href=API+"/monitor/sdr"+(TP||"?")+(TP?"&":"")+"format=csv"+(q?"&search="+encodeURIComponent(q):"");}' +
   'async function loadDupes(){' +
   'document.getElementById("dupes-tbody").innerHTML="<tr><td colspan=\\"7\\" class=\\"nd\\">Loading...</td></tr>";' +
   'try{' +
@@ -2364,15 +3166,15 @@ app.get('/monitor', (req, res) => {
   'return"<div style=\\"display:flex;gap:12px;align-items:center;padding:5px 0;border-bottom:1px solid #f5f5f5;font-size:11px;color:#555\\">"+' +
   '"<span style=\\"color:#aaa;font-family:monospace\\">"+esc(s.session_id.slice(0,16))+"...</span>"+' +
   '"<span>"+sb+"</span>"+' +
-  '"<span style=\\"color:#aaa\\">"+ist(s.created_at)+"</span>"+' +
+  '"<span style=\\"color:#aaa\\">"+et(s.created_at)+"</span>"+' +
   '"<span style=\\"color:#aaa\\">"+esc(s.page_url||"")+"</span>"+' +
   '"</div>";}).join("");' +
   'return"<tr><td class=\\"xbtn\\" id=\\"dupe-xbtn-"+i+"\\" onclick=\\"toggleDupeRow("+i+")\\">&#9658;</td>"+' +
   '"<td class=\\"te\\">"+esc(l.email)+"</td>"+' +
   '"<td><span class=\\"badge br\\">"+l.session_count+" sessions</span></td>"+' +
   '"<td>"+booked+"</td><td>"+comp+"</td>"+' +
-  '"<td style=\\"color:#999;white-space:nowrap\\">"+ist(l.first_seen)+"</td>"+' +
-  '"<td style=\\"color:#999;white-space:nowrap\\">"+ist(l.last_seen)+"</td>"+' +
+  '"<td style=\\"color:#999;white-space:nowrap\\">"+et(l.first_seen)+"</td>"+' +
+  '"<td style=\\"color:#999;white-space:nowrap\\">"+et(l.last_seen)+"</td>"+' +
   '"</tr>"+' +
   '"<tr class=\\"erow\\" id=\\"dupe-er-"+i+"\\" style=\\"display:none\\"><td></td><td colspan=\\"6\\"><div style=\\"padding:4px 0\\">"+sessRows+"</div></td></tr>";' +
   '}).join("");' +
@@ -2380,6 +3182,7 @@ app.get('/monitor', (req, res) => {
   '}catch(e){document.getElementById("dupes-tbody").innerHTML="<tr><td colspan=\\"7\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function toggleDupeRow(i){var row=document.getElementById("dupe-er-"+i);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=document.getElementById("dupe-xbtn-"+i);if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";}' +
   'renderSortArrows();loadAll();setInterval(loadAll,60000);' +
+  'checkHealth();setInterval(checkHealth,300000);' +
   '<\/script></body></html>';
 
   res.setHeader('Content-Type', 'text/html');
@@ -2599,7 +3402,7 @@ function recordElvOutcome(status, email) {
             { label: 'Now', value: `${_elvConsecGood} conclusive results in a row · ${Math.round(rate * 100)}% inconclusive of ${checks} recent checks` },
             downFor != null ? { label: 'Degraded for', value: downFor >= 60 ? `${Math.round(downFor / 60)}h ${downFor % 60}m` : `${downFor} min` } : null,
           ].filter(Boolean)),
-          bContext(`Severity: *info* · ${new Date().toISOString()}`),
+          bContext(`Severity: *info* · ${etStamp()}`),
         ].filter(Boolean), heading);
         console.log(`[ELV] ✅ Recovered — degradation cleared after ${downFor} min`);
       }
@@ -3087,6 +3890,14 @@ app.post('/verify-email', async (req, res) => {
 
 // Live ELV health for the dashboard's System Health tab.
 app.get('/monitor/elv-health', (req, res) => {
+  /* Was the only /monitor* route with no token check. It reports
+     verification volume, the inconclusive rate and whether the upstream is
+     degraded right now — operational state, and a map of when we are least
+     able to verify an address. Gated like the rest. */
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
   res.setHeader('Cache-Control', 'no-store');
   res.json(elvHealthSnapshot());
 });
@@ -3819,16 +4630,23 @@ app.post('/verify-website', async (req, res) => {
    Corrects BOTH directions: false positives sitting in "Not verified", and
    genuinely-parked domains sitting in "Passed" as content_clean.
 
-     GET /monitor/website-recheck?token=…               dry run (DEFAULT)
-     GET /monitor/website-recheck?token=…&apply=1       writes
+     POST /monitor/website-recheck?token=…              dry run (DEFAULT)
+     POST /monitor/website-recheck?token=…&apply=1      writes
      &scope=unverified|clean|all   default all
      &limit=200   &offset=0   &format=json
+
+   POST, not GET, and that is the point. It was a GET that rewrites lead
+   rows and runs two ALTER TABLEs, so a link prefetch, a chat client
+   unfurling the URL or a browser restoring the tab could have fired it
+   with apply=1 still in the query string. Nothing in the UI calls it, so
+   the change costs nothing on the client. Run it with:
+     curl -X POST "https://…/monitor/website-recheck?token=…&apply=1"
 
    Dry run is the default and the ONLY thing that writes is apply=1.
    Never touches social_profile_url rows or rows with no reason recorded.
    Sequential with a delay — this must not look like a burst of scraping.
    ======================================================= */
-app.get('/monitor/website-recheck', async (req, res) => {
+app.post('/monitor/website-recheck', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -4497,6 +5315,24 @@ app.post('/cron/send-partials', async (req, res) => {
         AND l.booking_uid IS NULL
         AND l.loops_sent = false
         AND l.created_at < NOW() - INTERVAL '2 hours'
+        /* The booked_at >= l.created_at test IS DELIBERATE — May 2026. Do not relax it
+           to "has this email ever booked", and do not COALESCE it.
+
+           The question here is NOT "is this person an SDR target" (which has no
+           time component — if they hold a call slot, nobody should ring them).
+           It is "does THIS session's drop-off still need an email", and a booking
+           that PREDATES this session does not resolve it: they came back weeks
+           later, started the form again, and dropped again. Suppressing on
+           ever-booked silently kills follow-ups that should go out.
+
+           No COALESCE on purpose either: production has zero rows with a null
+           booked_at, so there is nothing to defend against, and adding one would
+           make a null read as created_at and re-introduce the ever-booked
+           behaviour through the back door.
+
+           The monitor's "Pending recovery" card reports this same population but
+           is labelled for what it counts rather than as a mirror of this query —
+           see the Definitions section in CLAUDE.md. */
         AND NOT EXISTS (
           SELECT 1 FROM leads booked
           WHERE LOWER(booked.email) = LOWER(l.email)
@@ -4507,6 +5343,7 @@ app.post('/cron/send-partials', async (req, res) => {
 
     const leads = result.rows;
     _lastCronRunAt = Date.now(); // heartbeat: the scheduler reached us
+    _cronRanThisProcess = true;  // and the health badge can now say so honestly
     console.log(`[Cron] Found ${leads.length} leads to process`);
 
     for (const lead of leads) {
@@ -4738,7 +5575,7 @@ if (payload.router_name && payload.router_name !== 'Inbound Router - Website') {
 /* Lead-magnet routes. Mounted HERE, not at the top: FREE_EMAIL_DOMAINS is a
    const declared further up the file, so mounting above it would throw a TDZ
    ReferenceError at boot. */
-app.use(createLeadMagnetRouter({ pool, elvIsInternal, FREE_EMAIL_DOMAINS, recordFailure, recordSuccess }));
+app.use(createLeadMagnetRouter({ pool, elvIsInternal, FREE_EMAIL_DOMAINS, recordFailure, recordSuccess, DASH_TZ }));
 
 async function start() {
   try {

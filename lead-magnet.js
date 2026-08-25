@@ -184,6 +184,10 @@ module.exports = function createLeadMagnetRouter(deps) {
      lead-magnet contacts would silently stop reaching the mailing list. */
   const recordFailure = deps.recordFailure || (() => {});
   const recordSuccess = deps.recordSuccess || (() => {});
+  /* Dashboard timezone, injected rather than redeclared. index.js owns the one
+     definition; a local copy here is how the website-label map ended up with
+     two that drifted. Falls back only so this module still boots standalone. */
+  const DASH_TZ = deps.DASH_TZ || 'America/New_York';
   const router = express.Router();
 
   const isFree = (email) =>
@@ -460,7 +464,7 @@ module.exports = function createLeadMagnetRouter(deps) {
     const days = Math.min(parseInt(req.query.days, 10) || 30, 365);
     const scope = `created_at > NOW() - INTERVAL '${days} days' AND is_internal IS NOT TRUE`;
     try {
-      const [funnel, industries, custom, daily, entries] = await Promise.all([
+      const [funnel, industries, custom, daily, statusTotals, entries] = await Promise.all([
         pool.query(`
           SELECT
             COUNT(*)                                                AS views,
@@ -504,19 +508,38 @@ module.exports = function createLeadMagnetRouter(deps) {
            GROUP BY 1 ORDER BY n DESC, last_seen DESC LIMIT 50`),
         /* generate_series zero-fills days with no rows. Without it the chart
            silently omits quiet days and draws a straight line across them,
-           so a dead day looks like a gentle slope instead of a dead day. */
+           so a dead day looks like a gentle slope instead of a dead day.
+
+           ET day buckets, matching the rest of the dashboard. Bare date_trunc
+           resolved in the Postgres session zone (Etc/UTC), so these buckets
+           used to break 4-5 hours off from the ET timestamps rendered in the
+           table right below the chart. DASH_TZ is injected by index.js — one
+           definition, not a second copy of the zone name. */
         pool.query(`
           SELECT to_char(d.day, 'YYYY-MM-DD') AS day,
                  COALESCE(COUNT(l.id) FILTER (WHERE l.id IS NOT NULL), 0)::int AS views,
                  COALESCE(COUNT(l.id) FILTER (WHERE l.completed), 0)::int      AS submitted,
                  COALESCE(COUNT(l.id) FILTER (WHERE l.email IS NOT NULL), 0)::int AS emails
             FROM generate_series(
-                   date_trunc('day', NOW() - INTERVAL '${days} days'),
-                   date_trunc('day', NOW()), '1 day') AS d(day)
+                   date_trunc('day', (NOW() AT TIME ZONE '${DASH_TZ}') - INTERVAL '${days} days'),
+                   date_trunc('day', (NOW() AT TIME ZONE '${DASH_TZ}')), '1 day') AS d(day)
             LEFT JOIN lead_magnet_leads l
-              ON date_trunc('day', l.created_at) = d.day
+              ON date_trunc('day', l.created_at AT TIME ZONE '${DASH_TZ}') = d.day
              AND l.is_internal IS NOT TRUE
            GROUP BY d.day ORDER BY d.day`),
+        pool.query(`
+          SELECT
+            COUNT(*) FILTER (WHERE is_internal IS NOT TRUE)                                     AS all_count,
+            COUNT(*) FILTER (WHERE is_internal IS NOT TRUE AND completed IS TRUE
+                               AND delivered IS TRUE)                                           AS sent,
+            COUNT(*) FILTER (WHERE is_internal IS NOT TRUE AND completed IS TRUE
+                               AND delivered IS NOT TRUE)                                       AS awaiting,
+            COUNT(*) FILTER (WHERE is_internal IS NOT TRUE AND completed IS NOT TRUE)           AS abandoned,
+            COUNT(*) FILTER (WHERE is_internal IS TRUE)                                         AS internal,
+            COUNT(*)                                                                            AS total
+            FROM lead_magnet_leads
+           WHERE email IS NOT NULL
+             AND created_at > NOW() - INTERVAL '${days} days'`),
         pool.query(`
           SELECT COALESCE(entry_point, 'unknown') AS label,
                  COUNT(*)::int                             AS n,
@@ -525,8 +548,19 @@ module.exports = function createLeadMagnetRouter(deps) {
            WHERE ${scope} AND step_reached >= 2
            GROUP BY 1 ORDER BY n DESC LIMIT 10`),
       ]);
+      const stc = statusTotals.rows[0];
       res.json({
         funnel: funnel.rows[0],
+        /* Keyed to match the pill ids on the dashboard so the two cannot be
+           wired up to different things by accident. */
+        statusTotals: {
+          all:        parseInt(stc.all_count) || 0,
+          awaiting:   parseInt(stc.awaiting)  || 0,
+          sent:       parseInt(stc.sent)      || 0,
+          abandoned:  parseInt(stc.abandoned) || 0,
+          internal:   parseInt(stc.internal)  || 0,
+          total:      parseInt(stc.total)     || 0,
+        },
         industries: industries.rows,
         custom_categories: custom.rows,
         daily: daily.rows,
@@ -571,7 +605,16 @@ module.exports = function createLeadMagnetRouter(deps) {
           LIMIT $1`,
         [limit]
       );
-      res.json({ leads: rows });
+      /* The caller has no way to tell a 500-row page from a 500-row table.
+         Reporting the matching total is what lets the dashboard say
+         "showing 500 of 1,240" rather than presenting a page as a total. */
+      const { rows: totalRows } = await pool.query(
+        `SELECT COUNT(*)::int AS total
+           FROM lead_magnet_leads l
+          WHERE l.email IS NOT NULL
+            AND l.created_at > NOW() - INTERVAL '${days} days'`
+      );
+      res.json({ leads: rows, total: totalRows[0].total, limit });
     } catch (err) {
       console.error('[LM /monitor/lm-leads]', err.message);
       res.status(500).json({ error: err.message });
