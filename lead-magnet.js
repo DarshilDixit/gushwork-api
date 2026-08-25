@@ -184,6 +184,10 @@ module.exports = function createLeadMagnetRouter(deps) {
      lead-magnet contacts would silently stop reaching the mailing list. */
   const recordFailure = deps.recordFailure || (() => {});
   const recordSuccess = deps.recordSuccess || (() => {});
+  /* Dashboard timezone, injected rather than redeclared. index.js owns the one
+     definition; a local copy here is how the website-label map ended up with
+     two that drifted. Falls back only so this module still boots standalone. */
+  const DASH_TZ = deps.DASH_TZ || 'America/New_York';
   const router = express.Router();
 
   const isFree = (email) =>
@@ -504,17 +508,23 @@ module.exports = function createLeadMagnetRouter(deps) {
            GROUP BY 1 ORDER BY n DESC, last_seen DESC LIMIT 50`),
         /* generate_series zero-fills days with no rows. Without it the chart
            silently omits quiet days and draws a straight line across them,
-           so a dead day looks like a gentle slope instead of a dead day. */
+           so a dead day looks like a gentle slope instead of a dead day.
+
+           ET day buckets, matching the rest of the dashboard. Bare date_trunc
+           resolved in the Postgres session zone (Etc/UTC), so these buckets
+           used to break 4-5 hours off from the ET timestamps rendered in the
+           table right below the chart. DASH_TZ is injected by index.js — one
+           definition, not a second copy of the zone name. */
         pool.query(`
           SELECT to_char(d.day, 'YYYY-MM-DD') AS day,
                  COALESCE(COUNT(l.id) FILTER (WHERE l.id IS NOT NULL), 0)::int AS views,
                  COALESCE(COUNT(l.id) FILTER (WHERE l.completed), 0)::int      AS submitted,
                  COALESCE(COUNT(l.id) FILTER (WHERE l.email IS NOT NULL), 0)::int AS emails
             FROM generate_series(
-                   date_trunc('day', NOW() - INTERVAL '${days} days'),
-                   date_trunc('day', NOW()), '1 day') AS d(day)
+                   date_trunc('day', (NOW() AT TIME ZONE '${DASH_TZ}') - INTERVAL '${days} days'),
+                   date_trunc('day', (NOW() AT TIME ZONE '${DASH_TZ}')), '1 day') AS d(day)
             LEFT JOIN lead_magnet_leads l
-              ON date_trunc('day', l.created_at) = d.day
+              ON date_trunc('day', l.created_at AT TIME ZONE '${DASH_TZ}') = d.day
              AND l.is_internal IS NOT TRUE
            GROUP BY d.day ORDER BY d.day`),
         pool.query(`

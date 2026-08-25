@@ -536,6 +536,44 @@ function websiteCheckNote(row) {
   return '';
 }
 
+/* ── Eastern Time, everywhere ──────────────────────────────────────
+   The dashboard, the Slack alerts and the export filenames are all read
+   by people on US Eastern time. Before this, three different zones were
+   in play at once: the Postgres session is Etc/UTC (confirmed), so a bare
+   date_trunc bucketed days at 05:30 IST; the dashboard rendered every
+   timestamp in Asia/Kolkata; and the date-preset buttons used
+   getFullYear/getMonth/getDate, which read whatever the viewer's laptop
+   was set to. Same lead, three different "days".
+
+   ALWAYS the IANA name, never a fixed offset. 'EST' and '-05:00' are
+   wrong for eight months of the year, and a hardcoded offset is the
+   classic way a report silently shifts by an hour on the second Sunday
+   in March. */
+const DASH_TZ = 'America/New_York';
+
+// 'en-CA' because it formats as YYYY-MM-DD, which is what filenames and
+// SQL date literals want. Built once — Intl construction is not cheap and
+// these run per request.
+const _etDateFmt  = new Intl.DateTimeFormat('en-CA', { timeZone: DASH_TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
+const _etStampFmt = new Intl.DateTimeFormat('en-CA', {
+  timeZone: DASH_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+});
+
+// Calendar date in ET. Used for CSV filenames, which used to be
+// toISOString().slice(0,10) — so a 02:00 ET export was stamped with the
+// previous day.
+function etDateOnly(d) {
+  return _etDateFmt.format(d instanceof Date ? d : new Date(d || Date.now()));
+}
+
+// Human timestamp for Slack and alert emails. Replaces toISOString(), which
+// put UTC next to a dashboard showing ET and made cross-referencing an
+// incident an arithmetic exercise.
+function etStamp(d) {
+  return _etStampFmt.format(d instanceof Date ? d : new Date(d || Date.now())) + ' ET';
+}
+
 const ALERT_COOLDOWN_MS   = { critical: 3 * 60 * 60 * 1000, warning: 60 * 60 * 1000 };
 const ALERT_EMAIL_TO      = ['darshil.dixit@gushwork.ai', 'darshil@darshildixit.com'];
 const _alertLastSent      = new Map(); // `${severity}:${source}:${title}` -> ms
@@ -566,7 +604,7 @@ async function sendAlertEmail(subject, details) {
       from:    `"Gushwork Alerts" <${process.env.GMAIL_USER}>`,
       to:      ALERT_EMAIL_TO.join(', '),
       subject,
-      text:    `${subject}\n\n${lines}\n\nTime: ${new Date().toISOString()}`,
+      text:    `${subject}\n\n${lines}\n\nTime: ${etStamp()}`,
     });
     console.log(`[alertOps] ✅ Alert email sent | messageId: ${result.messageId}`);
   } catch (err) {
@@ -615,7 +653,7 @@ function alertOps(severity, source, title, details) {
     const blocks = [bHeader(heading), bDivider()];
     const f = bFields(fieldList);
     if (f) blocks.push(f);
-    blocks.push(bContext(`Severity: *${sev}* · ${new Date().toISOString()}`));
+    blocks.push(bContext(`Severity: *${sev}* · ${etStamp()}`));
     sendOpsSlack(blocks, heading);
 
     if (sev === 'critical') sendAlertEmail(heading, Object.assign({}, details, hidden > 0 ? { 'Also occurred': `${hidden} more time(s)` } : {})).catch(() => {});
@@ -1197,13 +1235,31 @@ app.get('/monitor/metrics', async (req, res) => {
         ) x
       `),
       pool.query(`
-        SELECT to_char(created_at AT TIME ZONE 'Asia/Kolkata', 'Mon DD') AS day_label,
-               date_trunc('day', created_at AT TIME ZONE 'Asia/Kolkata') AS day,
-               COUNT(*) AS count
-        FROM leads
-        WHERE created_at >= NOW() - INTERVAL '14 days'
-        GROUP BY 1, 2
-        ORDER BY 2 ASC
+        /* "Form entries per day" — a deliberate ROW count over the leads table,
+           people count and not a session count. Daily inbound volume is the
+           question; deduping by email would flatten exactly the repeat-attempt
+           spikes that make a bad day visible. Named as an exception in
+           CLAUDE.md's Definitions so it doesn't read as a rule violation.
+
+           Two fixes here beyond the ET move:
+           1. generate_series zero-fills. Without it a day with no entries was
+              ABSENT rather than zero, so the bars either side sat adjacent and
+              a dead day looked like continuity. Same fix the lead-magnet chart
+              already had.
+           2. Exactly 14 ET calendar days. The old rolling NOW() minus 14 days
+              window was 336 hours, so it drew 15 bars with the oldest one
+              starting mid-day — a partial bucket that read as a real one. */
+        SELECT to_char(d.day, 'Mon DD')  AS day_label,
+               d.day                     AS day,
+               COALESCE(COUNT(l.id), 0)::int AS count
+        FROM generate_series(
+               date_trunc('day', (NOW() AT TIME ZONE '${DASH_TZ}') - INTERVAL '13 days'),
+               date_trunc('day', (NOW() AT TIME ZONE '${DASH_TZ}')),
+               INTERVAL '1 day') AS d(day)
+        LEFT JOIN leads l
+          ON date_trunc('day', l.created_at AT TIME ZONE '${DASH_TZ}') = d.day
+        GROUP BY d.day
+        ORDER BY d.day ASC
       `),
       pool.query(`SELECT COUNT(*) AS count FROM enrichment_data`),
       pool.query(`
@@ -1393,6 +1449,25 @@ app.get('/monitor/funnel', async (req, res) => {
     const [byDay, totals] = await Promise.all([
       pool.query(`
         WITH s AS (
+          /* ── THIS ROUTE STAYS ON UTC DAY BUCKETS. DELIBERATE. ──
+             Everything else on the dashboard moved to America/New_York. This
+             one did not, and must not be "brought into line" without redoing
+             the coverage logic below.
+
+             Why: every judgement in this query is anchored to a single UTC
+             INSTANT — go_live, the moment session recording started (21 Aug
+             2026, 10:32 UTC). session_coverage, the null-ing of step1_rate on
+             a partial day, and the orphan_leads cutoff all ask "was recording
+             already running at the START of this day". Re-bucketing to ET moves
+             every day boundary 4-5 hours earlier, which changes WHICH day is
+             the partial one and silently makes a covered day read partial (or
+             worse, the reverse). The instant comparisons stay correct because
+             pg hands both sides back as absolute times.
+
+             Consequence to know when reading this next to the dashboard: this
+             route's per-day rows will NOT line up with the Overview chart. That
+             is expected, not a bug. Proper ET session charting is separate work
+             and this route is not fetched by the UI today. */
           SELECT date_trunc('day', created_at) AS d,
                  COUNT(*) FILTER (WHERE user_agent IS NULL OR user_agent !~* $2) AS sessions,
                  COUNT(*) FILTER (WHERE user_agent ~* $2)                        AS bot_sessions,
@@ -1410,6 +1485,9 @@ app.get('/monitor/funnel', async (req, res) => {
         -- anything.
         gl AS (SELECT MIN(created_at) AS go_live FROM form_sessions),
         l AS (
+          // UTC day buckets on purpose — see the note on the sessions CTE above.
+          // Both CTEs must use the SAME zone or the FULL OUTER JOIN on s.d = l.d
+          // silently stops matching and every day splits into two half-rows.
           SELECT date_trunc('day', l.created_at) AS d,
                  COUNT(*) FILTER (WHERE l.email IS NOT NULL AND l.email <> '' AND NOT (${WEBHOOK_LEAD_SQL})) AS step1,
                  COUNT(*) FILTER (WHERE l.submitted_at IS NOT NULL AND NOT (${WEBHOOK_LEAD_SQL}))            AS submitted,
@@ -1618,8 +1696,16 @@ app.get('/monitor/leads', async (req, res) => {
   if (repeatAttempts === 'yes') conditions.push(`EXISTS (SELECT 1 FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at)`);
   if (repeatAttempts === 'no')  conditions.push(`NOT EXISTS (SELECT 1 FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at)`);
 
-  if (dateFrom) { params.push(dateFrom); conditions.push(`l.created_at >= $${params.length}::date`); }
-  if (dateTo)   { params.push(dateTo);   conditions.push(`l.created_at < ($${params.length}::date + INTERVAL '1 day')`); }
+  /* The picked date is an ET calendar day, so the boundary has to be ET
+     midnight. `$n::date` alone produced a naive date that Postgres resolved in
+     the session zone — Etc/UTC — putting the cut at 20:00 the previous evening
+     ET. A lead at 21:00 ET on the 24th was labelled "24" in the table and
+     returned by a "25" filter, and a "Today" filter dropped everything from
+     20:00 the night before. Applying AT TIME ZONE to the naive timestamp
+     INTERPRETS it as ET and hands back a timestamptz, which is the comparison
+     we actually want. */
+  if (dateFrom) { params.push(dateFrom); conditions.push(`l.created_at >= ($${params.length}::date::timestamp AT TIME ZONE '${DASH_TZ}')`); }
+  if (dateTo)   { params.push(dateTo);   conditions.push(`l.created_at < (($${params.length}::date + INTERVAL '1 day')::timestamp AT TIME ZONE '${DASH_TZ}')`); }
   if (search) {
     params.push(`%${search.toLowerCase()}%`);
     const i = params.length;
@@ -1691,7 +1777,7 @@ app.get('/monitor/leads', async (req, res) => {
         ...allRows.rows.map(r => cols.map(c => escape(c === 'unverifiable_pair' ? isUnverifiablePair(r) : r[c])).join(','))
       ].join('\n');
       res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', `attachment; filename="leads-${new Date().toISOString().slice(0,10)}.csv"`);
+      res.setHeader('Content-Disposition', `attachment; filename="leads-${etDateOnly()}.csv"`);
       return res.send(csv);
     }
 
@@ -1816,7 +1902,7 @@ app.get('/monitor/sdr', async (req, res) => {
         ...leads.map(r => cols.map(c => escape(r[c])).join(','))
       ].join('\n');
       res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', `attachment; filename="sdr-list-${new Date().toISOString().slice(0,10)}.csv"`);
+      res.setHeader('Content-Disposition', `attachment; filename="sdr-list-${etDateOnly()}.csv"`);
       return res.send(csv);
     }
 
@@ -1898,7 +1984,8 @@ app.get('/monitor', (req, res) => {
   '@media(max-width:700px){.g4{grid-template-columns:repeat(2,1fr)}.g2{grid-template-columns:1fr}}' +
   '</style></head><body>' +
   '<div class="topbar"><div style="display:flex;align-items:center;gap:12px"><span class="logo">Gushwork &#8212; Form Monitor</span>' +
-  '<div class="apill"><span class="dot" id="apidot"></span><span id="apist">Checking...</span></div></div>' +
+  '<div class="apill"><span class="dot" id="apidot"></span><span id="apist">Checking...</span></div>' +
+  '<div class="apill" title="Every timestamp and every day boundary on this dashboard is US Eastern, and follows daylight saving automatically.">&#128340; All times ET</div></div>' +
   '<div style="display:flex;align-items:center;gap:10px"><span class="lu" id="lupd">&#8212;</span>' +
   '<button class="btn" onclick="loadAll()">&#8635; Refresh</button></div></div>' +
   '<div class="page">' +
@@ -1929,7 +2016,11 @@ app.get('/monitor', (req, res) => {
   '<div><div class="sl">Alerts</div><div id="alerts"><div class="alertbox" style="background:#f5f5f5;color:#999;border:1px solid #eee">Loading...</div></div></div>' +
   '<div><div class="sl">Conversion funnel (people)</div><div class="card"><div id="funnel">Loading...</div></div></div>' +
   '</div>' +
-  '<div class="sl">Form sessions per day &#8212; last 14 days (IST)</div>' +
+  /* "Form entries" not "sessions": this counts rows in `leads`, i.e. everyone
+     who reached step 1. It was labelled "sessions" while querying leads, which
+     is a different table with a deliberately different meaning. */
+  '<div class="sl">Form entries per day &#8212; last 14 days (ET)</div>' +
+  '<div class="ms" style="margin:-6px 0 8px">One bar per person who reached step 1 that day. Not deduplicated &#8212; a repeat attempt counts again.</div>' +
   '<div class="card" style="margin-bottom:24px"><div class="cw"><canvas id="lchart"></canvas></div></div>' +
   '</div>' +
   '<div class="tp" id="tp-leads">' +
@@ -1957,7 +2048,7 @@ app.get('/monitor', (req, res) => {
   '<th class="sortable" onclick="sortBy(\'company\')">Company <span class="sar" id="sar-company"></span></th>' +
   '<th class="sortable" onclick="sortBy(\'sell_to\')">Sells to <span class="sar" id="sar-sell_to"></span></th>' +
   '<th>Stage</th><th>Booked</th><th>Enrichment</th>' +
-  '<th class="sortable" onclick="sortBy(\'created_at\')">Created (IST) <span class="sar" id="sar-created_at"></span></th>' +
+  '<th class="sortable" onclick="sortBy(\'created_at\')">Created (ET) <span class="sar" id="sar-created_at"></span></th>' +
   '<th>Source</th>' +
   '</tr></thead><tbody id="ltbody"><tr><td colspan="10" class="nd">Loading leads...</td></tr></tbody></table></div></div>' +
   '<div class="pg" id="lpag"></div>' +
@@ -1971,7 +2062,7 @@ app.get('/monitor', (req, res) => {
   '<button class="btn" onclick="exportSDR()" style="background:#1a1a1a;color:#fff;border-color:#1a1a1a">&#8595; Export CSV</button>' +
   '</div></div>' +
   '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
-  '<th style="width:30px"></th><th>Email</th><th>Name</th><th>Company</th><th>Title</th><th>Industry</th><th>Company Size</th><th>Stage</th><th>LinkedIn</th><th>Date (IST)</th>' +
+  '<th style="width:30px"></th><th>Email</th><th>Name</th><th>Company</th><th>Title</th><th>Industry</th><th>Company Size</th><th>Stage</th><th>LinkedIn</th><th>Date (ET)</th>' +
   '</tr></thead><tbody id="sdr-tbody"><tr><td colspan="9" class="nd">Loading...</td></tr></tbody></table></div></div>' +
   '</div>' +
   '<div class="tp" id="tp-dupes">' +
@@ -1980,7 +2071,7 @@ app.get('/monitor', (req, res) => {
   '<span id="dupes-count" style="font-size:12px;color:#888"></span>' +
   '</div>' +
   '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
-  '<th style="width:30px"></th><th>Email</th><th>Sessions</th><th>Booked?</th><th>Completed?</th><th>First Seen (IST)</th><th>Last Seen (IST)</th>' +
+  '<th style="width:30px"></th><th>Email</th><th>Sessions</th><th>Booked?</th><th>Completed?</th><th>First Seen (ET)</th><th>Last Seen (ET)</th>' +
   '</tr></thead><tbody id="dupes-tbody"><tr><td colspan="7" class="nd">Loading...</td></tr></tbody></table></div></div>' +
   '</div>' +
   '<div class="tp" id="tp-health">' +
@@ -2051,7 +2142,7 @@ app.get('/monitor', (req, res) => {
   '</div>' +
   '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
   '<th style="width:28px"></th><th>Email</th><th>Industry</th><th>Product / service</th><th>Sells to</th>' +
-  '<th>Website</th><th>Source</th><th>Status</th><th>When (IST)</th><th></th>' +
+  '<th>Website</th><th>Source</th><th>Status</th><th>When (ET)</th><th></th>' +
   '</tr></thead><tbody id="lm-tbody"><tr><td colspan="10" class="nd">Loading...</td></tr></tbody></table></div></div>' +
   '<div class="ms" id="lm-count" style="margin-top:8px"></div>' +
 
@@ -2060,6 +2151,10 @@ app.get('/monitor', (req, res) => {
 
   const js = '<script>' +
   'var TP="' + tp + '";' +
+  /* One definition of the dashboard zone for every client-side formatter.
+     IANA name, never a fixed offset — 'EST' is wrong for eight months of the
+     year and a hardcoded -05:00 shifts everything by an hour each March. */
+  'var TZ="' + DASH_TZ + '";' +
   'var API=window.location.origin;' +
   'var lChart=null,curPage=1,stimer=null,curSort="created_at",curDir="desc",filterOptsLoaded=false;' +
   'function showTab(n){["overview","leads","sdr","dupes","health","lm"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();}' +
@@ -2068,7 +2163,15 @@ app.get('/monitor', (req, res) => {
   'function badge(id,text,cls){var el=document.getElementById(id);if(!el)return;el.textContent=text;el.className="badge "+cls;}' +
   'function set(id,v){var el=document.getElementById(id);if(el)el.textContent=v;}' +
   'function pct(a,b){return b?Math.round(a/b*100)+"%":"0%";}' +
-  'function ist(ts){if(!ts)return"\\u2014";return new Date(ts).toLocaleString("en-IN",{timeZone:"Asia/Kolkata",dateStyle:"short",timeStyle:"short"});}' +
+  'function et(ts){if(!ts)return"\\u2014";return new Date(ts).toLocaleString("en-US",{timeZone:TZ,dateStyle:"short",timeStyle:"short"});}' +
+  /* Calendar date in ET as YYYY-MM-DD. en-CA formats that way natively, which
+     is what the date inputs and the CSV filename both want. */
+  'function etDay(d){return new Intl.DateTimeFormat("en-CA",{timeZone:TZ,year:"numeric",month:"2-digit",day:"2-digit"}).format(d);}' +
+  /* Shift by whole calendar days from TODAY IN ET. Anchored at noon UTC on
+     purpose: shifting midnight by 24h multiples lands on the wrong date when
+     it crosses a DST change, and the presets are the one place a reader would
+     never notice being off by one. */
+  'function etDayShift(n){var p=etDay(new Date()).split("-");var d=new Date(Date.UTC(+p[0],+p[1]-1,+p[2],12,0,0));d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10);}' +
   'function esc(s){if(!s)return"";return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}' +
   'async function checkApi(){try{var r=await fetch(API+"/health",{signal:AbortSignal.timeout(5000)});if(r.ok){document.getElementById("apidot").className="dot dot-green";document.getElementById("apist").textContent="API online";badge("s-api","Online","bg");return true;}throw new Error("HTTP "+r.status);}catch(e){document.getElementById("apidot").className="dot dot-red";document.getElementById("apist").textContent="API offline";badge("s-api","Offline","br");return false;}}' +
   'async function checkElv(){try{var r=await fetch(API+"/monitor/elv-health",{signal:AbortSignal.timeout(5000)});var d=await r.json();var age=(d.minutesSinceLastCheck!=null&&d.minutesSinceLastCheck>=60)?" \\u00b7 last check "+Math.round(d.minutesSinceLastCheck/60)+"h ago":"";if(d.state==="degraded"){badge("s-elv","Degraded \\u2014 "+d.rate+"% of "+d.checks+" inconclusive"+age,"br");}else if(d.state==="insufficient_data"){if(d.rate>=50||d.consecutiveInconclusive>=2){badge("s-elv","Low traffic \\u2014 "+d.rate+"% of "+d.checks+" inconclusive"+age,"ba");}else{badge("s-elv","Quiet \\u2014 "+d.checks+" checks, "+d.rate+"% inconclusive"+age,"bx");}}else{badge("s-elv","Healthy ("+d.rate+"% inconclusive)","bg");}}catch(e){badge("s-elv","Unknown","bx");}}' +
@@ -2119,12 +2222,12 @@ app.get('/monitor', (req, res) => {
   '{lb:"\\uD83D\\uDCC4 Form Page",v:l.page_url,lnk:true},' +
   '{lb:"Meta fbc",v:l.fbc},' +
   '{lb:"Meta fbp",v:l.fbp},' +
-  '{lb:"Submitted",v:ist(l.submitted_at)},' +
-  '{lb:"Booked at",v:ist(l.booked_at)},' +
-  '{lb:"Meeting",v:l.start_time?ist(l.start_time):null},' +
+  '{lb:"Submitted",v:et(l.submitted_at)},' +
+  '{lb:"Booked at",v:et(l.booked_at)},' +
+  '{lb:"Meeting",v:l.start_time?et(l.start_time):null},' +
   '{lb:"Email sent",v:l.loops_sent?"Yes":"No"},' +
   '{lb:"Session ID",v:l.session_id,mono:true},' +
-  '{lb:"Enriched at",v:ist(l.enriched_at)}' +
+  '{lb:"Enriched at",v:et(l.enriched_at)}' +
   '].filter(function(f){return f.v;});' +
   'if(!fields.length)return"<div style=\\"color:#999;font-size:12px\\">No enrichment data.</div>";' +
   'return"<div class=\\"egrid\\">"+fields.map(function(f){var val=f.lnk&&f.v?"<a href=\\""+(f.v.startsWith("http")?"":"https://")+esc(f.v)+"\\" target=\\"_blank\\">"+esc(f.v)+"</a>":f.mono?"<code style=\\"font-size:10px\\">"+esc(f.v)+"</code>":esc(f.v);return"<div class=\\"ef\\"><div class=\\"efl\\">"+f.lb+"</div><div class=\\"efv\\">"+val+"</div></div>";}).join("")+"</div>";}' +
@@ -2132,7 +2235,7 @@ app.get('/monitor', (req, res) => {
   'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("fsellto").value="all";document.getElementById("fsource").value="all";document.getElementById("fenrich").value="all";document.getElementById("fwebsitecheck").value="all";document.getElementById("frepeat").value="all";document.getElementById("fhear").value="";document.getElementById("fpreset").value="";document.getElementById("ffrom").value="";document.getElementById("fto").value="";curSort="created_at";curDir="desc";renderSortArrows();loadLeads(1);}' +
   'function renderSortArrows(){["email","name","company","sell_to","created_at"].forEach(function(c){var el=document.getElementById("sar-"+c);if(el)el.textContent=(curSort===c)?(curDir==="asc"?"\\u25B2":"\\u25BC"):"";});}' +
   'function sortBy(c){if(curSort===c){curDir=(curDir==="asc")?"desc":"asc";}else{curSort=c;curDir=(c==="created_at")?"desc":"asc";}renderSortArrows();loadLeads(1);}' +
-  'function datePreset(v){var ff=document.getElementById("ffrom"),ft=document.getElementById("fto");if(!v){loadLeads(1);return;}function fmt(d){var y=d.getFullYear(),m=("0"+(d.getMonth()+1)).slice(-2),da=("0"+d.getDate()).slice(-2);return y+"-"+m+"-"+da;}var now=new Date(),to=fmt(now),from=to;if(v==="7d"){var d=new Date(now);d.setDate(d.getDate()-6);from=fmt(d);}else if(v==="30d"){var d2=new Date(now);d2.setDate(d2.getDate()-29);from=fmt(d2);}ff.value=from;ft.value=to;loadLeads(1);}' +
+  'function datePreset(v){var ff=document.getElementById("ffrom"),ft=document.getElementById("fto");if(!v){loadLeads(1);return;}var to=etDayShift(0),from=to;if(v==="7d")from=etDayShift(-6);else if(v==="30d")from=etDayShift(-29);ff.value=from;ft.value=to;loadLeads(1);}' +
   'function dateManual(){var p=document.getElementById("fpreset");if(p)p.value="";loadLeads(1);}' +
   'function exportLeads(){var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"format=csv&stage="+stage+"&sort="+curSort+"&dir="+curDir;if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;window.location.href=url;}' +
   'async function loadFilterOptions(){if(filterOptsLoaded)return;try{var r=await fetch(API+"/monitor/filter-options"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(10000)});if(!r.ok)return;var d=await r.json();var sel=document.getElementById("fsource");if(sel&&d.utmSource){d.utmSource.forEach(function(v){var o=document.createElement("option");o.value=v;o.textContent=v;sel.appendChild(o);});}var dl=document.getElementById("hearlist");if(dl&&d.hearAbout){dl.innerHTML=d.hearAbout.map(function(v){return"<option value=\\""+esc(v)+"\\"></option>";}).join("");}filterOptsLoaded=true;}catch(e){}}' +
@@ -2145,14 +2248,14 @@ app.get('/monitor', (req, res) => {
   'set("lcount",d.total+" lead"+(d.total!==1?"s":"")+" found");' +
   'if(!d.leads.length){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\">No leads match your filters.</td></tr>";document.getElementById("lpag").innerHTML="";return;}' +
   'var html=d.leads.map(function(l){var sid=esc(l.session_id),name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\\u2014",src=l.utm_source?esc(l.utm_source)+(l.utm_medium?" / "+esc(l.utm_medium):""):(l.referrer?"referral":"\\u2014");' +
-  'return"<tr><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+ist(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
+  'return"<tr><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
   '"<tr class=\\"erow\\" id=\\"er-"+sid+"\\" style=\\"display:none\\"><td></td><td colspan=\\"9\\">"+enrichPanel(l)+"</td></tr>";}).join("");' +
   'document.getElementById("ltbody").innerHTML=html;renderPag(d.page,d.pages);}catch(e){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function renderPag(pg,pages){if(pages<=1){document.getElementById("lpag").innerHTML="";return;}var h="";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg-1)+")\\""+(pg<=1?" disabled":"")+">&larr;</button>";var s=Math.max(1,pg-2),e=Math.min(pages,pg+2);if(s>1)h+="<button class=\\"pb\\" onclick=\\"loadLeads(1)\\">1</button>"+(s>2?"<span class=\\"pi\\">&#8230;</span>":"");for(var i=s;i<=e;i++)h+="<button class=\\"pb"+(i===pg?" act":"")+ "\\" onclick=\\"loadLeads("+i+")\\" >"+i+"</button>";if(e<pages)h+=(e<pages-1?"<span class=\\"pi\\">&#8230;</span>":"")+"<button class=\\"pb\\" onclick=\\"loadLeads("+pages+")\\" >"+pages+"</button>";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg+1)+")\\"" +(pg>=pages?" disabled":"")+">&rarr;</button><span class=\\"pi\\">Page "+pg+" of "+pages+"</span>";document.getElementById("lpag").innerHTML=h;}' +
   'var lmLeads=[],lmChart=null,lmFilter="all";' +
   'var lmPillDefs=[["all","All"],["awaiting","Awaiting send"],["sent","Sent"],["abandoned","Abandoned"],["internal","Internal tests"]];' +
   'function lmPct(a,b){return b>0?Math.round(a/b*100)+"%":"\\u2014";}' +
-  'function lmIST(t){if(!t)return "\\u2014";return new Date(t).toLocaleString("en-IN",{timeZone:"Asia/Kolkata",day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"});}' +
+  'function lmET(t){if(!t)return "\\u2014";return new Date(t).toLocaleString("en-US",{timeZone:TZ,day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"});}' +
   'function lmBars(rows,total){if(!rows.length)return "<div class=\\"nd\\">No data yet</div>";' +
   'return rows.map(function(r){var p=total>0?Math.round(r.n/total*100):0;' +
   'return "<div style=\\"margin-bottom:8px\\"><div style=\\"display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px\\"><span>"+esc(r.label)+' +
@@ -2239,7 +2342,7 @@ app.get('/monitor', (req, res) => {
   '"<td>"+esc(l.website||"\\u2014")+(l.website_source==="derived_from_email"?" <span style=\\"color:#888\\">(from email)</span>":"")+"</td>"+' +
   '"<td>"+esc(l.utm_source||l.referrer||"direct")+"</td>"+' +
   '"<td>"+badge+"</td>"+' +
-  '"<td>"+lmIST(l.submitted_at||l.created_at)+"</td>"+' +
+  '"<td>"+lmET(l.submitted_at||l.created_at)+"</td>"+' +
   '"<td>"+act+"</td></tr>"+' +
   '"<tr class=\\"erow\\" id=\\"lm-er-"+i+"\\" style=\\"display:none\\"><td></td><td colspan=\\"9\\">"+lmDetail(l)+"</td></tr>";' +
   '}).join("");}' +
@@ -2258,10 +2361,10 @@ app.get('/monitor', (req, res) => {
   'lmCell("Landing page",l.landing_page,1)+lmCell("Previous page",l.previous_page,1)+lmCell("Form page",l.page_url,1)+' +
   'lmCell("Meta fbc",l.fbc)+lmCell("Meta fbp",l.fbp)+' +
   'lmCell("Meta Contact sent",l.capi_contact_sent?"Yes":"No")+' +
-  'lmCell("Loops",l.loops_sent?("Sent "+lmIST(l.loops_sent_at)):(l.loops_error?("Failed: "+l.loops_error):"Not sent"))+' +
+  'lmCell("Loops",l.loops_sent?("Sent "+lmET(l.loops_sent_at)):(l.loops_error?("Failed: "+l.loops_error):"Not sent"))+' +
   '(l.loops_error||(!l.loops_sent&&l.completed)?lmCell("Retry","<button class=\\"btn\\" onclick=\\"lmLoopsRetry("+l.id+")\\">Push to Loops</button>",0,1):"")+' +
-  'lmCell("Submitted",lmIST(l.submitted_at))+lmCell("First seen",lmIST(l.created_at))+' +
-  'lmCell("Delivered at",lmIST(l.delivered_at))+' +
+  'lmCell("Submitted",lmET(l.submitted_at))+lmCell("First seen",lmET(l.created_at))+' +
+  'lmCell("Delivered at",lmET(l.delivered_at))+' +
   'lmCell("Session ID",l.session_id)+"</div>";}' +
   'function lmToggle(i){var r=document.getElementById("lm-er-"+i);if(!r)return;' +
   'var vis=r.style.display!=="none";r.style.display=vis?"none":"table-row";' +
@@ -2286,7 +2389,7 @@ app.get('/monitor', (req, res) => {
   'var out=[cols.join(",")].concat(rows0.map(function(l){return cols.map(function(c){return q(l[c]);}).join(",");}));' +
   'var a=document.createElement("a");' +
   'a.href=URL.createObjectURL(new Blob([out.join(String.fromCharCode(10))],{type:"text/csv"}));' +
-  'a.download="lead-magnet-"+new Date().toISOString().slice(0,10)+".csv";a.click();}' +
+  'a.download="lead-magnet-"+etDay(new Date())+".csv";a.click();}' +
   'async function loadAll(){set("lupd","Refreshing...");var ok=await checkApi();if(!ok){document.getElementById("alerts").innerHTML="<div class=\\"alertbox ae\\"><span>x</span><span>API offline.</span></div>";set("lupd","API offline");return;}checkElv();' +
   'try{var r=await fetch(API+"/monitor/metrics"+TP,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
   'set("m-total",d.peopleTotal);set("m-totals",d.total+" sessions \\u00B7 "+d.todayCount+" in last 24h");' +
@@ -2300,7 +2403,7 @@ app.get('/monitor', (req, res) => {
   'badge("s-partial",d.total+" sessions saved","bg");badge("s-submit",d.completed>0?d.completed+" completed sessions":"No completions",d.completed>0?"bg":"ba");badge("s-enrich",er+"% enriched",er>=60?"bg":er>=30?"ba":"br");badge("s-cal",brP+"% booking rate (people)",brP>=50?"bg":brP>=20?"ba":"bx");badge("s-cron",d.pendingPartials===0?"No pending":d.pendingPartials+" pending",d.pendingPartials===0?"bg":"ba");badge("s-aws",d.awsSynced?"Active":"Disabled",d.awsSynced?"bg":"br");badge("s-loops",d.loopsSent+" emails sent",d.loopsSent>0?"bg":"bx");' +
   'set("h-enr",d.enriched);set("h-tit",d.enrichTitlePct!==undefined?d.enrichTitlePct+"%":"\\u2014");set("h-fun",d.enrichFundingPct!==undefined?d.enrichFundingPct+"%":"\\u2014");set("h-loc",d.enrichLocationPct!==undefined?d.enrichLocationPct+"%":"\\u2014");' +
   'renderAlerts(d);renderFunnel(d.peopleTotal,d.peopleCompleted,d.peopleBooked,d.peopleDisqualified);renderChart(d.leadsByDay||[]);' +
-  'set("lupd","Updated "+new Date().toLocaleTimeString("en-IN",{timeZone:"Asia/Kolkata"})+" IST");' +
+  'set("lupd","Updated "+new Date().toLocaleTimeString("en-US",{timeZone:TZ})+" ET");' +
   '}catch(e){document.getElementById("alerts").innerHTML="<div class=\\"alertbox ae\\"><span>x</span><span>Failed: "+esc(e.message)+"</span></div>";set("lupd","Error");}' +
   'if(document.getElementById("tp-leads").classList.contains("act"))loadLeads(curPage);}' +
   'var sdrData=[],sdrTimer=null;' +
@@ -2329,7 +2432,7 @@ app.get('/monitor', (req, res) => {
   '{lb:"Annual Revenue",v:l.enriched_annual_revenue},' +
   '{lb:"Total Funding",v:l.enriched_total_funding},' +
   '{lb:"Funding Stage",v:l.enriched_funding_stage},' +
-  '{lb:"Submitted",v:ist(l.submitted_at)},' +
+  '{lb:"Submitted",v:et(l.submitted_at)},' +
   '].filter(function(f){return f.v;});' +
   'if(!fields.length)return"<div style=\\"color:#999;font-size:12px\\">No additional details.</div>";' +
   'return"<div class=\\"egrid\\">"+fields.map(function(f){var val=f.lnk&&f.v?"<a href=\\""+(f.v.startsWith("http")?"":"https://")+esc(f.v)+"\\" target=\\"_blank\\">"+esc(f.v)+"</a>":esc(f.v);return"<div class=\\"ef\\"><div class=\\"efl\\">"+f.lb+"</div><div class=\\"efv\\">"+val+"</div></div>";}).join("")+"</div>";}' +
@@ -2343,7 +2446,7 @@ app.get('/monitor', (req, res) => {
   'var name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\\u2014";' +
   'var stage=l.completed?"<span class=\\"badge bb\\">Completed</span>":"<span class=\\"badge ba\\">Step 1</span>";' +
   'var li=l.enriched_linkedin?"<a href=\\""+esc(l.enriched_linkedin)+"\\" target=\\"_blank\\" style=\\"color:#2563eb;text-decoration:none\\">View</a>":"\\u2014";' +
-  'return"<tr><td class=\\"xbtn\\" id=\\"sdr-xbtn-"+i+"\\" onclick=\\"toggleSDRRow("+i+")\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td style=\\"color:#555\\">"+esc(l.enriched_title||"\\u2014")+"</td><td>"+esc(l.enriched_industry||"\\u2014")+"</td><td>"+esc(l.enriched_company_size||"\\u2014")+"</td><td>"+stage+"</td><td>"+li+"</td><td style=\\"color:#999;white-space:nowrap\\">"+ist(l.created_at)+"</td></tr>"' +
+  'return"<tr><td class=\\"xbtn\\" id=\\"sdr-xbtn-"+i+"\\" onclick=\\"toggleSDRRow("+i+")\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td style=\\"color:#555\\">"+esc(l.enriched_title||"\\u2014")+"</td><td>"+esc(l.enriched_industry||"\\u2014")+"</td><td>"+esc(l.enriched_company_size||"\\u2014")+"</td><td>"+stage+"</td><td>"+li+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td></tr>"' +
   '+"<tr class=\\"erow\\" id=\\"sdr-er-"+i+"\\" style=\\"display:none\\"><td></td><td colspan=\\"9\\">"+sdrPanel(l)+"</td></tr>";' +
   '}).join("");' +
   'document.getElementById("sdr-tbody").innerHTML=html;}' +
@@ -2364,15 +2467,15 @@ app.get('/monitor', (req, res) => {
   'return"<div style=\\"display:flex;gap:12px;align-items:center;padding:5px 0;border-bottom:1px solid #f5f5f5;font-size:11px;color:#555\\">"+' +
   '"<span style=\\"color:#aaa;font-family:monospace\\">"+esc(s.session_id.slice(0,16))+"...</span>"+' +
   '"<span>"+sb+"</span>"+' +
-  '"<span style=\\"color:#aaa\\">"+ist(s.created_at)+"</span>"+' +
+  '"<span style=\\"color:#aaa\\">"+et(s.created_at)+"</span>"+' +
   '"<span style=\\"color:#aaa\\">"+esc(s.page_url||"")+"</span>"+' +
   '"</div>";}).join("");' +
   'return"<tr><td class=\\"xbtn\\" id=\\"dupe-xbtn-"+i+"\\" onclick=\\"toggleDupeRow("+i+")\\">&#9658;</td>"+' +
   '"<td class=\\"te\\">"+esc(l.email)+"</td>"+' +
   '"<td><span class=\\"badge br\\">"+l.session_count+" sessions</span></td>"+' +
   '"<td>"+booked+"</td><td>"+comp+"</td>"+' +
-  '"<td style=\\"color:#999;white-space:nowrap\\">"+ist(l.first_seen)+"</td>"+' +
-  '"<td style=\\"color:#999;white-space:nowrap\\">"+ist(l.last_seen)+"</td>"+' +
+  '"<td style=\\"color:#999;white-space:nowrap\\">"+et(l.first_seen)+"</td>"+' +
+  '"<td style=\\"color:#999;white-space:nowrap\\">"+et(l.last_seen)+"</td>"+' +
   '"</tr>"+' +
   '"<tr class=\\"erow\\" id=\\"dupe-er-"+i+"\\" style=\\"display:none\\"><td></td><td colspan=\\"6\\"><div style=\\"padding:4px 0\\">"+sessRows+"</div></td></tr>";' +
   '}).join("");' +
@@ -2599,7 +2702,7 @@ function recordElvOutcome(status, email) {
             { label: 'Now', value: `${_elvConsecGood} conclusive results in a row · ${Math.round(rate * 100)}% inconclusive of ${checks} recent checks` },
             downFor != null ? { label: 'Degraded for', value: downFor >= 60 ? `${Math.round(downFor / 60)}h ${downFor % 60}m` : `${downFor} min` } : null,
           ].filter(Boolean)),
-          bContext(`Severity: *info* · ${new Date().toISOString()}`),
+          bContext(`Severity: *info* · ${etStamp()}`),
         ].filter(Boolean), heading);
         console.log(`[ELV] ✅ Recovered — degradation cleared after ${downFor} min`);
       }
@@ -4497,6 +4600,24 @@ app.post('/cron/send-partials', async (req, res) => {
         AND l.booking_uid IS NULL
         AND l.loops_sent = false
         AND l.created_at < NOW() - INTERVAL '2 hours'
+        /* The booked_at >= l.created_at test IS DELIBERATE — May 2026. Do not relax it
+           to "has this email ever booked", and do not COALESCE it.
+
+           The question here is NOT "is this person an SDR target" (which has no
+           time component — if they hold a call slot, nobody should ring them).
+           It is "does THIS session's drop-off still need an email", and a booking
+           that PREDATES this session does not resolve it: they came back weeks
+           later, started the form again, and dropped again. Suppressing on
+           ever-booked silently kills follow-ups that should go out.
+
+           No COALESCE on purpose either: production has zero rows with a null
+           booked_at, so there is nothing to defend against, and adding one would
+           make a null read as created_at and re-introduce the ever-booked
+           behaviour through the back door.
+
+           The monitor's "Pending recovery" card reports this same population but
+           is labelled for what it counts rather than as a mirror of this query —
+           see the Definitions section in CLAUDE.md. */
         AND NOT EXISTS (
           SELECT 1 FROM leads booked
           WHERE LOWER(booked.email) = LOWER(l.email)
@@ -4738,7 +4859,7 @@ if (payload.router_name && payload.router_name !== 'Inbound Router - Website') {
 /* Lead-magnet routes. Mounted HERE, not at the top: FREE_EMAIL_DOMAINS is a
    const declared further up the file, so mounting above it would throw a TDZ
    ReferenceError at boot. */
-app.use(createLeadMagnetRouter({ pool, elvIsInternal, FREE_EMAIL_DOMAINS, recordFailure, recordSuccess }));
+app.use(createLeadMagnetRouter({ pool, elvIsInternal, FREE_EMAIL_DOMAINS, recordFailure, recordSuccess, DASH_TZ }));
 
 async function start() {
   try {
