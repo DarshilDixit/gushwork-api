@@ -55,7 +55,11 @@ function makeNode(tag, id) {
     id: id || '',
     className: '',
     textContent: '',
-    style: {},
+    style: (function () {
+      const st = {};
+      st.setProperty = function (k, v) { st[k] = v; };
+      return st;
+    })(),
     childNodes: [],
     parentNode: null,
     classList: makeClassList(),
@@ -80,13 +84,22 @@ function makeNode(tag, id) {
       c.parentNode = null; return c;
     },
     remove() { if (this.parentNode) this.parentNode.removeChild(this); },
+    contains(n) { let p = n; while (p) { if (p === this) return true; p = p.parentNode; } return false; },
     addEventListener(t, f) { (this._on[t] = this._on[t] || []).push(f); },
     fire(t, ev) { (this._on[t] || []).forEach((f) => f(ev || {})); },
   };
 }
 
-/* Rebuilt per test so no test can leak state into the next. */
-function buildEnv() {
+/* Rebuilt per test so no test can leak state into the next.
+
+   opts.rhOutsideStep3 puts #rh-embed OUTSIDE #step-3. That is not a
+   hypothetical: the RH SDK owns #rh-embed and reparents it when
+   dialog.open() runs, so on the live page the white panel is NOT a
+   descendant of the backdrop. The first version of this feature assumed it
+   was, which meant hiding #step-3 left the calendar on screen and no exit
+   worked. Every behavioural section below runs against BOTH structures. */
+function buildEnv(opts) {
+  opts = opts || {};
   const observers = [];
   const byId = {};
   function mk(tag, id) { const n = makeNode(tag, id); if (id) byId[id] = n; return n; }
@@ -102,9 +115,12 @@ function buildEnv() {
   const nextBtn = mk('button', 'step-2-next');
   nextBtn.className = 'wf-button wf-primary';
   hero.appendChild(step3);
-  step3.appendChild(rhEmbed);
+  if (opts.rhOutsideStep3) body.appendChild(rhEmbed);
+  else step3.appendChild(rhEmbed);
   body.appendChild(wrapper);
   body.appendChild(hero);
+  // The panel is measurable, so the cross can be anchored to its corner.
+  rhEmbed.getBoundingClientRect = () => ({ top: 100, right: 900, width: 800, height: 500 });
 
   const document = {
     readyState: 'complete',
@@ -123,7 +139,9 @@ function buildEnv() {
     this.observe = (el) => observers.push({ el, cb });
     this.disconnect = () => {};
   }
-  const window = {};
+  const window = { innerWidth: 1200, _on: {},
+    addEventListener(t, f) { (this._on[t] = this._on[t] || []).push(f); },
+    fire(t, ev) { (this._on[t] || []).forEach((f) => f(ev || {})); } };
 
   // Lift the overlay IIFE whole, by brace-matching from its signature.
   const marker = '(function rhStepOverlay() {';
@@ -142,6 +160,7 @@ function buildEnv() {
   function setDisplay(v) { step3.style.display = v; observers.forEach((o) => o.cb()); }
 
   return { document, window, html, body, head, hero, wrapper, step3, rhEmbed, nextBtn, setDisplay,
+           opts,
            api: () => window.__gwRhOverlay,
            closeBtn: () => step3.childNodes.find((n) => n.className === 'gw-rh-close'),
            resume: () => hero.childNodes.find((n) => n.id === 'gw-rh-resume') };
@@ -271,18 +290,32 @@ function buildEnv() {
   e.closeBtn().fire('click', {});
   ok('trigger: the cross dismisses', e.html.classList.contains('gw-rh-dismissed'));
 
-  // backdrop tap — target IS #step-3
+  // backdrop tap — anything not inside the panel
   e = buildEnv();
   e.setDisplay('block');
-  e.step3.fire('click', { target: e.step3 });
+  e.document.fire('click', { target: e.step3 });
   ok('trigger: a backdrop tap dismisses', e.html.classList.contains('gw-rh-dismissed'));
 
   // a tap on the panel must NOT dismiss
   e = buildEnv();
   e.setDisplay('block');
-  e.step3.fire('click', { target: e.rhEmbed });
+  e.document.fire('click', { target: e.rhEmbed });
   ok('trigger: a tap on the panel does NOT dismiss',
      !e.html.classList.contains('gw-rh-dismissed'));
+
+  // nor a tap on something nested inside the panel
+  e = buildEnv();
+  e.setDisplay('block');
+  const inner = e.document.createElement('div');
+  e.rhEmbed.appendChild(inner);
+  e.document.fire('click', { target: inner });
+  ok('trigger: a tap INSIDE the panel does NOT dismiss',
+     !e.html.classList.contains('gw-rh-dismissed'));
+
+  // a click before the calendar is open must not dismiss anything
+  e = buildEnv();
+  e.document.fire('click', { target: e.hero });
+  ok('trigger: a click while closed is inert', !e.html.classList.contains('gw-rh-dismissed'));
 
   // Escape
   e = buildEnv();
@@ -353,15 +386,109 @@ function buildEnv() {
 }
 
 /* ============================================================
-   9. Shape — the parts that need a live page, asserted in the text
+   9. THE REGRESSION — it must work with #rh-embed OUTSIDE #step-3
+
+   This is the structure the live page actually has, and the one the first
+   cut of this feature got wrong: the cross rendered, dismiss() ran, the
+   class was set, and nothing appeared to close, because hiding #step-3
+   left the reparented panel on screen. Every exit is re-run here against
+   that layout.
    ============================================================ */
 {
-  ok('shape: dismissed rule outranks the active display rule', (() => {
-    // Same id + one more class is what guarantees this wins regardless of
-    // source order. A single-class rule would depend on ordering.
-    const m = /html\.gw-rh-active\.gw-rh-dismissed #step-3 \{ display: none !important; \}/.exec(src);
-    return !!m;
+  for (const outside of [false, true]) {
+    const where = outside ? 'panel OUTSIDE #step-3' : 'panel inside #step-3';
+
+    // the cross
+    let e = buildEnv({ rhOutsideStep3: outside });
+    e.setDisplay('block');
+    ok(`both layouts: the cross dismisses (${where})`, (() => {
+      e.closeBtn().fire('click', {});
+      return e.html.classList.contains('gw-rh-dismissed');
+    })());
+
+    // backdrop / outside tap
+    e = buildEnv({ rhOutsideStep3: outside });
+    e.setDisplay('block');
+    e.document.fire('click', { target: e.hero });
+    ok(`both layouts: an outside tap dismisses (${where})`,
+       e.html.classList.contains('gw-rh-dismissed'));
+
+    // and a tap on the panel still must not
+    e = buildEnv({ rhOutsideStep3: outside });
+    e.setDisplay('block');
+    e.document.fire('click', { target: e.rhEmbed });
+    ok(`both layouts: a tap on the panel does NOT dismiss (${where})`,
+       !e.html.classList.contains('gw-rh-dismissed'));
+
+    // Escape
+    e = buildEnv({ rhOutsideStep3: outside });
+    e.setDisplay('block');
+    e.document.fire('keydown', { key: 'Escape' });
+    ok(`both layouts: Escape dismisses (${where})`,
+       e.html.classList.contains('gw-rh-dismissed'));
+
+    // the calendar must survive a close/reopen either way
+    e = buildEnv({ rhOutsideStep3: outside });
+    e.setDisplay('block');
+    const rhParent = e.rhEmbed.parentNode;
+    const s3Parent = e.step3.parentNode;
+    e.api().dismiss();
+    e.api().reopen();
+    ok(`both layouts: #rh-embed never moves (${where})`, e.rhEmbed.parentNode === rhParent);
+    ok(`both layouts: #step-3 never moves (${where})`, e.step3.parentNode === s3Parent);
+    eq(`both layouts: inline display untouched (${where})`, e.step3.style.display, 'block');
+    ok(`both layouts: a resume card is offered (${where})`, (() => {
+      e.api().dismiss();
+      return !!e.resume();
+    })());
+  }
+}
+
+/* ============================================================
+   10. The cross is anchored to the panel it closes
+   ============================================================ */
+{
+  const e = buildEnv();
+  e.setDisplay('block');
+  const btn = e.closeBtn();
+  // stub rect: top 100, right 900, viewport 1200 -> right offset 300 + 8
+  eq('anchor: top follows the panel', btn.style.top, '108px');
+  eq('anchor: right follows the panel', btn.style.right, '308px');
+
+  // resize must re-measure rather than leave it stranded
+  e.rhEmbed.getBoundingClientRect = () => ({ top: 40, right: 1100, width: 900, height: 600 });
+  e.window.fire('resize', {});
+  eq('anchor: re-measured on resize (top)', btn.style.top, '48px');
+  eq('anchor: re-measured on resize (right)', btn.style.right, '108px');
+
+  // an unmeasurable panel must not produce NaN offsets
+  const e2 = buildEnv();
+  e2.rhEmbed.getBoundingClientRect = () => ({ top: 0, right: 0, width: 0, height: 0 });
+  e2.setDisplay('block');
+  ok('anchor: a zero-size panel leaves the CSS fallback in place',
+     e2.closeBtn().style.top === undefined || !/NaN/.test(String(e2.closeBtn().style.top)));
+}
+
+/* ============================================================
+   11. Shape — the parts that need a live page, asserted in the text
+   ============================================================ */
+{
+  ok('shape: the dismissed rule hides the backdrop AND the panel', (() => {
+    /* Both selectors are required. Hiding only #step-3 was the original
+       bug: the RH SDK reparents #rh-embed, so the white panel survived and
+       the modal never appeared to close. Same id + one extra class also
+       makes each rule outrank the active display:block whatever the source
+       order. */
+    return /html\.gw-rh-active\.gw-rh-dismissed #step-3,\s*\n\s*html\.gw-rh-active\.gw-rh-dismissed #rh-embed \{ display: none !important; \}/.test(src);
   })());
+  ok('shape: click-outside asks about the PANEL, not the backdrop', (() => {
+    /* Testing e.target === step3 only works if the panel is a descendant.
+       It is not, so the check has to be "is the target inside #rh-embed". */
+    return /var panel = document\.getElementById\('rh-embed'\);\s*\n\s*if \(panel && panel\.contains && panel\.contains\(e\.target\)\) return;/.test(src)
+        && !/step3\.addEventListener\('click'/.test(src);
+  })());
+  ok('shape: the cross is measured against the panel, not pinned to the viewport',
+     /closeBtn\.style\.setProperty\('top'/.test(src) && /getBoundingClientRect\(\)/.test(src));
   ok('shape: the close button is styled only while the overlay is up',
      /\.gw-rh-close \{ display: none; \}/.test(src) && /html\.gw-rh-active \.gw-rh-close \{/.test(src));
 

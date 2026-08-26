@@ -2821,7 +2821,8 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
      Two classes deep on purpose. This must outrank the display:block above
      whatever the source order, and matching the same id with one more class
      is what guarantees that. */
-  html.gw-rh-active.gw-rh-dismissed #step-3 { display: none !important; }
+  html.gw-rh-active.gw-rh-dismissed #step-3,
+  html.gw-rh-active.gw-rh-dismissed #rh-embed { display: none !important; }
 
   /* The close control is a child of #step-3, never of #rh-embed: the RH SDK
      owns #rh-embed and re-renders it on open, which would take the button
@@ -2832,8 +2833,8 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
   align-items: center;
   justify-content: center;
   position: fixed !important;
-  top: 18px !important;
-  right: 18px !important;
+  top: 18px;
+  right: 18px;
   z-index: 100000 !important;
   width: 36px !important;
   height: 36px !important;
@@ -2955,22 +2956,59 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       document.documentElement.classList.remove('gw-rh-dismissed');
       if (resume.parentNode) resume.parentNode.removeChild(resume);
       setHeroWidth(true);
+      placeClose();
     }
 
     closeBtn.addEventListener('click', dismiss);
     resumeBtn.addEventListener('click', reopen);
 
-    /* Backdrop tap. #step-3 IS the dimmed backdrop and #rh-embed is the
-       panel inside it, so "outside" is simply the event landing on
-       #step-3 itself. Clicks inside the RH iframe never reach this
-       document at all, so using the calendar cannot trigger it. */
-    step3.addEventListener('click', function (e) {
-      if (e.target === step3) dismiss();
+    /* Backdrop tap, tested against the PANEL rather than the backdrop.
+       The first cut listened on #step-3 for a target of #step-3, which
+       assumed #rh-embed is a descendant. It is not reliably: the RH SDK
+       owns #rh-embed and reparents it when dialog.open() runs, so the
+       white panel can end up outside #step-3 entirely — and then a tap
+       on the dim area never matched. Asking "is the target inside the
+       panel" is true wherever the panel lives.
+       Clicks inside the RH iframe never reach this document at all, so
+       using the calendar still cannot dismiss it. */
+    document.addEventListener('click', function (e) {
+      if (!isOpen()) return;
+      var panel = document.getElementById('rh-embed');
+      if (panel && panel.contains && panel.contains(e.target)) return;
+      if (closeBtn.contains && closeBtn.contains(e.target)) return;
+      dismiss();
     });
+
+    /* Anchor the cross to the panel's own top-right corner. It was pinned
+       to the viewport corner, which on a wide screen leaves it hundreds of
+       pixels away from the box it closes and reads as unrelated. The panel
+       is centred by transform and its height is content-driven, so there
+       is no CSS expression for this — measure it. setProperty with
+       important is needed because the fallback rule is !important. */
+    function placeClose() {
+      var panel = document.getElementById('rh-embed');
+      if (!panel || typeof panel.getBoundingClientRect !== 'function') return;
+      var r = panel.getBoundingClientRect();
+      if (!r.width || !r.height) return; // not laid out yet
+      closeBtn.style.setProperty('top', Math.max(8, Math.round(r.top) + 8) + 'px', 'important');
+      closeBtn.style.setProperty('right', Math.max(8, Math.round(window.innerWidth - r.right) + 8) + 'px', 'important');
+    }
 
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape' && isOpen()) dismiss();
     });
+
+    if (typeof window.addEventListener === 'function') {
+      window.addEventListener('resize', placeClose);
+    }
+    /* RH renders its embed 350ms after the step transition and the panel
+       resizes as the calendar fills it, so one measurement at open time is
+       not enough. ResizeObserver where available, a few timed retries
+       otherwise. */
+    if (typeof ResizeObserver === 'function') {
+      var panelForRO = document.getElementById('rh-embed');
+      if (panelForRO) new ResizeObserver(placeClose).observe(panelForRO);
+    }
 
     /* initBrowserBack lives in the form's own IIFE and needs to ask
        whether the calendar is up before it treats a back press as step
@@ -2984,6 +3022,8 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
         document.body.appendChild(step3);
         document.documentElement.classList.add('gw-rh-active');
         moved = true;
+        placeClose();
+        [80, 400, 900].forEach(function (ms) { setTimeout(placeClose, ms); });
       } else if (!visible && moved) {
         if (resume.parentNode) resume.parentNode.removeChild(resume);
         if (placeholder.parentNode) {
