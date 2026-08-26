@@ -1225,7 +1225,7 @@
       '.iu': '.io', '.oi': '.io', '.ai.': '.ai',
     };
 
-    function suggestWebsiteDomainFix(domain, emailDomain) {
+    function suggestWebsiteDomainFix(domain, emailDomain, emailLocalPart) {
       const d = String(domain || '').toLowerCase().replace(/\.$/, '');
       if (!d || d.indexOf('.') === -1) return '';
 
@@ -1241,7 +1241,30 @@
         if (dist === 1 || (dist === 2 && ed.length >= 10)) return ed;
       }
 
-      // 2. Mistyped TLD. Longest suffix first so overlapping keys resolve
+      /* 2. The email's LOCAL PART, when the email is a personal one (v5.7.0).
+            Rule 1 needs a business email domain to compare against, so a
+            Gmail user gets nothing from it. But the local part often IS the
+            company name:
+              typed:  gslgraphics.com          (no A record, no mail)
+              email:  glsgraphics1@gmail.com
+              real:   glsgraphics.com          (live, Microsoft 365 mail)
+            GSL vs GLS — one transposition. Reconstructing the local part
+            with the typed TLD produces exactly the right answer.
+            Guarded hard by edit distance: john.smith@gmail.com typing
+            acme.com yields 'johnsmith.com', which is nowhere near, so
+            nothing is suggested. */
+      if (ed && PERSONAL_EMAIL_DOMAINS.indexOf(ed) !== -1) {
+        const local = String(emailLocalPart || '').toLowerCase()
+          .replace(/[^a-z0-9]/g, '')  // drop dots, plus-tags, underscores
+          .replace(/\d+$/, '');       // and a trailing counter: glsgraphics1 -> glsgraphics
+        const typedTld = d.slice(d.indexOf('.'));
+        if (local.length >= 5) {
+          const candidate = local + typedTld;
+          if (candidate !== d && damerauLevenshtein(d, candidate) === 1) return candidate;
+        }
+      }
+
+      // 3. Mistyped TLD. Longest suffix first so overlapping keys resolve
       //    to the most specific match.
       const bad = Object.keys(WEBSITE_BAD_TLDS).sort((a, b) => b.length - a.length);
       for (let i = 0; i < bad.length; i++) {
@@ -1693,7 +1716,8 @@
       // Offer a one-tap fix instead of a dead end. Six of the seven real
       // NXDOMAIN cases in the Jul/Aug sample were typos by real businesses
       // that went on to book, not junk leads.
-      const suggestion = suggestWebsiteDomainFix(domain, emailDomain);
+      const emailLocal = (getField('email') || formState.email || '').split('@')[0] || '';
+      const suggestion = suggestWebsiteDomainFix(domain, emailDomain, emailLocal);
       if (suggestion) {
         return { ...verdict, suggestion, msg: 'Did you mean ' + suggestion + '?' };
       }
