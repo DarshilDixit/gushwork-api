@@ -1,12 +1,40 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.7.1-ads  (ADS PAGE VERSION)
+  GUSHWORK — MULTI-STEP FORM  v5.7.2-ads  (ADS PAGE VERSION)
 
   Tracks /demo v5.7.1. Full feature parity with /demo, EXCEPT the
   booking step, which keeps the Ads page's fullscreen modal
   presentation — opened after step 2 — instead of /demo's inline
-  column render. That difference is deliberate and is the ONLY
-  intended divergence: everything else here is a port of
-  gushwork-form.js and should be kept in step with it.
+  column render, AND the close affordances that modal needs (v5.7.2).
+  Those are the only intended divergences: everything else here is a
+  port of gushwork-form.js and should be kept in step with it. A
+  modal needs a way out and an inline column does not, so this
+  section has no /demo counterpart to track.
+
+  v5.7.2-ads — THE MODAL CAN BE CLOSED.
+    It previously had no exit at all. Not a cross, not Escape, not a
+    backdrop tap, and not even a successful booking — MEETING_BOOKED
+    fires its events and leaves the overlay up. The only way out was
+    the browser back button, which navigated to step 2 and invited a
+    second submission.
+      - Cross, backdrop tap, and Escape all dismiss it. Back does too,
+        and no longer walks to step 2: a second submission creates a
+        second lead row, and the duplicate-booking guard reads only the
+        newest row per email, which is how one person ends up holding
+        two calendar slots.
+      - DISMISS IS A CLASS, NOT display:none. Hiding via style would
+        trip the observer's un-portal branch, and reparenting an iframe
+        discards its browsing context — the calendar would reload and
+        lose the date they had already picked. A class leaves the inline
+        style and DOM position alone, so reopening resumes exactly where
+        they were.
+      - On dismiss the hero shows a resume card, built by this script so
+        no Webflow republish is needed. It reads as UNFINISHED on
+        purpose: no tick, no thanks, and no promise that anyone will be
+        in touch. Outreach is not standard here, and implying it is
+        gives a lead a reason not to book. One button, no alternative.
+      - A lead who has already booked gets different copy, so nobody is
+        nagged to book a slot they already hold.
+    Changes no validation, no submission, and no Meta CAPI behaviour.
 
   v5.7.1-ads — PARITY CATCH-UP with /demo v5.6.0 and v5.7.0/v5.7.1.
     This file forked from /demo v5.3.0 on 14 Aug and missed the two
@@ -2321,6 +2349,10 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
 
         console.log('[GW] ✅ RH MEETING_BOOKED event received:', meeting);
 
+        /* Marker only, read by the overlay's resume card so a booked lead
+           is not told there is a step left. Touches no booking logic. */
+        document.documentElement.classList.add('gw-rh-booked');
+
         // GTM — Demo Booked
         if (!isTestEmail(formState.email)) {
           window.dataLayer = window.dataLayer || [];
@@ -2568,6 +2600,17 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
     function initBrowserBack() {
       history.replaceState({ step: 'step-1' }, '', '');
       window.addEventListener('popstate', (e) => {
+        /* v5.7.2-ads — with the calendar up, back CLOSES it rather than
+           navigating. Landing on step 2 would let them submit a second
+           time, and the duplicate-booking guard reads only the newest
+           lead row per email, so a second row is how one person ends up
+           holding two calendar slots. The step-3 entry is pushed back
+           because the pop already consumed it. */
+        if (window.__gwRhOverlay && window.__gwRhOverlay.isOpen()) {
+          window.__gwRhOverlay.dismiss();
+          history.pushState({ step: 'step-3' }, '', '');
+          return;
+        }
         const targetStep = e.state?.step;
         if (targetStep) {
           _isPopstateNav = true;
@@ -2713,7 +2756,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.7.1-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
+      console.log('[GW] ✅ Form initialised v5.7.2-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
@@ -2773,6 +2816,50 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
   }
   html.gw-rh-active #rh-embed * { scrollbar-width: none; }
   html.gw-rh-active #rh-embed *::-webkit-scrollbar { width: 0 !important; height: 0 !important; }
+
+  /* v5.7.2-ads — DISMISSED STATE.
+     Two classes deep on purpose. This must outrank the display:block above
+     whatever the source order, and matching the same id with one more class
+     is what guarantees that. */
+  html.gw-rh-active.gw-rh-dismissed #step-3 { display: none !important; }
+
+  /* The close control is a child of #step-3, never of #rh-embed: the RH SDK
+     owns #rh-embed and re-renders it on open, which would take the button
+     with it. Hidden unless the overlay is actually up. */
+  .gw-rh-close { display: none; }
+  html.gw-rh-active .gw-rh-close {
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  position: fixed !important;
+  top: 18px !important;
+  right: 18px !important;
+  z-index: 100000 !important;
+  width: 36px !important;
+  height: 36px !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
+  border-radius: 999px !important;
+  background: #ffffff !important;
+  color: #0f172a !important;
+  font-size: 22px !important;
+  line-height: 1 !important;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+  }
+  #gw-rh-resume {
+  text-align: center;
+  padding: 28px 20px;
+  }
+  #gw-rh-resume-title {
+  margin: 0 0 16px 0;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: #0f172a;
+  }
+  #gw-rh-resume-btn { cursor: pointer; }
   `;
     const style = document.createElement('style');
     style.textContent = css;
@@ -2786,6 +2873,110 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
     var placeholder = document.createComment('gw-step3-anchor');
     var moved = false;
 
+    /* =========================================================
+    v5.7.2-ads — CLOSING THE CALENDAR
+
+    Before this, the modal had NO exit. Not a cross, not Escape, not
+    a backdrop tap — and not even a successful booking, which fires
+    its events and leaves the overlay up. The only way out was the
+    browser back button, which navigated to step 2 and invited a
+    resubmit; see the popstate note in initBrowserBack.
+
+    THE LEAD IS ALREADY SAVED before this overlay ever appears —
+    submitLead() is awaited in handleStep2Next() before
+    showStep('step-3'). So closing costs no lead data. It costs a
+    BOOKING, which is the only thing this page is for, and that is
+    what shapes everything below.
+
+    Dismiss is a CLASS, never style.display. Setting display:none
+    would satisfy the observer's hide branch, which un-portals
+    #step-3 back into the hero column — and reparenting an iframe
+    discards its browsing context, so the RH calendar would reload
+    and lose whatever date they had already picked. Toggling a class
+    leaves the inline style and the DOM position untouched, so the
+    iframe never moves and reopening resumes exactly where they were.
+    ========================================================= */
+    var closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'gw-rh-close';
+    closeBtn.setAttribute('aria-label', 'Close the booking calendar');
+    closeBtn.appendChild(document.createTextNode('\u00d7'));
+    step3.appendChild(closeBtn);
+
+    /* The resume card. Deliberately reads as UNFINISHED: no tick, no
+       thanks, and no promise that anyone will be in touch — outreach is
+       not standard here, and telling someone it is gives them a reason
+       not to book. One button, no second option. */
+    var resume = document.createElement('div');
+    resume.id = 'gw-rh-resume';
+    var resumeTitle = document.createElement('p');
+    resumeTitle.id = 'gw-rh-resume-title';
+    var resumeBtn = document.createElement('button');
+    resumeBtn.type = 'button';
+    resumeBtn.id = 'gw-rh-resume-btn';
+    /* Borrow the real Next button's Webflow classes so this matches the
+       form instead of approximating it. Falls back to the plain styling
+       above if that button is not on the page. */
+    var btnModel = document.getElementById('step-2-next');
+    if (btnModel && btnModel.className) resumeBtn.className = btnModel.className;
+    resume.appendChild(resumeTitle);
+    resume.appendChild(resumeBtn);
+
+    function setHeroWidth(wide) {
+      var mw = document.getElementById('main-wrapper');
+      var fw = document.getElementById('form-wrap-view');
+      if (mw) mw.style.maxWidth = wide ? '1100px' : '1000px';
+      if (fw) fw.style.maxWidth = wide ? '1040px' : '600px';
+    }
+
+    function isOpen() {
+      var c = document.documentElement.classList;
+      return c.contains('gw-rh-active') && !c.contains('gw-rh-dismissed');
+    }
+
+    function dismiss() {
+      if (!isOpen()) return;
+      document.documentElement.classList.add('gw-rh-dismissed');
+      /* A lead who has already booked must not be nagged to book again.
+         initRHBookingListener sets gw-rh-booked when RH reports
+         MEETING_BOOKED. */
+      var booked = document.documentElement.classList.contains('gw-rh-booked');
+      resumeTitle.textContent = booked
+        ? 'You are booked \u2014 see you then.'
+        : 'One step left \u2014 choose your time.';
+      resumeBtn.textContent = booked ? 'View your booking' : 'Pick a time';
+      if (placeholder.parentNode && !resume.parentNode) {
+        placeholder.parentNode.insertBefore(resume, placeholder);
+      }
+      setHeroWidth(false);
+    }
+
+    function reopen() {
+      document.documentElement.classList.remove('gw-rh-dismissed');
+      if (resume.parentNode) resume.parentNode.removeChild(resume);
+      setHeroWidth(true);
+    }
+
+    closeBtn.addEventListener('click', dismiss);
+    resumeBtn.addEventListener('click', reopen);
+
+    /* Backdrop tap. #step-3 IS the dimmed backdrop and #rh-embed is the
+       panel inside it, so "outside" is simply the event landing on
+       #step-3 itself. Clicks inside the RH iframe never reach this
+       document at all, so using the calendar cannot trigger it. */
+    step3.addEventListener('click', function (e) {
+      if (e.target === step3) dismiss();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && isOpen()) dismiss();
+    });
+
+    /* initBrowserBack lives in the form's own IIFE and needs to ask
+       whether the calendar is up before it treats a back press as step
+       navigation. */
+    window.__gwRhOverlay = { dismiss: dismiss, reopen: reopen, isOpen: isOpen };
+
     function sync() {
       var visible = step3.style.display === 'block';
       if (visible && !moved) {
@@ -2794,11 +2985,15 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
         document.documentElement.classList.add('gw-rh-active');
         moved = true;
       } else if (!visible && moved) {
+        if (resume.parentNode) resume.parentNode.removeChild(resume);
         if (placeholder.parentNode) {
           placeholder.parentNode.insertBefore(step3, placeholder);
           placeholder.remove();
         }
-        document.documentElement.classList.remove('gw-rh-active');
+        /* Drop gw-rh-dismissed too, or a genuine navigation away from
+           step 3 would leave it set and the next open would paint
+           nothing. */
+        document.documentElement.classList.remove('gw-rh-active', 'gw-rh-dismissed');
         moved = false;
       }
     }
