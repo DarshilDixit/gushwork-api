@@ -63,13 +63,48 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `CLAUDE.md` | This file |
 
 **`gushwork-form.js` and `gushwork-form-popup.js` are in this repo, not a separate
-one.** jsDelivr serves both straight from `main`:
-`https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@main/gushwork-form.js`.
-Committing either file is a **live production change to the forms** — it needs a
-jsDelivr cache purge to take effect, unlike everything else here, which just needs
-a Railway redeploy. `darshildixit.github.io/gushwork-embeds` is a genuinely
-different repo — it holds the Webflow CSS/JS embeds, not these two files. Don't
-confuse the two.
+one,** and jsDelivr serves both from it. **They are pinned to a commit SHA, not to
+`main`** — see below, because it changes what "deploying a form fix" means.
+`darshildixit.github.io/gushwork-embeds` is a genuinely different repo — it holds
+the Webflow CSS/JS embeds, not these two files. Don't confuse the two.
+
+### Deploying a form change — the Webflow step
+
+**A `git push` does NOT ship a form change.** The two form files reach production
+through a `<script src>` in **Webflow → Project Settings → Custom Code**, and that
+URL names an immutable commit SHA:
+
+```
+https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@<40-char-sha>/gushwork-form.js
+https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@<40-char-sha>/gushwork-form-popup.js
+```
+
+So shipping a form fix is **two** steps, and the second one is outside this repo:
+
+1. Merge to `main` as usual.
+2. Take the new `main` SHA (`git rev-parse HEAD`) and update **both** script tags
+   in Webflow, then republish.
+
+Miss step 2 and the fix is in `main`, the tests pass, Railway has redeployed — and
+every real lead is still running the old file. Nothing in this repo will tell you.
+
+**Why SHA and not `@main`.** jsDelivr treats a SHA path as immutable and caches it
+permanently, so it either serves those exact bytes or 404s. `@main` is a mutable
+ref served best-effort, which needs a cache purge — and purges do not reliably
+take. Pinning removes the purge from the process entirely.
+
+**Use the full 40-character SHA.** Short SHAs work today but are ambiguous as the
+repo grows, and a collision resolves to the wrong file rather than erroring.
+
+**Pin both files to the same SHA**, even when only one of them changed. The bytes
+would be identical either way — a commit SHA names a snapshot of the whole repo,
+so asking for an untouched file at a newer SHA returns the same blob — but pinning
+them together is the only thing that records that the pair was *tested* together.
+
+**Confirming the swap actually took**: load the page and read the console banner.
+`/demo` logs `Form initialised v…`, the Ads page logs `… (Google Ads)`. If the
+version there is not the one you just merged, Webflow is still serving the old
+pin — the deploy is not done, however green this repo looks.
 
 **`backfill-sf.js` is a kept tool, not dead code.** It re-syncs leads to Salesforce
 after a broken connection or outage. Its `/admin/backfill-sf` route is deliberately
