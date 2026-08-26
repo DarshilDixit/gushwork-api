@@ -387,9 +387,21 @@ const P = build(popup);
    ============================================================ */
 {
   ok('fork: still declares itself the Ads page version', /\(ADS PAGE VERSION\)/.test(popup));
-  ok('fork: version header is v5.7.1-ads', /MULTI-STEP FORM  v5\.7\.1-ads/.test(popup));
-  ok('fork: init banner agrees with the header',
-     /Form initialised v5\.7\.1-ads \(Google Ads\)/.test(popup));
+  /* Assert the header and the banner AGREE rather than hard-coding a
+     number. A pinned version rots at every release and gets "fixed" by
+     bumping the test, which teaches nothing; the failure worth catching is
+     the two disagreeing, which is what actually misleads a person reading
+     the file or the console. */
+  ok('fork: version header is an -ads build', /MULTI-STEP FORM  v5\.[0-9]+\.[0-9]+-ads/.test(popup));
+  ok('fork: init banner agrees with the header', (() => {
+    const h = /MULTI-STEP FORM  (v[0-9.]+-ads)/.exec(popup);
+    const b = /Form initialised (v[0-9.]+-ads) \(Google Ads\)/.exec(popup);
+    return h && b && h[1] === b[1];
+  })());
+  /* The close affordances are Ads-only by design and have no /demo
+     counterpart. Pinned here so a future parity sweep cannot delete them
+     as "divergence"; behaviour is covered in tests/test-ads-modal.js. */
+  ok('fork: the modal keeps its close affordances', /window\.__gwRhOverlay = \{/.test(popup));
   ok('fork: the RevenueHero booking listener is still wired', /initRHBookingListener/.test(popup));
   ok('fork: it still has modal presentation of its own',
      /modal/i.test(popup) && !/modal/i.test(demo.slice(0, 60)));
