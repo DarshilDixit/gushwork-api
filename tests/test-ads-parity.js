@@ -398,6 +398,21 @@ const P = build(popup);
     const b = /Form initialised (v[0-9.]+-ads) \(Google Ads\)/.exec(popup);
     return h && b && h[1] === b[1];
   })());
+  /* /demo gets the SAME self-consistency check the Ads file has. It had
+     none, which is exactly why its init banner sat at v5.2.0 while its
+     header read v5.7.1 — through v5.3.0, v5.6.0, v5.7.0 and v5.7.1. The
+     banner is how you confirm which build a page is actually running, so a
+     banner that disagrees with its own header is worse than none. */
+  ok('demo: init banner agrees with the header', (() => {
+    const h = /MULTI-STEP FORM  (v[0-9.]+)  \(\/demo/.exec(demo);
+    const b = /Form initialised (v[0-9.]+) \(\/demo\)/.exec(demo);
+    return h && b && h[1] === b[1];
+  })(), (() => {
+    const h = /MULTI-STEP FORM  (v[0-9.]+)  \(\/demo/.exec(demo);
+    const b = /Form initialised (v[0-9.]+) \(\/demo\)/.exec(demo);
+    return `header=${h && h[1]} banner=${b && b[1]}`;
+  })());
+
   /* The close affordances are Ads-only by design and have no /demo
      counterpart. Pinned here so a future parity sweep cannot delete them
      as "divergence"; behaviour is covered in tests/test-ads-modal.js. */
