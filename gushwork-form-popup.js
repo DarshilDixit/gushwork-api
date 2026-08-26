@@ -1506,6 +1506,16 @@
     // its answer is authoritative. Anything else means it couldn't look, in
     // which case a DNS parking hint must survive as a flag rather than
     // silently passing as clean.
+    /* Server answers that mean it actually determined something. Anything
+       absent from this list means the server could not look either, so the
+       browser's original (passing) verdict stands. */
+    const SERVER_DNS_DECISIVE = [
+      'content_clean', 'live_despite_dns_hint', 'forwarded_to_live_site',
+      'thin_content', 'thin_content_wildcard',
+      'parked_confirmed', 'for_sale_lander', 'marketplace_redirect', 'hosting_placeholder',
+      'nxdomain', 'no_dns_records', 'mx_only',
+    ];
+
     const STAGE2_DECISIVE = ['content_clean', 'live_despite_dns_hint', 'forwarded_to_live_site', 'thin_content', 'thin_content_wildcard'];
 
     // Stage 2 — server-level content check (v4.9.5). DNS/IP/NS alone can't
@@ -1516,6 +1526,35 @@
     // test-email, since there's either nothing to scan or nothing to gain.
     // Same fail-open contract as everything else: any backend hiccup,
     // timeout, or bot-wall passes the lead through rather than blocking it.
+    /* v5.7.0 — SERVER-SIDE DNS FALLBACK.
+       Stage 1 runs in the VISITOR'S browser over DNS-over-HTTPS, so it
+       inherits their network restrictions — a corporate firewall or the
+       Great Firewall blocks it and a real business gets marked unverified.
+       The server has no such restrictions, so when the browser lookup is
+       blocked we ask it instead. Returns null on any failure, which means
+       "keep whatever the browser concluded". */
+    async function resolveWebsiteViaServer(rawValue) {
+      if (!isRailwayReady()) return null;
+      try {
+        const controller = new AbortController();
+        const t = setTimeout(() => controller.abort(), 15000); // matches the content check's budget
+        const res = await fetch(`${RAILWAY_API_URL}/resolve-website`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({ website: rawValue }),
+        });
+        clearTimeout(t);
+        if (!res.ok) return null;
+        const data = await res.json();
+        if (!data || !data.reason) return null;
+        return { ok: data.ok !== false, reason: data.reason, canonical_url: data.canonical_url || null };
+      } catch (err) {
+        console.warn('[GW] Server DNS fallback failed — keeping original verdict:', err && err.message);
+        return null;
+      }
+    }
+
     async function verifyWebsiteContent(rawValue, parkingHint, hasMX) {
       if (!isRailwayReady()) return { ok: true, reason: 'skipped_no_backend' };
       try {
@@ -1556,6 +1595,21 @@
           // it ran only on 'resolved', so a DNS hint was final and
           // unappealable — the one layer that can actually see the page
           // never got asked. Content is ground truth; DNS is a prior.
+          /* v5.7.0 — the browser's own DNS was blocked or inconclusive, so
+             we learned nothing about this domain. Ask the server, which is
+             not behind the visitor's corporate firewall or the Great
+             Firewall. Its answer is authoritative because it ran BOTH
+             stages; if it can't answer either, we keep what we had. */
+          const dnsWasBlocked = (v.reason === 'doh_error' || v.reason === 'dns_indeterminate');
+          if (dnsWasBlocked && !isTestEmail(getField('email'))) {
+            const sv = await resolveWebsiteViaServer(rawValue);
+            if (sv && SERVER_DNS_DECISIVE.indexOf(sv.reason) !== -1) {
+              console.log('[GW] Browser DNS blocked (' + v.reason + ') — server resolved it as ' + sv.reason);
+              return sv;
+            }
+            return v; // server couldn't help either; the original already passes
+          }
+
           const needsContentCheck = (v.reason === 'resolved' || v.reason === 'parked_suspect');
           if (!needsContentCheck || isTestEmail(getField('email'))) return v;
 
