@@ -1,9 +1,39 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.3.3-ads  (ADS PAGE VERSION)
+  GUSHWORK — MULTI-STEP FORM  v5.7.1-ads  (ADS PAGE VERSION)
 
-  Built from /demo v5.3.0. Full feature parity with /demo, EXCEPT the
+  Tracks /demo v5.7.1. Full feature parity with /demo, EXCEPT the
   booking step, which keeps the Ads page's fullscreen modal
-  presentation instead of /demo's inline column render.
+  presentation — opened after step 2 — instead of /demo's inline
+  column render. That difference is deliberate and is the ONLY
+  intended divergence: everything else here is a port of
+  gushwork-form.js and should be kept in step with it.
+
+  v5.7.1-ads — PARITY CATCH-UP with /demo v5.6.0 and v5.7.0/v5.7.1.
+    This file forked from /demo v5.3.0 on 14 Aug and missed the two
+    releases that followed, so all four items below are ports, not new
+    work. No change to the modal, the step ladder, or any Ads-specific
+    presentation. Nothing here alters which leads get blocked or which
+    fire Meta CAPI events.
+      - SERVER-SIDE DNS FALLBACK (v5.7.0). Stage 1 runs in the VISITOR'S
+        browser over DNS-over-HTTPS, so it inherits their network
+        restrictions — a corporate firewall or the Great Firewall blocks
+        it and a real business is marked unverified. When the browser
+        lookup is blocked we now ask the server, which has no such
+        restrictions, via POST /resolve-website. Fails closed to the
+        browser's original passing verdict.
+      - EMAIL IN THE WEBSITE FIELD (v5.7.0). user@domain.com PASSES
+        isValidURL, because it is a legal URL with a username — so it
+        reached the backend and threw a credentials error. Caught at
+        validation now, with the domain offered as a one-tap fix.
+      - SOFT EMAIL TYPO NUDGE (v5.6.0, made local in v5.7.1). A
+        typosquat like gmailc.com verifies cleanly, so the rejection-only
+        suggester never fired. This adds a non-blocking, tap-to-accept
+        nudge in its OWN element (#gw-email-typo-hint), computed locally
+        so an ELV timeout cannot swallow it. `valid` stays true.
+      - WEBSITE TYPO FROM THE EMAIL LOCAL PART (v5.7.0). The existing
+        suggester needs a business email domain to compare against, so a
+        Gmail user got nothing. Rule 2 in suggestWebsiteDomainFix()
+        reconstructs the domain from the local part, guarded to one edit.
 
   /* --------------------------------------------------------
   INJECT STYLES
@@ -2683,7 +2713,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.3.3-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
+      console.log('[GW] ✅ Form initialised v5.7.1-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
