@@ -59,7 +59,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `package-lock.json` | Locked dependency versions, committed so Railway installs exactly what was tested |
 | `.gitignore` | Keeps `node_modules/`, `.env`, logs, and local Claude settings out of the repo |
 | `README.md` | Repo landing blurb, not living documentation. This file is |
-| `tests/` | The three test files described under Deploying |
+| `tests/` | The test files described under Deploying |
 | `CLAUDE.md` | This file |
 
 **`gushwork-form.js` and `gushwork-form-popup.js` are in this repo, not a separate
@@ -231,8 +231,9 @@ can't verify, it must not be green.
 
 **The three lists.** `WEBSITE_VERIFIED_REASONS` (line ~424), `RECHECK_WRITEABLE`
 (~3386) and `RECHECK_PROTECTED` (~3398) must stay in sync with `gushwork-form.js`
-SECTION 3C. There's a warning comment above them. Adding a website verdict means
-deciding its place in all three:
+SECTION 3C **and `gushwork-form-popup.js`, which carries its own copy of the same
+lists** — see the fork note below. There's a warning comment above them. Adding a
+website verdict means deciding its place in all three:
 
 - **`WEBSITE_VERIFIED_REASONS`** → does Meta fire?
 - **`RECHECK_WRITEABLE`** → can the historical recheck tool overwrite it?
@@ -247,6 +248,19 @@ query explaining the incident behind it. A backtick in that comment — writing
 the error surfaces as `SyntaxError: missing ) after argument list` pointing at the
 `pool.query(` line, not at the comment. Four of these happened in one sitting. Use
 plain words inside SQL comments, and run `node --check index.js` before committing.
+
+**`gushwork-form-popup.js` is a FORK of `gushwork-form.js`, not a sibling.**
+The Ads file exists only to present the booking step as a fullscreen modal
+opened after step 2. Every other line is meant to be the same code, and there is
+no shared module — the two files are edited independently, so a fix applied to
+one is a fix applied to half the traffic. This has already gone wrong once: the
+Ads file forked at `/demo` v5.3.0 on 14 Aug 2026 and silently missed v5.6.0 and
+v5.7.0/v5.7.1, so for twelve days Google Ads leads got no DNS fallback, no
+email-in-website-field catch, and no typo nudge. **A change to `gushwork-form.js`
+is not finished until it is in `gushwork-form-popup.js` too.**
+`node tests/test-ads-parity.js` now enforces that — it lifts both files and
+compares them, and it also pins the modal as deliberate so a future sync cannot
+"tidy" the fork's own presentation away.
 
 **Two copies of the label map.** `WEBSITE_REASON_LABELS` is a normal JS object.
 The monitor dashboard has a second copy (`var WLBL=`) inside a JS string that gets
@@ -302,12 +316,17 @@ So: work on a branch, run the tests, and only merge when they pass.
 
 ```bash
 node tests/test-batch1.js       # logic, no dependencies
+node tests/test-batch2.js       # logic, no dependencies
+node tests/test-batch-a.js      # logic, no dependencies
+node tests/test-ads-parity.js   # the two form files against each other, no dependencies
 node tests/test-batch1-db.js    # needs DATABASE_URL
 node tests/test-batch1-e2e.js   # boots the real server, needs DATABASE_URL
 ```
 
-The first one runs anywhere in about a second — run it after any change to
-`index.js`, always.
+**The four dependency-free suites are the bar.** They run anywhere in about a
+second each — run all four after any change to `index.js`, `lead-magnet.js`, or
+either form file, always. Do not install Postgres and do not point anything at
+the production database from a feature branch.
 
 Tests read the real functions out of `index.js` rather than a copy. A test that
 exercises a duplicate of the source can pass while production is broken. Keep it
