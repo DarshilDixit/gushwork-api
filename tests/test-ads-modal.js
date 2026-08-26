@@ -159,8 +159,21 @@ function buildEnv(opts) {
   // Drive the observer the way a real style change would.
   function setDisplay(v) { step3.style.display = v; observers.forEach((o) => o.cb()); }
 
+  /* A click that BUBBLES. Firing only the target's own listener is not what
+     a browser does, and the difference is not academic: the resume button's
+     handler reopens the modal, then the SAME click reaches the document
+     listener with the modal now open and the target outside the panel. The
+     first version of this suite called reopen() directly and never saw it.
+     Element listeners first, then document — bubble order. */
+  function click(node) {
+    const ev = { target: node };
+    let p = node;
+    while (p) { p.fire && p.fire('click', ev); p = p.parentNode; }
+    document.fire('click', ev);
+  }
+
   return { document, window, html, body, head, hero, wrapper, step3, rhEmbed, nextBtn, setDisplay,
-           opts,
+           click, opts,
            api: () => window.__gwRhOverlay,
            closeBtn: () => step3.childNodes.find((n) => n.className === 'gw-rh-close'),
            resume: () => hero.childNodes.find((n) => n.id === 'gw-rh-resume') };
@@ -253,9 +266,13 @@ function buildEnv(opts) {
   eq('resume: exactly one action, no alternative', card && card.childNodes.length, 2);
   eq('resume: borrows the real Next button styling', btn && btn.className, e.nextBtn.className);
 
-  e.api().reopen();
+  /* Through a bubbling click, not api().reopen() — the bug this catches is
+     the card's own click re-dismissing the modal it just reopened. */
+  e.click(btn);
   ok('reopen: card is removed', !e.resume());
-  ok('reopen: dismissed flag cleared', !e.html.classList.contains('gw-rh-dismissed'));
+  ok('reopen: the modal STAYS open after the card is clicked',
+     !e.html.classList.contains('gw-rh-dismissed'));
+  ok('reopen: still active', e.html.classList.contains('gw-rh-active'));
   ok('reopen: #step-3 STILL has not moved — the calendar is intact',
      e.step3.parentNode === e.body);
   eq('reopen: inline display never changed throughout', e.step3.style.display, 'block');
@@ -287,19 +304,19 @@ function buildEnv(opts) {
   // cross
   let e = buildEnv();
   e.setDisplay('block');
-  e.closeBtn().fire('click', {});
+  e.click(e.closeBtn());
   ok('trigger: the cross dismisses', e.html.classList.contains('gw-rh-dismissed'));
 
   // backdrop tap — anything not inside the panel
   e = buildEnv();
   e.setDisplay('block');
-  e.document.fire('click', { target: e.step3 });
+  e.click(e.step3);
   ok('trigger: a backdrop tap dismisses', e.html.classList.contains('gw-rh-dismissed'));
 
   // a tap on the panel must NOT dismiss
   e = buildEnv();
   e.setDisplay('block');
-  e.document.fire('click', { target: e.rhEmbed });
+  e.click(e.rhEmbed);
   ok('trigger: a tap on the panel does NOT dismiss',
      !e.html.classList.contains('gw-rh-dismissed'));
 
@@ -402,21 +419,21 @@ function buildEnv(opts) {
     let e = buildEnv({ rhOutsideStep3: outside });
     e.setDisplay('block');
     ok(`both layouts: the cross dismisses (${where})`, (() => {
-      e.closeBtn().fire('click', {});
+      e.click(e.closeBtn());
       return e.html.classList.contains('gw-rh-dismissed');
     })());
 
     // backdrop / outside tap
     e = buildEnv({ rhOutsideStep3: outside });
     e.setDisplay('block');
-    e.document.fire('click', { target: e.hero });
+    e.click(e.hero);
     ok(`both layouts: an outside tap dismisses (${where})`,
        e.html.classList.contains('gw-rh-dismissed'));
 
     // and a tap on the panel still must not
     e = buildEnv({ rhOutsideStep3: outside });
     e.setDisplay('block');
-    e.document.fire('click', { target: e.rhEmbed });
+    e.click(e.rhEmbed);
     ok(`both layouts: a tap on the panel does NOT dismiss (${where})`,
        !e.html.classList.contains('gw-rh-dismissed'));
 
@@ -441,6 +458,23 @@ function buildEnv(opts) {
       e.api().dismiss();
       return !!e.resume();
     })());
+
+    /* Full round trip through real clicks: close, reopen, close again.
+       Anything that leaves the modal shut after the card is clicked, or
+       cannot be closed a second time, fails here. */
+    e = buildEnv({ rhOutsideStep3: outside });
+    e.setDisplay('block');
+    e.click(e.closeBtn());
+    ok(`cycle: closed once (${where})`, e.html.classList.contains('gw-rh-dismissed'));
+    e.click(e.resume().childNodes[1]);
+    ok(`cycle: reopened and STAYED open (${where})`,
+       !e.html.classList.contains('gw-rh-dismissed') && e.html.classList.contains('gw-rh-active'));
+    ok(`cycle: the card is gone after reopening (${where})`, !e.resume());
+    e.click(e.closeBtn());
+    ok(`cycle: closes a second time (${where})`, e.html.classList.contains('gw-rh-dismissed'));
+    e.click(e.resume().childNodes[1]);
+    ok(`cycle: reopens a second time (${where})`,
+       !e.html.classList.contains('gw-rh-dismissed'));
   }
 }
 
@@ -487,6 +521,8 @@ function buildEnv(opts) {
     return /var panel = document\.getElementById\('rh-embed'\);\s*\n\s*if \(panel && panel\.contains && panel\.contains\(e\.target\)\) return;/.test(src)
         && !/step3\.addEventListener\('click'/.test(src);
   })());
+  ok('shape: the resume card is exempt from the outside-click listener',
+     /if \(resume\.contains && resume\.contains\(e\.target\)\) return;/.test(src));
   ok('shape: the cross is measured against the panel, not pinned to the viewport',
      /closeBtn\.style\.setProperty\('top'/.test(src) && /getBoundingClientRect\(\)/.test(src));
   ok('shape: the close button is styled only while the overlay is up',

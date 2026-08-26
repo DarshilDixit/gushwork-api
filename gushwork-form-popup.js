@@ -2976,6 +2976,16 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       var panel = document.getElementById('rh-embed');
       if (panel && panel.contains && panel.contains(e.target)) return;
       if (closeBtn.contains && closeBtn.contains(e.target)) return;
+      /* The resume card's own button must be exempt too. Its handler runs
+         first and clears gw-rh-dismissed, so by the time this listener sees
+         the SAME click the modal is open again and the target is outside
+         the panel — which used to re-dismiss it instantly. The card looked
+         like it did nothing; it reopened and closed within one event.
+         Exempting the subtree is preferred over stopPropagation in the
+         button handler: it does not depend on which listener runs first.
+         resume is detached by then, but contains() still holds on a
+         detached tree. */
+      if (resume.contains && resume.contains(e.target)) return;
       dismiss();
     });
 
