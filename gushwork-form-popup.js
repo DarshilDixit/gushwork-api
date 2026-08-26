@@ -804,6 +804,26 @@
     // (Trade-off: the literal domain `www.com` would be rejected. Nobody
     // submits that as a company site, and stripping conditionally would
     // reopen the malbecgrillcom hole.)
+    /* An email address typed into the WEBSITE field PASSES isValidURL,
+       because new URL('https://user@domain.com') is a legal URL with a
+       username — so it slipped straight through to the backend, which then
+       threw "Request cannot be constructed from a URL that includes
+       credentials" (seen in the logs on 18 Aug).
+       Returns the domain when it is worth offering as a fix, '' otherwise. */
+    function emailInWebsiteField(value) {
+      const v = String(value || '').trim();
+      if (v.indexOf('@') === -1) return '';
+      try {
+        const u = new URL(/^https?:\/\//i.test(v) ? v : 'https://' + v);
+        if (!u.username) return '';
+        const host = u.hostname.replace(/^www\./i, '').toLowerCase();
+        // A mailbox provider is not their company website, so there is
+        // nothing useful to suggest for someone@gmail.com.
+        if (PERSONAL_EMAIL_DOMAINS.indexOf(host) !== -1) return '';
+        return /^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/i.test(host) ? host : '';
+      } catch (e) { return ''; }
+    }
+
     function isValidURL(url) {
       try {
         const u = new URL(url.startsWith('http') ? url : 'https://' + url);
@@ -901,6 +921,14 @@
       const website = getField('website');
       if (!website) {
         showError('website-error', 'Website URL is required.');
+        valid = false;
+      } else if (website.indexOf('@') !== -1) {
+        // Checked BEFORE isValidURL, which accepts user@domain.com as a
+        // valid URL-with-credentials and lets it straight through.
+        const emailFix = emailInWebsiteField(website);
+        showWebsiteVerdictError(emailFix
+          ? { msg: 'Did you mean ' + emailFix + '?', suggestion: emailFix }
+          : { msg: 'That looks like an email address. Please enter your website (e.g. acme.com).' });
         valid = false;
       } else if (!isValidURL(website)) {
         const suggestion = suggestUrlFix(website);
