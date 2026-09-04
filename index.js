@@ -2816,6 +2816,10 @@ app.get('/monitor', (req, res) => {
   '.pfsv{font-size:20px;font-weight:600;margin:2px 0}' +
   '.pfsr{font-size:11px;color:#888}' +
   '.pfsu{font-size:10px;color:#b45309;background:#fef3c7;border-radius:3px;padding:1px 4px;display:inline-block}' +
+  /* Off-path arrivals. Amber and not red: this is not a loss, it is a domain
+     that reached the stage without passing an earlier one. A loss costs money;
+     this one already made it. */
+  '.pfso{font-size:10px;margin-top:3px;color:#b45309;font-weight:600;line-height:1.35}' +
   '.pfl{font-size:10px;margin-top:4px;color:#666}' +
   '.pfl.bad{color:#b91c1c;font-weight:600}' +
   '.pschip{display:inline-block;font-size:10px;font-weight:600;padding:2px 7px;border-radius:4px;background:#eef;color:#334;margin:2px 4px 2px 0;white-space:nowrap}' +
@@ -2916,9 +2920,9 @@ app.get('/monitor', (req, res) => {
   '<div class="mc" title="Salesforce state per partner domain, refreshed every 15 minutes for EVERY partner domain. &quot;Waiting on an AE&quot; is the row to action daily: the Opportunity exists but nobody has ticked Qualified_Demo__c, so the $50 cannot fire yet. &quot;Opportunity never created&quot; means sfopp failed and no AE can ever tick it."><div class="ml">Waiting on an AE</div><div class="mv" id="p-sfwait">&#8212;</div><div class="ms" id="p-sfstates">&#8212;</div></div>' +
   '<div class="mc" title="Distinct COMPANIES that arrived on a partner link. Companies, not people, so this reconciles with the funnel and the lifecycle states below."><div class="ml">Partner companies</div><div class="mv" id="p-leads">&#8212;</div><div class="ms" id="p-leads24">&#8212;</div></div>' +
   '<div class="mc" title="Distinct customer DOMAINS with a conversion sent. Per domain, not per person &#8212; PartnerStack counts one conversion per customer key, ever."><div class="ml">Conversions sent</div><div class="mv" id="p-conv">&#8212;</div><div class="ms">domains, one per customer</div></div>' +
-  '<div class="mc" title="Distinct customer DOMAINS with a qualified_demo action sent. This is the event that pays the affiliate."><div class="ml">Qualified demos fired</div><div class="mv" id="p-qual">&#8212;</div><div class="ms">domains, one per customer</div></div>' +
+  '<div class="mc" title="Distinct customer DOMAINS with a qualified_demo action sent. This is the event that pays the affiliate. The funnel below computes this stage from the same expression, so the two cannot disagree \u2014 they did on 5 Sept, when this card said 1 and the funnel said 0."><div class="ml">Qualified demos fired</div><div class="mv" id="p-qual">&#8212;</div><div class="ms">domains, one per customer</div></div>' +
   '</div>' +
-  '<div class="card"><div class="ml" style="margin-bottom:4px">Funnel <span class="psna" style="font-weight:400;font-size:11px">&#8212; companies, cumulative. Each stage counts domains that passed every stage before it.</span></div>' +
+  '<div class="card"><div class="ml" style="margin-bottom:4px">Funnel <span class="psna" style="font-weight:400;font-size:11px">&#8212; companies. The big number is what happened at that stage; the line under it is how many got there down the funnel path.</span></div>' +
   '<div class="psm" id="pfn-note"></div><div class="pfn" id="pfn"></div></div>' +
   '<div class="card"><div class="ml" style="margin-bottom:8px">Per domain <span class="psna" style="font-weight:400;font-size:11px">&#8212; one row, one lifecycle state. The states above are counts of this column.</span></div>' +
   '<div style="overflow-x:auto"><table class="lt"><thead><tr><th>Domain</th><th>State</th><th>Partner</th><th>Salesforce</th><th>Detail</th><th></th><th>Last seen</th></tr></thead>' +
@@ -2929,7 +2933,7 @@ app.get('/monitor', (req, res) => {
   '<th class="sortable" onclick="sortPartners(\'partner_name\')">Partner <span id="psar-partner_name"></span></th>' +
   '<th>Email</th><th>Key</th>' +
   '<th class="sortable" onclick="sortPartners(\'clicks\')" title="OUR clicks, from ps_click_history &#8212; counted as distinct xid, because the cookie is cumulative per visitor. Clicks that never reached the form are NOT in our data at all, only PartnerStack has those. This is the one column that is not a company count.">Clicks <span id="psar-clicks"></span></th>' +
-  '<th class="sortable" onclick="sortPartners(\'step1\')" title="Companies that reached step 1. Every column in this funnel counts COMPANIES, so they nest: step 1 &#8805; completed &#8805; converted &#8805; booked &#8805; qualified.">Step 1 <span id="psar-step1"></span></th>' +
+  '<th class="sortable" onclick="sortPartners(\'step1\')" title="Companies that reached step 1. Every column here counts COMPANIES, never people. They read left to right as a funnel, except where a company skipped a stage &#8212; those cells are marked with a dagger and say so, because the alternative is a column reading 0 about something that happened.">Step 1 <span id="psar-step1"></span></th>' +
   '<th class="sortable" onclick="sortPartners(\'completed\')">Completed <span id="psar-completed"></span></th>' +
   '<th class="sortable" onclick="sortPartners(\'conversions\')">Converted <span id="psar-conversions"></span></th>' +
   '<th class="sortable" onclick="sortPartners(\'verified\')" title="Conversion read back from PartnerStack. Sent only means a 200 from an empty-bodied endpoint.">Verified <span id="psar-verified"></span></th>' +
@@ -3288,7 +3292,22 @@ app.get('/monitor', (req, res) => {
   /* Partners tab. Sorting is client-side over a single fetched page, like the
      SDR list — there are tens of partners, not thousands, and a round trip per
      column click would be worse than useless. */
-  'var partnerRows=[],pSort="step1",pDir="desc";' +
+  /* psAbs maps a stage key to its unchained twin, filled from the stage list
+     the server sends. Empty until loadPartners runs, and every read falls
+     back to the cumulative column, so a partner table rendered without the
+     funnel payload still reads correctly. */
+  'var partnerRows=[],pSort="step1",pDir="desc",psAbs={};' +
+  /* ONE function for the value a stage cell shows AND the value it sorts on.
+     Two would drift, and a column that sorts on a number it is not showing is
+     the same class of bug as a number computed and never rendered. */
+  'function psVal(p,k){var a=psAbs[k];var v=(a&&p[a]!==null&&p[a]!==undefined)?p[a]:p[k];return Number(v)||0;}' +
+  'function psOff(p,k){var a=psAbs[k];if(!a||p[a]===null||p[a]===undefined)return 0;' +
+  'return Math.max(0,(Number(p[a])||0)-(Number(p[k])||0));}' +
+  /* The dagger is the whole signal in a cell this narrow, so it carries the
+     numbers in its tooltip rather than reading as decoration. */
+  'function psCell(p,k){var v=psVal(p,k),o=psOff(p,k);' +
+  'return "<td"+(o?" style=\'color:#b45309;font-weight:600\' title=\'"+(v-o)+" on the funnel path, "+o+" skipped an earlier stage (an Opportunity for a company that never booked through our form, most often). The bigger number is what actually happened.\'":"")+">"' +
+  '+v+(o?" &#8224;":"")+"</td>";}' +
   'async function loadPartners(){try{' +
   'var r=await fetch(API+"/monitor/partners"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(20000)});' +
   'if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();var t=d.totals||{};' +
@@ -3351,26 +3370,43 @@ app.get('/monitor', (req, res) => {
      subtract two numbers to find out where it went. */
   'var fn=d.funnel||{},pr=fn.programme||{},rmin=fn.rateMin||10;' +
   'var stages=fn.stages||[],losses=fn.losses||{};' +
+  /* Shared with the per-partner table below, so a stage cannot read one way
+     in the funnel and another way in the row for the partner who owns it. */
+  'psAbs={};stages.forEach(function(st){if(st.abs)psAbs[st.key]=st.abs;});' +
   'var fnEl=document.getElementById("pfn");' +
   'if(fnEl){var prev=null,html="";' +
   'stages.forEach(function(st){' +
   'var v=pr[st.key];v=(v===null||v===undefined)?null:Number(v);' +
-  /* A rate over a tiny base is noise: 1 of 2 is "50%" and means nothing. */
+  /* The unchained count for this stage: "did this happen", with none of the
+     prior conditions. The HEADLINE, because it is the number someone acts on
+     and it may never read 0 about something that happened. The cumulative one
+     is kept and named — it is the only column that nests. */
+  'var a=st.abs?pr[st.abs]:undefined;a=(a===null||a===undefined)?null:Number(a);' +
+  'var head=(a!==null&&v!==null)?Math.max(a,v):(a!==null?a:v);' +
+  /* A rate over a tiny base is noise: 1 of 2 is "50%" and means nothing.
+     Always off the CUMULATIVE counts — a rate between two absolutes is not a
+     step-to-step rate and would not be between 0 and 100. */
   'var rate="";' +
   'if(prev!==null&&v!==null&&!st.unit){' +
   'rate=(prev>=rmin)?(Math.round((v/prev)*1000)/10+"% of previous"):("too few to rate (n="+prev+")");}' +
+  /* Only rendered when the two disagree. In the healthy case the row looks
+     exactly as it did before, so this adds no noise until it means something. */
+  'var off="";' +
+  'if(a!==null&&v!==null&&a>v){' +
+  'off="<div class=\'pfso\' title=\'These domains reached this stage without passing an earlier one \u2014 most often a Salesforce Opportunity for a company that never booked through our form. They are real and the money is real, so the big number counts them. The funnel path below them is the number that nests.\'>"' +
+  '+v+" on the funnel path &#183; "+(a-v)+" skipped an earlier stage</div>";}' +
   'var loss=(losses[st.key]||[]).map(function(L){var n=Number(pr[L.key]||0);' +
   'return n?("<div class=\'pfl"+(L.bad?" bad":"")+"\'>"+n+" "+L.label+"</div>"):"";}).join("");' +
   'html+="<div class=\'pfs\'><div class=\'pfsl\'>"+esc(st.label)+"</div>"' +
-  '+"<div class=\'pfsv\'>"+(v===null?"&#8212;":v)+"</div>"' +
+  '+"<div class=\'pfsv\'>"+(head===null?"&#8212;":head)+"</div>"' +
   /* Clicks are per click, everything else per company — say so rather than
      letting the row imply one unit. */
   '+(st.unit?"<div class=\'pfsu\'>clicks, not companies</div>":"<div class=\'pfsr\'>"+esc(rate)+"</div>")'  +
-  '+loss+"</div>";' +
+  '+off+loss+"</div>";' +
   'if(!st.unit)prev=v;});' +
   'fnEl.innerHTML=html;' +
   'var note=document.getElementById("pfn-note");' +
-  'if(note)note.innerHTML="Clicks that never reached the form are NOT in our data at all &#8212; only PartnerStack has those, and their API exposes no click endpoint we can reach. Rates are suppressed below "+rmin+" so a tiny base cannot read as a percentage.";}' +
+  'if(note)note.innerHTML="Each stage shows the number of companies it actually happened to. Where some of them skipped an earlier stage \u2014 a Salesforce Opportunity for a company that never booked through our form, say \u2014 the row says so and names the smaller number that does nest. Clicks that never reached the form are NOT in our data at all &#8212; only PartnerStack has those, and their API exposes no click endpoint we can reach. Rates run stage to stage down the funnel path and are suppressed below "+rmin+" so a tiny base cannot read as a percentage.";}' +
   'partnerRows=d.partners||[];renderPartners();' +
   /* The per-domain table. Same source as the chips above, so a domain cannot
      appear in one and not the other. */
@@ -3407,6 +3443,10 @@ app.get('/monitor', (req, res) => {
   'var rows=partnerRows.slice().sort(function(a,b){var x=a[pSort],y=b[pSort];' +
   'if(pSort==="partner_name"){x=(a.partner_name||a.partner_email||a.partner_key||"").toLowerCase();y=(b.partner_name||b.partner_email||b.partner_key||"").toLowerCase();}' +
   'else if(pSort==="last_click"){x=x?new Date(x).getTime():0;y=y?new Date(y).getTime():0;}' +
+  /* psVal, not a[pSort] — a stage column shows the absolute count, so sorting
+     on the cumulative one would order the table by a number that is not on
+     screen. */
+  'else if(psAbs[pSort]){x=psVal(a,pSort);y=psVal(b,pSort);}' +
   'else{x=Number(x)||0;y=Number(y)||0;}' +
   'if(x<y)return pDir==="asc"?-1:1;if(x>y)return pDir==="asc"?1:-1;return 0;});' +
   '["partner_name","clicks","step1","completed","conversions","verified","booked","opportunity","ticked","qualified","last_click"].forEach(function(c){var el=document.getElementById("psar-"+c);if(el)el.textContent=(pSort===c)?(pDir==="asc"?"▲":"▼"):"";});' +
@@ -3421,14 +3461,14 @@ app.get('/monitor', (req, res) => {
   '+"<td>"+esc(p.partner_email||"—")+"</td>"' +
   '+"<td><code style=\'font-size:10px\'>"+esc(p.partner_key)+"</code></td>"' +
   '+"<td>"+(p.clicks===null||p.clicks===undefined?"&#8212;":p.clicks)+"</td>"' +
+  /* Same rule as the funnel above, and for the same reason: this row read
+     "Qualified 0" for the partner whose $50 had already fired. psCell shows
+     the absolute count and marks the cell when some of it skipped a stage,
+     so the row cannot contradict the funnel or the per-domain table. */
   '+"<td>"+(p.step1||0)+"</td>"' +
   '+"<td>"+(p.completed||0)+"</td>"' +
-  '+"<td>"+(p.conversions||0)+"</td>"' +
-  '+"<td>"+(p.verified||0)+"</td>"' +
-  '+"<td>"+(p.booked||0)+"</td>"' +
-  '+"<td>"+(p.opportunity||0)+"</td>"' +
-  '+"<td>"+(p.ticked||0)+"</td>"' +
-  '+"<td>"+(p.qualified||0)+"</td>"' +
+  '+psCell(p,"conversions")+psCell(p,"verified")+psCell(p,"booked")' +
+  '+psCell(p,"opportunity")+psCell(p,"ticked")+psCell(p,"qualified")' +
   '+"<td style=\'color:#999;white-space:nowrap\'>"+(p.last_click?esc(et(p.last_click)):"—")+"</td></tr>";}).join("");' +
   'Array.prototype.forEach.call(tb.querySelectorAll(".prow"),function(tr){tr.onclick=function(){partnerDrill(tr.getAttribute("data-pk"));};});}' +
   /* Delegated like the partner rows, for the same reason: an inline handler
@@ -6786,10 +6826,20 @@ async function partnerLifecycle() {
    Opportunities exist for companies that never booked through our form.
 
    The trade-off, stated plainly: a domain that reaches a later stage without
-   passing an earlier one drops out of the funnel entirely. That is right for a
-   funnel measuring the path to the money — without a conversion the payment
-   cannot fire whatever else is true — but it means the funnel is not a census
-   of Salesforce. The per-domain table is.
+   passing an earlier one drops out of the CUMULATIVE column entirely. That is
+   right for a funnel measuring the path to the money — without a conversion
+   the payment cannot fire whatever else is true.
+
+   But it is NOT allowed to be the only number on screen, and on 5 Sept it was:
+   the funnel read "The $50 fired: 0" for a night when the $50 had fired for
+   hello.com and the money was sitting in PartnerStack. So every stage that can
+   be skipped into now carries an ABSOLUTE twin (abs_*) asking only "did this
+   happen", and the renderer shows that as the headline with the cumulative
+   count named underneath. Two numbers, both labelled, neither inferred from
+   the other's gap.
+
+   The absolute twins are the same expressions the summary cards use, so the
+   funnel and the cards cannot disagree by construction.
 
    Every stage counts DISTINCT DOMAINS. Clicks are the one exception, counted
    per click, and are labelled as a different unit wherever they appear.
@@ -6825,6 +6875,44 @@ const PS_FUNNEL_STAGE_SQL = `
       AND l.booking_uid IS NOT NULL
       AND s.sf_state = 'ticked'
       AND l.ps_qualified_sent_at IS NOT NULL)                           AS qualified,
+
+  /* ── The SAME stages, unchained ──────────────────────────────────
+     Each of these asks only "did this happen for this domain", with none of
+     the prior conditions. They exist because the cumulative column above
+     CANNOT answer that, and on 5 Sept the funnel therefore read
+     "The $50 fired: 0" while the card said 1, the per-domain row said
+     "ticked, $50 fired", and the commission was sitting in PartnerStack.
+     hello.com had a hand-made Salesforce Opportunity and never booked
+     through our form, so it drops out of the funnel at BOOKED and cannot
+     appear in any stage after it.
+
+     This is the recurring bug in docs/partnerstack.md, once more: we held
+     the evidence that the answer was incomplete and rendered it as fact.
+     The cumulative rule is still right and still nests — the fault was that
+     it was the ONLY number on screen.
+
+     These are deliberately the SAME expressions the summary cards use
+     (see the totals query in partnerOverview), which is what makes a
+     funnel-vs-card contradiction structurally impossible rather than fixed
+     once. Change one and you must change the other; a test asserts it.
+
+     No abs_step1 or abs_completed: their cumulative form already filters
+     the full base on one condition, so an absolute twin would be a
+     byte-identical duplicate column. A domain cannot skip its way into
+     step 1. */
+  COUNT(DISTINCT l.ps_customer_key) FILTER (
+    WHERE l.ps_signup_sent_at IS NOT NULL)                              AS abs_conversions,
+  COUNT(DISTINCT l.ps_customer_key) FILTER (
+    WHERE l.ps_signup_verified_at IS NOT NULL)                          AS abs_verified,
+  COUNT(DISTINCT l.ps_customer_key) FILTER (
+    WHERE l.booking_uid IS NOT NULL)                                    AS abs_booked,
+  COUNT(DISTINCT l.ps_customer_key) FILTER (
+    WHERE s.sf_state IN ('exists_unticked','ticked'))                   AS abs_opportunity,
+  COUNT(DISTINCT l.ps_customer_key) FILTER (
+    WHERE s.sf_state = 'ticked')                                        AS abs_ticked,
+  COUNT(DISTINCT l.ps_customer_key) FILTER (
+    WHERE l.ps_qualified_sent_at IS NOT NULL)                           AS abs_qualified,
+
   COUNT(DISTINCT l.ps_customer_key) FILTER (
     WHERE l.ps_signup_failed_at IS NOT NULL
       AND l.ps_signup_sent_at IS NULL)                                  AS lost_conversion,
@@ -6852,17 +6940,24 @@ const PS_CLICKS_SQL = `
       AND jsonb_typeof(c.ps_click_history) = 'array'
       AND e->>'xid' IS NOT NULL)                                        AS clicks`;
 
-/* Stage order and labels, shared by the renderer. */
+/* Stage order and labels, shared by the renderer.
+
+   `abs` names the unchained twin of that stage. Where a stage has one, the
+   renderer shows the ABSOLUTE number as the headline and the cumulative one
+   underneath as "on the funnel path", because the headline is the number a
+   reader acts on and it must never say zero about something that happened.
+   Rates and the nesting still come off the cumulative column — it is the only
+   one that nests, and that is why both are kept. */
 const PS_FUNNEL_STAGES = [
   { key: 'clicks',      label: 'Clicks',              unit: true },
   { key: 'step1',       label: 'Reached step 1' },
   { key: 'completed',   label: 'Completed the form' },
-  { key: 'conversions', label: 'Conversion sent' },
-  { key: 'verified',    label: 'Conversion verified' },
-  { key: 'booked',      label: 'Booked' },
-  { key: 'opportunity', label: 'Opportunity created' },
-  { key: 'ticked',      label: 'Qualified Demo ticked' },
-  { key: 'qualified',   label: 'The $50 fired' },
+  { key: 'conversions', label: 'Conversion sent',       abs: 'abs_conversions' },
+  { key: 'verified',    label: 'Conversion verified',   abs: 'abs_verified' },
+  { key: 'booked',      label: 'Booked',                abs: 'abs_booked' },
+  { key: 'opportunity', label: 'Opportunity created',   abs: 'abs_opportunity' },
+  { key: 'ticked',      label: 'Qualified Demo ticked', abs: 'abs_ticked' },
+  { key: 'qualified',   label: 'The $50 fired',         abs: 'abs_qualified' },
 ];
 
 /* Losses attached to the stage where the money leaks — never left as the gap
