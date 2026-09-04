@@ -117,20 +117,61 @@ once per key forever, the first would burn it for everyone after.
 
 ---
 
+## Custom fields, `meta`, and what is already built in
+
+`company_name`, `website` and `phone` **already exist** as built-in customer
+fields with those exact `api_name` values. Read them back any time with:
+
+```
+GET /v2/customers/{customer_key}    ->  data.fields[]  (api_name, name, value)
+```
+
+Do **not** create fields called "Company Name" or "Website" in Settings — you
+would get duplicates with slugged api_names like `company_name_1`, and the ones
+we send to would then be the wrong ones.
+
+Every field on the account today reports `read_only: true`, which is what a
+built-in field looks like. Whether `meta` populates a built-in field or only a
+user-created custom one is **not settled** — the documentation says `meta` is
+"additional custom fields configured in your dashboard" and does not say what
+happens for built-ins. The cheapest way to find out is one conversion from a
+fresh domain, then reading `data.fields[]` back:
+
+- `company_name` and `website` populated → `meta` maps onto built-ins, done.
+- still null → they need real custom fields, created in Settings with api_names
+  that do **not** collide with the built-ins (e.g. `gw_company_name`), and
+  `PS_META_COMPANY` / `PS_META_WEBSITE` in `index.js` updated to match.
+
+### Which environment did a conversion land in?
+
+Nothing in a response header names the environment, and both test and
+production public keys are prefixed `pk_`. The reliable indicator is on the
+customer record itself:
+
+```
+GET /v2/customers/{customer_key}   ->  data.test    // false = production
+```
+
+A conversion fired with the current tracking token produced `test: false` and
+is visible to the production key pair, so the token and the production keys
+address the same environment. The conversion endpoint uses **only** the
+tracking token, so swapping the `pk`/`sk` pair cannot change where a conversion
+lands — it changes only what the API can read back.
+
 ## Environment variables
 
 | Variable | Scope today | Used by | Swap before go-live? |
 |---|---|---|---|
 | `PARTNERSTACK_TRACKING_TOKEN` | **Production** | The conversion (Bearer) | Already production |
-| `PARTNERSTACK_PUBLIC_KEY` | **TEST** (`pk_…`) | v2 partnerships + actions (Basic) | **YES** |
-| `PARTNERSTACK_SECRET_KEY` | **TEST** | v2 partnerships + actions (Basic) | **YES** |
+| `PARTNERSTACK_PUBLIC_KEY` | **Production** (`pk_…`) | v2 partnerships + actions (Basic) | Done |
+| `PARTNERSTACK_SECRET_KEY` | **Production** | v2 partnerships + actions (Basic) | Done |
 | `PS_ELIGIBILITY_ENABLED` | Unset (off) | The dormant eligibility check | Only if you want the check on |
 
-**The tracking token and the key pair are on different environments right now.**
-That mismatch is live and worked in testing — the test key pair resolved a
-production partner fine — but it is not a state to leave a payment integration
-in. Swap the pair to production keys before real affiliates are paid, and
-re-run the end-to-end test afterwards.
+All three are production as of 4 Sept 2026, verified: a conversion fired with
+the tracking token produced a customer flagged `test: false` and readable by the
+production key pair. Note the conversion endpoint uses **only** the tracking
+token — swapping the key pair changes what the API can read, never where a
+conversion lands.
 
 Also relevant, and already present: `MONITOR_TOKEN` guards every `/monitor/*`
 route including the two new ones.
@@ -364,5 +405,6 @@ choice between decoding on read here and fixing the site-wide script is open.
 and unit-tested but dormant. Turning the flag on for the first time should be
 watched, not assumed.
 
-**6. Test vs production keys.** See the environment table — the tracking token
-is production-scoped while the v2 key pair is test-scoped.
+**6. `meta` -> built-in field mapping is unverified.** See the custom fields
+section. The keys we send (`company_name`, `website`) match existing built-in
+api_names, but whether `meta` writes to a built-in field is untested.
