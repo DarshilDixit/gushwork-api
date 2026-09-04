@@ -7,7 +7,7 @@ const helmet    = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { Pool }  = require('pg');
 const { pool, initDB } = require('./db');
-const { sendConversion, fetchPartnership, sendAction } = require('./partnerstack');
+const { sendConversion, fetchPartnership, sendAction, fetchCustomer } = require('./partnerstack');
 const { pushToSalesforce, findSFLeadByEmail, updateSFLead, findQualifiedDemoOpportunities, findOpportunityDomains } = require('./salesforce');
 const { pushFormEventsToMeta, pushStartTrialToMeta } = require('./meta-capi');
 const createLeadMagnetRouter = require('./lead-magnet');
@@ -190,6 +190,7 @@ async function initAWSTable() {
         ps_click_at             TIMESTAMPTZ,
         ps_click_history        JSONB,
         ps_signup_sent_at       TIMESTAMPTZ,
+        ps_signup_verified_at   TIMESTAMPTZ,
         ps_qualified_sent_at    TIMESTAMPTZ,
         created_at              TIMESTAMPTZ DEFAULT NOW(),
         updated_at              TIMESTAMPTZ DEFAULT NOW()
@@ -242,6 +243,7 @@ async function initAWSTable() {
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_click_at TIMESTAMPTZ`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_click_history JSONB`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_signup_sent_at TIMESTAMPTZ`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_signup_verified_at TIMESTAMPTZ`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_qualified_sent_at TIMESTAMPTZ`,
     ];
 
@@ -5675,7 +5677,8 @@ async function upgradePartnerHearAboutUs({ session_id, email, ps, identity }) {
    working. If you rename a field there, rename it here in the same change. */
 const PS_META_COMPANY = 'company_name';
 const PS_META_WEBSITE = 'website';
-const PS_CONVERSION_META_FIELDS = [PS_META_COMPANY, PS_META_WEBSITE];
+const PS_META_PHONE   = 'phone';
+const PS_CONVERSION_META_FIELDS = [PS_META_COMPANY, PS_META_WEBSITE, PS_META_PHONE];
 
 /* ── STEP 5: the signup conversion ───────────────────────────────────
    Fires for any partner-referred lead that is not one of our own test
@@ -5699,7 +5702,7 @@ const PS_CONVERSION_META_FIELDS = [PS_META_COMPANY, PS_META_WEBSITE];
    The alternative — leaving the stamp on a conversion that never arrived — is
    the worse failure: it is silent, permanent, and costs the affiliate a real
    payout with nothing in the system saying so. */
-async function runPartnerStackSignup({ session_id, email, website, company, first_name, last_name, disqualified, ps, ctx }) {
+async function runPartnerStackSignup({ session_id, email, website, company, phone, first_name, last_name, disqualified, ps, ctx }) {
   /* Logged on EVERY submit, including organic ones. Without this an organic
      lead produces no PartnerStack line at all, and the logs cannot tell
      "no partner traffic yet" apart from "capture is broken" — which is exactly
@@ -5785,9 +5788,14 @@ async function runPartnerStackSignup({ session_id, email, website, company, firs
     /* There is no company or website parameter on this endpoint. These keys
        must exist as custom CUSTOMER fields in PartnerStack Settings or they
        are dropped silently — see PS_CONVERSION_META_FIELDS. */
+    /* Phone is OPTIONAL on our form — only required for free-mail addresses —
+       so it is absent more often than not. sendConversion drops empty meta
+       values, so a missing phone omits the key entirely rather than sending a
+       blank, and can never fail or block the conversion. */
     meta: {
       [PS_META_COMPANY]: company,
       [PS_META_WEBSITE]: website,
+      [PS_META_PHONE]:   phone,
     },
   });
 
@@ -5810,6 +5818,101 @@ async function runPartnerStackSignup({ session_id, email, website, company, firs
   if (result.reason !== 'no_token') {
     recordFailure('PartnerStack', ps.ps_customer_key + ' (conversion)', result.reason + (result.body ? ' — ' + String(result.body).slice(0, 200) : ''));
   }
+}
+
+/* ── READ-BACK: did the conversion actually create a customer? ────────
+   /conversion/xid answers 200 with an EMPTY body. There is nothing in the
+   response to check, so a 200 that created nothing would still stamp
+   ps_signup_sent_at — and the once-per-domain rule would then burn that domain
+   PERMANENTLY, with no error anywhere. The only real proof is reading the
+   customer back.
+
+   A SWEEP, not a setTimeout after the send. A timer dies with the process, and
+   a deploy in the wrong ten minutes would lose the verification silently,
+   which is the same class of failure this exists to catch. The sweep survives
+   restarts and picks up anything left unverified.
+
+   THE GRACE PERIOD IS THE WHOLE DESIGN. PartnerStack's dashboard and API lag
+   behind a conversion — measured at under 2 minutes for one record and about 6
+   for another on 4 Sept 2026. Checking immediately would report healthy
+   conversions as missing and release claims that were fine, causing duplicate
+   conversions on the retry. 15 minutes is comfortably past the worst lag seen.
+
+   Only a definitive 404 releases a claim. A 5xx, a timeout or a network error
+   means WE COULD NOT TELL, and the row is left alone for the next sweep —
+   treating "could not tell" as "missing" would un-stamp every pending
+   conversion during a PartnerStack outage and re-fire them all. */
+const PS_VERIFY_GRACE_MIN   = 15;
+const PS_VERIFY_INTERVAL_MS = 15 * 60 * 1000;
+const PS_VERIFY_BATCH       = 25;
+let _psVerifyRunning = false;
+
+async function runPartnerStackConversionVerify() {
+  if (_psVerifyRunning) return;
+  _psVerifyRunning = true;
+  try {
+    const { rows } = await pool.query(
+      `SELECT session_id, email, ps_customer_key, ps_signup_sent_at
+         FROM leads
+        WHERE ps_signup_sent_at IS NOT NULL
+          AND ps_signup_verified_at IS NULL
+          AND ps_customer_key IS NOT NULL
+          AND ps_signup_sent_at < NOW() - INTERVAL '${PS_VERIFY_GRACE_MIN} minutes'
+        ORDER BY ps_signup_sent_at
+        LIMIT ${PS_VERIFY_BATCH}`
+    );
+    if (!rows.length) return;
+    console.log(`[PartnerStack] Verifying ${rows.length} conversion(s) against PartnerStack`);
+
+    for (const r of rows) {
+      const out = await fetchCustomer(r.ps_customer_key);
+
+      if (!out.ok) {
+        // Could not tell. Leave the claim alone and try again next sweep.
+        console.warn(`[PartnerStack] Could not verify ${r.ps_customer_key} (${out.reason}) — will retry`);
+        continue;
+      }
+
+      if (out.exists) {
+        await pool.query(
+          `UPDATE leads SET ps_signup_verified_at = NOW(), updated_at = NOW() WHERE session_id = $1`,
+          [r.session_id]
+        ).catch(err => console.warn('[PartnerStack] Could not stamp verification:', err.message));
+        console.log(`[PartnerStack] ✅ Conversion verified: ${r.ps_customer_key}` +
+          (out.test === true ? ' ⚠ record is flagged test=true' : ''));
+        /* A production integration writing test records would pay nobody and
+           look completely healthy from here, so it is called out rather than
+           quietly accepted. */
+        if (out.test === true) {
+          recordFailure('PartnerStack', r.ps_customer_key + ' (test record)',
+            'Conversion landed as a TEST record — check PARTNERSTACK_TRACKING_TOKEN is the production token');
+        }
+        continue;
+      }
+
+      /* A definitive 404. PartnerStack accepted the call and created nothing.
+         Release the claim so the domain can convert again rather than staying
+         burned forever, and make noise — this is money not being paid. */
+      console.error(`[PartnerStack] ⛔ Conversion 200'd but NO customer exists: ${r.ps_customer_key} — releasing the claim`);
+      await pool.query(
+        `UPDATE leads SET ps_signup_sent_at = NULL, updated_at = NOW() WHERE session_id = $1`,
+        [r.session_id]
+      ).catch(err => console.error('[PartnerStack] ⚠ Could not release the claim:', err.message));
+      recordFailure('PartnerStack', r.ps_customer_key + ' (phantom conversion)',
+        'PartnerStack returned 200 but no customer was created. Claim released so it can retry.');
+    }
+  } catch (err) {
+    console.warn('[PartnerStack] Conversion verify sweep failed (non-blocking):', err.message);
+    recordFailure('PartnerStack', 'conversion verify sweep', err.message);
+  } finally {
+    _psVerifyRunning = false;
+  }
+}
+
+function startPartnerStackConversionVerify() {
+  const t = setInterval(runPartnerStackConversionVerify, PS_VERIFY_INTERVAL_MS);
+  if (t.unref) t.unref();
+  console.log(`[PartnerStack] Conversion read-back started (every ${PS_VERIFY_INTERVAL_MS / 60000} min, ${PS_VERIFY_GRACE_MIN} min grace)`);
 }
 
 /* ── STEP 10: the qualification action ───────────────────────────────
@@ -6517,7 +6620,7 @@ app.post('/submit', async (req, res) => {
       .then(identity => upgradePartnerHearAboutUs({ session_id, email, ps, identity }))
       .catch(err => console.warn('[PartnerStack] Partner identity failed (non-blocking):', err.message));
     if (!alreadyCompleted) runPartnerStackEligibility({ session_id, email, website, ps });
-    if (!alreadyCompleted) runPartnerStackSignup({ session_id, email, website, company, first_name, last_name, disqualified, ps, ctx: readPartnerStackRequestContext(req, page_url) })
+    if (!alreadyCompleted) runPartnerStackSignup({ session_id, email, website, company, phone, first_name, last_name, disqualified, ps, ctx: readPartnerStackRequestContext(req, page_url) })
       .catch(err => console.warn('[PartnerStack] Signup conversion failed (non-blocking):', err.message));
   } catch (err) { console.error('[/submit]', err.message); res.status(500).json({ error: 'Submit failed' }); }
 });
@@ -6989,6 +7092,7 @@ async function start() {
       startHeartbeat();
       startPartnerStackCacheWarm();
       startPartnerStackQualificationPoll();
+      startPartnerStackConversionVerify();
     });
   } catch (err) { console.error('[GW API] Failed to start:', err); process.exit(1); }
 }

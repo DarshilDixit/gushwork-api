@@ -97,6 +97,7 @@ All on `leads`, and all mirrored to `gw_form_leads` on the AWS warehouse.
 | `ps_click_at` | `/partial`, `/submit` from `gw_ps_seen_at` | The winning click. Falls back to submit time when absent |
 | `ps_click_history` | `/partial`, `/submit` from `gw_ps_clicks` | JSONB, oldest first, max 10. Reporting and disputes only — **attribution reads `ps_xid` and nothing else** |
 | `ps_signup_sent_at` | `runPartnerStackSignup` | Claimed *before* the HTTP call, released if it fails |
+| `ps_signup_verified_at` | The read-back sweep | Proof the customer really exists, not just that PartnerStack said 200 |
 | `ps_qualified_sent_at` | `sendQualificationForDomain` | Same claim-first pattern |
 | `ps_eligible` | `runPartnerStackEligibility` | **Null today** — the check is off |
 | `ps_ineligible_reason` | `runPartnerStackEligibility` | **Null today.** The contractual rejection record |
@@ -120,7 +121,12 @@ once per key forever, the first would burn it for everyone after.
 ## Custom fields, `meta`, and what is already built in
 
 `company_name`, `website` and `phone` **already exist** as built-in customer
-fields with those exact `api_name` values. Read them back any time with:
+fields with those exact `api_name` values, and all three are sent.
+
+Phone is **optional on our form** — only required for free-mail addresses — so
+it is absent more often than not. `sendConversion` drops empty meta values, so
+a missing phone omits the key entirely rather than sending a blank, and can
+never fail or block the conversion. Read them back any time with:
 
 ```
 GET /v2/customers/{customer_key}    ->  data.fields[]  (api_name, name, value)
@@ -291,6 +297,41 @@ PartnerStack knows the customer by the `customer_key` we sent at signup, which
 came from the lead's website.
 
 ---
+
+## The read-back guard
+
+`/conversion/xid` answers **200 with an empty body**. There is nothing in the
+response to check, so a 200 that created nothing would still stamp
+`ps_signup_sent_at` — and the once-per-domain rule would then burn that domain
+**permanently**, with no error anywhere. The only real proof is reading the
+customer back.
+
+`runPartnerStackConversionVerify()` sweeps every 15 minutes for conversions
+sent but not yet verified:
+
+- **exists** → stamp `ps_signup_verified_at`
+- **definitive 404** → release the claim (`ps_signup_sent_at = NULL`) so the
+  domain can convert again, and `recordFailure` a *phantom conversion*
+- **anything else** (5xx, timeout, network) → leave the row alone, retry next
+  sweep
+
+**The grace period is the whole design.** PartnerStack's API and dashboard lag
+behind a conversion — measured at under 2 minutes for one record and about 6
+for another on 4 Sept 2026. Checking immediately would report healthy
+conversions as missing and release good claims, causing duplicate conversions
+on the retry. `PS_VERIFY_GRACE_MIN` is 15, comfortably past the worst lag seen.
+
+**"Could not tell" is never "missing".** Only a definitive 404 releases a
+claim. Treating a 5xx as missing would un-stamp every pending conversion during
+a PartnerStack outage and re-fire them all.
+
+**A sweep, not a `setTimeout` after the send.** A timer dies with the process,
+and a deploy in the wrong ten minutes would lose the verification silently —
+the same class of failure this exists to catch.
+
+It also flags a record that comes back `test: true`, because a production
+integration writing test records pays nobody and looks completely healthy
+otherwise.
 
 ## Monitoring
 

@@ -404,6 +404,10 @@ async function initDB() {
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_click_at TIMESTAMPTZ`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_click_history JSONB`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_sent_at TIMESTAMPTZ`,
+      /* Proof the conversion actually created a customer, not just that
+         PartnerStack answered 200 with an empty body. Null while unverified;
+         the sweep in index.js fills it or releases the claim. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_verified_at TIMESTAMPTZ`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_qualified_sent_at TIMESTAMPTZ`,
       /* The eligibility verdict, stamped on the lead row.
          We are contractually required to tell an affiliate why a referral was
@@ -440,6 +444,10 @@ async function initDB() {
       `CREATE UNIQUE INDEX IF NOT EXISTS leads_ps_qualified_once_idx
          ON leads (ps_customer_key)
          WHERE ps_customer_key IS NOT NULL AND ps_qualified_sent_at IS NOT NULL`,
+      /* The read-back sweep looks for conversions sent but not yet verified. */
+      `CREATE INDEX IF NOT EXISTS leads_ps_signup_unverified_idx
+         ON leads (ps_signup_sent_at)
+         WHERE ps_signup_sent_at IS NOT NULL AND ps_signup_verified_at IS NULL`,
       /* The partner-identity resolver looks up "have we already resolved this
          key?" on first sight of each new key. */
       `CREATE INDEX IF NOT EXISTS leads_ps_partner_key_resolved_idx

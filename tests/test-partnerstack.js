@@ -889,6 +889,104 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   ok('regression: psPanel is still wired into enrichPanel',
      /'var pp=psPanel\(l\);' \+/.test(src) && /'return pp\+"<div class=/.test(src));
 
+  /* ── Read-back guard ────────────────────────────────────────────────
+     /conversion/xid answers 200 with an EMPTY body, so a 200 that created
+     nothing would still stamp ps_signup_sent_at and burn the domain forever
+     under the once-per-domain rule. */
+  {
+    const fn = src.slice(src.indexOf('async function runPartnerStackConversionVerify'),
+                         src.indexOf('function startPartnerStackConversionVerify'));
+
+    /* THE GRACE PERIOD IS THE DESIGN. Measured lag on 4 Sept was under 2 min
+       for one record and ~6 for another; checking immediately would report
+       healthy conversions missing and release good claims. */
+    ok('readback: there is a grace period before checking',
+       /const PS_VERIFY_GRACE_MIN   = 15;/.test(src) &&
+       /ps_signup_sent_at < NOW\(\) - INTERVAL '\$\{PS_VERIFY_GRACE_MIN\} minutes'/.test(fn));
+    ok('readback: only unverified conversions are swept',
+       /ps_signup_sent_at IS NOT NULL[\s\S]{0,120}?ps_signup_verified_at IS NULL/.test(fn));
+    ok('readback: the batch is bounded', /LIMIT \$\{PS_VERIFY_BATCH\}/.test(fn));
+    ok('readback: overlapping sweeps are prevented',
+       /if \(_psVerifyRunning\) return;/.test(fn) && /_psVerifyRunning = true;/.test(fn));
+
+    /* A SWEEP, not a setTimeout: a timer dies with the process and a deploy in
+       the wrong ten minutes loses the verification silently. */
+    ok('readback: it is a sweep on an interval, not a post-send timer',
+       /setInterval\(runPartnerStackConversionVerify/.test(src) &&
+       !/setTimeout\([\s\S]{0,80}?fetchCustomer/.test(src));
+    ok('readback: it is started at boot', /startPartnerStackConversionVerify\(\);/.test(src));
+
+    /* The distinction that matters most: "could not tell" is not "missing". */
+    const cantTell = fn.slice(fn.indexOf('if (!out.ok)'), fn.indexOf('if (out.exists)'));
+    ok('readback: an unreachable API leaves the claim alone',
+       /continue;/.test(cantTell) && !/ps_signup_sent_at = NULL/.test(cantTell), cantTell.slice(0, 140));
+    ok('readback: a 404 releases the claim so the domain can retry',
+       /NO customer exists[\s\S]{0,400}?ps_signup_sent_at = NULL/.test(fn));
+    ok('readback: a phantom conversion is escalated, not just logged',
+       /recordFailure\('PartnerStack', r\.ps_customer_key \+ ' \(phantom conversion\)'/.test(fn));
+    ok('readback: a verified conversion is stamped',
+       /ps_signup_verified_at = NOW\(\)/.test(fn));
+    /* A production integration writing test records pays nobody and looks
+       perfectly healthy from here. */
+    ok('readback: a test-flagged record is called out',
+       /if \(out\.test === true\) \{[\s\S]{0,300}?recordFailure\([\s\S]{0,120}?\(test record\)/.test(fn));
+  }
+  {
+    const fn = psmod.slice(psmod.indexOf('async function fetchCustomer'), psmod.indexOf('module.exports'));
+    ok('readback: 404 is reported as exists:false, not as an error',
+       /res\.status === 404[\s\S]{0,160}?return \{ ok: true, exists: false/.test(fn));
+    ok('readback: a non-404 failure is ok:false, so it cannot be read as missing',
+       /if \(!res\.ok\)[\s\S]{0,200}?return \{ ok: false/.test(fn));
+    ok('readback: a timeout is ok:false too',
+       /AbortError' \? 'timeout' : 'network_error'[\s\S]{0,80}?return \{ ok: false/.test(fn));
+    ok('readback: it reads back data.test', /test = d\.test/.test(fn));
+    ok('readback: the call is bounded by a timeout', /signal: controller\.signal/.test(fn));
+  }
+  ok('readback: the verified column exists on leads',
+     /ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_verified_at TIMESTAMPTZ/.test(dbjs));
+  ok('readback: and on the AWS mirror',
+     /ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_signup_verified_at TIMESTAMPTZ/.test(src));
+  ok('readback: the sweep query is indexed',
+     /CREATE INDEX IF NOT EXISTS leads_ps_signup_unverified_idx/.test(dbjs));
+
+  /* ── Phone in meta ──────────────────────────────────────────────────
+     Optional on our form (only required for free-mail addresses), so it is
+     absent more often than not and must never block the conversion. */
+  {
+    const fn = src.slice(src.indexOf('async function runPartnerStackSignup'),
+                         src.indexOf('/* ── READ-BACK'));
+    ok('phone: sent in meta', /\[PS_META_PHONE\]:   phone,/.test(fn));
+    ok('phone: threaded into the signup runner', /company, phone, first_name/.test(fn));
+  }
+  eq('phone: the meta field name', /const PS_META_PHONE   = '([^']+)'/.exec(src)[1], 'phone');
+  ok('phone: /submit passes it', /runPartnerStackSignup\(\{[^}]*\bphone\b/.test(src));
+  /* An absent phone must omit the KEY, not send a blank, and must not stop the
+     conversion being created. */
+  {
+    const fn = psmod.slice(psmod.indexOf('async function sendConversion'),
+                           psmod.indexOf('/* ============================================================\n   The v2 API'));
+    const M = (new Function('meta', `
+      const metaClean = {};
+      for (const [k, v] of Object.entries(meta || {})) {
+        const val = (v === null || v === undefined) ? '' : String(v).trim();
+        if (val) metaClean[k] = val.slice(0, 500);
+      }
+      return metaClean;`));
+    eq('phone: a null phone omits the key entirely',
+       M({ company_name: 'Acme', website: 'a.com', phone: null }), { company_name: 'Acme', website: 'a.com' });
+    eq('phone: an empty phone omits the key entirely',
+       M({ company_name: 'Acme', phone: '' }), { company_name: 'Acme' });
+    eq('phone: a whitespace-only phone omits the key entirely',
+       M({ company_name: 'Acme', phone: '   ' }), { company_name: 'Acme' });
+    eq('phone: a real phone is sent',
+       M({ phone: ' +91 98765 43210 ' }), { phone: '+91 98765 43210' });
+    /* The cleaner is what the module actually runs — asserted so this test
+       cannot drift from it. */
+    ok('phone: the cleaner under test matches the shipped one',
+       /const val = \(v === null \|\| v === undefined\) \? '' : String\(v\)\.trim\(\);/.test(fn) &&
+       /if \(val\) metaClean\[k\] = val\.slice\(0, 500\);/.test(fn));
+  }
+
   /* Step 8. */
   {
     const fn = src.slice(src.indexOf('function buildJourneyBlocks'), src.indexOf('function slackPartial'));
