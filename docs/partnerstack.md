@@ -476,6 +476,37 @@ commit SHA in Webflow → Project Settings → Custom Code. See CLAUDE.md.
 
 ---
 
+## Status: what is verified and what is not
+
+Verified end to end against live production data (4 Sept 2026):
+
+| Piece | Evidence |
+|---|---|
+| Conversion | `hello.com`, `test: false`, correct attribution, `meta` populated |
+| Partner identity | `Test Account <growth@gushwork.ai>` resolved via v2 |
+| `hear_about_us` | `"Partner - Test Account"`, referral still wins |
+| Slack journey line | name, email, click date |
+| Qualification | `act_3yZ2M4ZGbIqGz1`, `"Action tracked successfully"` |
+| Read-back guard | caught a real phantom (`test.com`) within 15 min of going live |
+| Claim release | exercised twice by genuine failures, both retryable afterwards |
+| Lifecycle ladder | states reconcile with the domain total |
+| Click-history backfill | one row, dry-run first, Railway and mirror both normalised |
+
+**NOT verified — waiting on real traffic, not on work:**
+
+- **`syncToAWS` writing `ps_signup_sent_at`, `ps_signup_verified_at` and
+  `ps_qualified_sent_at`.** The code shipped in batch C but no lead has been
+  written since. The next real form submit proves it: those columns should stop
+  being NULL for new rows in `gw_form_leads`. Until then the mirror still shows
+  NULL for every existing row, because the backfills only touched Railway.
+- **The Slack alert on `conversion_failed` / `qualification_failed`.** Built in
+  batch A and never fired. It cannot be triggered without a genuine failure and
+  should not be faked. The first real one is the test.
+- **The Partners tab rendered in a browser.** The SQL runs and the JSON is
+  correct; nobody has looked at the page.
+
+Do not mark any of these done on the strength of the code existing.
+
 ## Known gaps
 
 **1. sfopp failures mean no Opportunity, and no Opportunity means no payout.**
@@ -514,18 +545,24 @@ the statement as a read-only SELECT against real data before shipping —
 `invalid base64 end sequence` — which is worth doing for any statement that
 converts or casts untrusted text.
 
-**3. `disqualified` is read inconsistently across six sites.** The stage ladder
-uses `IS TRUE` / `IS NOT TRUE`; the dashboard metric counts, the recovery cron,
-the recovery health check, the backlog count and the SDR list all use
-`= true` / `= false`. A NULL flag lands in neither bucket and vanishes from
-those queries entirely. `DEFAULT FALSE` makes it unlikely, not impossible.
-Tracked separately; not fixed here.
+**3. OPEN TICKET — `disqualified` is read inconsistently across six sites.**
+The stage ladder uses `IS TRUE` / `IS NOT TRUE`; the dashboard metric counts
+(`index.js` ~1805), the recovery cron, the recovery health check, the backlog
+count and the SDR list all use `= true` / `= false`. A NULL flag lands in
+neither bucket and vanishes from those queries entirely. `DEFAULT FALSE` makes
+it unlikely, not impossible.
 
-**4. `ps_click_history` stores the base64 partner key.** The `gw_ps_clicks`
-cookie carries the URL-param form, so each entry's `pk` is base64 while
-`ps_partner_key` is decoded — the same partner, two spellings, sitting next to
-each other in the dashboard panel. Confirmed by round-trip. Not fixed: the
-choice between decoding on read here and fixing the site-wide script is open.
+Deliberately left open and NOT bundled into the PartnerStack batches — it
+touches the recovery cron and the SDR list, which are unrelated to partners and
+would have made those reviews about two things at once. Its own ticket, on
+purpose.
+
+**4. RESOLVED — `ps_click_history` base64 partner key.** The `gw_ps_clicks`
+cookie carried the key base64 before 12:07 on 4 Sept and decoded after, so one
+partner had two strings in one JSONB column. Normalised on write behind a
+round-trip guard (batch C), and the single affected row backfilled on both
+Railway and the AWS mirror. Kept as a numbered entry so older links do not
+renumber.
 
 **5. The eligibility check has never run against production data.** It is built
 and unit-tested but dormant. Turning the flag on for the first time should be
