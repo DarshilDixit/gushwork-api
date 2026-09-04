@@ -470,8 +470,12 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        /ps_signup_sent_at = NULL/.test(fn));
     ok('conversion: a stuck claim is escalated, not swallowed',
        /could not be released/.test(fn));
-    ok('conversion: name prefers company over contact name',
-       /company \|\| ''\)\.trim\(\)[\s\S]{0,160}?first_name, last_name/.test(fn));
+    /* Deliberately INVERTED from the original. `name` titles the record in
+       PartnerStack, so it must be the contact; sending the company left every
+       customer titled with the company and Company Name / Website / Phone
+       reading "Not Available". Asserted in full under "payload:" below. */
+    ok('conversion: name is the contact, with company only as a last resort',
+       /const contactName = \[first_name, last_name\][\s\S]{0,160}?\|\| \(company \|\| ''\)\.trim\(\)/.test(fn));
   }
   ok('schema: the once-per-domain rule is enforced by a UNIQUE PARTIAL index',
      /CREATE UNIQUE INDEX IF NOT EXISTS leads_ps_signup_once_idx[\s\S]{0,200}?ON leads \(ps_customer_key\)[\s\S]{0,200}?WHERE ps_customer_key IS NOT NULL AND ps_signup_sent_at IS NOT NULL/.test(dbjs));
@@ -505,8 +509,8 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   for (const f of ['email', 'name', 'ip_address', 'user_agent', 'origin'])
     ok(`module: ${f} is omitted rather than sent empty`,
        new RegExp(f + ':\\s*' + f + '\\s*\\|\\| undefined').test(psmod));
-  ok('module: fraud signals are accepted by the signature',
-     /async function sendConversion\(\{ xid, customer_key, email, name, ip_address, user_agent, origin \}\)/.test(psmod));
+  ok('module: fraud signals and meta are accepted by the signature',
+     /async function sendConversion\(\{ xid, customer_key, email, name, ip_address, user_agent, origin, meta \}\)/.test(psmod));
 
   /* The request context. x-forwarded-for is a comma-separated CHAIN behind
      Railway's proxy — sending the whole header as an IP is worse than sending
@@ -740,6 +744,150 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   ok('chain: hear_about_us uses it', /const label = partnerDisplayName\(identity, ps\.ps_partner_key\)/.test(src));
   ok('chain: Slack has an email rung', /d\.ps_partner_email\s*\n?\s*\? `\*\$\{d\.ps_partner_email\}\*/.test(src));
   ok('chain: the dashboard has an email rung', /l\.ps_partner_email\?\(esc\(l\.ps_partner_email\)/.test(src));
+
+  /* ── Payload: contact name, and company/website via meta ────────────── */
+  {
+    const fn = src.slice(src.indexOf('async function runPartnerStackSignup'),
+                         src.indexOf('/* Rejections are logged in one place'));
+    /* `name` titles the record in PartnerStack and whoever approves payouts
+       opens it. Sending the company there titled every customer with the
+       company and left Company Name / Website / Phone "Not Available". */
+    ok('payload: name is the CONTACT name, not the company',
+       /const contactName = \[first_name, last_name\]/.test(fn));
+    ok('payload: company is only a last-resort title',
+       fn.indexOf('[first_name, last_name]') < fn.indexOf("(company || '').trim()"));
+    ok('payload: name is passed as the contact name', /name: contactName/.test(fn));
+    ok('payload: company and website go via meta',
+       /meta: \{[\s\S]{0,200}?\[PS_META_COMPANY\]: company,[\s\S]{0,80}?\[PS_META_WEBSITE\]: website,/.test(fn));
+  }
+  /* A typo in a meta key is invisible — PartnerStack drops unrecognised keys
+     silently, which looks exactly like the integration working. */
+  eq('payload: the company meta field name', /const PS_META_COMPANY = '([^']+)'/.exec(src)[1], 'company_name');
+  eq('payload: the website meta field name', /const PS_META_WEBSITE = '([^']+)'/.exec(src)[1], 'website');
+  {
+    const fn = psmod.slice(psmod.indexOf('async function sendConversion'),
+                           psmod.indexOf('/* ============================================================\n   The v2 API'));
+    ok('payload: sendConversion accepts meta', /ip_address, user_agent, origin, meta \}/.test(fn));
+    ok('payload: empty meta values are dropped, not sent blank',
+       /if \(val\) metaClean\[k\] = val\.slice\(0, 500\)/.test(fn));
+    ok('payload: an entirely empty meta is omitted from the payload',
+       /if \(Object\.keys\(metaClean\)\.length\) payload\.meta = metaClean;/.test(fn));
+  }
+
+  /* ── Partners tab ───────────────────────────────────────────────────── */
+  {
+    const fn = src.slice(src.indexOf('async function partnerOverview'),
+                         src.indexOf("app.get('/monitor/partners'"));
+    /* Per CLAUDE.md: headline numbers are PEOPLE, but a conversion is per
+       DOMAIN because that is the unit PartnerStack counts. The two are
+       different units and the column headers have to say so. */
+    /* The two queries are asserted SEPARATELY. Testing against the whole
+       function let the per-partner query satisfy a unit changed in the totals
+       query — two mutations survived on exactly that. */
+    const qTotals = fn.slice(fn.indexOf('pool.query('), fn.indexOf('pool.query(', fn.indexOf('pool.query(') + 5));
+    const qRows   = fn.slice(fn.indexOf('pool.query(', fn.indexOf('pool.query(') + 5));
+    for (const [label, q] of [['totals', qTotals], ['per-partner', qRows]]) {
+      ok(`partners (${label}): leads are deduped by email (people)`,
+         /COUNT\(DISTINCT LOWER\(email\)\)\s+AS leads/.test(q), q.slice(0, 80));
+      ok(`partners (${label}): leads are NOT a raw row count`,
+         !/COUNT\(\*\)\s+AS leads/.test(q));
+      ok(`partners (${label}): bookings are deduped by email (people)`,
+         /COUNT\(DISTINCT LOWER\(email\)\) FILTER \(\s*WHERE booking_uid IS NOT NULL\)/.test(q));
+      ok(`partners (${label}): conversions are per DOMAIN`,
+         /COUNT\(DISTINCT ps_customer_key\) FILTER \([\s\S]{0,80}?ps_signup_sent_at IS NOT NULL\)/.test(q));
+      ok(`partners (${label}): qualified is per DOMAIN`,
+         /COUNT\(DISTINCT ps_customer_key\) FILTER \([\s\S]{0,80}?ps_qualified_sent_at IS NOT NULL\)/.test(q));
+      /* A domain count and a people count are different units. Presenting one
+         as the other is the exact drift the Definitions section exists to
+         stop. */
+      ok(`partners (${label}): conversions are NOT deduped by email`,
+         !/COUNT\(DISTINCT LOWER\(email\)\) FILTER \([\s\S]{0,80}?ps_signup_sent_at IS NOT NULL\)/.test(q));
+    }
+    ok('partners: only partner-sourced leads are counted',
+       (fn.match(/WHERE ps_partner_key IS NOT NULL/g) || []).length === 2);
+    /* A rate over zero leads is undefined, not 0%. */
+    ok('partners: the booking rate is null when there are no leads',
+       /leads \? Math\.round\(\(booked \/ leads\) \* 1000\) \/ 10 : null/.test(fn));
+    ok('partners: the per-partner list resolves a name via MAX over the key',
+       /GROUP BY ps_partner_key/.test(fn) && /MAX\(ps_partner_name\)/.test(fn));
+  }
+  ok('partners: the route is token-guarded',
+     /partners'[\s\S]{0,200}?req\.query\.token !== token/.test(src));
+  ok('partners: it is a TAB, and Partner gaps stays on Overview',
+     /id="t-partners"/.test(src) && /id="tp-partners"/.test(src) && /id="psgapbox"/.test(src));
+  ok('partners: the tab is registered in showTab',
+     /\["overview","leads","sdr","dupes","health","lm","partners"\]/.test(src));
+  ok('partners: it loads lazily on first open',
+     /n==="partners"&&document\.getElementById\("ptbody"\)/.test(src));
+  {
+    const i = src.indexOf("'var partnerRows=[],pSort=");
+    const j = src.indexOf("'function debounce()");
+    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const els = {};
+    const mkEl = () => ({ textContent: '', innerHTML: '', style: {}, querySelectorAll: () => [], options: [], appendChild(o) { this.options.push(o); }, value: '' });
+    const doc = { getElementById: (id) => (els[id] = els[id] || mkEl()), createElement: () => ({ value: '', textContent: '' }) };
+    let tabShown = null, leadsLoaded = 0;
+    const F = (new Function('API','TP','esc','et','set','fetch','AbortSignal','document','showTab','loadFilterOptions','loadLeads','Array',
+      client + '; return {loadPartners,renderPartners,sortPartners,partnerDrill};'))(
+      '', '', (x) => String(x == null ? '' : x), (x) => String(x == null ? '' : x),
+      (id, v) => { doc.getElementById(id).textContent = String(v); },
+      async () => ({ ok: true, json: async () => ({
+        totals: { leads: 12, leads24h: 3, conversions: 5, qualified: 2, booked: 7, bookingRate: 58.3 },
+        partners: [
+          { partner_key: 'k1', partner_name: 'Jane', partner_email: 'j@x.com', leads: 8, conversions: 4, booked: 5, qualified: 2, last_click: '2026-09-04' },
+          { partner_key: 'k2', partner_name: null, partner_email: null, leads: 4, conversions: 1, booked: 2, qualified: 0, last_click: null }] }) }),
+      { timeout: () => null }, doc,
+      (t) => { tabShown = t; }, async () => {}, () => { leadsLoaded++; }, Array);
+    await F.loadPartners();
+    eq('partners UI: lead card', els['p-leads'].textContent, '12');
+    eq('partners UI: 24h subtitle', els['p-leads24'].textContent, '3 in the last 24h');
+    eq('partners UI: conversions card', els['p-conv'].textContent, '5');
+    eq('partners UI: qualified card', els['p-qual'].textContent, '2');
+    eq('partners UI: bookings card', els['p-booked'].textContent, '7');
+    eq('partners UI: booking rate', els['p-rate'].textContent, '58.3%');
+    ok('partners UI: one row per partner', (els['ptbody'].innerHTML.match(/<tr /g) || []).length === 2);
+    ok('partners UI: an unresolved partner falls back to the key',
+       els['ptbody'].innerHTML.includes("data-pk='k2'"));
+    /* The key would need quotes nested three deep in an inline handler, which
+       is how this markup broke the first time. */
+    ok('partners UI: rows use data-pk + delegation, not an inline onclick',
+       !els['ptbody'].innerHTML.includes('onclick'));
+    F.sortPartners('leads');
+    ok('partners UI: clicking the active column flips direction',
+       els['psar-leads'].textContent === '▲');
+    F.sortPartners('partner_name');
+    ok('partners UI: switching column resets the arrow', els['psar-leads'].textContent === '');
+    // Drill-down reuses All Leads and its existing partner filter.
+    await F.partnerDrill('k1');
+    eq('partners UI: drill-down switches to the leads tab', tabShown, 'leads');
+    eq('partners UI: drill-down sets the existing partner filter', els['fpartner'].value, 'k1');
+    ok('partners UI: drill-down reloads the leads table', leadsLoaded === 1);
+  }
+  /* A zero-lead programme must show a dash, not 0% or NaN. */
+  {
+    const i = src.indexOf("'var partnerRows=[],pSort=");
+    const j = src.indexOf("'function debounce()");
+    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const els = {};
+    const mkEl = () => ({ textContent: '', innerHTML: '', style: {}, querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
+    const doc = { getElementById: (id) => (els[id] = els[id] || mkEl()), createElement: () => ({ value: '', textContent: '' }) };
+    const F = (new Function('API','TP','esc','et','set','fetch','AbortSignal','document','showTab','loadFilterOptions','loadLeads','Array',
+      client + '; return {loadPartners};'))(
+      '', '', (x) => String(x), (x) => String(x), (id, v) => { doc.getElementById(id).textContent = String(v); },
+      async () => ({ ok: true, json: async () => ({ totals: { leads: 0, bookingRate: null }, partners: [] }) }),
+      { timeout: () => null }, doc, () => {}, async () => {}, () => {}, Array);
+    await F.loadPartners();
+    eq('partners UI: no leads shows a dash, not 0% or NaN', els['p-rate'].textContent, '—');
+    ok('partners UI: an empty list says so', els['ptbody'].innerHTML.includes('No partner-sourced leads yet'));
+  }
+
+  /* ── Regression: the All Leads partner filter and click panel still work ── */
+  ok('regression: the All Leads partner filter control survives',
+     /id="fpartner"/.test(src) && /url\+="&partner="\+encodeURIComponent\(partner\)/.test(src));
+  ok('regression: the leads API still accepts the partner filter',
+     /const partner      = req\.query\.partner/.test(src));
+  ok('regression: psPanel is still wired into enrichPanel',
+     /'var pp=psPanel\(l\);' \+/.test(src) && /'return pp\+"<div class=/.test(src));
 
   /* Step 8. */
   {

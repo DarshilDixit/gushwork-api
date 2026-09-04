@@ -2717,6 +2717,7 @@ app.get('/monitor', (req, res) => {
   '<div class="tab" id="t-sdr" onclick="showTab(\'sdr\')">SDR List</div>' +
   '<div class="tab" id="t-dupes" onclick="showTab(\'dupes\')" style="color:#aaa">Duplicates</div>' +
   '<div class="tab" id="t-lm" onclick="showTab(\'lm\')">Lead Magnet</div>' +
+  '<div class="tab" id="t-partners" onclick="showTab(\'partners\')">Partners</div>' +
   '<div class="tab" id="t-health" onclick="showTab(\'health\')">System Health</div>' +
   '</div>' +
   '<div class="tp act" id="tp-overview">' +
@@ -2777,6 +2778,25 @@ app.get('/monitor', (req, res) => {
   '<div id="psgapbox" style="display:none"></div>' +
   '</tr></thead><tbody id="ltbody"><tr><td colspan="10" class="nd">Loading leads...</td></tr></tbody></table></div></div>' +
   '<div class="pg" id="lpag"></div>' +
+  '</div>' +
+  '<div class="tp" id="tp-partners">' +
+  '<div class="mgrid">' +
+  '<div class="mc" title="Distinct people (deduped by lower(email)) who arrived on a partner link."><div class="ml">Partner leads</div><div class="mv" id="p-leads">&#8212;</div><div class="ms" id="p-leads24">&#8212;</div></div>' +
+  '<div class="mc" title="Distinct customer DOMAINS with a conversion sent. Per domain, not per person &#8212; PartnerStack counts one conversion per customer key, ever."><div class="ml">Conversions sent</div><div class="mv" id="p-conv">&#8212;</div><div class="ms">domains, one per customer</div></div>' +
+  '<div class="mc" title="Distinct customer DOMAINS with a qualified_demo action sent. This is the event that pays the affiliate."><div class="ml">Qualified demos fired</div><div class="mv" id="p-qual">&#8212;</div><div class="ms">domains, one per customer</div></div>' +
+  '<div class="mc" title="Distinct people from a partner link who hold a booking."><div class="ml">Partner bookings</div><div class="mv" id="p-booked">&#8212;</div><div class="ms">people</div></div>' +
+  '<div class="mc" title="Partner-sourced people with a booking, over partner-sourced people. Both sides are deduped by email, so this is people-to-people and not a domain count over a people count."><div class="ml">Lead &#8594; booking</div><div class="mv" id="p-rate">&#8212;</div><div class="ms">partner leads only</div></div>' +
+  '</div>' +
+  '<div class="card"><div class="ml" style="margin-bottom:8px">Per partner <span class="psna" style="font-weight:400;font-size:11px">&#8212; click a row to see that partner\'s leads</span></div>' +
+  '<div style="overflow-x:auto"><table class="lt"><thead><tr>' +
+  '<th class="sortable" onclick="sortPartners(\'partner_name\')">Partner <span id="psar-partner_name"></span></th>' +
+  '<th>Email</th><th>Key</th>' +
+  '<th class="sortable" onclick="sortPartners(\'leads\')">Leads <span id="psar-leads"></span></th>' +
+  '<th class="sortable" onclick="sortPartners(\'conversions\')">Conversions <span id="psar-conversions"></span></th>' +
+  '<th class="sortable" onclick="sortPartners(\'booked\')">Bookings <span id="psar-booked"></span></th>' +
+  '<th class="sortable" onclick="sortPartners(\'qualified\')">Qualified <span id="psar-qualified"></span></th>' +
+  '<th class="sortable" onclick="sortPartners(\'last_click\')">Last click <span id="psar-last_click"></span></th>' +
+  '</tr></thead><tbody id="ptbody"><tr><td colspan="8" class="nd">Loading...</td></tr></tbody></table></div></div>' +
   '</div>' +
   '<div class="tp" id="tp-sdr">' +
   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
@@ -2885,7 +2905,7 @@ app.get('/monitor', (req, res) => {
   'var TZ="' + DASH_TZ + '";' +
   'var API=window.location.origin;' +
   'var lChart=null,curPage=1,stimer=null,curSort="created_at",curDir="desc",filterOptsLoaded=false;' +
-  'function showTab(n){["overview","leads","sdr","dupes","health","lm"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();if(n==="health")checkHealth();}' +
+  'function showTab(n){["overview","leads","sdr","dupes","health","lm","partners"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="partners"&&document.getElementById("ptbody").textContent.indexOf("Loading")>=0)loadPartners();if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();if(n==="health")checkHealth();}' +
   'var WLBL={"nxdomain": "Domain doesn\'t exist \u2014 likely a typo", "no_dns_records": "Domain registered but nothing set up on it", "hosting_placeholder": "No website yet \u2014 domain points to a hosting setup page", "parked_confirmed": "Domain registered but no website on it", "parked": "Domain registered but no website on it", "parked_ns": "Domain registered but no website on it", "parked_suspect": "Looks like a parked domain \u2014 could not confirm", "for_sale_lander": "Domain is listed for sale", "marketplace_redirect": "Domain is for sale on a domain marketplace", "mailbox_domain": "Typed an email provider instead of their website", "brand_mismatch": "Typed a well-known brand\'s site, not their own", "social_profile_url": "Gave a social profile instead of a website", "thin_content": "Page looked mostly empty to us \u2014 worth a manual look", "thin_content_wildcard": "Page looked mostly empty to us \u2014 worth a manual look", "check_blocked": "Site blocked our check \u2014 the page itself looks fine", "dns_unresolved": "Could not look up the domain \u2014 DNS gave no answer", "forwarded_to_live_site": "Redirects to their live site \u2014 checked OK", "live_despite_dns_hint": "Live site (an early parking signal was overruled)", "mx_only": "Email-only company \u2014 no website, but mail works", "nxdomain_contradicted": "DNS blip \u2014 domain matches their verified email domain", "content_clean": "Live website", "resolved": "Domain resolves", "dns_indeterminate": "Could not reach the site to check it", "doh_error": "Could not reach the site to check it", "timeout": "Could not reach the site to check it", "unreachable": "Could not reach the site to check it", "non_html": "Address did not return a web page", "backend_error": "Our check errored \u2014 not the website\u2019s fault", "fetch_error": "Our check errored \u2014 not the website\u2019s fault", "skipped_no_backend": "Check was skipped", "skipped_unsafe_target": "Address pointed at an internal network \u2014 skipped", "test_email_skipped": "Internal test \u2014 check skipped", "ok": "Website checked OK"};' +
   'function wlabel(r){if(!r)return"Unknown";if(WLBL[r])return WLBL[r];if(String(r).indexOf("http_")===0){var c=String(r).slice(5);return ["999","403","401","429"].indexOf(c)>=0?("Site blocked our check ("+c+")"):("Site returned an error ("+c+")");}return String(r).replace(/_/g," ");}' +
   'function badge(id,text,cls){var el=document.getElementById(id);if(!el)return;el.textContent=text;el.className="badge "+cls;}' +
@@ -3098,6 +3118,53 @@ app.get('/monitor', (req, res) => {
   'box.innerHTML=h+"</div>";box.style.display="block";' +
   '}catch(e){var el2=document.getElementById("m-psgap");if(el2)el2.textContent="?";' +
   'var s2=document.getElementById("m-psgap-sub");if(s2)s2.textContent="could not check";}}' +
+  /* Partners tab. Sorting is client-side over a single fetched page, like the
+     SDR list — there are tens of partners, not thousands, and a round trip per
+     column click would be worse than useless. */
+  'var partnerRows=[],pSort="leads",pDir="desc";' +
+  'async function loadPartners(){try{' +
+  'var r=await fetch(API+"/monitor/partners"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(20000)});' +
+  'if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();var t=d.totals||{};' +
+  'set("p-leads",t.leads);set("p-leads24",(t.leads24h||0)+" in the last 24h");' +
+  'set("p-conv",t.conversions);set("p-qual",t.qualified);set("p-booked",t.booked);' +
+  /* A rate over zero leads is not 0%, it is undefined — show a dash. */
+  'set("p-rate",(t.bookingRate===null||t.bookingRate===undefined)?"—":(t.bookingRate+"%"));' +
+  'partnerRows=d.partners||[];renderPartners();' +
+  '}catch(e){document.getElementById("ptbody").innerHTML="<tr><td colspan=\'8\' class=\'nd\' style=\'color:#b91c1c\'>Failed: "+esc(e.message)+"</td></tr>";}}' +
+  'function sortPartners(c){if(pSort===c)pDir=(pDir==="asc"?"desc":"asc");else{pSort=c;pDir=(c==="partner_name")?"asc":"desc";}renderPartners();}' +
+  'function renderPartners(){var tb=document.getElementById("ptbody");' +
+  'if(!partnerRows.length){tb.innerHTML="<tr><td colspan=\'8\' class=\'nd\'>No partner-sourced leads yet.</td></tr>";return;}' +
+  'var rows=partnerRows.slice().sort(function(a,b){var x=a[pSort],y=b[pSort];' +
+  'if(pSort==="partner_name"){x=(a.partner_name||a.partner_email||a.partner_key||"").toLowerCase();y=(b.partner_name||b.partner_email||b.partner_key||"").toLowerCase();}' +
+  'else if(pSort==="last_click"){x=x?new Date(x).getTime():0;y=y?new Date(y).getTime():0;}' +
+  'else{x=Number(x)||0;y=Number(y)||0;}' +
+  'if(x<y)return pDir==="asc"?-1:1;if(x>y)return pDir==="asc"?1:-1;return 0;});' +
+  '["partner_name","leads","conversions","booked","qualified","last_click"].forEach(function(c){var el=document.getElementById("psar-"+c);if(el)el.textContent=(pSort===c)?(pDir==="asc"?"▲":"▼"):"";});' +
+  /* name -> email -> key, the same chain as Slack and the detail panel. */
+  /* Event delegation rather than an inline onclick: the key would otherwise
+     need quotes nested three deep (HTML attribute inside a client JS string
+     inside this server-side JS string), which is precisely how the row markup
+     broke the first time. data-pk carries it instead. */
+  'tb.innerHTML=rows.map(function(p){var label=p.partner_name||p.partner_email||p.partner_key;' +
+  'return "<tr class=\'prow\' data-pk=\'"+esc(p.partner_key)+"\' style=\'cursor:pointer\' title=\'Show this partner\\u2019s leads\'>"' +
+  '+"<td>"+esc(label)+"</td>"' +
+  '+"<td>"+esc(p.partner_email||"—")+"</td>"' +
+  '+"<td><code style=\'font-size:10px\'>"+esc(p.partner_key)+"</code></td>"' +
+  '+"<td>"+(p.leads||0)+"</td>"' +
+  '+"<td>"+(p.conversions||0)+"</td>"' +
+  '+"<td>"+(p.booked||0)+"</td>"' +
+  '+"<td>"+(p.qualified||0)+"</td>"' +
+  '+"<td style=\'color:#999;white-space:nowrap\'>"+(p.last_click?esc(et(p.last_click)):"—")+"</td></tr>";}).join("");' +
+  'Array.prototype.forEach.call(tb.querySelectorAll(".prow"),function(tr){tr.onclick=function(){partnerDrill(tr.getAttribute("data-pk"));};});}' +
+  /* Drill-down REUSES the All Leads view and its existing partner filter
+     rather than building a second leads table. The detail panel, the stage
+     ladder and the CSV export all come along for free, and there is only one
+     place where "a lead row" is rendered. */
+  'async function partnerDrill(key){showTab("leads");await loadFilterOptions();' +
+  'var sel=document.getElementById("fpartner");' +
+  'if(sel){var has=Array.prototype.some.call(sel.options,function(o){return o.value===key;});' +
+  'if(!has){var o=document.createElement("option");o.value=key;o.textContent="Partner: "+key;sel.appendChild(o);}' +
+  'sel.value=key;}loadLeads(1);}' +
   'function debounce(){clearTimeout(stimer);stimer=setTimeout(function(){loadLeads(1);},400);}' +
   'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("fsellto").value="all";document.getElementById("fsource").value="all";document.getElementById("fenrich").value="all";document.getElementById("fwebsitecheck").value="all";document.getElementById("frepeat").value="all";document.getElementById("fpartner").value="all";document.getElementById("fhear").value="";document.getElementById("fpreset").value="";document.getElementById("ffrom").value="";document.getElementById("fto").value="";curSort="created_at";curDir="desc";renderSortArrows();loadLeads(1);}' +
   'function renderSortArrows(){["email","name","company","sell_to","created_at"].forEach(function(c){var el=document.getElementById("sar-"+c);if(el)el.textContent=(curSort===c)?(curDir==="asc"?"\\u25B2":"\\u25BC"):"";});}' +
@@ -5602,6 +5669,14 @@ async function upgradePartnerHearAboutUs({ session_id, email, ps, identity }) {
   }
 }
 
+/* The custom CUSTOMER field names these must match in PartnerStack Settings.
+   Named as constants because a typo here is invisible: PartnerStack drops an
+   unrecognised meta key silently, which looks identical to the integration
+   working. If you rename a field there, rename it here in the same change. */
+const PS_META_COMPANY = 'company_name';
+const PS_META_WEBSITE = 'website';
+const PS_CONVERSION_META_FIELDS = [PS_META_COMPANY, PS_META_WEBSITE];
+
 /* ── STEP 5: the signup conversion ───────────────────────────────────
    Fires for any partner-referred lead that is not one of our own test
    addresses. There is NO eligibility gate on this path for the MVP — rejections
@@ -5688,21 +5763,32 @@ async function runPartnerStackSignup({ session_id, email, website, company, firs
     return;
   }
 
-  /* company first, contact name second — PartnerStack shows this to the
-     affiliate, and a company is what they recognise as the referral. */
-  const name = (company || '').trim()
-    || [first_name, last_name].map(v => (v || '').trim()).filter(Boolean).join(' ')
+  /* The CONTACT's name, not the company. `name` titles the record in
+     PartnerStack and whoever approves payouts opens that record — sending the
+     company there made every customer read as the company, with Company Name,
+     Website and Phone all showing "Not Available". Falls back to the company
+     only when we have no human name at all, since an untitled record is worse
+     than a company-titled one. */
+  const contactName = [first_name, last_name].map(v => (v || '').trim()).filter(Boolean).join(' ')
+    || (company || '').trim()
     || null;
 
   const result = await sendConversion({
     xid: ps.ps_xid,
     customer_key: ps.ps_customer_key,
     email,
-    name,
+    name: contactName,
     // Fraud-detection signals. Absent rather than empty when we do not have them.
     ip_address: ctx && ctx.ip_address,
     user_agent: ctx && ctx.user_agent,
     origin:     ctx && ctx.origin,
+    /* There is no company or website parameter on this endpoint. These keys
+       must exist as custom CUSTOMER fields in PartnerStack Settings or they
+       are dropped silently — see PS_CONVERSION_META_FIELDS. */
+    meta: {
+      [PS_META_COMPANY]: company,
+      [PS_META_WEBSITE]: website,
+    },
   });
 
   if (result.ok) {
@@ -5972,6 +6058,85 @@ async function partnerRevenueGaps() {
   _psGapCache = { at: Date.now(), data };
   return data;
 }
+
+/* ── PARTNERS — the operational view ─────────────────────────────────
+   Partner gaps on Overview is the ALERT ("someone is not getting paid").
+   This is the day-to-day picture: who is sending, how much, and how it
+   converts.
+
+   Counting follows the Definitions section of CLAUDE.md. Leads and bookings
+   are PEOPLE — COUNT(DISTINCT lower(email)) — because those are headline
+   numbers. Conversions and qualified demos are per DOMAIN, because that is the
+   unit PartnerStack itself counts: one conversion per customer key, ever. The
+   two are deliberately different units and the column headers say so, rather
+   than quietly presenting a domain count next to a people count as if they
+   were comparable.
+
+   Booked uses COALESCE(booked_at, created_at) per CLAUDE.md — comparing a null
+   booked_at yields null and the row silently drops out of the count. */
+async function partnerOverview() {
+  const [totals, rows] = await Promise.all([
+    pool.query(`
+      SELECT
+        COUNT(DISTINCT LOWER(email))                                        AS leads,
+        COUNT(DISTINCT LOWER(email)) FILTER (
+          WHERE created_at >= NOW() - INTERVAL '24 hours')                  AS leads_24h,
+        COUNT(DISTINCT ps_customer_key) FILTER (
+          WHERE ps_signup_sent_at IS NOT NULL)                              AS conversions,
+        COUNT(DISTINCT ps_customer_key) FILTER (
+          WHERE ps_qualified_sent_at IS NOT NULL)                           AS qualified,
+        COUNT(DISTINCT LOWER(email)) FILTER (WHERE booking_uid IS NOT NULL) AS booked,
+        COUNT(DISTINCT ps_partner_key)                                      AS partners
+        FROM leads
+       WHERE ps_partner_key IS NOT NULL
+    `),
+    pool.query(`
+      SELECT ps_partner_key                                                 AS partner_key,
+             MAX(ps_partner_name)                                           AS partner_name,
+             MAX(ps_partner_email)                                          AS partner_email,
+             COUNT(DISTINCT LOWER(email))                                   AS leads,
+             COUNT(DISTINCT ps_customer_key) FILTER (
+               WHERE ps_signup_sent_at IS NOT NULL)                         AS conversions,
+             COUNT(DISTINCT LOWER(email)) FILTER (
+               WHERE booking_uid IS NOT NULL)                               AS booked,
+             COUNT(DISTINCT ps_customer_key) FILTER (
+               WHERE ps_qualified_sent_at IS NOT NULL)                      AS qualified,
+             MAX(ps_click_at)                                               AS last_click
+        FROM leads
+       WHERE ps_partner_key IS NOT NULL
+       GROUP BY ps_partner_key
+       ORDER BY COUNT(DISTINCT LOWER(email)) DESC, MAX(ps_click_at) DESC NULLS LAST
+       LIMIT 200
+    `),
+  ]);
+  const t = totals.rows[0] || {};
+  const leads = Number(t.leads) || 0;
+  const booked = Number(t.booked) || 0;
+  return {
+    totals: {
+      leads,
+      leads24h:   Number(t.leads_24h)   || 0,
+      conversions:Number(t.conversions) || 0,
+      qualified:  Number(t.qualified)   || 0,
+      booked,
+      partners:   Number(t.partners)    || 0,
+      // Guarded: a partner programme with no leads yet must show a dash, not NaN.
+      bookingRate: leads ? Math.round((booked / leads) * 1000) / 10 : null,
+    },
+    partners: rows.rows,
+  };
+}
+
+app.get('/monitor/partners', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    res.json(await partnerOverview());
+  } catch (err) {
+    console.error('[/monitor/partners]', err.message);
+    res.status(500).json({ error: 'Partner overview query failed', detail: err.message });
+  }
+});
 
 app.get('/monitor/partner-gaps', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
