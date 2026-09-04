@@ -8,7 +8,7 @@ const rateLimit = require('express-rate-limit');
 const { Pool }  = require('pg');
 const { pool, initDB } = require('./db');
 const { sendConversion, fetchPartnership, sendAction, fetchCustomer } = require('./partnerstack');
-const { pushToSalesforce, findSFLeadByEmail, updateSFLead, findQualifiedDemoOpportunities, findOpportunityDomains } = require('./salesforce');
+const { pushToSalesforce, findSFLeadByEmail, updateSFLead, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails } = require('./salesforce');
 const { pushFormEventsToMeta, pushStartTrialToMeta } = require('./meta-capi');
 const createLeadMagnetRouter = require('./lead-magnet');
 
@@ -2989,6 +2989,17 @@ app.get('/monitor', (req, res) => {
   '<div class="mc"><div class="ml">With funding data</div><div class="mv" id="h-fun">&#8212;</div><div class="ms">% of enriched</div></div>' +
   '<div class="mc"><div class="ml">With location</div><div class="mv" id="h-loc">&#8212;</div><div class="ms">% of enriched</div></div>' +
   '</div>' +
+  /* HELD vs SENT. The counter whose absence let "0 of 200" stand for a whole
+     evening. Its own row, because it is the only number here that compares
+     two systems rather than describing one. */
+  '<div class="sl">Enrichment reaching Salesforce <span class="psna" style="font-weight:400;font-size:11px">&#8212; people who reached step 2, against the Lead Salesforce actually holds</span></div>' +
+  '<div class="g4" style="margin-bottom:8px">' +
+  '<div class="mc" title="People who reached /submit in the window and for whom we hold Apollo enrichment on the submitted row. This is the denominator, and it is a POPULATION, not a sample \u2014 the 4 Sept false alarm came from reading whatever a LIMIT returned."><div class="ml">We hold it for</div><div class="mv" id="h-ec-held">&#8212;</div><div class="ms" id="h-ec-heldsub">people who submitted</div></div>' +
+  '<div class="mc" title="Of those, how many have enrichment on their Salesforce Lead. Apollo returning nothing is not counted as a miss \u2014 this asks only about enrichment we actually hold."><div class="ml">Arrived in Salesforce</div><div class="mv" id="h-ec-ok">&#8212;</div><div class="ms" id="h-ec-okpct">&#8212;</div></div>' +
+  '<div class="mc" title="We hold enrichment and the Salesforce Lead does not. This is the only number on this row that means something is wrong."><div class="ml">Held but never arrived</div><div class="mv" id="h-ec-gap">&#8212;</div><div class="ms" id="h-ec-gapsub">&#8212;</div></div>' +
+  '<div class="mc" title="Reached /submit and has no Salesforce Lead at all. A different bug from the one beside it: not lost enrichment but a lost lead, and an AE has no record of them."><div class="ml">No Salesforce Lead</div><div class="mv" id="h-ec-nolead">&#8212;</div><div class="ms">reached step 2, absent entirely</div></div>' +
+  '</div>' +
+  '<div class="ms" id="h-ec-note" style="margin:-4px 0 24px 2px">&#8212;</div>' +
   '</div>' +
   '<div class="tp" id="tp-lm">' +
 
@@ -3090,7 +3101,41 @@ app.get('/monitor', (req, res) => {
   'if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();paintHealth(d);' +
   'set("hupd","Checked "+new Date().toLocaleTimeString("en-US",{timeZone:TZ})+" ET");' +
   '}catch(e){hkeys().forEach(function(k){badge(HIDS[k],"Could not check","br");});' +
-  'set("hupd","Health check unreachable: "+e.message);}}' +
+  'set("hupd","Health check unreachable: "+e.message);}' +
+  /* Its own fetch, not folded into /monitor/health: it makes a WAN Salesforce
+     call and health is on the alerting heartbeat. Awaited AFTER the badges so
+     a slow or broken Salesforce cannot delay or blank the health rows. */
+  'loadEnrichCoverage();}' +
+  /* HELD vs SENT. Every number here is rendered or the card says why not —
+     "0 of 200" survived a whole evening because nothing on screen compared
+     the two systems. */
+  'async function loadEnrichCoverage(){' +
+  'var ids=["h-ec-held","h-ec-ok","h-ec-gap","h-ec-nolead"];' +
+  'try{var r=await fetch(API+"/monitor/enrichment-coverage"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(45000)});' +
+  'if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
+  'set("h-ec-held",d.held);' +
+  'set("h-ec-heldsub",d.submitted+" reached step 2 in "+d.days+"d");' +
+  /* UNAVAILABLE, never 0. A zero here reads as "Salesforce has none of it",
+     which is the exact false alarm this counter exists to prevent. */
+  'if(!d.ok){ids.slice(1).forEach(function(i){set(i,"?");});' +
+  'set("h-ec-okpct","could not check");set("h-ec-gapsub","could not check");' +
+  'set("h-ec-note","Salesforce could not be read ("+esc(d.reason||"unknown")+"), so the three counts to the right are UNKNOWN, not zero. We hold enrichment for "+d.held+" of "+d.submitted+" people who reached step 2 in the last "+d.days+" days; whether it arrived is unmeasured until Salesforce answers.");' +
+  'return;}' +
+  'set("h-ec-ok",d.heldAndArrived);' +
+  'set("h-ec-okpct",d.held?(Math.round(d.heldAndArrived/d.held*1000)/10+"% of what we hold"):"nothing held to send");' +
+  'set("h-ec-gap",d.heldNotArrived);' +
+  'set("h-ec-gapsub",d.held?(Math.round(d.heldNotArrived/d.held*1000)/10+"% of what we hold"):"\u2014");' +
+  'set("h-ec-nolead",d.notInSalesforce);' +
+  'var g=document.getElementById("h-ec-gap");if(g)g.style.color=d.heldNotArrived>0?"#b91c1c":"#1a1a1a";' +
+  'var nl=document.getElementById("h-ec-nolead");if(nl)nl.style.color=d.notInSalesforce>0?"#b91c1c":"#1a1a1a";' +
+  /* The cap and the dropped addresses are completeness signals, so they reach
+     the screen or they do not exist. */
+  'var extra="";' +
+  'if(d.capped)extra+=" Capped at "+d.limit+" people \u2014 more reached step 2 in this window, so this is a page and not the population.";' +
+  'if(d.skipped)extra+=" "+d.skipped+" address(es) skipped as unquotable.";' +
+  'set("h-ec-note","Denominator is every person who reached step 2 in the last "+d.days+" days ("+d.submitted+"), deduped by email \u2014 a population, not a sample. Apollo returning nothing is not a miss here: this compares only enrichment we actually hold. "+d.inSalesforce+" of "+d.submitted+" have a Salesforce Lead."+extra);' +
+  '}catch(e){ids.forEach(function(i){set(i,"?");});' +
+  'set("h-ec-note","Coverage check unreachable: "+esc(e.message)+". These are UNKNOWN, not zero.");}}' +
   /* The Overview alerts panel is fed by five Overview metrics. When all
      five are quiet it used to render a green tick reading "All systems
      healthy." — a claim about the whole system made by a box that has
@@ -7120,6 +7165,116 @@ app.get('/monitor/partners', async (req, res) => {
   } catch (err) {
     console.error('[/monitor/partners]', err.message);
     res.status(500).json({ error: 'Partner overview query failed', detail: err.message });
+  }
+});
+
+/* ── HELD vs SENT: does the enrichment we hold reach Salesforce? ─────
+   The counter that did not exist, and whose absence cost an evening.
+
+   On 4 Sept the answer was recorded as "we hold enrichment for 49% of leads
+   and Salesforce has it for 0%" — a total, months-long silent outage. It was
+   a measurement error: the denominator was whatever a LIMIT returned over the
+   whole Lead object, and in this org ~99.5% of Leads are outbound list
+   imports that never touched Apollo. Measured properly against form leads the
+   figure was 46.5%, and the real held-but-not-sent rate is 0.47% of 2,355
+   people over 90 days.
+
+   Three rules this obeys, all of them house rules and all of them the
+   difference between this number and the one that was wrong:
+
+   1. The denominator is a POPULATION, not a sample. Every person who reached
+      /submit in the window, no LIMIT standing in for "all of them". Where the
+      population exceeds the cap the response says so and the card says so.
+   2. "A Lead is owed" is submitted_at IS NOT NULL, never completed IS TRUE.
+      The Cal and RevenueHero safety-net branches set completed for someone
+      who booked without touching the form, and pushToSalesforce runs from
+      /submit — counting those as owed reports a webhook lead as a lost form
+      submission. That mistake put one row in the gap column on the first run
+      of this join.
+   3. Salesforce unreachable reports UNAVAILABLE, never zero. "We could not
+      check" is not "we checked and it is fine" — the same rule the lead-path
+      checkers follow, pointed the other way.
+
+   Deliberately NOT a System Health row and NOT in runHealthChecks: it makes
+   a WAN Salesforce call, health is on the 30-minute alerting heartbeat, and a
+   background rate of a few tenths of a percent would leave a badge
+   permanently amber and train people to ignore it. Same reasoning as
+   /monitor/partner-gaps, which is kept out for the same reason. */
+const ENRICH_COVERAGE_DAYS  = 30;
+/* A named cap, and hitting it is RENDERED. A page that silently reads as the
+   population is how the Opportunity truncation went unnoticed for a month. */
+const ENRICH_COVERAGE_LIMIT = 1500;
+
+async function enrichmentCoverage({ days = ENRICH_COVERAGE_DAYS } = {}) {
+  const d = parseInt(days, 10) || ENRICH_COVERAGE_DAYS;
+
+  /* PEOPLE, not rows. Salesforce upserts the Lead by email, so one person
+     cannot have two Leads and comparing rows would count a dedupe as a loss.
+
+     held: did we hold enrichment ON A ROW THAT REACHED /submit. Enrichment
+     attached to a later drop-off session was never sent anywhere and is not
+     a Salesforce miss. */
+  const rows = await pool.query(`
+    SELECT LOWER(l.email) AS email,
+           BOOL_OR(l.submitted_at IS NOT NULL AND (
+                l.enriched_title IS NOT NULL
+             OR l.enriched_industry IS NOT NULL
+             OR l.enriched_company_size IS NOT NULL
+             OR EXISTS (SELECT 1 FROM enrichment_data e
+                         WHERE e.session_id = l.session_id
+                           AND (e.enriched_title IS NOT NULL
+                             OR e.enriched_industry IS NOT NULL
+                             OR e.enriched_company_size IS NOT NULL))))   AS held
+      FROM leads l
+     WHERE l.created_at >= NOW() - INTERVAL '${d} days'
+       AND COALESCE(l.email,'') <> ''
+       AND l.submitted_at IS NOT NULL
+     GROUP BY LOWER(l.email)
+     ORDER BY MAX(l.created_at) DESC
+     LIMIT ${ENRICH_COVERAGE_LIMIT + 1}`);
+
+  const capped = rows.rows.length > ENRICH_COVERAGE_LIMIT;
+  const people = rows.rows.slice(0, ENRICH_COVERAGE_LIMIT);
+  const held   = people.filter((r) => r.held === true);
+
+  const sf = await findEnrichmentByEmails(people.map((r) => r.email));
+  if (!sf.ok) {
+    /* UNAVAILABLE. Every count that depends on Salesforce is null, not 0 —
+       a zero here reads as "Salesforce has none of it", which is precisely
+       the false alarm this counter exists to prevent. */
+    return {
+      ok: false, reason: sf.reason || 'unknown', days: d,
+      submitted: people.length, held: held.length,
+      inSalesforce: null, heldAndArrived: null, heldNotArrived: null, notInSalesforce: null,
+      capped, limit: ENRICH_COVERAGE_LIMIT, checkedAt: new Date().toISOString(),
+    };
+  }
+
+  const arrived = (r) => { const x = sf.found.get(r.email); return !!x && x.enriched; };
+  return {
+    ok: true, days: d,
+    submitted:       people.length,
+    inSalesforce:    people.filter((r) => sf.found.has(r.email)).length,
+    notInSalesforce: people.filter((r) => !sf.found.has(r.email)).length,
+    held:            held.length,
+    heldAndArrived:  held.filter(arrived).length,
+    heldNotArrived:  held.filter((r) => !arrived(r)).length,
+    /* Dropped for an unquotable address rather than escaped. Surfaced so the
+       denominator cannot quietly narrow itself. */
+    skipped: sf.skipped || 0,
+    capped, limit: ENRICH_COVERAGE_LIMIT,
+    checkedAt: new Date().toISOString(),
+  };
+}
+
+app.get('/monitor/enrichment-coverage', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    res.json(await enrichmentCoverage({ days: req.query.days }));
+  } catch (err) {
+    console.error('[/monitor/enrichment-coverage]', err.message);
+    res.status(500).json({ error: 'Coverage check failed', detail: err.message });
   }
 });
 
