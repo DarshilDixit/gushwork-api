@@ -379,6 +379,72 @@ async function initDB() {
       `ALTER TABLE lead_magnet_leads ADD COLUMN IF NOT EXISTS loops_sent_at TIMESTAMPTZ`,
       `ALTER TABLE lead_magnet_leads ADD COLUMN IF NOT EXISTS loops_contact_id TEXT`,
       `ALTER TABLE lead_magnet_leads ADD COLUMN IF NOT EXISTS loops_error TEXT`,
+      /* PartnerStack affiliate attribution.
+         ps_xid and ps_partner_key are read from cookies set site-wide at click
+         time and arrive with the form payload. The cookie carries the DECODED
+         partner key (785ec78e1ee4688); the URL param is base64 of it, and we
+         never store that form. The v2 partnerships API takes the decoded key
+         directly.
+         ps_customer_key is the normalised root domain and is the join key for
+         everything downstream: PartnerStack counts one conversion per customer
+         key FOREVER, so it has to be derived one way in one place. See
+         partnerStackCustomerKey in index.js.
+         ps_click_at is the winning click. The site-wide script restamps
+         gw_ps_seen_at whenever the click id changes, so this timestamp always
+         belongs to the click that won attribution, which is the anchor the
+         90-day eligibility lookback measures back from.
+         ps_click_history is every partner click this visitor made, oldest
+         first, capped at 10. Reporting and dispute resolution only. Attribution
+         reads ps_xid (last click) and nothing else. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_xid TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_partner_key TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_partner_name TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_partner_email TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_customer_key TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_click_at TIMESTAMPTZ`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_click_history JSONB`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_sent_at TIMESTAMPTZ`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_qualified_sent_at TIMESTAMPTZ`,
+      /* The eligibility verdict, stamped on the lead row.
+         We are contractually required to tell an affiliate why a referral was
+         rejected, and a console line does not survive that conversation three
+         months later. Same habit as website_check_reason and elv_status: the
+         verdict lives on the row that caused it. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_eligible BOOLEAN`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_ineligible_reason TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_checked_at TIMESTAMPTZ`,
+      /* One conversion per customer key, ever, is enforced by looking this up
+         on every partner submit. Without the index that is a seq scan of leads
+         on the critical path. */
+      `CREATE INDEX IF NOT EXISTS leads_ps_customer_key_idx ON leads (ps_customer_key) WHERE ps_customer_key IS NOT NULL`,
+      `CREATE INDEX IF NOT EXISTS leads_ps_xid_idx ON leads (ps_xid) WHERE ps_xid IS NOT NULL`,
+      /* The eligibility check reads a 90-day window of leads to find prior
+         contact on the same domain. created_at was unindexed. */
+      `CREATE INDEX IF NOT EXISTS leads_created_at_idx ON leads (created_at)`,
+      /* "One conversion per domain, EVER" enforced by the database rather than
+         by a SELECT-then-send in application code, which races: two submits for
+         the same domain arriving together both see no stamp and both fire, and
+         the affiliate is credited twice for one customer. PartnerStack has no
+         way to undo that.
+         UNIQUE and PARTIAL: only stamped rows participate, so any number of
+         rows may share a customer key while unsent, and at most one can ever
+         carry ps_signup_sent_at. The claim in runPartnerStackSignup relies on
+         this to turn a race into a unique violation it can treat as
+         "already sent". */
+      `CREATE UNIQUE INDEX IF NOT EXISTS leads_ps_signup_once_idx
+         ON leads (ps_customer_key)
+         WHERE ps_customer_key IS NOT NULL AND ps_signup_sent_at IS NOT NULL`,
+      /* Same rule, same enforcement, for the qualification action: one per
+         domain ever. Separate index because the two stamps are independent —
+         a domain can have converted at signup and not yet qualified. */
+      `CREATE UNIQUE INDEX IF NOT EXISTS leads_ps_qualified_once_idx
+         ON leads (ps_customer_key)
+         WHERE ps_customer_key IS NOT NULL AND ps_qualified_sent_at IS NOT NULL`,
+      /* The partner-identity resolver looks up "have we already resolved this
+         key?" on first sight of each new key. */
+      `CREATE INDEX IF NOT EXISTS leads_ps_partner_key_resolved_idx
+         ON leads (ps_partner_key)
+         WHERE ps_partner_key IS NOT NULL AND ps_partner_name IS NOT NULL`,
     ];
 
     for (const sql of migrations) {

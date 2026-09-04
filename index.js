@@ -7,7 +7,8 @@ const helmet    = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { Pool }  = require('pg');
 const { pool, initDB } = require('./db');
-const { pushToSalesforce, findSFLeadByEmail, updateSFLead } = require('./salesforce');
+const { sendConversion, fetchPartnership, sendAction } = require('./partnerstack');
+const { pushToSalesforce, findSFLeadByEmail, updateSFLead, findQualifiedDemoOpportunities } = require('./salesforce');
 const { pushFormEventsToMeta, pushStartTrialToMeta } = require('./meta-capi');
 const createLeadMagnetRouter = require('./lead-magnet');
 
@@ -181,6 +182,15 @@ async function initAWSTable() {
         event_type              TEXT,
         booked_at               TIMESTAMPTZ,
         loops_sent              BOOLEAN DEFAULT FALSE,
+        ps_xid                  TEXT,
+        ps_partner_key          TEXT,
+        ps_partner_name         TEXT,
+        ps_partner_email        TEXT,
+        ps_customer_key         TEXT,
+        ps_click_at             TIMESTAMPTZ,
+        ps_click_history        JSONB,
+        ps_signup_sent_at       TIMESTAMPTZ,
+        ps_qualified_sent_at    TIMESTAMPTZ,
         created_at              TIMESTAMPTZ DEFAULT NOW(),
         updated_at              TIMESTAMPTZ DEFAULT NOW()
       )
@@ -220,6 +230,19 @@ async function initAWSTable() {
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS landing_page TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS utm_term TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS previous_page TEXT`,
+      /* PartnerStack affiliate attribution. Mirrored so the dialer and anything
+         else reading gw_form_leads can see that a lead came from a partner
+         without going back to Railway. The two _sent_at stamps are written by
+         the conversion and qualification calls, which do not exist yet. */
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_xid TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_partner_key TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_partner_name TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_partner_email TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_customer_key TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_click_at TIMESTAMPTZ`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_click_history JSONB`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_signup_sent_at TIMESTAMPTZ`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_qualified_sent_at TIMESTAMPTZ`,
     ];
 
     for (const sql of migrations) {
@@ -249,8 +272,10 @@ function syncToAWS(data) {
        enriched_funding_events, enriched_alexa_ranking, enriched_keywords,
        enriched_org_hq, enriched_total_funding, enriched_funding_stage,
        disqualified, disqualified_reason,
-       step_reached, completed, submitted_at, loops_sent, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,NOW())
+       step_reached, completed, submitted_at, loops_sent,
+       ps_xid, ps_partner_key, ps_partner_name, ps_partner_email, ps_customer_key,
+       ps_click_at, ps_click_history, updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,NOW())
     ON CONFLICT (session_id) DO UPDATE SET
       page_url                = COALESCE(EXCLUDED.page_url,                gw_form_leads.page_url),
       email                   = COALESCE(EXCLUDED.email,                   gw_form_leads.email),
@@ -296,6 +321,13 @@ function syncToAWS(data) {
       completed               = (COALESCE(gw_form_leads.completed, false) OR COALESCE(EXCLUDED.completed, false)),
       submitted_at            = COALESCE(EXCLUDED.submitted_at,            gw_form_leads.submitted_at),
       loops_sent              = COALESCE(EXCLUDED.loops_sent,              gw_form_leads.loops_sent),
+      ps_xid                  = COALESCE(EXCLUDED.ps_xid,                  gw_form_leads.ps_xid),
+      ps_partner_key          = COALESCE(EXCLUDED.ps_partner_key,          gw_form_leads.ps_partner_key),
+      ps_partner_name         = COALESCE(EXCLUDED.ps_partner_name,         gw_form_leads.ps_partner_name),
+      ps_partner_email        = COALESCE(EXCLUDED.ps_partner_email,        gw_form_leads.ps_partner_email),
+      ps_customer_key         = COALESCE(EXCLUDED.ps_customer_key,         gw_form_leads.ps_customer_key),
+      ps_click_at             = COALESCE(EXCLUDED.ps_click_at,             gw_form_leads.ps_click_at),
+      ps_click_history        = COALESCE(EXCLUDED.ps_click_history,        gw_form_leads.ps_click_history),
       updated_at              = NOW()
   `, [
     data.session_id,                        data.page_url                  || null,
@@ -320,7 +352,12 @@ function syncToAWS(data) {
     data.enriched_funding_stage  || null,   data.disqualified              ?? false,
     data.disqualified_reason     || null,   data.step_reached              || 1,
     data.completed               || false,  data.completed ? new Date() : null,
-    data.loops_sent              || false
+    data.loops_sent              || false,
+    data.ps_xid                  || null,   data.ps_partner_key            || null,
+    data.ps_partner_name         || null,   data.ps_partner_email          || null,
+    data.ps_customer_key         || null,
+    data.ps_click_at             || null,
+    data.ps_click_history ? JSON.stringify(data.ps_click_history) : null
   ]).then(() => {
     console.log(`[AWS] ✅ Synced session ${data.session_id}`);
   }).catch(err => {
@@ -336,6 +373,36 @@ function syncBookingToAWS(session_id, booking_uid, start_time, end_time, event_t
   `, [session_id, booking_uid, start_time || null, end_time || null, event_type || null])
   .then(() => console.log(`[AWS] ✅ Booking synced for session ${session_id}`))
   .catch(err => { console.warn(`[AWS] ⚠ Booking sync failed:`, err.message); recordFailure('AWS sync', 'booking sync', err.message); });
+}
+
+/* The partner name resolves AFTER the row has already been mirrored, so the
+   ordinary syncToAWS upsert has been and gone by the time we know it. Same
+   shape as syncBookingToAWS above and for the same reason: a late-arriving
+   fact needs its own targeted write or the mirror never sees it. */
+function syncPartnerIdentityToAWS(session_id, name, email) {
+  if (!awsPool) return;
+  awsPool.query(
+    `UPDATE gw_form_leads
+        SET ps_partner_name = COALESCE($2, ps_partner_name),
+            ps_partner_email = COALESCE($3, ps_partner_email),
+            updated_at = NOW()
+      WHERE session_id = $1`,
+    [session_id, name || null, email || null]
+  ).catch(err => console.warn('[AWS] ⚠ Partner identity sync failed:', err.message));
+}
+
+/* A targeted UPDATE, NOT syncToAWS, and the distinction matters.
+   syncToAWS is a whole-row upsert whose conflict clause sets
+   `disqualified = EXCLUDED.disqualified` UNCONDITIONALLY — no COALESCE. Handing
+   it a partial object therefore passes disqualified as false and CLEARS a real
+   disqualification on the mirror, which the dialer reads. Any late-arriving
+   single field needs its own write, like the booking and identity syncs above. */
+function syncHearAboutUsToAWS(session_id, hear_about_us) {
+  if (!awsPool) return;
+  awsPool.query(
+    `UPDATE gw_form_leads SET hear_about_us = $2, updated_at = NOW() WHERE session_id = $1`,
+    [session_id, hear_about_us || null]
+  ).catch(err => console.warn('[AWS] ⚠ hear_about_us sync failed:', err.message));
 }
 
 function sendSlack(blocks, fallbackText) {
@@ -922,6 +989,7 @@ function auditStartupConfig() {
       GMAIL_USER:               'Drop-off follow-up emails',
       GMAIL_APP_PASSWORD:       'Drop-off follow-up emails',
       SLACK_ALERTS_WEBHOOK_URL: 'Ops alerts',
+      PARTNERSTACK_TRACKING_TOKEN: 'PartnerStack affiliate conversions',
     };
     const missing = Object.entries(required).filter(([k]) => !process.env[k]).map(([k, v]) => `${k} (${v})`);
     if (missing.length > 0) {
@@ -957,11 +1025,28 @@ function buildEnrichmentBlocks(blocks, e) {
 function buildJourneyBlocks(blocks, d) {
   const hasAttribution = d.utm_source || d.utm_medium || d.utm_campaign || d.utm_content || d.referrer;
   const hasJourney     = d.landing_page || d.previous_page || d.page_url;
+  const hasPartner     = !!d.ps_partner_key;
 
-  if (!hasAttribution && !hasJourney) return;
+  if (!hasAttribution && !hasJourney && !hasPartner) return;
 
   blocks.push(bDivider());
   blocks.push(bSection('*📊 Attribution & Journey*'));
+
+  /* The partner line goes FIRST in this section, above the UTMs. An SDR
+     picking up a partner-sourced lead needs to know that before anything
+     else — it changes who owns the relationship and what they open with.
+
+     Falls back to the raw key when the name has not resolved. That is the
+     first lead from a brand-new partner only: the resolver runs after the
+     response and every later lead reads the cache. A key is ugly but it is
+     true, and an SDR can still search it. */
+  if (hasPartner) {
+    const who = d.ps_partner_name
+      ? `*${d.ps_partner_name}*` + (d.ps_partner_email ? ` (${d.ps_partner_email})` : '')
+      : `\`${d.ps_partner_key}\`  _(name not resolved yet)_`;
+    const clicked = d.ps_click_at ? ` — clicked ${etStamp(d.ps_click_at)}` : '';
+    blocks.push(bSection(`🤝 *Partner:* ${who}${clicked}`));
+  }
 
   if (hasAttribution) {
     const src = [d.utm_source, d.utm_medium].filter(Boolean).join(' / ');
@@ -2211,6 +2296,7 @@ app.get('/monitor/leads', async (req, res) => {
   const enrichment = req.query.enrichment || null;
   const websiteCheck = req.query.websiteCheck || 'all';
   const repeatAttempts = req.query.repeatAttempts || 'all';
+  const partner      = req.query.partner      || null;
   const format     = req.query.format     || 'json';
 
   const sortMap = {
@@ -2271,6 +2357,18 @@ app.get('/monitor/leads', async (req, res) => {
     const verifiedSql = WEBSITE_VERIFIED_REASONS.filter((r) => /^[a-z0-9_]+$/.test(r)).map((r) => `'${r}'`).join(',');
     conditions.push(`(l.website_check_failed IS TRUE OR (l.website_check_reason IS NOT NULL AND l.website_check_reason <> '' AND l.website_check_reason NOT IN (${verifiedSql})))`);
   }
+  /* Partner as a DIMENSION on the existing view, not a tab of its own.
+     '__any' is every partner-sourced lead; a specific value matches the key,
+     the resolved name or the partner's email, because whoever is filtering
+     may have any one of the three to hand and will not know which we
+     resolved. */
+  if (partner === '__any')      conditions.push(`l.ps_partner_key IS NOT NULL`);
+  else if (partner === '__none') conditions.push(`l.ps_partner_key IS NULL`);
+  else if (partner) {
+    params.push(`%${partner.toLowerCase()}%`);
+    const i = params.length;
+    conditions.push(`(LOWER(COALESCE(l.ps_partner_key,'')) LIKE $${i} OR LOWER(COALESCE(l.ps_partner_name,'')) LIKE $${i} OR LOWER(COALESCE(l.ps_partner_email,'')) LIKE $${i})`);
+  }
   if (repeatAttempts === 'yes') conditions.push(`EXISTS (SELECT 1 FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at)`);
   if (repeatAttempts === 'no')  conditions.push(`NOT EXISTS (SELECT 1 FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at)`);
 
@@ -2301,6 +2399,9 @@ app.get('/monitor/leads', async (req, res) => {
       l.loops_sent, l.created_at, l.submitted_at, l.page_url,
       l.landing_page, l.previous_page, l.website_check_failed, l.website_check_reason,
       l.elv_status, l.elv_checked_at,
+      l.ps_partner_key, l.ps_partner_name, l.ps_partner_email,
+      l.ps_xid, l.ps_customer_key, l.ps_click_at, l.ps_click_history,
+      l.ps_signup_sent_at, l.ps_qualified_sent_at,
       (SELECT COUNT(*) FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at) AS prior_attempts,
       (SELECT COUNT(*) FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at AND pa.disqualified IS TRUE) AS prior_disqualified,
       l.utm_source, l.utm_medium, l.utm_campaign, l.utm_term, l.referrer, l.prefill_source,
@@ -2389,13 +2490,21 @@ app.get('/monitor/filter-options', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const [hearRows, sourceRows] = await Promise.all([
+    const [hearRows, sourceRows, partnerRows] = await Promise.all([
       pool.query(`SELECT hear_about_us AS v, COUNT(*) AS c FROM leads WHERE hear_about_us IS NOT NULL AND hear_about_us <> '' GROUP BY hear_about_us ORDER BY c DESC, hear_about_us ASC LIMIT 100`),
-      pool.query(`SELECT utm_source AS v, COUNT(*) AS c FROM leads WHERE utm_source IS NOT NULL AND utm_source <> '' GROUP BY utm_source ORDER BY c DESC, utm_source ASC LIMIT 100`)
+      pool.query(`SELECT utm_source AS v, COUNT(*) AS c FROM leads WHERE utm_source IS NOT NULL AND utm_source <> '' GROUP BY utm_source ORDER BY c DESC, utm_source ASC LIMIT 100`),
+      /* One row per partner KEY, carrying the best name and email we have
+         resolved for it. MAX() rather than a join: the name lands on later
+         rows than the first lead from that partner, so grouping on the key and
+         taking whatever resolved is what shows a name instead of a blank. */
+      pool.query(`SELECT ps_partner_key AS k, MAX(ps_partner_name) AS n, MAX(ps_partner_email) AS e, COUNT(*) AS c
+                    FROM leads WHERE ps_partner_key IS NOT NULL AND ps_partner_key <> ''
+                   GROUP BY ps_partner_key ORDER BY c DESC LIMIT 100`)
     ]);
     res.json({
       hearAbout: hearRows.rows.map(r => r.v),
-      utmSource: sourceRows.rows.map(r => r.v)
+      utmSource: sourceRows.rows.map(r => r.v),
+      partners:  partnerRows.rows.map(r => ({ key: r.k, name: r.n, email: r.e }))
     });
   } catch (err) {
     console.error('[/monitor/filter-options]', err.message);
@@ -2570,6 +2679,14 @@ app.get('/monitor', (req, res) => {
   '.egrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}' +
   '.ef{background:#fff;border:1px solid #eee;border-radius:6px;padding:8px 10px}' +
   '.efl{font-size:10px;font-weight:600;color:#aaa;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:3px}' +
+  '.psb{margin-bottom:12px;padding:10px;border:1px solid #ddd6fe;background:#faf8ff;border-radius:6px}' +
+  '.psh{font-weight:600;font-size:12px;margin-bottom:6px;color:#5b21b6}' +
+  '.psm{font-size:11px;color:#666;margin:8px 0 4px}' +
+  '.pst{width:100%;border-collapse:collapse;font-size:11px}' +
+  '.pst td{padding:2px 6px}' +
+  '.pslost{color:#aaa}' +
+  '.pswon{font-weight:600}' +
+  '.psna{color:#999}' +
   '.efv{font-size:12px;color:#1a1a1a;word-break:break-word}.efv a{color:#2563eb;text-decoration:none}' +
   '.pg{display:flex;align-items:center;gap:8px;justify-content:center;padding:16px 0;flex-wrap:wrap}' +
   '.pb{padding:5px 12px;border:1px solid #e5e5e5;border-radius:6px;background:#fff;cursor:pointer;font-size:12px;color:#333}' +
@@ -2631,6 +2748,7 @@ app.get('/monitor', (req, res) => {
   '<select id="fsellto" onchange="loadLeads(1)"><option value="all">All sell-to</option><option value="B2B">B2B</option><option value="B2B (clarified from B2C)">B2B (clarified from B2C)</option><option value="B2B (clarified from Mixed)">B2B (clarified from Mixed)</option><option value="B2C">B2C</option><option value="Mixed">Mixed</option><option value="__clarified">Clarified (any)</option></select>' +
   '<select id="fsource" onchange="loadLeads(1)"><option value="all">All sources</option></select>' +
   '<select id="fenrich" onchange="loadLeads(1)"><option value="all">Enrichment: all</option><option value="yes">Enriched</option><option value="no">Not enriched</option></select>' +
+  '<select id="fpartner" onchange="loadLeads(1)"><option value="all">Partner: all</option><option value="__any">Any partner</option><option value="__none">No partner</option></select>' +
   '<select id="fwebsitecheck" onchange="loadLeads(1)"><option value="all">Website check: all</option><option value="failed">Failed</option><option value="passed">Passed</option><option value="social">Social profile</option><option value="unverified">Not verified (any)</option></select>' +
   '<select id="frepeat" onchange="loadLeads(1)"><option value="all">Attempts: all</option><option value="yes">Repeat only</option><option value="no">First-time only</option></select>' +
   '<input type="text" id="fhear" list="hearlist" placeholder="Heard about us..." oninput="debounce()" style="min-width:170px">' +
@@ -2860,6 +2978,37 @@ app.get('/monitor', (req, res) => {
   'function renderChart(rows){var labels=(rows||[]).map(function(r){return r.day_label;}),data=(rows||[]).map(function(r){return parseInt(r.count)||0;});if(lChart)lChart.destroy();var ctx=document.getElementById("lchart").getContext("2d");lChart=new Chart(ctx,{type:"bar",data:{labels:labels,datasets:[{data:data,backgroundColor:"#818cf8",borderRadius:4,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{stepSize:1,color:"#aaa"},grid:{color:"#f0f0f0"}},x:{ticks:{color:"#aaa",maxRotation:45,autoSkip:false},grid:{display:false}}}}});}' +
   'function stageBadge(l){if(l.booking_uid)return"<span class=\\"badge bg\\">Booked</span>";if(l.disqualified)return"<span class=\\"badge br\\">Disqualified</span>";if(l.completed)return"<span class=\\"badge bb\\">Completed</span>";return"<span class=\\"badge ba\\">Step 1</span>";}' +
   'function enrichBadge(l){return(l.enriched_title||l.enriched_company_size||l.e_company)?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>";}' +
+  /* The partner panel — rendered above the enrichment grid on a partner lead,
+     and absent entirely otherwise so an organic lead looks exactly as today.
+     ps_click_history is every partner click this visitor made, oldest first.
+     Attribution uses the LAST click and only the last click, so that row is
+     badged WON and the others greyed: the point of keeping the history is
+     answering "why partner A and not B?" without opening the database. */
+  'function psPanel(l){if(!l.ps_partner_key)return "";' +
+  'function C(v){return "<code>"+esc(v)+"</code>";}' +
+  'var who=l.ps_partner_name?esc(l.ps_partner_name):(C(l.ps_partner_key)+" <span class=\'psna\'>(name not resolved)</span>");' +
+  'var rows=[["Partner",who],' +
+  '["Partner email",l.ps_partner_email?esc(l.ps_partner_email):null],' +
+  '["Partner key",l.ps_partner_name?C(l.ps_partner_key):null],' +
+  '["Clicked",l.ps_click_at?esc(et(l.ps_click_at)):null],' +
+  '["Customer key",l.ps_customer_key?C(l.ps_customer_key):null],' +
+  '["Conversion sent",l.ps_signup_sent_at?esc(et(l.ps_signup_sent_at)):"<span class=\'psna\'>not sent</span>"],' +
+  '["Qualified sent",l.ps_qualified_sent_at?esc(et(l.ps_qualified_sent_at)):null]' +
+  '].filter(function(r){return r[1];});' +
+  'var h="<div class=\'psb\'><div class=\'psh\'>\u{1F91D} Partner</div><div class=\'egrid\'>";' +
+  'h+=rows.map(function(r){return "<div class=\'ef\'><div class=\'efl\'>"+r[0]+"</div><div>"+r[1]+"</div></div>";}).join("");' +
+  'h+="</div>";' +
+  'var hist=l.ps_click_history;if(typeof hist==="string"){try{hist=JSON.parse(hist);}catch(e){hist=null;}}' +
+  'if(hist&&hist.length){' +
+  'h+="<div class=\'psm\'>Click history ("+hist.length+", oldest first — the last click wins attribution)</div><table class=\'pst\'>";' +
+  'h+=hist.map(function(c,i){var won=(i===hist.length-1);' +
+  'return "<tr class=\'"+(won?"pswon":"pslost")+"\'>"' +
+  '+"<td>"+(won?"<span class=\'badge bg\'>WON</span>":"")+"</td>"' +
+  '+"<td>"+esc(c.at?et(c.at):"—")+"</td>"' +
+  '+"<td>"+C(c.pk||"—")+"</td>"' +
+  '+"<td class=\'psna\'>"+C(c.xid||"—")+"</td></tr>";}).join("");' +
+  'h+="</table>";}' +
+  'return h+"</div>";}' +
   'function enrichPanel(l){var loc=[l.enriched_city,l.enriched_state,l.enriched_country].filter(Boolean).join(", ");var fields=[' +
   '{lb:"Title",v:l.enriched_title},' +
   '{lb:"Seniority",v:l.enriched_seniority},' +
@@ -2909,20 +3058,21 @@ app.get('/monitor', (req, res) => {
   '{lb:"Session ID",v:l.session_id,mono:true},' +
   '{lb:"Enriched at",v:et(l.enriched_at)}' +
   '].filter(function(f){return f.v;});' +
-  'if(!fields.length)return"<div style=\\"color:#999;font-size:12px\\">No enrichment data.</div>";' +
-  'return"<div class=\\"egrid\\">"+fields.map(function(f){var val=f.lnk&&f.v?"<a href=\\""+(f.v.startsWith("http")?"":"https://")+esc(f.v)+"\\" target=\\"_blank\\">"+esc(f.v)+"</a>":f.mono?"<code style=\\"font-size:10px\\">"+esc(f.v)+"</code>":esc(f.v);return"<div class=\\"ef\\"><div class=\\"efl\\">"+f.lb+"</div><div class=\\"efv\\">"+val+"</div></div>";}).join("")+"</div>";}' +
+  'var pp=psPanel(l);' +
+  'if(!fields.length)return pp||"<div style=\\"color:#999;font-size:12px\\">No enrichment data.</div>";' +
+  'return pp+"<div class=\\"egrid\\">"+fields.map(function(f){var val=f.lnk&&f.v?"<a href=\\""+(f.v.startsWith("http")?"":"https://")+esc(f.v)+"\\" target=\\"_blank\\">"+esc(f.v)+"</a>":f.mono?"<code style=\\"font-size:10px\\">"+esc(f.v)+"</code>":esc(f.v);return"<div class=\\"ef\\"><div class=\\"efl\\">"+f.lb+"</div><div class=\\"efv\\">"+val+"</div></div>";}).join("")+"</div>";}' +
   'function debounce(){clearTimeout(stimer);stimer=setTimeout(function(){loadLeads(1);},400);}' +
-  'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("fsellto").value="all";document.getElementById("fsource").value="all";document.getElementById("fenrich").value="all";document.getElementById("fwebsitecheck").value="all";document.getElementById("frepeat").value="all";document.getElementById("fhear").value="";document.getElementById("fpreset").value="";document.getElementById("ffrom").value="";document.getElementById("fto").value="";curSort="created_at";curDir="desc";renderSortArrows();loadLeads(1);}' +
+  'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("fsellto").value="all";document.getElementById("fsource").value="all";document.getElementById("fenrich").value="all";document.getElementById("fwebsitecheck").value="all";document.getElementById("frepeat").value="all";document.getElementById("fpartner").value="all";document.getElementById("fhear").value="";document.getElementById("fpreset").value="";document.getElementById("ffrom").value="";document.getElementById("fto").value="";curSort="created_at";curDir="desc";renderSortArrows();loadLeads(1);}' +
   'function renderSortArrows(){["email","name","company","sell_to","created_at"].forEach(function(c){var el=document.getElementById("sar-"+c);if(el)el.textContent=(curSort===c)?(curDir==="asc"?"\\u25B2":"\\u25BC"):"";});}' +
   'function sortBy(c){if(curSort===c){curDir=(curDir==="asc")?"desc":"asc";}else{curSort=c;curDir=(c==="created_at")?"desc":"asc";}renderSortArrows();loadLeads(1);}' +
   'function datePreset(v){var ff=document.getElementById("ffrom"),ft=document.getElementById("fto");if(!v){loadLeads(1);return;}var to=etDayShift(0),from=to;if(v==="7d")from=etDayShift(-6);else if(v==="30d")from=etDayShift(-29);ff.value=from;ft.value=to;loadLeads(1);}' +
   'function dateManual(){var p=document.getElementById("fpreset");if(p)p.value="";loadLeads(1);}' +
-  'function exportLeads(){var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"format=csv&stage="+stage+"&sort="+curSort+"&dir="+curDir;if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;window.location.href=url;}' +
-  'async function loadFilterOptions(){if(filterOptsLoaded)return;try{var r=await fetch(API+"/monitor/filter-options"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(10000)});if(!r.ok)return;var d=await r.json();var sel=document.getElementById("fsource");if(sel&&d.utmSource){d.utmSource.forEach(function(v){var o=document.createElement("option");o.value=v;o.textContent=v;sel.appendChild(o);});}var dl=document.getElementById("hearlist");if(dl&&d.hearAbout){dl.innerHTML=d.hearAbout.map(function(v){return"<option value=\\""+esc(v)+"\\"></option>";}).join("");}filterOptsLoaded=true;}catch(e){}}' +
+  'function exportLeads(){var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"format=csv&stage="+stage+"&sort="+curSort+"&dir="+curDir;if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;window.location.href=url;}' +
+  'async function loadFilterOptions(){if(filterOptsLoaded)return;try{var r=await fetch(API+"/monitor/filter-options"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(10000)});if(!r.ok)return;var d=await r.json();var sel=document.getElementById("fsource");if(sel&&d.utmSource){d.utmSource.forEach(function(v){var o=document.createElement("option");o.value=v;o.textContent=v;sel.appendChild(o);});}var ps=document.getElementById("fpartner");if(ps&&d.partners){d.partners.forEach(function(p){var o=document.createElement("option");o.value=p.key;o.textContent="Partner: "+(p.name||p.key)+(p.email?" <"+p.email+">":"");ps.appendChild(o);});}var dl=document.getElementById("hearlist");if(dl&&d.hearAbout){dl.innerHTML=d.hearAbout.map(function(v){return"<option value=\\""+esc(v)+"\\"></option>";}).join("");}filterOptsLoaded=true;}catch(e){}}' +
   'function toggleRow(sid){var row=document.getElementById("er-"+sid);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=row.previousElementSibling&&row.previousElementSibling.querySelector(".xbtn");if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";}' +
-  'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
+  'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
   'var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"page="+curPage+"&stage="+stage+"&sort="+curSort+"&dir="+curDir;' +
-  'if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;' +
+  'if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;' +
   'document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\">Loading...</td></tr>";' +
   'try{var r=await fetch(url,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
   'set("lcount",d.total+" lead"+(d.total!==1?"s":"")+" found");' +
@@ -3990,6 +4140,56 @@ function registrableDomain(hostname) {
   return lastTwo;
 }
 
+/* ── PartnerStack: the customer key ──────────────────────────────────
+   PartnerStack counts ONE conversion per customer key, for the life of the
+   account. Get the key wrong twice for the same company and either the
+   affiliate is paid twice for one customer, or the second real referral is
+   silently swallowed as a duplicate. So it is derived here and nowhere else.
+
+   Normalised root domain: lowercase, no protocol, no port, no path, no www,
+   no subdomain. acme.com — never Acme.com, www.acme.com or mail.acme.com.
+   Subdomain stripping rides on registrableDomain above, so acme.co.uk stays
+   acme.co.uk rather than collapsing to co.uk.
+
+   Accepts a website URL, a bare domain or an email address, because the two
+   places that need a key have different fields to hand.
+
+   Returns null rather than a guess when there is nothing usable. A free-mail
+   address is deliberately null: gmail.com as a customer key would merge every
+   Gmail lead into one PartnerStack customer, and since the conversion fires
+   once per key forever, the first one would permanently burn the conversion
+   for everybody after it. */
+function partnerStackCustomerKey(input) {
+  let raw = String(input || '').trim().toLowerCase();
+  if (!raw) return null;
+
+  // An email: take what is after the last @, so display names cannot confuse it.
+  if (raw.includes('@')) raw = raw.slice(raw.lastIndexOf('@') + 1);
+
+  raw = raw.replace(/^[a-z][a-z0-9+.-]*:\/\//, '');   // scheme
+  raw = raw.replace(/^[^/@]*@/, '');                   // userinfo
+  raw = raw.split(/[/?#]/)[0];                         // path, query, fragment
+  raw = raw.split(':')[0];                             // port
+  /* registrableDomain below already collapses a leading www. and a trailing
+     dot, so these two are belt-and-braces rather than load-bearing — a
+     mutation test on this line survives. Kept because the intent of the
+     function is "no www, no trailing dot" and a reader should not have to
+     derive that from the suffix table. */
+  raw = raw.replace(/^www\./, '').replace(/\.$/, '');
+  if (!raw || !raw.includes('.')) return null;
+  if (!/^[a-z0-9.-]+$/.test(raw)) return null;
+  /* An IP literal is not a company. registrableDomain deliberately passes IPv4
+     straight through (a website check cares that the host resolves), but as a
+     customer key it would be nonsense — and shared hosting means several
+     unrelated companies can sit behind one address. */
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(raw)) return null;
+
+  const key = registrableDomain(raw);
+  if (!key || !key.includes('.')) return null;
+  if (isFreeEmailDomain(key)) return null;
+  return key;
+}
+
 function isMarketplaceHost(hostname) {
   const reg = registrableDomain(hostname);
   return MARKETPLACE_DOMAINS.includes(reg) ? reg : null;
@@ -4809,6 +5009,787 @@ ${results.map((r) => `<tr class="${r.changed ? 'chg' : ''}"><td>${esc(r.email)}<
 
 
 
+/* ============================================================
+   PARTNERSTACK — ELIGIBILITY
+
+   Runs BEFORE any PartnerStack call. Nothing in here touches the lead:
+   eligibility decides whether an AFFILIATE gets paid, never whether a
+   person gets a demo. A lead that fails every check below still books,
+   still fires Slack, Salesforce and Meta exactly as it does today.
+
+   Three rejection rules, in the order they are cheapest to answer:
+
+     c) test address        — our own testing must not pay a partner
+     b) current customer    — they were already ours
+     a) prior contact       — we had already reached this domain before
+                              the click, so the partner did not source them
+
+   Every rejection carries a stable reason string. That is not decoration:
+   the affiliate agreement obliges us to say WHY a referral was rejected,
+   and "the code said no" is not an answer three months later. The reasons
+   are written to leads.ps_ineligible_reason so the record outlives the log.
+
+   FAILS CLOSED. If a check cannot run — database unreachable, query
+   timeout — this returns ineligible with reason 'check_failed' rather than
+   waving the conversion through. That is the opposite of the fail-open rule
+   the lead path follows, and deliberately so: the conversion call fires ONCE
+   per customer key for the life of the account and cannot be recalled, while
+   a conversion we skipped is still sitting in the log to be sent by hand.
+   Wrong in the cautious direction is recoverable; wrong in the other
+   direction is not.
+   ============================================================ */
+
+/* Our own test traffic. Deliberately a PartnerStack-only guard rather than a
+   change to the shared exclusion lists: ELV_EXCLUDED_DOMAINS today governs
+   ELV health and alerting only, and every lead count on the dashboard still
+   deliberately INCLUDES internal addresses. Widening that list here would
+   move historical numbers across the whole dashboard as a side effect. */
+const PS_TEST_EMAILS = ['b@g.ai'];
+
+function isPartnerStackTestEmail(email) {
+  const e = String(email || '').trim().toLowerCase();
+  if (!e) return false;
+  if (PS_TEST_EMAILS.includes(e)) return true;
+  const domain = e.slice(e.lastIndexOf('@') + 1);
+  return ELV_EXCLUDED_DOMAINS.includes(domain);
+}
+
+/* ── Rule (a): prior contact ─────────────────────────────────────────
+   The source is behind this registry ON PURPOSE. Today "contact" means a
+   prior inbound form lead on the same root domain, in Railway leads. The
+   warehouse also holds two live outbound logs — gist.gtm_coldemail_sends_master
+   (cold email, indexed on domain) and gist.gtm_outbound_multisource (dials,
+   currently unindexed on website_url) — and either may be switched on later.
+
+   Measured before choosing, against 90 days of real leads: prior form lead
+   9.7%, cold email sent in the 90 days before the submit 25.6%, dials 4.9%.
+   A naive "emailed in the last 90 calendar days" reading looked like 39.6%,
+   but 17.4 points of that was our own sequencer following UP on an inbound
+   lead, which is not prior contact at all. Adding a source without measuring
+   it the same way will silently change how many affiliates get rejected.
+
+   To add one: write the function, add it to PS_CONTACT_SOURCES, and put its
+   key in PS_CONTACT_ACTIVE. Nothing else changes. */
+const PS_CONTACT_LOOKBACK_DAYS = 90;
+
+const PS_CONTACT_SOURCES = {
+  /* Prior inbound form leads on the same root domain.
+     Normalisation happens in JS, not SQL, and that is the whole point: the
+     SQL we could write here strips www but not subdomains, so mail.acme.com
+     would fail to match acme.com and the rule would quietly under-reject.
+     Reading the window and normalising each row through the same helper the
+     key itself came from is the only way the two sides can agree. The window
+     is bounded and leads is small; leads_created_at_idx covers it. */
+  form_leads: async (customerKey, since, until) => {
+    const { rows } = await pool.query(
+      `SELECT email, website, created_at FROM leads
+        WHERE created_at >= $1 AND created_at < $2`,
+      [since, until]
+    );
+    for (const r of rows) {
+      const k = partnerStackCustomerKey(r.website) || partnerStackCustomerKey(r.email);
+      if (k && k === customerKey) {
+        return { hit: true, at: r.created_at, detail: 'prior form lead' };
+      }
+    }
+    return { hit: false };
+  },
+};
+
+const PS_CONTACT_ACTIVE = ['form_leads'];
+
+async function partnerStackPriorContact(customerKey, clickAt) {
+  const until = clickAt instanceof Date ? clickAt : new Date(clickAt || Date.now());
+  const since = new Date(until.getTime() - PS_CONTACT_LOOKBACK_DAYS * 86400000);
+  for (const name of PS_CONTACT_ACTIVE) {
+    const src = PS_CONTACT_SOURCES[name];
+    if (!src) continue;
+    const out = await src(customerKey, since, until);
+    if (out && out.hit) return { ...out, source: name };
+  }
+  return { hit: false };
+}
+
+/* ── Rule (b): current customer ──────────────────────────────────────
+   Three warehouse tables hold customer domains and none of them agrees with
+   the others on format: customer_contract_terms has clean domains,
+   customer_enrichment stores things like https://www.example.com/ and
+   gist_accountsmaster stores example.com/ with a trailing slash. They are
+   unioned here and every value is put through partnerStackCustomerKey, so
+   the comparison happens on one normalised form on both sides.
+
+   Cached rather than queried per submit. It is 853 rows across the three
+   tables, it changes on a human timescale, and the warehouse is across a WAN
+   from Railway — the same reason /monitor/health is kept off the 60s poll.
+
+   THE 12-MONTH HALF OF THIS RULE IS NOT IMPLEMENTED, because it cannot be.
+   Nothing in the warehouse can date a churn: customer_contract_terms has
+   zero churned rows at all, gist_accountsmaster has an End_Date on 2 of its
+   330 rows, and public.subscriptions has no row with a future billing date.
+   So "was a customer in the last 12 months" is reported as an explicit gap
+   for manual review rather than silently passing as "not a customer". The
+   clause stays in the affiliate terms; we just cannot yet enforce it here. */
+const PS_CUSTOMER_CACHE_TTL_MS = 30 * 60 * 1000;
+
+/* The query crosses a WAN to the warehouse and the pool it uses has NO
+   statement_timeout — connectionTimeoutMillis caps acquiring a connection, not
+   a query that has already started. An RDS instance that accepts connections
+   but answers slowly is exactly what a degraded WAN produces, and unbounded
+   that hangs forever. Three of those exhaust awsPool (max: 3), which also
+   starves the mirror writes in syncToAWS.
+
+   8s to match HEALTH_AWS_TIMEOUT_MS, for the same reason: a hung warehouse has
+   to resolve to a verdict rather than hang the caller. A timeout surfaces as a
+   rejected promise, so the fail-closed path in partnerStackEligibility already
+   handles it as 'check_failed' — note that fail-closed alone does NOT cover
+   this, because a hang never reaches the catch. Measured cost of the query
+   when healthy: 0.8-3.4s including the round trip. */
+const PS_CUSTOMER_QUERY_TIMEOUT_MS = 8000;
+
+let _psCustomerCache = { at: 0, keys: null };
+
+async function partnerStackCustomerDomains() {
+  if (_psCustomerCache.keys && Date.now() - _psCustomerCache.at < PS_CUSTOMER_CACHE_TTL_MS) {
+    return _psCustomerCache.keys;
+  }
+  if (!awsPool) throw new Error('AWS warehouse pool not configured');
+  const { rows } = await withTimeout(awsPool.query(`
+    SELECT domain AS d, status FROM gist.customer_contract_terms WHERE domain IS NOT NULL
+    UNION ALL
+    SELECT url,          status FROM gist.gist_accountsmaster     WHERE url    IS NOT NULL
+    UNION ALL
+    SELECT domain,       NULL   FROM gist.customer_enrichment     WHERE domain IS NOT NULL
+  `), PS_CUSTOMER_QUERY_TIMEOUT_MS, 'PartnerStack customer domains');
+  const keys = new Set();
+  for (const r of rows) {
+    // Churned, inactive and the test rows are not CURRENT customers. They are
+    // exactly the population the unenforceable 12-month clause would cover.
+    if (r.status && /^(churn|inactive|dummy)/i.test(String(r.status).trim())) continue;
+    const k = partnerStackCustomerKey(r.d);
+    if (k) keys.add(k);
+  }
+  _psCustomerCache = { at: Date.now(), keys };
+  console.log(`[PartnerStack] Customer domain cache refreshed: ${keys.size} domains`);
+  return keys;
+}
+
+/* Warmed at boot and on a timer so no LEAD ever pays for the fetch. Filling
+   this cache from inside a submit put a multi-second cross-WAN query on the
+   critical path of someone waiting on a form, which is the thing this codebase
+   exists not to do.
+
+   Deliberately swallows its error. A cold cache is not an outage: the next
+   eligibility check falls back to fetching on demand, bounded by the timeout
+   above, and rejects closed if that fails too. Warming must never be able to
+   take the process down or spam alerts on a schedule. */
+function refreshPartnerStackCustomerCache(reason) {
+  if (!awsPool) return;
+  partnerStackCustomerDomains()
+    .catch(err => console.warn(`[PartnerStack] Customer cache warm failed (${reason}, non-blocking):`, err.message));
+}
+
+function startPartnerStackCacheWarm() {
+  /* Nothing reads this cache while the eligibility check is off, and warming it
+     anyway is a pointless cross-WAN query every 30 minutes forever. */
+  if (!PS_ELIGIBILITY_ENABLED) {
+    console.log('[PartnerStack] Eligibility check disabled — customer cache not warmed');
+    return;
+  }
+  refreshPartnerStackCustomerCache('boot');
+  const t = setInterval(() => refreshPartnerStackCustomerCache('scheduled'), PS_CUSTOMER_CACHE_TTL_MS);
+  if (t.unref) t.unref();
+}
+
+/* The verdict. Reason strings are stable identifiers — they are stored, and
+   they are what an affiliate is eventually told. Do not reword them casually. */
+async function partnerStackEligibility({ email, website, customer_key, click_at } = {}) {
+  const stamp = (out) => ({ ...out, checked_at: new Date() });
+
+  if (isPartnerStackTestEmail(email)) {
+    return stamp({ eligible: false, reason: 'test_email',
+      detail: 'Internal or test address — our own testing must not pay a partner.' });
+  }
+
+  const key = customer_key || partnerStackCustomerKey(website) || partnerStackCustomerKey(email);
+  if (!key) {
+    return stamp({ eligible: false, reason: 'no_customer_key',
+      detail: 'No usable company domain on the lead (missing, malformed, or a free mail provider).' });
+  }
+
+  let customers;
+  try {
+    customers = await partnerStackCustomerDomains();
+  } catch (err) {
+    console.warn('[PartnerStack] Customer check FAILED — failing closed:', err.message);
+    recordFailure('PartnerStack', key + ' (customer check)', err.message);
+    return stamp({ eligible: false, reason: 'check_failed', customer_key: key,
+      detail: 'Could not read the customer list, so eligibility could not be decided. Re-run before telling the affiliate anything.' });
+  }
+  if (customers.has(key)) {
+    return stamp({ eligible: false, reason: 'existing_customer', customer_key: key,
+      detail: `${key} is on the current customer list.` });
+  }
+
+  let contact;
+  try {
+    contact = await partnerStackPriorContact(key, click_at);
+  } catch (err) {
+    console.warn('[PartnerStack] Prior-contact check FAILED — failing closed:', err.message);
+    recordFailure('PartnerStack', key + ' (contact check)', err.message);
+    return stamp({ eligible: false, reason: 'check_failed', customer_key: key,
+      detail: 'Could not read prior contact history, so eligibility could not be decided. Re-run before telling the affiliate anything.' });
+  }
+  if (contact.hit) {
+    return stamp({ eligible: false, reason: 'prior_contact_90d', customer_key: key,
+      detail: `We already had contact with ${key} within ${PS_CONTACT_LOOKBACK_DAYS} days before the click (${contact.detail}).` });
+  }
+
+  return stamp({
+    eligible: true, reason: 'eligible', customer_key: key,
+    /* Surfaced on every PASS, not buried. An affiliate paid on a lead that
+       turns out to have been a customer eleven months ago is a conversation
+       we want to have from a record, not from memory. */
+    unverified: ['customer_last_12_months'],
+  });
+}
+
+/* ── Reading the PartnerStack fields off the form payload ────────────
+   One reader for /partial and /submit. They took separate copies of every
+   other field and that is exactly how the two forms drifted apart before;
+   there is no reason to repeat it for a field set this fiddly.
+
+   ps_click_history is the only thing on the whole payload that arrives as
+   caller-supplied JSON destined for a JSONB column, so it is rebuilt entry by
+   entry rather than passed through. A visitor can set their own cookies, and
+   "store as-is" cannot mean "store whatever bytes turn up": unbounded, this
+   is a free write amplifier into our database.
+
+   The cap of 10 mirrors the cookie's own cap. Entries are kept oldest-first,
+   as the cookie writes them, and the LAST one is the click that won — but
+   nothing here depends on that, because attribution reads ps_xid and only
+   ps_xid. This is for reporting and dispute resolution. */
+const PS_CLICK_HISTORY_MAX = 10;
+
+function parsePartnerStackClickAt(raw) {
+  if (raw === null || raw === undefined || raw === '') return null;
+  let d;
+  if (typeof raw === 'number' || /^\d{9,14}$/.test(String(raw).trim())) {
+    const n = Number(raw);
+    // 10-digit values are seconds, 13-digit are milliseconds.
+    d = new Date(n < 1e11 ? n * 1000 : n);
+  } else {
+    d = new Date(String(raw).trim());
+  }
+  if (isNaN(d.getTime())) return null;
+  /* A click cannot be in the future or before the integration existed. A bad
+     value here would silently move the 90-day contact window, so it is dropped
+     rather than trusted; the caller then falls back to submit time. */
+  const now = Date.now();
+  if (d.getTime() > now + 86400000) return null;
+  if (d.getTime() < Date.UTC(2026, 0, 1)) return null;
+  return d;
+}
+
+function parsePartnerStackClickHistory(raw) {
+  let arr = raw;
+  if (typeof arr === 'string') {
+    try { arr = JSON.parse(arr); } catch { return null; }
+  }
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  const out = [];
+  for (const item of arr.slice(0, PS_CLICK_HISTORY_MAX)) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const xid = (item.xid || '').toString().trim().slice(0, 200);
+    const pk  = (item.pk  || '').toString().trim().slice(0, 120);
+    const at  = parsePartnerStackClickAt(item.at);
+    if (!xid && !pk) continue;
+    out.push({ xid: xid || null, pk: pk || null, at: at ? at.toISOString() : null });
+  }
+  return out.length ? out : null;
+}
+
+/* The request-level signals PartnerStack's fraud detection wants. None of these
+   is stored on the lead — `leads` has no IP or user-agent column — so they are
+   read off the request at the moment of submit.
+
+   ip_address takes the FIRST entry of x-forwarded-for, not the whole header.
+   app.set('trust proxy', 1) means req.ip is already resolved, but Railway sits
+   behind a proxy chain and the raw header is a comma-separated list; sending
+   "1.2.3.4, 10.0.0.1" as an IP address is worse than sending nothing, because
+   it looks like a value and will never match anything.
+
+   origin is the FULL page URL the form was on, not the scheme+host of it and
+   not the browser's Origin header. The Origin header is absent on same-origin
+   non-CORS posts, and a bare scheme+host cannot tell /demo from an ads lander,
+   which is exactly the distinction a fraud review wants to see. */
+function readPartnerStackRequestContext(req, page_url) {
+  const fwd = (req.headers['x-forwarded-for'] || '').toString();
+  const ip_address = (fwd.split(',')[0] || '').trim() || req.ip || null;
+  const user_agent = (req.headers['user-agent'] || '').toString().slice(0, 500) || null;
+  const origin = (page_url || '').toString().trim().slice(0, 1000) || null;
+  return { ip_address, user_agent, origin };
+}
+
+function readPartnerStackPayload(body, { email, website } = {}) {
+  const ps_xid         = (body.ps_xid         || '').toString().trim().slice(0, 200);
+  const ps_partner_key = (body.ps_partner_key || '').toString().trim().slice(0, 120);
+  const ps_click_at    = parsePartnerStackClickAt(body.click_at);
+  const ps_click_history = parsePartnerStackClickHistory(body.ps_click_history);
+  /* Derived here, once, and stored. Everything downstream joins on it, and
+     re-deriving it at each call site is how two call sites end up disagreeing
+     about which domain a company is. */
+  const ps_customer_key = partnerStackCustomerKey(website) || partnerStackCustomerKey(email);
+  return {
+    ps_xid: ps_xid || null,
+    ps_partner_key: ps_partner_key || null,
+    ps_customer_key: ps_customer_key || null,
+    ps_click_at,
+    ps_click_history,
+  };
+}
+
+/* MVP ships WITHOUT the automated eligibility check. Rejections are decided by
+   hand at payout approval instead, which is a deliberate v2 deferral and not an
+   oversight — every piece of the check below is built, tested and dormant.
+   Flip PS_ELIGIBILITY_ENABLED=true in the Railway env to turn it on; no rebuild,
+   no code change. Default off.
+
+   The conversion call in runPartnerStackSignup does NOT consult it and must not
+   start to without that being a deliberate decision: today every partner lead
+   that is not a test address converts. */
+const PS_ELIGIBILITY_ENABLED = process.env.PS_ELIGIBILITY_ENABLED === 'true';
+
+/* ── Running the check WITHOUT making the lead wait ──────────────────
+   Called after res.json(), never before it. Two separate reasons, and both
+   matter:
+
+     - Rule (b) reads the warehouse across a WAN. Even warmed and bounded at
+       8s, that has no business sitting between a visitor and their booking.
+     - Nothing about the answer changes what the lead sees. Eligibility decides
+       whether an AFFILIATE is paid. The lead has already been written,
+       Slack has fired, Salesforce has fired, Meta has fired.
+
+   Fire-and-forget, same shape as finaliseElvVerdict and syncToAWS above it. A
+   thrown promise here must not turn a successful submit into a 500, so the
+   catch is total.
+
+   Runs ONLY for partner-referred leads. Without ps_xid there is no affiliate
+   to pay or reject, and a Railway query per submit for every organic lead is
+   pure cost.
+
+   NOTE for step 5: this is where the conversion call goes, AFTER this verdict
+   and only when eligible. Do not move it earlier to "save a round trip".
+
+   The stored verdict is the audit record. ps_ineligible_reason carries the
+   reason on a rejection and stays null on a pass; the unenforceable 12-month
+   clause is a constant on every pass, so "SELECT ... WHERE ps_eligible IS TRUE"
+   IS the manual-review list without needing its own column. */
+function runPartnerStackEligibility({ session_id, email, website, ps }) {
+  if (!PS_ELIGIBILITY_ENABLED) return;
+  if (!ps || !ps.ps_xid) return;
+  partnerStackEligibility({
+    email,
+    website,
+    customer_key: ps.ps_customer_key,
+    click_at: ps.ps_click_at,
+  })
+    .then((verdict) => {
+      logPartnerStackEligibility(verdict, { email, session_id });
+      return pool.query(
+        `UPDATE leads
+            SET ps_eligible = $2, ps_ineligible_reason = $3, ps_checked_at = $4, updated_at = NOW()
+          WHERE session_id = $1`,
+        [session_id, verdict.eligible, verdict.eligible ? null : verdict.reason, verdict.checked_at]
+      );
+    })
+    .catch((err) => {
+      console.warn('[PartnerStack] Eligibility check failed (non-blocking):', err.message);
+      recordFailure('PartnerStack', (email || session_id) + ' (eligibility)', err.message);
+    });
+}
+
+/* ── STEP 6: who is the partner? ─────────────────────────────────────
+   The cookie gives us a key like 785ec78e1ee4688, which is meaningless to an
+   SDR reading Slack. This turns it into a name and an email, once per key.
+
+   THREE layers, cheapest first, because the same handful of partners will
+   send most of the traffic and re-asking the API for each of their leads is
+   pure waste:
+     1. process memory, for the life of the dyno
+     2. any earlier lead row already carrying a resolved name for that key
+     3. the v2 API — Basic base64(public_key:secret_key), NOT the tracking
+        token that the conversion endpoint uses
+
+   Deliberately does NOT gate anything. An unresolved partner is a cosmetic
+   problem: Slack falls back to the raw key, the dashboard falls back to the
+   raw key, and the conversion has already fired regardless. So every failure
+   path here is a warning and a return, never a throw. */
+const _psPartnerCache = new Map();
+
+async function resolvePartnerIdentity(partnerKey) {
+  if (!partnerKey) return null;
+  if (_psPartnerCache.has(partnerKey)) return _psPartnerCache.get(partnerKey);
+
+  // Someone else's lead may already have paid for this lookup.
+  try {
+    const { rows } = await pool.query(
+      `SELECT ps_partner_name, ps_partner_email
+         FROM leads
+        WHERE ps_partner_key = $1 AND ps_partner_name IS NOT NULL
+        LIMIT 1`,
+      [partnerKey]
+    );
+    if (rows[0]) {
+      const known = { name: rows[0].ps_partner_name, email: rows[0].ps_partner_email };
+      _psPartnerCache.set(partnerKey, known);
+      return known;
+    }
+  } catch (err) {
+    console.warn('[PartnerStack] Partner cache lookup failed (will try the API):', err.message);
+  }
+
+  const out = await fetchPartnership(partnerKey);
+  if (!out.ok) {
+    console.warn(`[PartnerStack] Could not resolve partner ${partnerKey}: ${out.reason}`);
+    /* NOT cached. A failure is usually transient (rate limit, blip) and
+       caching it would pin every future lead from this partner to "unknown"
+       for the life of the process. */
+    return null;
+  }
+  const identity = { name: out.name, email: out.email };
+  _psPartnerCache.set(partnerKey, identity);
+  console.log(`[PartnerStack] Resolved partner ${partnerKey} -> ${identity.name || '(no name)'} <${identity.email || 'no email'}>`);
+  return identity;
+}
+
+/* Resolve and stamp the row. Returns the identity so the caller can put it in
+   Slack without a second lookup. */
+async function runPartnerStackIdentity({ session_id, ps }) {
+  if (!ps || !ps.ps_partner_key) return null;
+  const identity = await resolvePartnerIdentity(ps.ps_partner_key);
+  if (!identity || (!identity.name && !identity.email)) return null;
+  try {
+    await pool.query(
+      `UPDATE leads
+          SET ps_partner_name  = COALESCE($2, ps_partner_name),
+              ps_partner_email = COALESCE($3, ps_partner_email),
+              updated_at = NOW()
+        WHERE session_id = $1`,
+      [session_id, identity.name || null, identity.email || null]
+    );
+  } catch (err) {
+    console.warn('[PartnerStack] Could not store the partner identity (non-blocking):', err.message);
+  }
+  syncPartnerIdentityToAWS(session_id, identity.name, identity.email);
+  return identity;
+}
+
+/* A NON-fetching read of the in-memory cache, for the Slack path.
+   Slack fires before res.json() and the resolver runs after it, so the very
+   first lead from a brand-new partner posts with the raw key. Every lead after
+   that hits this and shows the name. Peeking costs nothing; making Slack wait
+   for an HTTP round trip to a third party would cost a lead. */
+function peekPartnerIdentity(partnerKey) {
+  if (!partnerKey) return null;
+  return _psPartnerCache.get(partnerKey) || null;
+}
+
+/* ── STEP 7: hear_about_us on a partner lead ─────────────────────────
+   "Partner - Jane Smith" is what an AE sees in Salesforce, and it is the only
+   place the partner shows up in their workflow at all.
+
+   AN EXISTING REFERRAL WINS. gw_ref_email is a named human vouching for this
+   lead, set by prefillHearAboutUs in both form files as "Referral - <email>",
+   and it is a stronger signal than an affiliate link. If someone arrives on a
+   referral link AND a partner link, the referral is what the AE should see.
+   Anything already starting with "Referral -" is therefore left untouched.
+
+   Falls back to the raw partner key when the name has not resolved yet, which
+   happens for the very first lead from a brand-new partner: the resolver runs
+   after res.json() and the Salesforce push has already gone. That row is
+   upgraded in place by upgradePartnerHearAboutUs once the name lands. */
+const PS_HEAR_PREFIX = 'Partner - ';
+
+function partnerHearAboutUs({ hear_about_us, ps, identity }) {
+  if (!ps || !ps.ps_partner_key) return null;
+  const current = (hear_about_us || '').trim();
+  if (/^referral\s*-/i.test(current)) return null;          // a human referral wins
+  const label = (identity && identity.name) || ps.ps_partner_key;
+  const next = PS_HEAR_PREFIX + label;
+  return next === current ? null : next;
+}
+
+/* Once the name resolves, replace the key-shaped placeholder — in our row and
+   in Salesforce, where the AE is actually looking. Only ever rewrites a value
+   this code wrote: a referral, or anything a human typed, is left alone. */
+async function upgradePartnerHearAboutUs({ session_id, email, ps, identity }) {
+  if (!identity || !identity.name || !ps || !ps.ps_partner_key) return;
+  const placeholder = PS_HEAR_PREFIX + ps.ps_partner_key;
+  const resolved    = PS_HEAR_PREFIX + identity.name;
+  if (placeholder === resolved) return;
+  try {
+    const { rowCount } = await pool.query(
+      `UPDATE leads SET hear_about_us = $2, updated_at = NOW()
+        WHERE session_id = $1 AND hear_about_us = $3`,
+      [session_id, resolved, placeholder]
+    );
+    if (!rowCount) return;                                   // nothing of ours to upgrade
+    console.log(`[PartnerStack] hear_about_us upgraded to "${resolved}"`);
+    syncHearAboutUsToAWS(session_id, resolved);
+    const leadId = await findSFLeadByEmail(email);
+    if (leadId) await updateSFLead(leadId, { hear_about_us__c: resolved });
+  } catch (err) {
+    console.warn('[PartnerStack] Could not upgrade hear_about_us (non-blocking):', err.message);
+  }
+}
+
+/* ── STEP 5: the signup conversion ───────────────────────────────────
+   Fires for any partner-referred lead that is not one of our own test
+   addresses. There is NO eligibility gate on this path for the MVP — rejections
+   are decided by hand at payout approval instead. The automated check exists
+   and is dormant behind PS_ELIGIBILITY_ENABLED; wiring it in here is a
+   deliberate decision for someone to make, not a tidy-up.
+
+   Deferred, like everything else on this path: called after res.json(), never
+   awaited. The lead has been written, Slack, Salesforce and Meta have all
+   fired, and nobody is waiting on an affiliate being credited.
+
+   ONCE PER DOMAIN, EVER — and the claim happens BEFORE the HTTP call, not
+   after. Checking "has this domain been sent?" and then sending is a race:
+   two submits for the same domain arriving together both read no stamp, both
+   fire, and PartnerStack credits the affiliate twice for one customer with no
+   way to undo it. So the stamp is taken first, as an atomic conditional
+   UPDATE backed by leads_ps_signup_once_idx, and only the winner sends.
+
+   If the send then fails, the claim is RELEASED so a later submit can retry.
+   The alternative — leaving the stamp on a conversion that never arrived — is
+   the worse failure: it is silent, permanent, and costs the affiliate a real
+   payout with nothing in the system saying so. */
+async function runPartnerStackSignup({ session_id, email, website, company, first_name, last_name, ps, ctx }) {
+  if (!ps || !ps.ps_xid) return;                       // not a partner lead
+  if (!ps.ps_customer_key) return;                     // no usable domain
+  if (isPartnerStackTestEmail(email)) {
+    console.log(`[PartnerStack] Skipped conversion — internal or test address: ${email}`);
+    return;
+  }
+
+  let claimed = false;
+  try {
+    /* Claim the domain. The NOT EXISTS covers the ordinary case; the unique
+       index covers the concurrent one, surfacing as a 23505 we read as
+       "somebody else already sent it". */
+    const claim = await pool.query(
+      `UPDATE leads
+          SET ps_signup_sent_at = NOW(), updated_at = NOW()
+        WHERE session_id = $1
+          AND ps_signup_sent_at IS NULL
+          AND NOT EXISTS (
+                SELECT 1 FROM leads other
+                 WHERE other.ps_customer_key = $2
+                   AND other.ps_signup_sent_at IS NOT NULL)
+        RETURNING id`,
+      [session_id, ps.ps_customer_key]
+    );
+    if (claim.rowCount === 0) {
+      console.log(`[PartnerStack] Skipped conversion — ${ps.ps_customer_key} already sent`);
+      return;
+    }
+    claimed = true;
+  } catch (err) {
+    if (err && err.code === '23505') {
+      console.log(`[PartnerStack] Skipped conversion — ${ps.ps_customer_key} claimed concurrently`);
+      return;
+    }
+    console.warn('[PartnerStack] Could not claim the domain (conversion NOT sent):', err.message);
+    recordFailure('PartnerStack', ps.ps_customer_key + ' (claim)', err.message);
+    return;
+  }
+
+  /* company first, contact name second — PartnerStack shows this to the
+     affiliate, and a company is what they recognise as the referral. */
+  const name = (company || '').trim()
+    || [first_name, last_name].map(v => (v || '').trim()).filter(Boolean).join(' ')
+    || null;
+
+  const result = await sendConversion({
+    xid: ps.ps_xid,
+    customer_key: ps.ps_customer_key,
+    email,
+    name,
+    // Fraud-detection signals. Absent rather than empty when we do not have them.
+    ip_address: ctx && ctx.ip_address,
+    user_agent: ctx && ctx.user_agent,
+    origin:     ctx && ctx.origin,
+  });
+
+  if (result.ok) {
+    console.log(`[PartnerStack] ✅ Conversion sent: ${ps.ps_customer_key} | xid=${ps.ps_xid} | ${email}`);
+    return;
+  }
+
+  // Release the claim so this domain can be retried rather than silently lost.
+  try {
+    await pool.query(
+      `UPDATE leads SET ps_signup_sent_at = NULL, updated_at = NOW() WHERE session_id = $1`,
+      [session_id]
+    );
+  } catch (err) {
+    console.error('[PartnerStack] ⚠ Conversion failed AND the claim could not be released:', err.message);
+    recordFailure('PartnerStack', ps.ps_customer_key + ' (stuck claim)', err.message);
+  }
+  console.warn(`[PartnerStack] ⛔ Conversion NOT sent (${result.reason}): ${ps.ps_customer_key}`);
+  if (result.reason !== 'no_token') {
+    recordFailure('PartnerStack', ps.ps_customer_key + ' (conversion)', result.reason + (result.body ? ' — ' + String(result.body).slice(0, 200) : ''));
+  }
+}
+
+/* ── STEP 10: the qualification action ───────────────────────────────
+   An AE ticks Qualified_Demo__c on the Opportunity after the call; we poll
+   every 15 minutes and tell PartnerStack, which is what actually triggers the
+   affiliate's commission.
+
+   A POLLER, not a Salesforce Flow callout, deliberately: a Flow that calls out
+   fails inside Salesforce where nobody on this team would ever see it, and it
+   couples an AE ticking a box to our service being up at that instant. Polling
+   means a missed window is just a later window.
+
+   DOMAIN is the join. It is the only identifier both systems share —
+   PartnerStack knows the customer by the customer_key we sent at signup, which
+   came from the lead's website. Account.Website first, the primary contact's
+   email domain as a fallback, both normalised through partnerStackCustomerKey
+   so the two sides cannot disagree about what acme.com is called.
+
+   CLAIM-FIRST and once per domain, exactly like the signup conversion, and for
+   the same reason: two poller runs overlapping, or one Opportunity per contact
+   on the same account, would otherwise pay the affiliate twice for one
+   qualification. leads_ps_qualified_once_idx makes that impossible; the claim
+   is released if the send fails so the next run retries. */
+const PS_QUALIFY_INTERVAL_MS = 15 * 60 * 1000;
+const PS_QUALIFY_ACTION_TYPE = 'qualified_demo';
+let _psQualifyRunning = false;
+
+async function runPartnerStackQualificationPoll() {
+  /* One at a time. A slow Salesforce round trip must not let a second run
+     start and race the first for the same claims. */
+  if (_psQualifyRunning) {
+    console.log('[PartnerStack] Qualification poll already running — skipping this tick');
+    return;
+  }
+  _psQualifyRunning = true;
+  try {
+    const opps = await findQualifiedDemoOpportunities();
+    if (!opps.length) return;
+
+    /* Collapse to distinct domains first. Several Opportunities can point at
+       one account, and the action is per customer, not per Opportunity. */
+    const byKey = new Map();
+    for (const o of opps) {
+      const key = partnerStackCustomerKey(o.website) || partnerStackCustomerKey(o.contactEmail);
+      if (!key) {
+        console.log(`[PartnerStack] Qualified demo with no usable domain — Opportunity ${o.id} (${o.accountName || o.name || 'unnamed'})`);
+        continue;
+      }
+      if (!byKey.has(key)) byKey.set(key, o);
+    }
+    if (!byKey.size) return;
+
+    /* Only domains we actually told PartnerStack about at signup can be
+       qualified: an action for a customer_key it has never seen is a no-op at
+       best. ps_signup_sent_at IS NOT NULL is that filter. */
+    const { rows } = await pool.query(
+      `SELECT DISTINCT ps_customer_key
+         FROM leads
+        WHERE ps_customer_key = ANY($1)
+          AND ps_signup_sent_at IS NOT NULL
+          AND ps_qualified_sent_at IS NULL`,
+      [Array.from(byKey.keys())]
+    );
+    if (!rows.length) return;
+
+    for (const r of rows) {
+      await sendQualificationForDomain(r.ps_customer_key);
+    }
+  } catch (err) {
+    console.warn('[PartnerStack] Qualification poll failed (non-blocking):', err.message);
+    recordFailure('PartnerStack', 'qualification poll', err.message);
+  } finally {
+    _psQualifyRunning = false;
+  }
+}
+
+async function sendQualificationForDomain(customerKey) {
+  let claimedSession = null;
+  try {
+    // Claim before sending — see the note above runPartnerStackSignup.
+    const claim = await pool.query(
+      `UPDATE leads
+          SET ps_qualified_sent_at = NOW(), updated_at = NOW()
+        WHERE session_id = (
+              SELECT session_id FROM leads
+               WHERE ps_customer_key = $1 AND ps_signup_sent_at IS NOT NULL
+               ORDER BY ps_signup_sent_at ASC LIMIT 1)
+          AND ps_qualified_sent_at IS NULL
+          AND NOT EXISTS (
+                SELECT 1 FROM leads o
+                 WHERE o.ps_customer_key = $1 AND o.ps_qualified_sent_at IS NOT NULL)
+        RETURNING session_id`,
+      [customerKey]
+    );
+    if (claim.rowCount === 0) return;                 // already qualified, or nothing to claim
+    claimedSession = claim.rows[0].session_id;
+  } catch (err) {
+    if (err && err.code === '23505') return;          // concurrent claim won
+    console.warn(`[PartnerStack] Could not claim ${customerKey} for qualification:`, err.message);
+    recordFailure('PartnerStack', customerKey + ' (qualify claim)', err.message);
+    return;
+  }
+
+  const result = await sendAction({
+    customer_key: customerKey,
+    type: PS_QUALIFY_ACTION_TYPE,
+    value: 1,
+  });
+
+  if (result.ok) {
+    console.log(`[PartnerStack] ✅ Qualification sent: ${customerKey}`);
+    return;
+  }
+
+  try {
+    await pool.query(
+      `UPDATE leads SET ps_qualified_sent_at = NULL, updated_at = NOW() WHERE session_id = $1`,
+      [claimedSession]
+    );
+  } catch (err) {
+    console.error(`[PartnerStack] ⚠ Qualification failed AND the claim could not be released for ${customerKey}:`, err.message);
+    recordFailure('PartnerStack', customerKey + ' (stuck qualify claim)', err.message);
+  }
+  console.warn(`[PartnerStack] ⛔ Qualification NOT sent (${result.reason}): ${customerKey}`);
+  if (result.reason !== 'no_credentials') {
+    recordFailure('PartnerStack', customerKey + ' (qualification)', result.reason + (result.body ? ' — ' + String(result.body).slice(0, 200) : ''));
+  }
+}
+
+function startPartnerStackQualificationPoll() {
+  const t = setInterval(runPartnerStackQualificationPoll, PS_QUALIFY_INTERVAL_MS);
+  if (t.unref) t.unref();
+  console.log(`[PartnerStack] Qualification poller started (every ${PS_QUALIFY_INTERVAL_MS / 60000} min)`);
+}
+
+/* Rejections are logged in one place so the format cannot drift between call
+   sites. Written to the lead row by the caller; this is the operator's view. */
+function logPartnerStackEligibility(verdict, ctx = {}) {
+  const who = ctx.email || ctx.session_id || 'unknown';
+  if (verdict.eligible) {
+    console.log(`[PartnerStack] ✅ eligible: ${who} | key=${verdict.customer_key}` +
+      (verdict.unverified ? ` | UNVERIFIED: ${verdict.unverified.join(',')}` : ''));
+  } else {
+    console.log(`[PartnerStack] ⛔ rejected: ${who} | key=${verdict.customer_key || '-'} | ` +
+      `reason=${verdict.reason} | ${verdict.detail}`);
+  }
+  return verdict;
+}
+
 /* v5.8.0 — /session used to validate the id and reply 'ok' without writing
    anything, so the first record of any visitor was /partial, AFTER they had
    typed an email. Everyone who saw the form and left was invisible, which
@@ -4930,6 +5911,16 @@ app.post('/partial', async (req, res) => {
   const step_reached       = parseInt(req.body.step_reached) || 1;
   const website_check_failed = req.body.website_check_failed === true || req.body.website_check_failed === 'true';
   const website_check_reason = (req.body.website_check_reason || '').toString().trim().slice(0, 100);
+  /* PartnerStack attribution, captured at step 1 as well as at submit.
+     The lead row is CREATED here, so a partner-referred visitor who reaches
+     step 1 and drops would otherwise have no partner on the row at all —
+     including for the drop-off recovery cron. */
+  const ps = readPartnerStackPayload(req.body, { email, website });
+  /* Step 7. peek only — never an API call here. The identity resolver runs
+     after res.json(); a brand-new partner key lands as the key and is upgraded
+     in place once the name arrives. */
+  const psHear = partnerHearAboutUs({ hear_about_us, ps, identity: peekPartnerIdentity(ps.ps_partner_key) });
+  const hearAboutUsFinal = psHear || hear_about_us;
 
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
@@ -4941,8 +5932,8 @@ app.post('/partial', async (req, res) => {
     const elv = await lookupElvStatus(email);
 
     await pool.query(`
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW(),$29,$30,$31,$32)
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW(),$29,$30,$31,$32,$33,$34,$35,$36,$37)
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -4975,12 +5966,20 @@ app.post('/partial', async (req, res) => {
         website_check_failed  = EXCLUDED.website_check_failed,
         website_check_reason  = COALESCE(EXCLUDED.website_check_reason,  leads.website_check_reason),
         elv_status            = COALESCE(EXCLUDED.elv_status,            leads.elv_status),
-        elv_checked_at        = COALESCE(EXCLUDED.elv_checked_at,        leads.elv_checked_at)
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hear_about_us||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null]);
+        elv_checked_at        = COALESCE(EXCLUDED.elv_checked_at,        leads.elv_checked_at),
+        /* COALESCE for the same reason as /submit: /partial fires repeatedly as
+           the visitor moves through step 1, and a later call with an expired
+           cookie must not wipe attribution captured by an earlier one. */
+        ps_xid                = COALESCE(EXCLUDED.ps_xid,                leads.ps_xid),
+        ps_partner_key        = COALESCE(EXCLUDED.ps_partner_key,        leads.ps_partner_key),
+        ps_customer_key       = COALESCE(EXCLUDED.ps_customer_key,       leads.ps_customer_key),
+        ps_click_at           = COALESCE(EXCLUDED.ps_click_at,           leads.ps_click_at),
+        ps_click_history      = COALESCE(EXCLUDED.ps_click_history,      leads.ps_click_history)
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null]);
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/partial] Enrichment sync failed (non-blocking):', err.message));
 
-    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false});
+    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false,...ps});
 
     // StartTrial fires ONLY for qualified (B2B) leads on BUSINESS emails —
     // free-mailbox leads (gmail/yahoo/...) are skipped so Meta optimises
@@ -5033,6 +6032,13 @@ app.post('/submit', async (req, res) => {
   const disqualified_reason = (req.body.disqualified_reason || '').toString().trim().slice(0, 100);
   const website_check_failed = req.body.website_check_failed === true || req.body.website_check_failed === 'true';
   const website_check_reason = (req.body.website_check_reason || '').toString().trim().slice(0, 100);
+  // PartnerStack attribution. Read once, stored below and mirrored to AWS.
+  const ps = readPartnerStackPayload(req.body, { email, website });
+  /* Step 7. peek only — never an API call here. The identity resolver runs
+     after res.json(); a brand-new partner key lands as the key and is upgraded
+     in place once the name arrives. */
+  const psHear = partnerHearAboutUs({ hear_about_us, ps, identity: peekPartnerIdentity(ps.ps_partner_key) });
+  const hearAboutUsFinal = psHear || hear_about_us;
 
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
@@ -5049,8 +6055,8 @@ app.post('/submit', async (req, res) => {
     const elv = await lookupElvStatus(email);
 
     await pool.query(`
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW(),$28,$29,$30,$31)
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW(),$28,$29,$30,$31,$32,$33,$34,$35,$36)
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -5085,17 +6091,25 @@ app.post('/submit', async (req, res) => {
         website_check_failed  = EXCLUDED.website_check_failed,
         website_check_reason  = COALESCE(EXCLUDED.website_check_reason,  leads.website_check_reason),
         elv_status            = COALESCE(EXCLUDED.elv_status,            leads.elv_status),
-        elv_checked_at        = COALESCE(EXCLUDED.elv_checked_at,        leads.elv_checked_at)
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hear_about_us||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null]);
+        elv_checked_at        = COALESCE(EXCLUDED.elv_checked_at,        leads.elv_checked_at),
+        /* COALESCE, not overwrite: a second submit in the same session arrives
+           with whatever cookies the browser still has. A partner cookie that
+           has since expired must not erase the attribution we already captured. */
+        ps_xid                = COALESCE(EXCLUDED.ps_xid,                leads.ps_xid),
+        ps_partner_key        = COALESCE(EXCLUDED.ps_partner_key,        leads.ps_partner_key),
+        ps_customer_key       = COALESCE(EXCLUDED.ps_customer_key,       leads.ps_customer_key),
+        ps_click_at           = COALESCE(EXCLUDED.ps_click_at,           leads.ps_click_at),
+        ps_click_history      = COALESCE(EXCLUDED.ps_click_history,      leads.ps_click_history)
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null]);
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/submit] Enrichment sync failed (non-blocking):', err.message));
 
-    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true});
+    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true,...ps});
 
     if (!alreadyCompleted) {
-      slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,elv_status:elv?.status||null,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
+      slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us:hearAboutUsFinal,ps_partner_key:ps.ps_partner_key,ps_partner_name:(peekPartnerIdentity(ps.ps_partner_key)||{}).name,ps_partner_email:(peekPartnerIdentity(ps.ps_partner_key)||{}).email,ps_click_at:ps.ps_click_at,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,elv_status:elv?.status||null,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
 
-      pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'form completed', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
+      pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,hear_about_us:hearAboutUsFinal,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'form completed', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
 
       // Meta CAPI Lead — suppressed when the website check failed (temporary
       // non-blocking mode still lets the lead through, but keeps the Lead
@@ -5118,6 +6132,12 @@ app.post('/submit', async (req, res) => {
 
     // Off the critical path on purpose — the lead is no longer waiting.
     if (!elv && !alreadyCompleted) finaliseElvVerdict({ session_id, email, website_check_reason });
+    if (!alreadyCompleted) runPartnerStackIdentity({ session_id, ps })
+      .then(identity => upgradePartnerHearAboutUs({ session_id, email, ps, identity }))
+      .catch(err => console.warn('[PartnerStack] Partner identity failed (non-blocking):', err.message));
+    if (!alreadyCompleted) runPartnerStackEligibility({ session_id, email, website, ps });
+    if (!alreadyCompleted) runPartnerStackSignup({ session_id, email, website, company, first_name, last_name, ps, ctx: readPartnerStackRequestContext(req, page_url) })
+      .catch(err => console.warn('[PartnerStack] Signup conversion failed (non-blocking):', err.message));
   } catch (err) { console.error('[/submit]', err.message); res.status(500).json({ error: 'Submit failed' }); }
 });
 
@@ -5586,6 +6606,8 @@ async function start() {
       console.log(`[GW API] Allowed origins: ${allowedOrigins.join(', ')}`);
       auditStartupConfig();
       startHeartbeat();
+      startPartnerStackCacheWarm();
+      startPartnerStackQualificationPoll();
     });
   } catch (err) { console.error('[GW API] Failed to start:', err); process.exit(1); }
 }

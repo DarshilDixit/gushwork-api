@@ -1,5 +1,5 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.7.1  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.8.0  (/demo PAGE VERSION - thru github/jsdlivr)
 
   v5.7.0 — three fixes, all "the check failed for reasons that are not
   the lead's fault":
@@ -318,6 +318,38 @@
       setHidden('utm-content', formState.utm_content);
       setHidden('utm-term', formState.utm_term);
       setHidden('referrer', formState.referrer);
+    }
+
+    /* PartnerStack affiliate attribution.
+       Cookies are set site-wide at click time, on .gushwork.ai, with a 90-day
+       window. ps_* are the canonical names; gw_ps_* are our own fallback for
+       the case where the PartnerStack script did not run. getCookie already
+       decodeURIComponent()s, which is what we want: the cookie carries the
+       DECODED partner key and the base64 form in the URL is never stored.
+
+       gw_ps_seen_at is restamped by the site-wide script whenever the click id
+       changes, so it always belongs to the click that won attribution. That is
+       the anchor the server measures its 90-day eligibility window back from.
+
+       gw_ps_clicks is every partner click this visitor made, oldest first,
+       capped at 10. It is passed through for reporting and dispute resolution
+       only — attribution reads ps_xid, the last click, and nothing else.
+       Parsed here rather than forwarded raw so a corrupt cookie costs the
+       history and not the whole submit. */
+    function capturePartnerStack() {
+      formState.ps_xid = getCookie('ps_xid') || getCookie('gw_ps_xid') || '';
+      formState.ps_partner_key = getCookie('ps_partner_key') || getCookie('gw_ps_partner_key') || '';
+      formState.click_at = getCookie('gw_ps_seen_at') || '';
+      formState.ps_click_history = null;
+      var rawClicks = getCookie('gw_ps_clicks');
+      if (rawClicks) {
+        try {
+          var parsed = JSON.parse(rawClicks);
+          if (Array.isArray(parsed) && parsed.length) formState.ps_click_history = parsed.slice(0, 10);
+        } catch (err) {
+          console.warn('[GW] Could not parse gw_ps_clicks:', err);
+        }
+      }
     }
 
     function captureMetaAttribution() {
@@ -2323,6 +2355,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initSession();
       captureUTMs();
       captureMetaAttribution();
+      capturePartnerStack();
       prefillHearAboutUs();
       saveSession();
       prefillFromURL();
@@ -2334,7 +2367,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.7.1 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '');
+      console.log('[GW] ✅ Form initialised v5.8.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

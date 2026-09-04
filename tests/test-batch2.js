@@ -227,13 +227,17 @@ function finish() {
 
   const partial = between("app.post('/partial'", "app.post('/submit'");
   ok('partial: reads the stored verdict', /await lookupElvStatus\(email\)/.test(partial));
-  ok('partial: writes elv_status into the row', /elv_status,elv_checked_at\)/.test(partial));
+  /* [,)] not just ): the pair has to be present and adjacent in the column
+     list, but it no longer has to END it — the PartnerStack columns follow. */
+  ok('partial: writes elv_status into the row', /elv_status,elv_checked_at[,)]/.test(partial));
   ok('partial: never overwrites a stored verdict with a blank',
      /elv_status\s+= COALESCE\(EXCLUDED\.elv_status,\s+leads\.elv_status\)/.test(partial));
 
   const submit = between("app.post('/submit'", "app.post('/booking-confirmed'");
   ok('submit: reads the stored verdict', /await lookupElvStatus\(email\)/.test(submit));
-  ok('submit: writes elv_status into the row', /elv_status,elv_checked_at\)/.test(submit));
+  /* [,)] not just ): the pair has to be present and adjacent in the column
+     list, but it no longer has to END it — the PartnerStack columns follow. */
+  ok('submit: writes elv_status into the row', /elv_status,elv_checked_at[,)]/.test(submit));
   ok('submit: COALESCE-guarded like every other column',
      /elv_status\s+= COALESCE\(EXCLUDED\.elv_status,\s+leads\.elv_status\)/.test(submit));
   ok('submit: evaluates the flag', /alertUnverifiablePair\(\{ email, elv_status: elv\?\.status, website_check_reason \}\)/.test(submit));
@@ -267,8 +271,17 @@ function finish() {
     const highest = Math.max(...(body.match(/\$(\d+)/g) || []).map((s) => +s.slice(1)));
     eq(`${name}: INSERT column count matches the VALUES list`, values.length, cols.length);
     eq(`${name}: highest placeholder matches the params array length`, params.length, highest);
-    ok(`${name}: elv columns are the last two, in order`,
-       cols.slice(-2).join(',') === 'elv_status,elv_checked_at', cols.slice(-2).join(','));
+    /* elv_status and elv_checked_at must stay ADJACENT and in that order,
+       because they are bound to two consecutive placeholders — swap them and
+       a timestamp lands in the status column. This used to assert they were
+       the LAST two, which was the same thing only for as long as nothing else
+       was ever appended; the PartnerStack columns (v5.8.0) are now after them.
+       Position was never the property worth protecting, pairing was, and the
+       two arity assertions above cover the count. */
+    const elvAt = cols.indexOf('elv_status');
+    ok(`${name}: elv columns are present, adjacent and in order`,
+       elvAt !== -1 && cols[elvAt + 1] === 'elv_checked_at',
+       cols.slice(Math.max(0, elvAt), elvAt + 2).join(','));
   });
 
   // The re-check only ever returns something conclusive, and records its own

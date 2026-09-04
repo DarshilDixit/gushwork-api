@@ -84,6 +84,7 @@ const REQUIRED_FNS = [
   ['damerauLevenshtein',      'shared edit-distance helper'],
   ['isValidEmail',            'shared validator'],
   ['isValidURL',              'shared validator'],
+  ['capturePartnerStack',     'PartnerStack cookie capture (v5.8.0)'],
 ];
 const REQUIRED_CONSTS = [
   ['SERVER_DNS_DECISIVE',    'server DNS fallback (v5.7.0)'],
