@@ -191,6 +191,12 @@ async function initAWSTable() {
         ps_click_history        JSONB,
         ps_signup_sent_at       TIMESTAMPTZ,
         ps_signup_verified_at   TIMESTAMPTZ,
+        ps_signup_skipped_reason TEXT,
+        ps_signup_skipped_at    TIMESTAMPTZ,
+        ps_signup_failed_at     TIMESTAMPTZ,
+        ps_signup_fail_reason   TEXT,
+        ps_qualify_failed_at    TIMESTAMPTZ,
+        ps_qualify_fail_reason  TEXT,
         ps_qualified_sent_at    TIMESTAMPTZ,
         created_at              TIMESTAMPTZ DEFAULT NOW(),
         updated_at              TIMESTAMPTZ DEFAULT NOW()
@@ -244,6 +250,12 @@ async function initAWSTable() {
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_click_history JSONB`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_signup_sent_at TIMESTAMPTZ`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_signup_verified_at TIMESTAMPTZ`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_signup_skipped_reason TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_signup_skipped_at TIMESTAMPTZ`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_signup_failed_at TIMESTAMPTZ`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_signup_fail_reason TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_qualify_failed_at TIMESTAMPTZ`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_qualify_fail_reason TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_qualified_sent_at TIMESTAMPTZ`,
     ];
 
@@ -2693,6 +2705,9 @@ app.get('/monitor', (req, res) => {
   '.pslost{color:#aaa}' +
   '.pswon{font-weight:600}' +
   '.psna{color:#999}' +
+  '.pschip{display:inline-block;font-size:10px;font-weight:600;padding:2px 7px;border-radius:4px;background:#eef;color:#334;margin:2px 4px 2px 0;white-space:nowrap}' +
+  '.pschip.bad{background:#fee2e2;color:#b91c1c}' +
+  '.psattn{color:#b91c1c}' +
   '.efv{font-size:12px;color:#1a1a1a;word-break:break-word}.efv a{color:#2563eb;text-decoration:none}' +
   '.pg{display:flex;align-items:center;gap:8px;justify-content:center;padding:16px 0;flex-wrap:wrap}' +
   '.pb{padding:5px 12px;border:1px solid #e5e5e5;border-radius:6px;background:#fff;cursor:pointer;font-size:12px;color:#333}' +
@@ -2783,6 +2798,8 @@ app.get('/monitor', (req, res) => {
   '</div>' +
   '<div class="tp" id="tp-partners">' +
   '<div class="mgrid">' +
+  '<div class="mc" title="Partner domains in a FAILED lifecycle state \u2014 a conversion or a qualification that did not land. This is the only number here that means someone has to do something today. Sums the two red states of the lifecycle ladder."><div class="ml">Needs attention</div><div class="mv" id="p-attn">&#8212;</div><div class="ms" id="p-attn-sub">failed conversions or qualifications</div></div>' +
+  '<div class="mc" title="Every partner-sourced domain, in exactly one lifecycle state. The states always sum to this total."><div class="ml">Partner domains</div><div class="mv" id="p-domains">&#8212;</div><div class="ms" id="p-states">&#8212;</div></div>' +
   '<div class="mc" title="Distinct people (deduped by lower(email)) who arrived on a partner link."><div class="ml">Partner leads</div><div class="mv" id="p-leads">&#8212;</div><div class="ms" id="p-leads24">&#8212;</div></div>' +
   '<div class="mc" title="Distinct customer DOMAINS with a conversion sent. Per domain, not per person &#8212; PartnerStack counts one conversion per customer key, ever."><div class="ml">Conversions sent</div><div class="mv" id="p-conv">&#8212;</div><div class="ms">domains, one per customer</div></div>' +
   '<div class="mc" title="Distinct customer DOMAINS with a qualified_demo action sent. This is the event that pays the affiliate."><div class="ml">Qualified demos fired</div><div class="mv" id="p-qual">&#8212;</div><div class="ms">domains, one per customer</div></div>' +
@@ -3129,6 +3146,22 @@ app.get('/monitor', (req, res) => {
   'if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();var t=d.totals||{};' +
   'set("p-leads",t.leads);set("p-leads24",(t.leads24h||0)+" in the last 24h");' +
   'set("p-conv",t.conversions);set("p-qual",t.qualified);set("p-booked",t.booked);' +
+  /* The ladder. Every figure here is a sum of ONE column, so the chips always
+     add up to the domain total and cannot disagree with the cards above. */
+  'var lc=d.lifecycle||{};var bs=lc.byState||{};var failed=lc.failedStates||[];' +
+  'var attn=document.getElementById("p-attn");' +
+  'if(attn){attn.textContent=String(lc.needsAttention||0);attn.className="mv"+((lc.needsAttention||0)>0?" psattn":"");}' +
+  'set("p-attn-sub",(lc.needsAttention||0)>0?"act on these today":"nothing failing");' +
+  'set("p-domains",lc.totalDomains||0);' +
+  'var order=["qualified","qualification_failed","conversion_failed","demo_done_not_qualified","awaiting_demo","converted","skipped","conversion_pending"];' +
+  'var lbl={qualified:"qualified",qualification_failed:"qualification failed",conversion_failed:"conversion failed",demo_done_not_qualified:"demo done, not qualified",awaiting_demo:"awaiting demo",converted:"converted",skipped:"skipped",conversion_pending:"pending"};' +
+  'var chips=order.filter(function(k){return bs[k];}).map(function(k){' +
+  'return "<span class=\'pschip"+(failed.indexOf(k)>=0?" bad":"")+"\'>"+bs[k]+" "+lbl[k]+"</span>";}).join("");' +
+  /* The unit seam, stated on screen rather than left in a comment: everything
+     else on this tab counts COMPANIES, this one counts leads, because a lead
+     with no usable domain cannot be keyed by one. */
+  'if(lc.noCustomerKeyLeads)chips+="<span class=\'pschip\' title=\'Counted as LEADS, not companies \\u2014 these have no usable domain to key by, so they cannot appear in the domain states above.\'>"+lc.noCustomerKeyLeads+" no customer key (leads, not companies)</span>";' +
+  'var se=document.getElementById("p-states");if(se)se.innerHTML=chips||"no partner domains yet";' +
   /* A rate over zero leads is not 0%, it is undefined — show a dash. */
   'set("p-rate",(t.bookingRate===null||t.bookingRate===undefined)?"—":(t.bookingRate+"%"));' +
   'partnerRows=d.partners||[];renderPartners();' +
@@ -5680,6 +5713,76 @@ const PS_META_WEBSITE = 'website';
 const PS_META_PHONE   = 'phone';
 const PS_CONVERSION_META_FIELDS = [PS_META_COMPANY, PS_META_WEBSITE, PS_META_PHONE];
 
+/* ── Recording WHY a conversion or qualification did not happen ───────
+   A SKIP is usually correct behaviour — a test address, a disqualified lead.
+   A FAILURE is money not being paid. Before these were stored the two were
+   indistinguishable on screen: both rendered as "not sent", and today's 400
+   on the qualification wrote nothing anywhere at all.
+
+   Every write is best-effort. None of this is on a lead's critical path and a
+   failure to record a failure must not become a second failure. */
+async function recordPartnerStackSkip(session_id, reason) {
+  try {
+    await pool.query(
+      `UPDATE leads
+          SET ps_signup_skipped_reason = $2, ps_signup_skipped_at = NOW(), updated_at = NOW()
+        WHERE session_id = $1`,
+      [session_id, reason]
+    );
+  } catch (err) {
+    console.warn('[PartnerStack] Could not record skip reason (non-blocking):', err.message);
+  }
+}
+
+/* Stamped where the claim is RELEASED, so the two always move together: a
+   released claim without a recorded reason is exactly the invisible state
+   this batch exists to remove.
+
+   Alerts immediately rather than waiting for someone to read a dashboard.
+   Today's 400 was invisible because nobody was watching, and a state you have
+   to remember to check is half a fix. alertOps de-duplicates on
+   severity:source:title with a 3h cooldown for critical, so a systemic outage
+   sends one alert naming the scale rather than one per lead. */
+async function recordPartnerStackFailure(kind, { session_id, customer_key, email, reason, detail }) {
+  const isSignup = kind === 'signup';
+  const cols = isSignup
+    ? 'ps_signup_failed_at = NOW(), ps_signup_fail_reason = $2'
+    : 'ps_qualify_failed_at = NOW(), ps_qualify_fail_reason = $2';
+  try {
+    await pool.query(
+      `UPDATE leads SET ${cols}, updated_at = NOW() WHERE session_id = $1`,
+      [session_id, String(reason || 'unknown').slice(0, 200)]
+    );
+  } catch (err) {
+    console.warn('[PartnerStack] Could not record failure reason (non-blocking):', err.message);
+  }
+  alertOps('critical', 'PartnerStack',
+    isSignup ? 'Conversion failed — affiliate not credited'
+             : 'Qualification failed — the $50 did not fire',
+    {
+      'Domain':  customer_key || '(unknown)',
+      'Email':   email || '(unknown)',
+      'Reason':  reason || 'unknown',
+      'Detail':  (detail || '').toString().slice(0, 300) || '—',
+      'Impact':  isSignup
+        ? 'PartnerStack does not know this customer exists, so the qualification can never fire either. The claim has been released, so a later submit from this domain will retry.'
+        : 'The commission for this customer has not been recorded. The claim has been released, so the next poll will retry.',
+    });
+}
+
+/* Cleared whenever the matching step later succeeds, so a domain that failed
+   once and recovered does not sit in a red state forever. */
+async function clearPartnerStackFailure(kind, session_id) {
+  const cols = kind === 'signup'
+    ? 'ps_signup_failed_at = NULL, ps_signup_fail_reason = NULL, ps_signup_skipped_reason = NULL, ps_signup_skipped_at = NULL'
+    : 'ps_qualify_failed_at = NULL, ps_qualify_fail_reason = NULL';
+  try {
+    await pool.query(`UPDATE leads SET ${cols}, updated_at = NOW() WHERE session_id = $1`, [session_id]);
+  } catch (err) {
+    console.warn('[PartnerStack] Could not clear failure reason (non-blocking):', err.message);
+  }
+}
+
 /* ── STEP 5: the signup conversion ───────────────────────────────────
    Fires for any partner-referred lead that is not one of our own test
    addresses. There is NO eligibility gate on this path for the MVP — rejections
@@ -5722,15 +5825,18 @@ async function runPartnerStackSignup({ session_id, email, website, company, phon
      have drifted apart before. This makes it a guard. */
   if (disqualified) {
     console.log(`[PartnerStack] Skipped conversion — lead is disqualified: ${email}`);
+    await recordPartnerStackSkip(session_id, 'disqualified');
     return;
   }
 
   if (!ps.ps_customer_key) {
     console.log(`[PartnerStack] Skipped conversion — no usable company domain: ${email}`);
+    await recordPartnerStackSkip(session_id, 'no_customer_key');
     return;
   }
   if (isPartnerStackTestEmail(email)) {
     console.log(`[PartnerStack] Skipped conversion — internal or test address: ${email}`);
+    await recordPartnerStackSkip(session_id, 'test_email');
     return;
   }
 
@@ -5753,6 +5859,7 @@ async function runPartnerStackSignup({ session_id, email, website, company, phon
     );
     if (claim.rowCount === 0) {
       console.log(`[PartnerStack] Skipped conversion — ${ps.ps_customer_key} already sent`);
+      await recordPartnerStackSkip(session_id, 'already_sent');
       return;
     }
     claimed = true;
@@ -5801,6 +5908,7 @@ async function runPartnerStackSignup({ session_id, email, website, company, phon
 
   if (result.ok) {
     console.log(`[PartnerStack] ✅ Conversion sent: ${ps.ps_customer_key} | xid=${ps.ps_xid} | ${email}`);
+    await clearPartnerStackFailure('signup', session_id);
     return;
   }
 
@@ -5817,6 +5925,13 @@ async function runPartnerStackSignup({ session_id, email, website, company, phon
   console.warn(`[PartnerStack] ⛔ Conversion NOT sent (${result.reason}): ${ps.ps_customer_key}`);
   if (result.reason !== 'no_token') {
     recordFailure('PartnerStack', ps.ps_customer_key + ' (conversion)', result.reason + (result.body ? ' — ' + String(result.body).slice(0, 200) : ''));
+    /* Recorded AFTER the release above, never instead of it. The release is
+       what kept hello.com retryable when the qualification 400'd; this only
+       adds the reason and the alert on top of it. */
+    await recordPartnerStackFailure('signup', {
+      session_id, customer_key: ps.ps_customer_key, email,
+      reason: result.reason, detail: result.body,
+    });
   }
 }
 
@@ -5900,6 +6015,10 @@ async function runPartnerStackConversionVerify() {
       ).catch(err => console.error('[PartnerStack] ⚠ Could not release the claim:', err.message));
       recordFailure('PartnerStack', r.ps_customer_key + ' (phantom conversion)',
         'PartnerStack returned 200 but no customer was created. Claim released so it can retry.');
+      await recordPartnerStackFailure('signup', {
+        session_id: r.session_id, customer_key: r.ps_customer_key, email: r.email,
+        reason: 'phantom_200', detail: 'PartnerStack answered 200 but no customer exists',
+      });
     }
   } catch (err) {
     console.warn('[PartnerStack] Conversion verify sweep failed (non-blocking):', err.message);
@@ -6024,6 +6143,7 @@ async function sendQualificationForDomain(customerKey) {
 
   if (result.ok) {
     console.log(`[PartnerStack] ✅ Qualification sent: ${customerKey}`);
+    await clearPartnerStackFailure('qualify', claimedSession);
     return;
   }
 
@@ -6039,6 +6159,13 @@ async function sendQualificationForDomain(customerKey) {
   console.warn(`[PartnerStack] ⛔ Qualification NOT sent (${result.reason}): ${customerKey}`);
   if (result.reason !== 'no_credentials') {
     recordFailure('PartnerStack', customerKey + ' (qualification)', result.reason + (result.body ? ' — ' + String(result.body).slice(0, 200) : ''));
+    /* Recorded after the release above. This is the case that was completely
+       invisible: a 400 released the claim correctly and nothing anywhere said
+       the $50 had not fired. */
+    await recordPartnerStackFailure('qualify', {
+      session_id: claimedSession, customer_key: customerKey,
+      reason: result.reason, detail: result.body,
+    });
   }
 }
 
@@ -6177,6 +6304,98 @@ async function partnerRevenueGaps() {
 
    Booked uses COALESCE(booked_at, created_at) per CLAUDE.md — comparing a null
    booked_at yields null and the row silently drops out of the count. */
+/* ── THE PARTNERSTACK LIFECYCLE LADDER ───────────────────────────────
+   One state per partner DOMAIN, mutually exclusive and exhaustive, resolved
+   in the order below. Every counter on the tab is a COUNT FILTER over this one
+   column, so they cannot disagree with each other — the same reason the lead
+   stage ladder exists. See the Definitions section of CLAUDE.md.
+
+   Keyed by DOMAIN because that is the unit PartnerStack pays on: one
+   conversion and one qualification per customer key, ever. Leads with no
+   usable domain cannot be keyed that way and are counted SEPARATELY, as
+   leads, and the UI says so — mixing a lead count into a domain count is
+   exactly the arithmetic that made the old counters irreconcilable.
+
+   RESOLUTION ORDER, and why it is not simply the progression order:
+
+     1 qualified              terminal success
+     2 qualification_failed   failed, and not since qualified
+     3 conversion_failed      failed, and NOT since converted
+     4 demo_done_not_qualified
+     5 awaiting_demo
+     6 converted
+     7 skipped
+     8 conversion_pending     nothing has happened yet
+
+   A success always outranks its OWN failure, because a domain that failed and
+   later succeeded is fine — and the failure stamps are cleared on success
+   anyway, so this is belt and braces. But an UNRESOLVED conversion failure
+   outranks every later stage it blocks: a domain whose conversion never landed
+   can never be qualified, so showing it as "awaiting demo" would hide the one
+   fact worth acting on. That is the case that was invisible today.
+
+   A domain matching two states therefore takes the FIRST match in this order,
+   never a blend, and the eight always sum to the domain total. */
+const PS_LADDER_SQL = `
+  CASE
+    WHEN BOOL_OR(ps_qualified_sent_at IS NOT NULL)                          THEN 'qualified'
+    WHEN BOOL_OR(ps_qualify_failed_at IS NOT NULL)                          THEN 'qualification_failed'
+    WHEN BOOL_OR(ps_signup_failed_at IS NOT NULL)
+     AND NOT BOOL_OR(ps_signup_sent_at IS NOT NULL)                         THEN 'conversion_failed'
+    WHEN MIN(CASE WHEN start_time ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
+                  THEN start_time::timestamptz END) < NOW()                 THEN 'demo_done_not_qualified'
+    WHEN BOOL_OR(booking_uid IS NOT NULL)                                   THEN 'awaiting_demo'
+    WHEN BOOL_OR(ps_signup_sent_at IS NOT NULL)                             THEN 'converted'
+    WHEN BOOL_OR(ps_signup_skipped_reason IS NOT NULL)                      THEN 'skipped'
+    ELSE 'conversion_pending'
+  END`;
+
+/* The two red states. Summed into one "Needs attention" number, which is the
+   only figure on the tab that means someone has to do something today. */
+const PS_LADDER_FAILED = ['conversion_failed', 'qualification_failed'];
+
+async function partnerLifecycle() {
+  const [domains, noKey] = await Promise.all([
+    pool.query(`
+      SELECT ps_customer_key                    AS customer_key,
+             ${PS_LADDER_SQL}                   AS state,
+             MAX(ps_partner_key)                AS partner_key,
+             MAX(ps_partner_name)               AS partner_name,
+             MAX(ps_partner_email)              AS partner_email,
+             MAX(email)                         AS email,
+             MAX(ps_signup_fail_reason)         AS signup_fail_reason,
+             MAX(ps_qualify_fail_reason)        AS qualify_fail_reason,
+             MAX(ps_signup_skipped_reason)      AS skipped_reason,
+             BOOL_OR(ps_signup_verified_at IS NOT NULL) AS signup_verified,
+             MAX(created_at)                    AS last_seen
+        FROM leads
+       WHERE ps_xid IS NOT NULL AND ps_customer_key IS NOT NULL
+       GROUP BY ps_customer_key
+       ORDER BY MAX(created_at) DESC
+       LIMIT 500`),
+    /* Counted as LEADS, not domains — there is no domain to key them by.
+       Reported separately so the domain counts stay one honest unit. */
+    pool.query(`
+      SELECT COUNT(*) AS leads
+        FROM leads
+       WHERE ps_xid IS NOT NULL AND ps_customer_key IS NULL`),
+  ]);
+
+  const byState = {};
+  for (const r of domains.rows) byState[r.state] = (byState[r.state] || 0) + 1;
+  const needsAttention = PS_LADDER_FAILED.reduce((n, k) => n + (byState[k] || 0), 0);
+
+  return {
+    domains: domains.rows,
+    byState,
+    totalDomains: domains.rows.length,
+    needsAttention,
+    /* Deliberately its own field and its own unit. */
+    noCustomerKeyLeads: Number(noKey.rows[0].leads) || 0,
+    failedStates: PS_LADDER_FAILED,
+  };
+}
+
 async function partnerOverview() {
   const [totals, rows] = await Promise.all([
     pool.query(`
@@ -6234,7 +6453,8 @@ app.get('/monitor/partners', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    res.json(await partnerOverview());
+    const [overview, lifecycle] = await Promise.all([partnerOverview(), partnerLifecycle()]);
+    res.json({ ...overview, lifecycle });
   } catch (err) {
     console.error('[/monitor/partners]', err.message);
     res.status(500).json({ error: 'Partner overview query failed', detail: err.message });

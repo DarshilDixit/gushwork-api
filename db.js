@@ -408,6 +408,26 @@ async function initDB() {
          PartnerStack answered 200 with an empty body. Null while unverified;
          the sweep in index.js fills it or releases the claim. */
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_verified_at TIMESTAMPTZ`,
+      /* WHY a conversion did not fire, recorded at the moment we decide.
+         Deliberately NOT ps_ineligible_reason: that means "the eligibility
+         check rejected this", and the two will be confused the moment
+         eligibility is switched on. A skip is usually correct behaviour
+         (test address, disqualified); a FAILURE is money not being paid, and
+         the dashboard has to tell them apart. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_skipped_reason TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_skipped_at TIMESTAMPTZ`,
+      /* The two failure paths. Before these, today's 400 on the qualification
+         wrote nothing anywhere: the claim released correctly and the dashboard
+         showed a 0 that looked identical to "no demo has happened yet". */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_failed_at TIMESTAMPTZ`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_fail_reason TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_qualify_failed_at TIMESTAMPTZ`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_qualify_fail_reason TEXT`,
+      /* The lifecycle ladder groups by domain and filters on the failure
+         stamps; both are read on every dashboard load. */
+      `CREATE INDEX IF NOT EXISTS leads_ps_failed_idx
+         ON leads (ps_customer_key)
+         WHERE ps_signup_failed_at IS NOT NULL OR ps_qualify_failed_at IS NOT NULL`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_qualified_sent_at TIMESTAMPTZ`,
       /* The eligibility verdict, stamped on the lead row.
          We are contractually required to tell an affiliate why a referral was
