@@ -83,6 +83,21 @@ function lift(s, decl) {
   }
   throw new Error('unbalanced: ' + decl);
 }
+/* Lift a const whose value is a TEMPLATE LITERAL. The brace/bracket matcher
+   cannot be used here: PS_LADDER_SQL contains a regex with [0-9]{4} in it, so
+   bracket matching truncates the SQL mid-statement and the eval fails
+   somewhere unrelated. Match the backticks instead. */
+function liftTemplate(s, decl) {
+  const i = s.indexOf('\n' + decl);
+  if (i === -1) throw new Error('not found: ' + decl);
+  const open = s.indexOf('`', i);
+  const close = s.indexOf('`', open + 1);
+  if (open === -1 || close === -1) throw new Error('unterminated template: ' + decl);
+  let end = close + 1;
+  while (end < s.length && s[end] !== '\n') end++;
+  return s.slice(i + 1, end);
+}
+
 function liftLine(s, decl) {
   const i = s.indexOf('\n' + decl);
   if (i === -1) throw new Error('not found: ' + decl);
@@ -986,6 +1001,181 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        /const val = \(v === null \|\| v === undefined\) \? '' : String\(v\)\.trim\(\);/.test(fn) &&
        /if \(val\) metaClean\[k\] = val\.slice\(0, 500\);/.test(fn));
   }
+
+  /* ── Batch A: the lifecycle ladder, skip/failure reasons, alerting ── */
+  for (const [c, t] of [['ps_signup_skipped_reason','TEXT'],['ps_signup_skipped_at','TIMESTAMPTZ'],
+                        ['ps_signup_failed_at','TIMESTAMPTZ'],['ps_signup_fail_reason','TEXT'],
+                        ['ps_qualify_failed_at','TIMESTAMPTZ'],['ps_qualify_fail_reason','TEXT']]) {
+    ok(`ladderA: leads.${c} declared as ${t}`,
+       new RegExp(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS ${c} ${t}`).test(dbjs));
+    ok(`ladderA: gw_form_leads.${c} declared`,
+       new RegExp(`ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ${c} ${t}`).test(src));
+  }
+  /* Separate from ps_ineligible_reason on purpose: that means "eligibility
+     rejected this", and conflating them once eligibility is on would make a
+     correct skip indistinguishable from a rejection. */
+  ok('ladderA: skip reason is NOT overloaded onto ps_ineligible_reason',
+     !/ps_ineligible_reason\s*=\s*\$2/.test(src.slice(src.indexOf('async function recordPartnerStackSkip'),
+                                                     src.indexOf('async function recordPartnerStackFailure'))));
+
+  /* The ladder: order, exclusivity, and the unit seam. */
+  {
+    const l = src.slice(src.indexOf('const PS_LADDER_SQL'), src.indexOf('const PS_LADDER_FAILED'));
+    const order = [...l.matchAll(/THEN '([a-z_]+)'/g)].map(m => m[1]);
+    eq('ladderA: resolution order is failure-aware, not plain progression', order,
+       ['qualified','qualification_failed','conversion_failed','demo_done_not_qualified',
+        'awaiting_demo','converted','skipped']);
+    ok('ladderA: there is an exhaustive ELSE so every domain lands somewhere',
+       /ELSE 'conversion_pending'/.test(l));
+    /* A success outranks its OWN failure... */
+    ok('ladderA: qualified outranks qualification_failed',
+       order.indexOf('qualified') < order.indexOf('qualification_failed'));
+    /* ...but an UNRESOLVED conversion failure outranks the stages it blocks,
+       or a domain that can never be qualified shows as "awaiting demo". */
+    ok('ladderA: an unresolved conversion failure outranks awaiting_demo',
+       order.indexOf('conversion_failed') < order.indexOf('awaiting_demo'));
+    ok('ladderA: conversion_failed only fires when NOT since converted',
+       /ps_signup_failed_at IS NOT NULL\)\s*\n\s*AND NOT BOOL_OR\(ps_signup_sent_at IS NOT NULL\)/.test(l));
+    /* start_time is TEXT — a bare cast takes the query down on one bad row. */
+    ok('ladderA: the start_time cast is CASE-guarded',
+       /CASE WHEN start_time ~ '\^\[0-9\]\{4\}/.test(l));
+  }
+  {
+    const fn = src.slice(src.indexOf('async function partnerLifecycle'), src.indexOf('async function partnerOverview'));
+    ok('ladderA: keyed by DOMAIN', /GROUP BY ps_customer_key/.test(fn));
+    ok('ladderA: only partner-sourced leads', /ps_xid IS NOT NULL AND ps_customer_key IS NOT NULL/.test(fn));
+    /* Bounded so it does not scan every partner lead ever — but the bound must
+       never hide a failure, or a domain that failed months ago and was never
+       fixed drops out of "Needs attention", the one number that has to be
+       complete. */
+    ok('ladderA: the query is date-bounded', /INTERVAL '\$\{PS_LADDER_WINDOW_D\} days'/.test(fn));
+    ok('ladderA: an unresolved failure is included regardless of age',
+       /OR ps_signup_failed_at IS NOT NULL\s*\n\s*OR ps_qualify_failed_at IS NOT NULL\)/.test(fn));
+    ok('ladderA: the window matches the Salesforce lookback',
+       /const PS_LADDER_WINDOW_D = 180;/.test(src));
+    /* The unit seam: leads with no domain cannot be keyed by one, so they are
+       counted as LEADS in their own field rather than folded into a domain
+       count. */
+    ok('ladderA: no-customer-key leads are counted separately, as leads',
+       /ps_xid IS NOT NULL AND ps_customer_key IS NULL/.test(fn) && /noCustomerKeyLeads/.test(fn));
+    /* EXECUTED. Asserting the field name exists passes even when the value is
+       hardcoded to 0 — a mutation survived on exactly that, which would hide
+       the unit seam rather than surface it. */
+    {
+      const calls = [];
+      const fakePool = { query: async (q) => {
+        calls.push(q);
+        return q.includes('ps_customer_key IS NULL')
+          ? { rows: [{ leads: '7' }] }
+          : { rows: [
+              { customer_key: 'a.com', state: 'qualified' },
+              { customer_key: 'b.com', state: 'conversion_failed' },
+              { customer_key: 'c.com', state: 'qualification_failed' },
+              { customer_key: 'd.com', state: 'skipped' }] };
+      } };
+      const L = (new Function('pool', 'console',
+        liftLine(src, 'const PS_LADDER_FAILED =') + '\n' +
+        liftLine(src, 'const PS_LADDER_WINDOW_D =') + '\n' +
+        liftTemplate(src, 'const PS_LADDER_SQL =') + '\n' +
+        lift(src, 'async function partnerLifecycle(') +
+        '\n return partnerLifecycle;'))(fakePool, { warn() {}, log() {} });
+      const out = await L();
+      eq('ladderA: no-key leads reach the response with their real count', out.noCustomerKeyLeads, 7);
+      eq('ladderA: needsAttention counts exactly the two red states', out.needsAttention, 2);
+      eq('ladderA: totalDomains counts domains, not leads', out.totalDomains, 4);
+      eq('ladderA: the state counts sum to the domain total',
+         Object.values(out.byState).reduce((a, b) => a + b, 0), out.totalDomains);
+      ok('ladderA: no-key leads are NOT folded into the domain total',
+         out.totalDomains === 4 && out.noCustomerKeyLeads === 7);
+    }
+    ok('ladderA: needsAttention sums only the red states',
+       /PS_LADDER_FAILED\.reduce/.test(fn));
+    eq('ladderA: exactly two red states',
+       (/const PS_LADDER_FAILED = \[([^\]]+)\]/.exec(src)[1].match(/'/g) || []).length / 2, 2);
+  }
+  ok('ladderA: the ladder is exposed on /monitor/partners',
+     /partnerOverview\(\), partnerLifecycle\(\)/.test(src));
+  ok('ladderA: the unit seam is stated in the UI, not just in comments',
+     /no customer key \(leads, not companies\)/.test(src));
+
+  /* The one-off backfill. Two historical rows would otherwise render in the
+     WRONG state on day one — test.com grey when its conversion really was a
+     phantom, which is the exact bug this batch fixes. */
+  {
+    const bf = dbjs.slice(dbjs.indexOf('ONE-OFF BACKFILL'), dbjs.indexOf('console.log(\'[DB] Tables ready\')'));
+    ok('backfill: test.com is marked as a phantom conversion failure',
+       /ps_customer_key = 'test\.com'[\s\S]{0,300}?ps_signup_fail_reason = 'phantom_200'/.test(bf) ||
+       /ps_signup_fail_reason = 'phantom_200'[\s\S]{0,300}?ps_customer_key = 'test\.com'/.test(bf));
+    ok('backfill: gushwork.ai is marked as a test-address skip',
+       /ps_signup_skipped_reason = 'test_email'[\s\S]{0,300}?ps_customer_key = 'gushwork\.ai'/.test(bf));
+    /* Idempotent by construction, not by a ledger: it can only touch rows
+       where the target is still NULL, nothing has since been sent, and the row
+       predates the cutoff. So a genuine later lead from either domain is
+       untouched and a reboot cannot re-fire it. */
+    ok('backfill: only fires where the target column is still NULL',
+       /ps_signup_failed_at IS NULL/.test(bf) && /ps_signup_skipped_reason IS NULL/.test(bf));
+    ok('backfill: never overwrites a domain that has since converted',
+       (bf.match(/ps_signup_sent_at IS NULL/g) || []).length === 2);
+    ok('backfill: bounded to rows predating the cutoff',
+       (bf.match(/created_at < \$\{CUTOFF\}/g) || []).length === 2);
+    /* Honest timestamps rather than NOW(): the release moment for the phantom,
+       the submit time for the skip. */
+    ok('backfill: the phantom uses the claim-release time, not NOW()',
+       /ps_signup_failed_at   = updated_at/.test(bf) && !/ps_signup_failed_at\s*=\s*NOW\(\)/.test(bf));
+    ok('backfill: the skip uses the submit time, not NOW()',
+       /ps_signup_skipped_at     = created_at/.test(bf));
+    /* initDB throwing exits the process; a cosmetic backfill must not be able
+       to take the service down. */
+    ok('backfill: wrapped so it cannot kill boot',
+       /catch \(err\)[\s\S]{0,120}?backfill failed \(non-fatal\)/.test(bf));
+  }
+
+  /* Alerting — the reason today's 400 was invisible is that nobody was
+     watching, so the state alone is half a fix. */
+  {
+    const fn = src.slice(src.indexOf('async function recordPartnerStackFailure'),
+                         src.indexOf('async function clearPartnerStackFailure'));
+    ok('alertA: a failure alerts Slack immediately', /alertOps\('critical', 'PartnerStack'/.test(fn));
+    ok('alertA: the qualification alert names the money', /the \$50 did not fire/.test(fn));
+    ok('alertA: the alert says the claim was released and it will retry',
+       /claim has been released/.test(fn));
+    ok('alertA: both kinds write their own column pair',
+       /ps_signup_failed_at = NOW\(\), ps_signup_fail_reason = \$2/.test(fn) &&
+       /ps_qualify_failed_at = NOW\(\), ps_qualify_fail_reason = \$2/.test(fn));
+    ok('alertA: recording a failure can never throw into the caller',
+       /catch \(err\)[\s\S]{0,160}?non-blocking/.test(fn));
+  }
+
+  /* THE REGRESSION THAT MATTERS: the claim release is what kept hello.com
+     retryable when the qualification 400'd. Recording must be additive. */
+  {
+    const sig = src.slice(src.indexOf('async function runPartnerStackSignup'), src.indexOf('/* ── READ-BACK'));
+    const rel = sig.indexOf('ps_signup_sent_at = NULL');
+    const rec = sig.indexOf("recordPartnerStackFailure('signup'");
+    ok('regression: the signup claim release still exists', rel !== -1);
+    ok('regression: the failure is recorded AFTER the release, not instead of it', rel < rec);
+    const qual = src.slice(src.indexOf('async function sendQualificationForDomain'),
+                           src.indexOf('function startPartnerStackQualificationPoll'));
+    const qrel = qual.indexOf('ps_qualified_sent_at = NULL');
+    const qrec = qual.indexOf("recordPartnerStackFailure('qualify'");
+    ok('regression: the qualification claim release still exists', qrel !== -1);
+    ok('regression: qualification failure recorded AFTER the release', qrel < qrec);
+    ok('regression: the claim is still taken BEFORE the send',
+       qual.indexOf('ps_qualified_sent_at = NOW()') < qual.indexOf('await sendAction('));
+  }
+  /* A domain that failed and later recovered must not sit red forever. */
+  ok('recovery: a successful conversion clears the failure and skip reasons',
+     /Conversion sent[\s\S]{0,160}?clearPartnerStackFailure\('signup', session_id\)/.test(src));
+  ok('recovery: a successful qualification clears its failure',
+     /Qualification sent[\s\S]{0,160}?clearPartnerStackFailure\('qualify', claimedSession\)/.test(src));
+  ok('recovery: clearing signup also clears the skip reason',
+     /ps_signup_failed_at = NULL, ps_signup_fail_reason = NULL, ps_signup_skipped_reason = NULL/.test(src));
+  /* Every skip guard records WHY, or "not sent" stays ambiguous on screen. */
+  for (const r of ['disqualified', 'no_customer_key', 'test_email', 'already_sent'])
+    ok(`skipA: the ${r} guard records its reason`,
+       new RegExp(`recordPartnerStackSkip\\(session_id, '${r}'\\)`).test(src));
+  ok('skipA: a phantom conversion records a failure, not a skip',
+     /reason: 'phantom_200'/.test(src));
 
   /* Step 8. */
   {

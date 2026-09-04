@@ -408,6 +408,26 @@ async function initDB() {
          PartnerStack answered 200 with an empty body. Null while unverified;
          the sweep in index.js fills it or releases the claim. */
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_verified_at TIMESTAMPTZ`,
+      /* WHY a conversion did not fire, recorded at the moment we decide.
+         Deliberately NOT ps_ineligible_reason: that means "the eligibility
+         check rejected this", and the two will be confused the moment
+         eligibility is switched on. A skip is usually correct behaviour
+         (test address, disqualified); a FAILURE is money not being paid, and
+         the dashboard has to tell them apart. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_skipped_reason TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_skipped_at TIMESTAMPTZ`,
+      /* The two failure paths. Before these, today's 400 on the qualification
+         wrote nothing anywhere: the claim released correctly and the dashboard
+         showed a 0 that looked identical to "no demo has happened yet". */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_failed_at TIMESTAMPTZ`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_fail_reason TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_qualify_failed_at TIMESTAMPTZ`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_qualify_fail_reason TEXT`,
+      /* The lifecycle ladder groups by domain and filters on the failure
+         stamps; both are read on every dashboard load. */
+      `CREATE INDEX IF NOT EXISTS leads_ps_failed_idx
+         ON leads (ps_customer_key)
+         WHERE ps_signup_failed_at IS NOT NULL OR ps_qualify_failed_at IS NOT NULL`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_qualified_sent_at TIMESTAMPTZ`,
       /* The eligibility verdict, stamped on the lead row.
          We are contractually required to tell an affiliate why a referral was
@@ -457,6 +477,60 @@ async function initDB() {
 
     for (const sql of migrations) {
       await client.query(sql);
+    }
+
+    /* -------------------------------------------------------
+       ONE-OFF BACKFILL — the four partner leads that predate the
+       skip/failure columns (batch A, 4 Sept 2026).
+
+       Without this, two rows render in the WRONG lifecycle state on day one:
+       test.com falls to conversion_pending (grey) when its conversion really
+       was a phantom 200 that the read-back sweep caught and released — a red
+       state showing grey is precisely the bug this batch exists to fix. And
+       gushwork.ai reads conversion_pending when it was correctly skipped as a
+       test address. Neither self-corrects: nobody is going to submit from
+       test.com again.
+
+       IDEMPOTENT by construction, not by a migration ledger. Each statement
+       only touches rows where the target column is still NULL and no send has
+       since succeeded, and only rows created before the cutoff. Once set it
+       cannot re-fire, and a genuine later lead from either domain is outside
+       the cutoff and untouched.
+
+       Timestamps are the honest ones available rather than NOW():
+         - test.com uses updated_at, which IS the moment the sweep released
+           the claim, because that release was the row's last write.
+         - gushwork.ai uses created_at, because the skip happened at submit
+           and we have nothing more precise. Approximate, and said so.
+
+       Wrapped in its own try/catch: initDB throwing exits the process, and a
+       cosmetic backfill must never be able to take the service down.
+    ------------------------------------------------------- */
+    try {
+      const CUTOFF = `TIMESTAMPTZ '2026-09-04 13:00:00+00'`;
+      const phantom = await client.query(`
+        UPDATE leads
+           SET ps_signup_failed_at   = updated_at,
+               ps_signup_fail_reason = 'phantom_200'
+         WHERE ps_customer_key = 'test.com'
+           AND ps_xid IS NOT NULL
+           AND ps_signup_failed_at IS NULL
+           AND ps_signup_sent_at IS NULL
+           AND created_at < ${CUTOFF}`);
+      const skipped = await client.query(`
+        UPDATE leads
+           SET ps_signup_skipped_reason = 'test_email',
+               ps_signup_skipped_at     = created_at
+         WHERE ps_customer_key = 'gushwork.ai'
+           AND ps_xid IS NOT NULL
+           AND ps_signup_skipped_reason IS NULL
+           AND ps_signup_sent_at IS NULL
+           AND created_at < ${CUTOFF}`);
+      if (phantom.rowCount || skipped.rowCount) {
+        console.log(`[DB] PartnerStack backfill: ${phantom.rowCount} phantom, ${skipped.rowCount} skipped`);
+      }
+    } catch (err) {
+      console.warn('[DB] PartnerStack backfill failed (non-fatal):', err.message);
     }
 
     console.log('[DB] Tables ready');

@@ -173,6 +173,51 @@ must land in a stage rather than vanishing from all four. The stage filter, the
 stage badge and any stage count all read from this one ladder. If you add a stage,
 it goes in the ladder or it doesn't exist.
 
+### The PartnerStack lifecycle ladder
+
+Exactly eight states, **mutually exclusive and exhaustive**, one per partner
+**domain**, resolved in this priority order. Every counter on the Partners tab
+is a `COUNT FILTER` over this one column, so the numbers cannot disagree with
+each other. Same rule as the stage ladder above: if you add a state, it goes in
+the ladder or it does not exist.
+
+1. **qualified** — `ps_qualified_sent_at IS NOT NULL`
+2. **qualification_failed** — `ps_qualify_failed_at IS NOT NULL`
+3. **conversion_failed** — `ps_signup_failed_at IS NOT NULL` **and not since converted**
+4. **demo_done_not_qualified** — earliest `start_time` is in the past
+5. **awaiting_demo** — `booking_uid IS NOT NULL`
+6. **converted** — `ps_signup_sent_at IS NOT NULL`
+7. **skipped** — `ps_signup_skipped_reason IS NOT NULL`
+8. **conversion_pending** — everything else
+
+**The order is not the progression order, deliberately.** A success always
+outranks its own failure, because a domain that failed and later succeeded is
+fine. But an *unresolved* conversion failure outranks every later stage it
+blocks: a domain whose conversion never landed can never be qualified, so
+showing it as "awaiting demo" would hide the only fact worth acting on. That is
+exactly what happened on 4 Sept — a 400 on the qualification released the claim
+correctly and nothing on any card moved.
+
+A domain matching two states takes the **first** match, never a blend.
+
+**Keyed by DOMAIN, because that is the unit PartnerStack pays on** — one
+conversion and one qualification per customer key, ever. Leads with **no usable
+domain** cannot be keyed that way, so they are counted **separately, as leads**,
+in their own field, and the UI says "leads, not companies" on that chip. Folding
+them into a domain count would reintroduce the mixed-unit arithmetic that made
+the old counters irreconcilable.
+
+The query is bounded to `PS_LADDER_WINDOW_D` (180 days, matching the Salesforce
+lookback) **except for unresolved failures, which are included regardless of
+age** — otherwise a domain that failed months ago and was never fixed would
+silently drop out of "Needs attention", the one number that has to be complete.
+
+**conversion_failed and qualification_failed are the two red states** and are
+summed into "Needs attention" — the only number on the tab that means someone
+has to act today. Both also fire a Slack alert at the moment of failure, via
+`alertOps` with its normal cooldown, because a state you have to remember to
+check is half a fix.
+
 ### Bookings: two different questions, and they are not interchangeable
 
 These look like one question and are not. Collapsing them onto a single rule
