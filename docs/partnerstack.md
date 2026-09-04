@@ -661,6 +661,12 @@ Do not mark any of these done on the strength of the code existing.
   Found while investigating the partner list view. Not a PartnerStack bug, but
   the same shape as the four below.
 - **`disqualified` read inconsistently** across six sites — see gap 3.
+- **`docs/tickets/health-alert-state-is-in-memory.md`** — a red health row
+  re-alerts on every deploy, because the cooldown and the last-reported state
+  are in-memory Maps. Affects every check, not just PartnerStack.
+- **`docs/tickets/salesforce-integration-user-is-a-system-administrator.md`** —
+  the integration user has Customize Application, Modify All Data and delete on
+  Opportunity. Far more than it needs.
 
 ## Known gaps
 
