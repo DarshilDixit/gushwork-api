@@ -33,6 +33,7 @@ const dbjs = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
 const demo  = fs.readFileSync(path.join(__dirname, '..', 'gushwork-form.js'), 'utf8');
 const popup = fs.readFileSync(path.join(__dirname, '..', 'gushwork-form-popup.js'), 'utf8');
 const psmod = fs.readFileSync(path.join(__dirname, '..', 'partnerstack.js'), 'utf8');
+const sfmod = fs.readFileSync(path.join(__dirname, '..', 'salesforce.js'), 'utf8');
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -468,8 +469,19 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   ok('module: does NOT use /v2/customers', !/v2\/customers/.test(psmod.replace(/\/\/.*$/gm, '')));
   ok('module: authorises with the TRACKING TOKEN as a Bearer token',
      /Bearer \$\{token\}/.test(psmod) && /process\.env\.PARTNERSTACK_TRACKING_TOKEN/.test(psmod));
-  ok('module: does not reach for the v2 Basic key pair on this endpoint',
-     !/PARTNERSTACK_SECRET_KEY|PARTNERSTACK_PUBLIC_KEY/.test(psmod));
+  /* Scoped to sendConversion, not the whole module: the v2 helpers alongside it
+     legitimately use the key pair. What must never happen is the CONVERSION
+     reaching for it — that endpoint takes the tracking token, and swapping the
+     two returns a 401 that reads like a bad password rather than a wrong
+     scheme. */
+  {
+    const fn = psmod.slice(psmod.indexOf('async function sendConversion'),
+                           psmod.indexOf('/* ============================================================\n   The v2 API'));
+    ok('module: sendConversion does NOT reach for the v2 Basic key pair',
+       fn.length > 200 && !/PARTNERSTACK_SECRET_KEY|PARTNERSTACK_PUBLIC_KEY|v2AuthHeader/.test(fn));
+    ok('module: sendConversion uses the tracking token',
+       /process\.env\.PARTNERSTACK_TRACKING_TOKEN/.test(fn));
+  }
   ok('module: sends the two required fields plus the five optional ones',
      /const payload = \{[\s\S]{0,400}?\bxid,[\s\S]{0,400}?\bcustomer_key,[\s\S]{0,400}?email:[\s\S]{0,400}?name:[\s\S]{0,400}?ip_address:[\s\S]{0,400}?user_agent:[\s\S]{0,400}?origin:[\s\S]{0,80}?\};/.test(psmod));
   /* An empty string is worse than an absent field for fraud matching: it looks
@@ -491,9 +503,12 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        /fwd\.split\(','\)\[0\]/.test(fn));
     ok('ctx: falls back to req.ip', /\|\| req\.ip \|\| null/.test(fn));
     ok('ctx: user agent is bounded', /user-agent[\s\S]{0,80}?slice\(0, 500\)/.test(fn));
-    ok('ctx: origin prefers the Origin header', /req\.headers\['origin'\]/.test(fn));
-    ok('ctx: origin falls back to the page URL origin', /new URL\(page_url\)\.origin/.test(fn));
-    ok('ctx: a non-URL page_url cannot throw out of the helper', /catch \{/.test(fn));
+    /* origin is the FULL page URL, deliberately: a bare scheme+host cannot
+       tell /demo from an ads lander, and the Origin header is absent on
+       same-origin non-CORS posts anyway. */
+    ok('ctx: origin is the full page URL', /const origin = \(page_url \|\| ''\)/.test(fn));
+    ok('ctx: origin does NOT use the Origin header', !/req\.headers\['origin'\]/.test(fn));
+    ok('ctx: origin is bounded', /slice\(0, 1000\)/.test(fn));
     ok('ctx: absent values are null, never empty strings',
        (fn.match(/\|\| null/g) || []).length >= 2);
   }
@@ -523,6 +538,217 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     ok('conversion: is not awaited', !/await runPartnerStackSignup/.test(seg));
     ok('conversion: its rejection cannot reach the response', /runPartnerStackSignup\([\s\S]{0,200}?\.catch\(/.test(seg));
   }
+
+  /* ============================================================
+     4c. STEPS 6-10 — identity, hear_about_us, Slack, dashboard, qualification
+     ============================================================ */
+
+  /* Step 6. The auth split is the expensive mistake here: the conversion uses
+     a Bearer tracking token, everything on api.partnerstack.com uses Basic
+     base64(public:secret), and both credentials live in the same env. */
+  ok('v6: partnerships lookup hits the v2 API',
+     /\$\{V2_BASE\}\/partnerships\/\$\{encodeURIComponent\(partnerKey\)\}/.test(psmod));
+  ok('v6: v2 base is api.partnerstack.com',
+     /const V2_BASE = 'https:\/\/api\.partnerstack\.com\/api\/v2';/.test(psmod));
+  ok('v6: v2 auth is Basic base64(public:secret)',
+     /Buffer\.from\(`\$\{pub\}:\$\{sec\}`\)\.toString\('base64'\)/.test(psmod));
+  ok('v6: v2 auth does NOT use the tracking token',
+     !/v2AuthHeader[\s\S]{0,300}?TRACKING_TOKEN/.test(psmod));
+  ok('v6: the conversion still uses Bearer, not Basic',
+     /sendConversion[\s\S]{0,1400}?Bearer \$\{token\}/.test(psmod));
+  ok('v6: a missing key pair is inert, not an error', /reason: 'no_credentials'/.test(psmod));
+  ok('v6: the response is unwrapped defensively',
+     /const d = \(json && json\.data\) \|\| json \|\| \{\}/.test(psmod) && /d\.partnership \|\| d/.test(psmod));
+  ok('v6: name falls back through first\/last, name, company_name',
+     /company_name/.test(psmod));
+  {
+    const fn = src.slice(src.indexOf('async function resolvePartnerIdentity'),
+                         src.indexOf('async function runPartnerStackIdentity'));
+    ok('v6: memory cache is checked first', /_psPartnerCache\.has\(partnerKey\)/.test(fn));
+    ok('v6: an earlier lead row is checked before the API',
+       /FROM leads[\s\S]{0,120}?ps_partner_key = \$1 AND ps_partner_name IS NOT NULL/.test(fn));
+    /* Caching a failure would pin every future lead from this partner to
+       "unknown" for the life of the process. */
+    /* Caching a failure would pin every future lead from this partner to
+       "unknown" for the life of the process. The failure branch must return
+       WITHOUT touching the cache. */
+    const failBranch = fn.slice(fn.indexOf('if (!out.ok)'), fn.indexOf('const identity ='));
+    ok('v6: the failure branch does not write to the cache',
+       failBranch.length > 40 && !/_psPartnerCache\.set/.test(failBranch), failBranch.slice(0, 120));
+    ok('v6: the cache is only written on success',
+       /const identity = \{ name: out\.name, email: out\.email \};\s*\n\s*_psPartnerCache\.set\(partnerKey, identity\);/.test(fn));
+  }
+  ok('v6: ps_partner_email column exists on leads',
+     /ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_partner_email TEXT/.test(dbjs));
+  ok('v6: ps_partner_email exists on the AWS mirror',
+     /ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_partner_email TEXT/.test(src));
+  /* The name resolves after the row was already mirrored, so the ordinary
+     upsert has been and gone — it needs its own targeted write. */
+  ok('v6: a late-resolved identity is mirrored to AWS',
+     /function syncPartnerIdentityToAWS[\s\S]{0,400}?UPDATE gw_form_leads/.test(src));
+
+  /* Step 7. A human referral outranks an affiliate link. */
+  {
+    const fn = src.slice(src.indexOf('function partnerHearAboutUs'), src.indexOf('async function upgradePartnerHearAboutUs'));
+    const H = (new Function(
+      liftLine(src, 'const PS_HEAR_PREFIX =') + '\n' + fn + '\n return partnerHearAboutUs;'))();
+    eq('v7: sets Partner - <name> when resolved',
+       H({ hear_about_us: '', ps: { ps_partner_key: 'k1' }, identity: { name: 'Jane Smith' } }), 'Partner - Jane Smith');
+    eq('v7: falls back to the raw key when unresolved',
+       H({ hear_about_us: '', ps: { ps_partner_key: 'k1' }, identity: null }), 'Partner - k1');
+    eq('v7: an existing REFERRAL wins',
+       H({ hear_about_us: 'Referral - bob@x.com', ps: { ps_partner_key: 'k1' }, identity: { name: 'Jane' } }), null);
+    eq('v7: referral match is case-insensitive',
+       H({ hear_about_us: 'referral - bob@x.com', ps: { ps_partner_key: 'k1' }, identity: { name: 'Jane' } }), null);
+    eq('v7: no partner means no change', H({ hear_about_us: 'Google', ps: {}, identity: null }), null);
+    eq('v7: an unrelated value is overwritten by the partner',
+       H({ hear_about_us: 'Google', ps: { ps_partner_key: 'k1' }, identity: { name: 'Jane' } }), 'Partner - Jane');
+    eq('v7: no rewrite when it already matches',
+       H({ hear_about_us: 'Partner - Jane', ps: { ps_partner_key: 'k1' }, identity: { name: 'Jane' } }), null);
+  }
+  {
+    const fn = src.slice(src.indexOf('async function upgradePartnerHearAboutUs'), src.indexOf('/* ── STEP 5'));
+    /* Only ever rewrites the placeholder this code wrote — never a referral
+       and never anything a human typed. */
+    ok('v7: the upgrade only replaces our own key-shaped placeholder',
+       /WHERE session_id = \$1 AND hear_about_us = \$3/.test(fn));
+    ok('v7: the upgrade reaches Salesforce, where the AE looks',
+       /findSFLeadByEmail\(email\)/.test(fn) && /hear_about_us__c: resolved/.test(fn));
+    /* A targeted UPDATE, never syncToAWS. That upsert sets
+       `disqualified = EXCLUDED.disqualified` with no COALESCE, so a partial
+       object passes false and CLEARS a real disqualification on the mirror the
+       dialer reads. */
+    ok('v7: the upgrade reaches the AWS mirror', /syncHearAboutUsToAWS\(session_id, resolved\)/.test(fn));
+    ok('v7: the upgrade does NOT go through the whole-row upsert', !/syncToAWS\(/.test(fn));
+  }
+  for (const route of ['/partial', '/submit']) {
+    const [from, to] = route === '/partial'
+      ? ["app.post('/partial'", "app.post('/submit'"]
+      : ["app.post('/submit'", "app.post('/booking-confirmed'"];
+    const seg = src.slice(src.indexOf(from), src.indexOf(to));
+    ok(`v7: ${route} computes the partner hear_about_us`, /partnerHearAboutUs\(\{ hear_about_us, ps/.test(seg));
+    ok(`v7: ${route} binds the final value, not the raw one`, /hearAboutUsFinal\|\|null/.test(seg));
+    /* A colon in an INSERT column list is invalid SQL that node --check
+       cannot see, because the query lives in a template literal. */
+    const cols = /INSERT INTO leads \(([^)]*)\)/.exec(seg)[1];
+    ok(`v7: ${route} INSERT column list is still valid SQL`,
+       cols.split(',').every(c => /^[a-z_][a-z0-9_]*$/.test(c.trim())), cols.slice(0, 80));
+  }
+  ok('v7: Salesforce receives the final hear_about_us',
+     /pushToSalesforce\(\{[^}]*hear_about_us:hearAboutUsFinal/.test(src));
+
+  /* Step 8. */
+  {
+    const fn = src.slice(src.indexOf('function buildJourneyBlocks'), src.indexOf('function slackPartial'));
+    ok('v8: a partner alone is enough to render the section', /!hasPartner\) return;/.test(fn));
+    ok('v8: shows the resolved name', /d\.ps_partner_name/.test(fn));
+    ok('v8: shows the partner email', /d\.ps_partner_email/.test(fn));
+    ok('v8: shows the click date', /d\.ps_click_at \? ` — clicked \$\{etStamp\(d\.ps_click_at\)\}`/.test(fn));
+    ok('v8: falls back to the raw key when unresolved', /name not resolved yet/.test(fn));
+  }
+  ok('v8: /submit passes the partner fields to Slack',
+     /slackSubmit\(\{[^}]*ps_partner_key:ps\.ps_partner_key/.test(src));
+
+  /* Step 9. A dimension on the existing view, not a new tab. */
+  {
+    const seg = src.slice(src.indexOf("app.get('/monitor/leads'"), src.indexOf("app.get('/monitor/filter-options'"));
+    ok('v9: the leads API accepts a partner filter', /req\.query\.partner/.test(seg));
+    ok('v9: __any selects every partner-sourced lead', /partner === '__any'[\s\S]{0,80}?ps_partner_key IS NOT NULL/.test(seg));
+    ok('v9: __none selects the rest', /partner === '__none'[\s\S]{0,80}?ps_partner_key IS NULL/.test(seg));
+    /* Whoever filters may have the key, the name or the email to hand. */
+    ok('v9: a specific value matches key, name OR email',
+       /ps_partner_key,''\)\) LIKE[\s\S]{0,120}?ps_partner_name,''\)\) LIKE[\s\S]{0,120}?ps_partner_email,''\)\) LIKE/.test(seg));
+    for (const c of ['ps_partner_key','ps_partner_name','ps_partner_email','ps_click_at','ps_click_history','ps_signup_sent_at','ps_qualified_sent_at'])
+      ok(`v9: the leads API returns ${c}`, new RegExp('l\\.' + c).test(seg));
+  }
+  ok('v9: filter-options lists partners', /partners:\s*partnerRows\.rows\.map/.test(src));
+  ok('v9: the partner list groups by key and keeps the resolved name',
+     /GROUP BY ps_partner_key/.test(src) && /MAX\(ps_partner_name\)/.test(src));
+  ok('v9: there is a partner filter control, not a new tab',
+     /id="fpartner"/.test(src) && !/id="tab-partner"/.test(src));
+  ok('v9: clearF resets the partner filter', /getElementById\("fpartner"\)\.value="all"/.test(src));
+  ok('v9: the CSV export carries the partner filter',
+     (src.match(/url\+="&partner="\+encodeURIComponent\(partner\)/g) || []).length === 2);
+  /* The panel is real client JS living inside a JS string; lift it and run it. */
+  {
+    const i = src.indexOf("'function psPanel(l){");
+    const j = src.indexOf("'function debounce()");
+    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const F = (new Function('esc', 'et', 'wlabel', client + '; return { psPanel };'))(
+      (x) => String(x == null ? '' : x), (x) => String(x == null ? '' : x), (x) => String(x));
+    eq('v9: an organic lead renders no partner panel', F.psPanel({}), '');
+    const html = F.psPanel({
+      ps_partner_key: 'k1', ps_partner_name: 'Jane Smith', ps_partner_email: 'j@x.com',
+      ps_click_at: '2026-09-01', ps_customer_key: 'acme.com', ps_signup_sent_at: '2026-09-02',
+      ps_click_history: [{ xid: 'x1', pk: 'kA', at: '2026-08-01' }, { xid: 'x2', pk: 'k1', at: '2026-09-01' }],
+    });
+    ok('v9: panel shows the partner name', html.includes('Jane Smith'));
+    ok('v9: panel shows the partner email', html.includes('j@x.com'));
+    ok('v9: panel shows the click date', html.includes('2026-09-01'));
+    ok('v9: panel shows every click in the history', html.includes('kA') && html.includes('k1'));
+    /* Attribution is last-click, so exactly one row is the winner. */
+    eq('v9: exactly one click is marked WON', (html.match(/WON/g) || []).length, 1);
+    const lastIdx = html.lastIndexOf('kA'), wonIdx = html.indexOf('WON');
+    ok('v9: the WON badge is on the LAST click, not the first', wonIdx > lastIdx);
+    ok('v9: an unresolved partner shows the key and says so',
+       F.psPanel({ ps_partner_key: 'k9' }).includes('name not resolved'));
+    ok('v9: a stringified history is still parsed',
+       F.psPanel({ ps_partner_key: 'k1', ps_click_history: JSON.stringify([{ xid: 'a', pk: 'b', at: 'c' }]) }).includes('WON'));
+    ok('v9: a corrupt history cannot break the panel',
+       F.psPanel({ ps_partner_key: 'k1', ps_click_history: '{not json' }).includes('Partner'));
+  }
+
+  /* Step 10. */
+  ok('v10: the poller queries the Qualified_Demo__c checkbox',
+     /Qualified_Demo__c = true/.test(sfmod));
+  ok('v10: it reads the account website and a contact email as fallback',
+     /Account\.Website/.test(sfmod) && /OpportunityContactRoles/.test(sfmod));
+  ok('v10: a Salesforce failure returns [] rather than throwing',
+     /return \[\];/.test(sfmod));
+  {
+    /* Scoped to the POLL function only. Slicing through to
+       startPartnerStackQualificationPoll swallowed sendQualificationForDomain
+       too, so a guard deleted from the poll still matched the identical text
+       in the claim below it — a mutation survived on exactly that. */
+    const fn = src.slice(src.indexOf('async function runPartnerStackQualificationPoll'),
+                         src.indexOf('async function sendQualificationForDomain'));
+    ok('v10: runs every 15 minutes', /const PS_QUALIFY_INTERVAL_MS = 15 \* 60 \* 1000;/.test(src));
+    ok('v10: the action type is qualified_demo', /const PS_QUALIFY_ACTION_TYPE = 'qualified_demo';/.test(src));
+    ok('v10: overlapping runs are prevented',
+       /if \(_psQualifyRunning\) \{[\s\S]{0,200}?return;/.test(fn) && /_psQualifyRunning = true;/.test(fn));
+    /* The domain is the only identifier both systems share. */
+    ok('v10: the domain is derived with the SAME helper as everything else',
+       /partnerStackCustomerKey\(o\.website\) \|\| partnerStackCustomerKey\(o\.contactEmail\)/.test(fn));
+    ok('v10: several Opportunities on one account collapse to one action', /byKey/.test(fn));
+    /* An action for a customer_key PartnerStack has never seen is a no-op. */
+    ok('v10: only domains we already converted can be qualified',
+       /AND ps_signup_sent_at IS NOT NULL/.test(fn) && /AND ps_qualified_sent_at IS NULL/.test(fn));
+    ok('v10: an unmatchable Opportunity is logged, not silently dropped',
+       /no usable domain/.test(fn));
+
+    const send = src.slice(src.indexOf('async function sendQualificationForDomain'),
+                           src.indexOf('function startPartnerStackQualificationPoll'));
+    const claimAt = send.indexOf('ps_qualified_sent_at = NOW()');
+    const sendAt  = send.indexOf('await sendAction(');
+    ok('v10: the domain is claimed BEFORE the action is sent', claimAt !== -1 && sendAt !== -1 && claimAt < sendAt);
+    /* Position alone is not the guarantee — the claim also has to be
+       CONDITIONAL on nothing else having qualified this domain, or two
+       overlapping runs both claim and both pay. */
+    ok('v10: the claim is conditional on no prior qualification',
+       /NOT EXISTS \([\s\S]{0,200}?o\.ps_customer_key = \$1 AND o\.ps_qualified_sent_at IS NOT NULL/.test(send));
+    ok('v10: the claim only fires on an unqualified row',
+       /AND ps_qualified_sent_at IS NULL/.test(send));
+    ok('v10: a concurrent claim is read as already-qualified', /err\.code === '23505'/.test(send));
+    ok('v10: a failed send releases the claim', /ps_qualified_sent_at = NULL/.test(send));
+    ok('v10: a stuck claim is escalated', /stuck qualify claim/.test(send));
+  }
+  ok('v10: once-per-domain is enforced by a UNIQUE PARTIAL index',
+     /CREATE UNIQUE INDEX IF NOT EXISTS leads_ps_qualified_once_idx[\s\S]{0,220}?WHERE ps_customer_key IS NOT NULL AND ps_qualified_sent_at IS NOT NULL/.test(dbjs));
+  ok('v10: the poller is started at boot', /startPartnerStackQualificationPoll\(\);/.test(src));
+  ok('v10: the action posts to /v2/actions with Basic auth',
+     /`\$\{V2_BASE\}\/actions`/.test(psmod) && /sendAction[\s\S]{0,600}?v2AuthHeader\(\)/.test(psmod));
+  ok('v10: the action payload is customer_key + type + value',
+     /const payload = \{ customer_key, type, value: value === undefined \? 1 : value \};/.test(psmod));
 
   /* The three fixes that keep the warehouse off the lead's critical path. */
   ok('hazard: the customer query is wrapped in withTimeout',

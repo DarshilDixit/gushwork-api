@@ -51,7 +51,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `salesforce.js` | Lead upsert by email. Refresh-token OAuth |
 | `meta-capi.js` | Conversions API — `Lead`, `Schedule`, `StartTrial`, `Contact` |
 | `loops.js` | Loops.so contact push for the lead-magnet landing page |
-| `partnerstack.js` | The S2S affiliate conversion call. Bearer tracking token, NOT the v2 key pair. Sends ip_address / user_agent / origin for fraud detection |
+| `partnerstack.js` | PartnerStack API. TWO hosts and TWO auth schemes: `partnerlinks.io` conversion (Bearer tracking token) and `api.partnerstack.com` v2 partnerships + actions (Basic public:secret) |
 | `lead-magnet.js` | `/lm/*` routes. Separate table, deliberately not joined to `leads` |
 | `backfill-sf.js` | Manual recovery tool for re-syncing leads to Salesforce after a broken connection or outage. Not mounted by default — see below |
 | `gushwork-form.js` | The `/demo` form frontend. Lives here and is served live by jsDelivr — see below |
@@ -343,6 +343,46 @@ twice or a real referral swallowed as a duplicate. Website, email and the three
 warehouse customer tables all go through this one function. Do not normalise a
 domain inline anywhere near this integration.
 
+**Two PartnerStack hosts, two auth schemes, one env.** The conversion goes to
+`partnerlinks.io/conversion/xid` with `PARTNERSTACK_TRACKING_TOKEN` as a
+**Bearer** token. The partnerships lookup and the qualification action go to
+`api.partnerstack.com/api/v2/*` with **Basic** base64(`PARTNERSTACK_PUBLIC_KEY`:
+`PARTNERSTACK_SECRET_KEY`). Both credentials sit in the same environment and
+using one where the other belongs returns a 401 that reads like a bad password
+rather than the wrong scheme. A test asserts `sendConversion` never reaches for
+the key pair.
+
+**Partner identity resolves in three layers and never blocks a lead.** Process
+memory, then any earlier lead row already carrying a resolved name for that key,
+then the v2 API. A FAILED lookup is deliberately not cached — caching it would
+pin every future lead from that partner to "unknown" for the life of the dyno.
+Slack and `hear_about_us` read a non-fetching `peekPartnerIdentity()` and fall
+back to the raw key, so the very first lead from a brand-new partner shows the
+key and is upgraded in place by `upgradePartnerHearAboutUs` once the name lands
+— in our row, on the AWS mirror, and in Salesforce where the AE is looking.
+
+**`hear_about_us`: an existing referral outranks a partner.** `gw_ref_email` is a
+named human vouching for the lead and is a stronger signal than an affiliate
+link, so anything already starting with `Referral -` is left alone. The upgrade
+only ever rewrites the exact `Partner - <key>` placeholder this code wrote; a
+referral or anything a human typed is never touched.
+
+**A late-arriving single field needs its own targeted AWS write, NEVER
+`syncToAWS`.** That upsert's conflict clause sets
+`disqualified = EXCLUDED.disqualified` with no COALESCE, so handing it a partial
+object passes `disqualified` as false and CLEARS a real disqualification on the
+mirror the dialer reads. `syncBookingToAWS`, `syncPartnerIdentityToAWS` and
+`syncHearAboutUsToAWS` all exist for this reason. A test catches the regression.
+
+**Step 10 is a POLLER, not a Salesforce Flow callout.** A Flow that calls out
+fails inside Salesforce where nobody on this team would see it, and it couples an
+AE ticking `Qualified_Demo__c` to our service being up at that instant. Polling
+every 15 minutes means a missed window is just a later window. The join between
+the two systems is the DOMAIN — `Account.Website` first, the primary contact's
+email domain as fallback, both through `partnerStackCustomerKey`. Only domains
+that already converted (`ps_signup_sent_at IS NOT NULL`) can be qualified: an
+action for a `customer_key` PartnerStack has never seen is a no-op at best.
+
 **The automated eligibility check is BUILT AND OFF for the MVP.** Rejections are
 decided by hand at payout approval. Everything below is dormant behind
 `PS_ELIGIBILITY_ENABLED`, default off — set it to the string `true` in the
@@ -433,7 +473,7 @@ node tests/test-batch1.js       # logic, no dependencies
 node tests/test-batch2.js       # logic, no dependencies
 node tests/test-batch-a.js      # logic, no dependencies
 node tests/test-ads-parity.js   # the two form files against each other, no dependencies
-node tests/test-partnerstack.js # PartnerStack steps 1-5, no dependencies
+node tests/test-partnerstack.js # PartnerStack steps 1-10, no dependencies
 node tests/test-batch1-db.js    # needs DATABASE_URL
 node tests/test-batch1-e2e.js   # boots the real server, needs DATABASE_URL
 ```

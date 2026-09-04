@@ -277,4 +277,58 @@ async function updateSFLead(leadId, fields) {
   }
 }
 
-module.exports = { pushToSalesforce, findSFLeadByEmail, updateSFLead, getSalesforceToken };
+/* --------------------------------------------------------
+   findQualifiedDemoOpportunities — the step 10 poller's read side.
+
+   Qualified_Demo__c is a checkbox on Opportunity, ticked by an AE after the
+   call. We pull every ticked one and match it back to our leads by DOMAIN,
+   because the domain is the only identifier both systems share: PartnerStack
+   knows the customer by the customer_key we sent at signup, and that key was
+   derived from the lead's website.
+
+   Account.Website is the primary source. Some Opportunities have no Account
+   website, so the Contact's email domain is taken as a fallback via
+   OpportunityContactRole — a lead that reached an Opportunity almost always
+   has a contact on it, and their work email is the same company.
+
+   Returns [] on any failure rather than throwing. The poller runs on a timer
+   with nothing waiting on it, and a Salesforce blip must not become an
+   unhandled rejection in the process.
+-------------------------------------------------------- */
+async function findQualifiedDemoOpportunities(limit = 200) {
+  try {
+    const { accessToken, instanceUrl } = await getSalesforceToken();
+    const soql =
+      `SELECT Id, Name, Account.Website, Account.Name, ` +
+      `(SELECT Contact.Email FROM OpportunityContactRoles ORDER BY IsPrimary DESC LIMIT 1) ` +
+      `FROM Opportunity WHERE Qualified_Demo__c = true LIMIT ${parseInt(limit, 10) || 200}`;
+    const res = await fetch(
+      `${instanceUrl}/services/data/v60.0/query/?q=${encodeURIComponent(soql)}`,
+      { method: 'GET', headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (!res.ok) {
+      const err = await res.text();
+      console.warn('[SF] Qualified-demo query failed:', err.slice(0, 400));
+      return [];
+    }
+    const data = await res.json();
+    const out = (data.records || []).map((r) => {
+      const roles = r.OpportunityContactRoles && r.OpportunityContactRoles.records;
+      const contactEmail = roles && roles[0] && roles[0].Contact && roles[0].Contact.Email;
+      return {
+        id: r.Id,
+        name: r.Name || null,
+        website: (r.Account && r.Account.Website) || null,
+        accountName: (r.Account && r.Account.Name) || null,
+        contactEmail: contactEmail || null,
+      };
+    });
+    console.log(`[SF] Qualified demos found: ${out.length}`);
+    return out;
+  } catch (err) {
+    console.warn('[SF] Qualified-demo query error:', err.message);
+    return [];
+  }
+}
+
+module.exports = { pushToSalesforce, findSFLeadByEmail, updateSFLead, getSalesforceToken, findQualifiedDemoOpportunities };

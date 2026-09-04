@@ -103,4 +103,114 @@ async function sendConversion({ xid, customer_key, email, name, ip_address, user
   }
 }
 
-module.exports = { sendConversion, CONVERSION_URL };
+/* ============================================================
+   The v2 API — a DIFFERENT host and a DIFFERENT auth scheme
+   ------------------------------------------------------------
+   The conversion endpoint above is partnerlinks.io with a Bearer tracking
+   token. Everything below is api.partnerstack.com with Basic
+   base64(public_key:secret_key). Both credentials sit in the same env and
+   using one where the other belongs returns a 401 that reads like a bad
+   password rather than the wrong scheme — which is a genuinely expensive
+   hour to lose, so the split is stated at every call site.
+   ============================================================ */
+const V2_BASE = 'https://api.partnerstack.com/api/v2';
+
+function v2AuthHeader() {
+  const pub = process.env.PARTNERSTACK_PUBLIC_KEY;
+  const sec = process.env.PARTNERSTACK_SECRET_KEY;
+  if (!pub || !sec) return null;
+  return 'Basic ' + Buffer.from(`${pub}:${sec}`).toString('base64');
+}
+
+/* GET /v2/partnerships/{unique_identifier}
+   The identifier may be a partner_key, an internal partnership_key or an
+   email. We pass the DECODED partner key straight from the cookie — the
+   base64 form in the URL param is never stored and never sent here.
+
+   Resolves { ok, name, email, raw } — never rejects. */
+async function fetchPartnership(partnerKey) {
+  const auth = v2AuthHeader();
+  if (!auth) {
+    console.warn('[PartnerStack] PARTNERSTACK_PUBLIC_KEY / _SECRET_KEY not set — partner not resolved');
+    return { ok: false, reason: 'no_credentials' };
+  }
+  if (!partnerKey) return { ok: false, reason: 'no_partner_key' };
+
+  const url = `${V2_BASE}/partnerships/${encodeURIComponent(partnerKey)}`;
+  logCall('-> GET /v2/partnerships', { partner_key: partnerKey });
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { 'Authorization': auth, 'Accept': 'application/json' },
+      signal: controller.signal,
+    });
+    const text = await res.text().catch(() => '');
+    logCall(`<- ${res.status} ${res.ok ? 'OK' : 'FAIL'}`, { status: res.status, body: text.slice(0, 800) });
+    if (!res.ok) return { ok: false, status: res.status, body: text, reason: `http_${res.status}` };
+
+    let json;
+    try { json = JSON.parse(text); } catch { return { ok: false, reason: 'bad_json', body: text }; }
+
+    /* The response wraps the partnership in { status, message, data }, and
+       `data` has been seen both as the partnership itself and as a container
+       for it. Unwrapping defensively costs nothing and means a shape change
+       degrades to "name not resolved" rather than to a crash on the lead path. */
+    const d = (json && json.data) || json || {};
+    const p = d.partnership || d;
+    const name = [p.first_name, p.last_name].map(v => (v || '').trim()).filter(Boolean).join(' ')
+      || (p.name || '').trim()
+      || (p.company_name || '').trim()
+      || null;
+    const email = (p.email || '').trim() || null;
+    if (!name && !email) return { ok: false, reason: 'no_identity_in_response', body: text.slice(0, 400) };
+    return { ok: true, name, email, raw: p };
+  } catch (err) {
+    const reason = err && err.name === 'AbortError' ? 'timeout' : 'network_error';
+    console.warn(`[PartnerStack] <- ${reason}: ${err && err.message}`);
+    return { ok: false, reason, error: err && err.message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* POST /v2/actions — the qualification event.
+   Basic auth, like the partnerships lookup and unlike the conversion.
+   Resolves { ok, status, body, reason } — never rejects. */
+async function sendAction({ customer_key, type, value }) {
+  const auth = v2AuthHeader();
+  if (!auth) {
+    console.warn('[PartnerStack] PARTNERSTACK_PUBLIC_KEY / _SECRET_KEY not set — action NOT sent');
+    return { ok: false, reason: 'no_credentials' };
+  }
+  if (!customer_key) return { ok: false, reason: 'no_customer_key' };
+  if (!type)         return { ok: false, reason: 'no_type' };
+
+  const payload = { customer_key, type, value: value === undefined ? 1 : value };
+  logCall('-> POST /v2/actions', payload);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(`${V2_BASE}/actions`, {
+      method: 'POST',
+      headers: { 'Authorization': auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const text = await res.text().catch(() => '');
+    logCall(`<- ${res.status} ${res.ok ? 'OK' : 'FAIL'}`, { status: res.status, body: text.slice(0, 800) });
+    if (!res.ok) return { ok: false, status: res.status, body: text, reason: `http_${res.status}` };
+    return { ok: true, status: res.status, body: text };
+  } catch (err) {
+    const reason = err && err.name === 'AbortError' ? 'timeout' : 'network_error';
+    console.warn(`[PartnerStack] <- ${reason}: ${err && err.message}`);
+    return { ok: false, reason, error: err && err.message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+module.exports = { sendConversion, fetchPartnership, sendAction, CONVERSION_URL, V2_BASE };

@@ -399,6 +399,7 @@ async function initDB() {
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_xid TEXT`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_partner_key TEXT`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_partner_name TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_partner_email TEXT`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_customer_key TEXT`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_click_at TIMESTAMPTZ`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_click_history JSONB`,
@@ -433,6 +434,17 @@ async function initDB() {
       `CREATE UNIQUE INDEX IF NOT EXISTS leads_ps_signup_once_idx
          ON leads (ps_customer_key)
          WHERE ps_customer_key IS NOT NULL AND ps_signup_sent_at IS NOT NULL`,
+      /* Same rule, same enforcement, for the qualification action: one per
+         domain ever. Separate index because the two stamps are independent —
+         a domain can have converted at signup and not yet qualified. */
+      `CREATE UNIQUE INDEX IF NOT EXISTS leads_ps_qualified_once_idx
+         ON leads (ps_customer_key)
+         WHERE ps_customer_key IS NOT NULL AND ps_qualified_sent_at IS NOT NULL`,
+      /* The partner-identity resolver looks up "have we already resolved this
+         key?" on first sight of each new key. */
+      `CREATE INDEX IF NOT EXISTS leads_ps_partner_key_resolved_idx
+         ON leads (ps_partner_key)
+         WHERE ps_partner_key IS NOT NULL AND ps_partner_name IS NOT NULL`,
     ];
 
     for (const sql of migrations) {

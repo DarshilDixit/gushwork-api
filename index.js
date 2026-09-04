@@ -7,8 +7,8 @@ const helmet    = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { Pool }  = require('pg');
 const { pool, initDB } = require('./db');
-const { sendConversion } = require('./partnerstack');
-const { pushToSalesforce, findSFLeadByEmail, updateSFLead } = require('./salesforce');
+const { sendConversion, fetchPartnership, sendAction } = require('./partnerstack');
+const { pushToSalesforce, findSFLeadByEmail, updateSFLead, findQualifiedDemoOpportunities } = require('./salesforce');
 const { pushFormEventsToMeta, pushStartTrialToMeta } = require('./meta-capi');
 const createLeadMagnetRouter = require('./lead-magnet');
 
@@ -185,6 +185,7 @@ async function initAWSTable() {
         ps_xid                  TEXT,
         ps_partner_key          TEXT,
         ps_partner_name         TEXT,
+        ps_partner_email        TEXT,
         ps_customer_key         TEXT,
         ps_click_at             TIMESTAMPTZ,
         ps_click_history        JSONB,
@@ -236,6 +237,7 @@ async function initAWSTable() {
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_xid TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_partner_key TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_partner_name TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_partner_email TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_customer_key TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_click_at TIMESTAMPTZ`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_click_history JSONB`,
@@ -271,9 +273,9 @@ function syncToAWS(data) {
        enriched_org_hq, enriched_total_funding, enriched_funding_stage,
        disqualified, disqualified_reason,
        step_reached, completed, submitted_at, loops_sent,
-       ps_xid, ps_partner_key, ps_partner_name, ps_customer_key,
+       ps_xid, ps_partner_key, ps_partner_name, ps_partner_email, ps_customer_key,
        ps_click_at, ps_click_history, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,NOW())
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,NOW())
     ON CONFLICT (session_id) DO UPDATE SET
       page_url                = COALESCE(EXCLUDED.page_url,                gw_form_leads.page_url),
       email                   = COALESCE(EXCLUDED.email,                   gw_form_leads.email),
@@ -322,6 +324,7 @@ function syncToAWS(data) {
       ps_xid                  = COALESCE(EXCLUDED.ps_xid,                  gw_form_leads.ps_xid),
       ps_partner_key          = COALESCE(EXCLUDED.ps_partner_key,          gw_form_leads.ps_partner_key),
       ps_partner_name         = COALESCE(EXCLUDED.ps_partner_name,         gw_form_leads.ps_partner_name),
+      ps_partner_email        = COALESCE(EXCLUDED.ps_partner_email,        gw_form_leads.ps_partner_email),
       ps_customer_key         = COALESCE(EXCLUDED.ps_customer_key,         gw_form_leads.ps_customer_key),
       ps_click_at             = COALESCE(EXCLUDED.ps_click_at,             gw_form_leads.ps_click_at),
       ps_click_history        = COALESCE(EXCLUDED.ps_click_history,        gw_form_leads.ps_click_history),
@@ -351,7 +354,8 @@ function syncToAWS(data) {
     data.completed               || false,  data.completed ? new Date() : null,
     data.loops_sent              || false,
     data.ps_xid                  || null,   data.ps_partner_key            || null,
-    data.ps_partner_name         || null,   data.ps_customer_key           || null,
+    data.ps_partner_name         || null,   data.ps_partner_email          || null,
+    data.ps_customer_key         || null,
     data.ps_click_at             || null,
     data.ps_click_history ? JSON.stringify(data.ps_click_history) : null
   ]).then(() => {
@@ -369,6 +373,36 @@ function syncBookingToAWS(session_id, booking_uid, start_time, end_time, event_t
   `, [session_id, booking_uid, start_time || null, end_time || null, event_type || null])
   .then(() => console.log(`[AWS] ✅ Booking synced for session ${session_id}`))
   .catch(err => { console.warn(`[AWS] ⚠ Booking sync failed:`, err.message); recordFailure('AWS sync', 'booking sync', err.message); });
+}
+
+/* The partner name resolves AFTER the row has already been mirrored, so the
+   ordinary syncToAWS upsert has been and gone by the time we know it. Same
+   shape as syncBookingToAWS above and for the same reason: a late-arriving
+   fact needs its own targeted write or the mirror never sees it. */
+function syncPartnerIdentityToAWS(session_id, name, email) {
+  if (!awsPool) return;
+  awsPool.query(
+    `UPDATE gw_form_leads
+        SET ps_partner_name = COALESCE($2, ps_partner_name),
+            ps_partner_email = COALESCE($3, ps_partner_email),
+            updated_at = NOW()
+      WHERE session_id = $1`,
+    [session_id, name || null, email || null]
+  ).catch(err => console.warn('[AWS] ⚠ Partner identity sync failed:', err.message));
+}
+
+/* A targeted UPDATE, NOT syncToAWS, and the distinction matters.
+   syncToAWS is a whole-row upsert whose conflict clause sets
+   `disqualified = EXCLUDED.disqualified` UNCONDITIONALLY — no COALESCE. Handing
+   it a partial object therefore passes disqualified as false and CLEARS a real
+   disqualification on the mirror, which the dialer reads. Any late-arriving
+   single field needs its own write, like the booking and identity syncs above. */
+function syncHearAboutUsToAWS(session_id, hear_about_us) {
+  if (!awsPool) return;
+  awsPool.query(
+    `UPDATE gw_form_leads SET hear_about_us = $2, updated_at = NOW() WHERE session_id = $1`,
+    [session_id, hear_about_us || null]
+  ).catch(err => console.warn('[AWS] ⚠ hear_about_us sync failed:', err.message));
 }
 
 function sendSlack(blocks, fallbackText) {
@@ -991,11 +1025,28 @@ function buildEnrichmentBlocks(blocks, e) {
 function buildJourneyBlocks(blocks, d) {
   const hasAttribution = d.utm_source || d.utm_medium || d.utm_campaign || d.utm_content || d.referrer;
   const hasJourney     = d.landing_page || d.previous_page || d.page_url;
+  const hasPartner     = !!d.ps_partner_key;
 
-  if (!hasAttribution && !hasJourney) return;
+  if (!hasAttribution && !hasJourney && !hasPartner) return;
 
   blocks.push(bDivider());
   blocks.push(bSection('*📊 Attribution & Journey*'));
+
+  /* The partner line goes FIRST in this section, above the UTMs. An SDR
+     picking up a partner-sourced lead needs to know that before anything
+     else — it changes who owns the relationship and what they open with.
+
+     Falls back to the raw key when the name has not resolved. That is the
+     first lead from a brand-new partner only: the resolver runs after the
+     response and every later lead reads the cache. A key is ugly but it is
+     true, and an SDR can still search it. */
+  if (hasPartner) {
+    const who = d.ps_partner_name
+      ? `*${d.ps_partner_name}*` + (d.ps_partner_email ? ` (${d.ps_partner_email})` : '')
+      : `\`${d.ps_partner_key}\`  _(name not resolved yet)_`;
+    const clicked = d.ps_click_at ? ` — clicked ${etStamp(d.ps_click_at)}` : '';
+    blocks.push(bSection(`🤝 *Partner:* ${who}${clicked}`));
+  }
 
   if (hasAttribution) {
     const src = [d.utm_source, d.utm_medium].filter(Boolean).join(' / ');
@@ -2245,6 +2296,7 @@ app.get('/monitor/leads', async (req, res) => {
   const enrichment = req.query.enrichment || null;
   const websiteCheck = req.query.websiteCheck || 'all';
   const repeatAttempts = req.query.repeatAttempts || 'all';
+  const partner      = req.query.partner      || null;
   const format     = req.query.format     || 'json';
 
   const sortMap = {
@@ -2305,6 +2357,18 @@ app.get('/monitor/leads', async (req, res) => {
     const verifiedSql = WEBSITE_VERIFIED_REASONS.filter((r) => /^[a-z0-9_]+$/.test(r)).map((r) => `'${r}'`).join(',');
     conditions.push(`(l.website_check_failed IS TRUE OR (l.website_check_reason IS NOT NULL AND l.website_check_reason <> '' AND l.website_check_reason NOT IN (${verifiedSql})))`);
   }
+  /* Partner as a DIMENSION on the existing view, not a tab of its own.
+     '__any' is every partner-sourced lead; a specific value matches the key,
+     the resolved name or the partner's email, because whoever is filtering
+     may have any one of the three to hand and will not know which we
+     resolved. */
+  if (partner === '__any')      conditions.push(`l.ps_partner_key IS NOT NULL`);
+  else if (partner === '__none') conditions.push(`l.ps_partner_key IS NULL`);
+  else if (partner) {
+    params.push(`%${partner.toLowerCase()}%`);
+    const i = params.length;
+    conditions.push(`(LOWER(COALESCE(l.ps_partner_key,'')) LIKE $${i} OR LOWER(COALESCE(l.ps_partner_name,'')) LIKE $${i} OR LOWER(COALESCE(l.ps_partner_email,'')) LIKE $${i})`);
+  }
   if (repeatAttempts === 'yes') conditions.push(`EXISTS (SELECT 1 FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at)`);
   if (repeatAttempts === 'no')  conditions.push(`NOT EXISTS (SELECT 1 FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at)`);
 
@@ -2335,6 +2399,9 @@ app.get('/monitor/leads', async (req, res) => {
       l.loops_sent, l.created_at, l.submitted_at, l.page_url,
       l.landing_page, l.previous_page, l.website_check_failed, l.website_check_reason,
       l.elv_status, l.elv_checked_at,
+      l.ps_partner_key, l.ps_partner_name, l.ps_partner_email,
+      l.ps_xid, l.ps_customer_key, l.ps_click_at, l.ps_click_history,
+      l.ps_signup_sent_at, l.ps_qualified_sent_at,
       (SELECT COUNT(*) FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at) AS prior_attempts,
       (SELECT COUNT(*) FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at AND pa.disqualified IS TRUE) AS prior_disqualified,
       l.utm_source, l.utm_medium, l.utm_campaign, l.utm_term, l.referrer, l.prefill_source,
@@ -2423,13 +2490,21 @@ app.get('/monitor/filter-options', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const [hearRows, sourceRows] = await Promise.all([
+    const [hearRows, sourceRows, partnerRows] = await Promise.all([
       pool.query(`SELECT hear_about_us AS v, COUNT(*) AS c FROM leads WHERE hear_about_us IS NOT NULL AND hear_about_us <> '' GROUP BY hear_about_us ORDER BY c DESC, hear_about_us ASC LIMIT 100`),
-      pool.query(`SELECT utm_source AS v, COUNT(*) AS c FROM leads WHERE utm_source IS NOT NULL AND utm_source <> '' GROUP BY utm_source ORDER BY c DESC, utm_source ASC LIMIT 100`)
+      pool.query(`SELECT utm_source AS v, COUNT(*) AS c FROM leads WHERE utm_source IS NOT NULL AND utm_source <> '' GROUP BY utm_source ORDER BY c DESC, utm_source ASC LIMIT 100`),
+      /* One row per partner KEY, carrying the best name and email we have
+         resolved for it. MAX() rather than a join: the name lands on later
+         rows than the first lead from that partner, so grouping on the key and
+         taking whatever resolved is what shows a name instead of a blank. */
+      pool.query(`SELECT ps_partner_key AS k, MAX(ps_partner_name) AS n, MAX(ps_partner_email) AS e, COUNT(*) AS c
+                    FROM leads WHERE ps_partner_key IS NOT NULL AND ps_partner_key <> ''
+                   GROUP BY ps_partner_key ORDER BY c DESC LIMIT 100`)
     ]);
     res.json({
       hearAbout: hearRows.rows.map(r => r.v),
-      utmSource: sourceRows.rows.map(r => r.v)
+      utmSource: sourceRows.rows.map(r => r.v),
+      partners:  partnerRows.rows.map(r => ({ key: r.k, name: r.n, email: r.e }))
     });
   } catch (err) {
     console.error('[/monitor/filter-options]', err.message);
@@ -2604,6 +2679,14 @@ app.get('/monitor', (req, res) => {
   '.egrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}' +
   '.ef{background:#fff;border:1px solid #eee;border-radius:6px;padding:8px 10px}' +
   '.efl{font-size:10px;font-weight:600;color:#aaa;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:3px}' +
+  '.psb{margin-bottom:12px;padding:10px;border:1px solid #ddd6fe;background:#faf8ff;border-radius:6px}' +
+  '.psh{font-weight:600;font-size:12px;margin-bottom:6px;color:#5b21b6}' +
+  '.psm{font-size:11px;color:#666;margin:8px 0 4px}' +
+  '.pst{width:100%;border-collapse:collapse;font-size:11px}' +
+  '.pst td{padding:2px 6px}' +
+  '.pslost{color:#aaa}' +
+  '.pswon{font-weight:600}' +
+  '.psna{color:#999}' +
   '.efv{font-size:12px;color:#1a1a1a;word-break:break-word}.efv a{color:#2563eb;text-decoration:none}' +
   '.pg{display:flex;align-items:center;gap:8px;justify-content:center;padding:16px 0;flex-wrap:wrap}' +
   '.pb{padding:5px 12px;border:1px solid #e5e5e5;border-radius:6px;background:#fff;cursor:pointer;font-size:12px;color:#333}' +
@@ -2665,6 +2748,7 @@ app.get('/monitor', (req, res) => {
   '<select id="fsellto" onchange="loadLeads(1)"><option value="all">All sell-to</option><option value="B2B">B2B</option><option value="B2B (clarified from B2C)">B2B (clarified from B2C)</option><option value="B2B (clarified from Mixed)">B2B (clarified from Mixed)</option><option value="B2C">B2C</option><option value="Mixed">Mixed</option><option value="__clarified">Clarified (any)</option></select>' +
   '<select id="fsource" onchange="loadLeads(1)"><option value="all">All sources</option></select>' +
   '<select id="fenrich" onchange="loadLeads(1)"><option value="all">Enrichment: all</option><option value="yes">Enriched</option><option value="no">Not enriched</option></select>' +
+  '<select id="fpartner" onchange="loadLeads(1)"><option value="all">Partner: all</option><option value="__any">Any partner</option><option value="__none">No partner</option></select>' +
   '<select id="fwebsitecheck" onchange="loadLeads(1)"><option value="all">Website check: all</option><option value="failed">Failed</option><option value="passed">Passed</option><option value="social">Social profile</option><option value="unverified">Not verified (any)</option></select>' +
   '<select id="frepeat" onchange="loadLeads(1)"><option value="all">Attempts: all</option><option value="yes">Repeat only</option><option value="no">First-time only</option></select>' +
   '<input type="text" id="fhear" list="hearlist" placeholder="Heard about us..." oninput="debounce()" style="min-width:170px">' +
@@ -2894,6 +2978,37 @@ app.get('/monitor', (req, res) => {
   'function renderChart(rows){var labels=(rows||[]).map(function(r){return r.day_label;}),data=(rows||[]).map(function(r){return parseInt(r.count)||0;});if(lChart)lChart.destroy();var ctx=document.getElementById("lchart").getContext("2d");lChart=new Chart(ctx,{type:"bar",data:{labels:labels,datasets:[{data:data,backgroundColor:"#818cf8",borderRadius:4,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{stepSize:1,color:"#aaa"},grid:{color:"#f0f0f0"}},x:{ticks:{color:"#aaa",maxRotation:45,autoSkip:false},grid:{display:false}}}}});}' +
   'function stageBadge(l){if(l.booking_uid)return"<span class=\\"badge bg\\">Booked</span>";if(l.disqualified)return"<span class=\\"badge br\\">Disqualified</span>";if(l.completed)return"<span class=\\"badge bb\\">Completed</span>";return"<span class=\\"badge ba\\">Step 1</span>";}' +
   'function enrichBadge(l){return(l.enriched_title||l.enriched_company_size||l.e_company)?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>";}' +
+  /* The partner panel — rendered above the enrichment grid on a partner lead,
+     and absent entirely otherwise so an organic lead looks exactly as today.
+     ps_click_history is every partner click this visitor made, oldest first.
+     Attribution uses the LAST click and only the last click, so that row is
+     badged WON and the others greyed: the point of keeping the history is
+     answering "why partner A and not B?" without opening the database. */
+  'function psPanel(l){if(!l.ps_partner_key)return "";' +
+  'function C(v){return "<code>"+esc(v)+"</code>";}' +
+  'var who=l.ps_partner_name?esc(l.ps_partner_name):(C(l.ps_partner_key)+" <span class=\'psna\'>(name not resolved)</span>");' +
+  'var rows=[["Partner",who],' +
+  '["Partner email",l.ps_partner_email?esc(l.ps_partner_email):null],' +
+  '["Partner key",l.ps_partner_name?C(l.ps_partner_key):null],' +
+  '["Clicked",l.ps_click_at?esc(et(l.ps_click_at)):null],' +
+  '["Customer key",l.ps_customer_key?C(l.ps_customer_key):null],' +
+  '["Conversion sent",l.ps_signup_sent_at?esc(et(l.ps_signup_sent_at)):"<span class=\'psna\'>not sent</span>"],' +
+  '["Qualified sent",l.ps_qualified_sent_at?esc(et(l.ps_qualified_sent_at)):null]' +
+  '].filter(function(r){return r[1];});' +
+  'var h="<div class=\'psb\'><div class=\'psh\'>\u{1F91D} Partner</div><div class=\'egrid\'>";' +
+  'h+=rows.map(function(r){return "<div class=\'ef\'><div class=\'efl\'>"+r[0]+"</div><div>"+r[1]+"</div></div>";}).join("");' +
+  'h+="</div>";' +
+  'var hist=l.ps_click_history;if(typeof hist==="string"){try{hist=JSON.parse(hist);}catch(e){hist=null;}}' +
+  'if(hist&&hist.length){' +
+  'h+="<div class=\'psm\'>Click history ("+hist.length+", oldest first — the last click wins attribution)</div><table class=\'pst\'>";' +
+  'h+=hist.map(function(c,i){var won=(i===hist.length-1);' +
+  'return "<tr class=\'"+(won?"pswon":"pslost")+"\'>"' +
+  '+"<td>"+(won?"<span class=\'badge bg\'>WON</span>":"")+"</td>"' +
+  '+"<td>"+esc(c.at?et(c.at):"—")+"</td>"' +
+  '+"<td>"+C(c.pk||"—")+"</td>"' +
+  '+"<td class=\'psna\'>"+C(c.xid||"—")+"</td></tr>";}).join("");' +
+  'h+="</table>";}' +
+  'return h+"</div>";}' +
   'function enrichPanel(l){var loc=[l.enriched_city,l.enriched_state,l.enriched_country].filter(Boolean).join(", ");var fields=[' +
   '{lb:"Title",v:l.enriched_title},' +
   '{lb:"Seniority",v:l.enriched_seniority},' +
@@ -2943,20 +3058,21 @@ app.get('/monitor', (req, res) => {
   '{lb:"Session ID",v:l.session_id,mono:true},' +
   '{lb:"Enriched at",v:et(l.enriched_at)}' +
   '].filter(function(f){return f.v;});' +
-  'if(!fields.length)return"<div style=\\"color:#999;font-size:12px\\">No enrichment data.</div>";' +
-  'return"<div class=\\"egrid\\">"+fields.map(function(f){var val=f.lnk&&f.v?"<a href=\\""+(f.v.startsWith("http")?"":"https://")+esc(f.v)+"\\" target=\\"_blank\\">"+esc(f.v)+"</a>":f.mono?"<code style=\\"font-size:10px\\">"+esc(f.v)+"</code>":esc(f.v);return"<div class=\\"ef\\"><div class=\\"efl\\">"+f.lb+"</div><div class=\\"efv\\">"+val+"</div></div>";}).join("")+"</div>";}' +
+  'var pp=psPanel(l);' +
+  'if(!fields.length)return pp||"<div style=\\"color:#999;font-size:12px\\">No enrichment data.</div>";' +
+  'return pp+"<div class=\\"egrid\\">"+fields.map(function(f){var val=f.lnk&&f.v?"<a href=\\""+(f.v.startsWith("http")?"":"https://")+esc(f.v)+"\\" target=\\"_blank\\">"+esc(f.v)+"</a>":f.mono?"<code style=\\"font-size:10px\\">"+esc(f.v)+"</code>":esc(f.v);return"<div class=\\"ef\\"><div class=\\"efl\\">"+f.lb+"</div><div class=\\"efv\\">"+val+"</div></div>";}).join("")+"</div>";}' +
   'function debounce(){clearTimeout(stimer);stimer=setTimeout(function(){loadLeads(1);},400);}' +
-  'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("fsellto").value="all";document.getElementById("fsource").value="all";document.getElementById("fenrich").value="all";document.getElementById("fwebsitecheck").value="all";document.getElementById("frepeat").value="all";document.getElementById("fhear").value="";document.getElementById("fpreset").value="";document.getElementById("ffrom").value="";document.getElementById("fto").value="";curSort="created_at";curDir="desc";renderSortArrows();loadLeads(1);}' +
+  'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("fsellto").value="all";document.getElementById("fsource").value="all";document.getElementById("fenrich").value="all";document.getElementById("fwebsitecheck").value="all";document.getElementById("frepeat").value="all";document.getElementById("fpartner").value="all";document.getElementById("fhear").value="";document.getElementById("fpreset").value="";document.getElementById("ffrom").value="";document.getElementById("fto").value="";curSort="created_at";curDir="desc";renderSortArrows();loadLeads(1);}' +
   'function renderSortArrows(){["email","name","company","sell_to","created_at"].forEach(function(c){var el=document.getElementById("sar-"+c);if(el)el.textContent=(curSort===c)?(curDir==="asc"?"\\u25B2":"\\u25BC"):"";});}' +
   'function sortBy(c){if(curSort===c){curDir=(curDir==="asc")?"desc":"asc";}else{curSort=c;curDir=(c==="created_at")?"desc":"asc";}renderSortArrows();loadLeads(1);}' +
   'function datePreset(v){var ff=document.getElementById("ffrom"),ft=document.getElementById("fto");if(!v){loadLeads(1);return;}var to=etDayShift(0),from=to;if(v==="7d")from=etDayShift(-6);else if(v==="30d")from=etDayShift(-29);ff.value=from;ft.value=to;loadLeads(1);}' +
   'function dateManual(){var p=document.getElementById("fpreset");if(p)p.value="";loadLeads(1);}' +
-  'function exportLeads(){var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"format=csv&stage="+stage+"&sort="+curSort+"&dir="+curDir;if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;window.location.href=url;}' +
-  'async function loadFilterOptions(){if(filterOptsLoaded)return;try{var r=await fetch(API+"/monitor/filter-options"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(10000)});if(!r.ok)return;var d=await r.json();var sel=document.getElementById("fsource");if(sel&&d.utmSource){d.utmSource.forEach(function(v){var o=document.createElement("option");o.value=v;o.textContent=v;sel.appendChild(o);});}var dl=document.getElementById("hearlist");if(dl&&d.hearAbout){dl.innerHTML=d.hearAbout.map(function(v){return"<option value=\\""+esc(v)+"\\"></option>";}).join("");}filterOptsLoaded=true;}catch(e){}}' +
+  'function exportLeads(){var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"format=csv&stage="+stage+"&sort="+curSort+"&dir="+curDir;if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;window.location.href=url;}' +
+  'async function loadFilterOptions(){if(filterOptsLoaded)return;try{var r=await fetch(API+"/monitor/filter-options"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(10000)});if(!r.ok)return;var d=await r.json();var sel=document.getElementById("fsource");if(sel&&d.utmSource){d.utmSource.forEach(function(v){var o=document.createElement("option");o.value=v;o.textContent=v;sel.appendChild(o);});}var ps=document.getElementById("fpartner");if(ps&&d.partners){d.partners.forEach(function(p){var o=document.createElement("option");o.value=p.key;o.textContent="Partner: "+(p.name||p.key)+(p.email?" <"+p.email+">":"");ps.appendChild(o);});}var dl=document.getElementById("hearlist");if(dl&&d.hearAbout){dl.innerHTML=d.hearAbout.map(function(v){return"<option value=\\""+esc(v)+"\\"></option>";}).join("");}filterOptsLoaded=true;}catch(e){}}' +
   'function toggleRow(sid){var row=document.getElementById("er-"+sid);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=row.previousElementSibling&&row.previousElementSibling.querySelector(".xbtn");if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";}' +
-  'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
+  'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
   'var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"page="+curPage+"&stage="+stage+"&sort="+curSort+"&dir="+curDir;' +
-  'if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;' +
+  'if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;' +
   'document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\">Loading...</td></tr>";' +
   'try{var r=await fetch(url,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
   'set("lcount",d.total+" lead"+(d.total!==1?"s":"")+" found");' +
@@ -5202,18 +5318,15 @@ function parsePartnerStackClickHistory(raw) {
    "1.2.3.4, 10.0.0.1" as an IP address is worse than sending nothing, because
    it looks like a value and will never match anything.
 
-   origin is the browser's Origin header, falling back to the origin of the page
-   the form was on. The Origin header is absent on same-origin non-CORS posts,
-   and page_url is the closest honest substitute for "where did this happen". */
+   origin is the FULL page URL the form was on, not the scheme+host of it and
+   not the browser's Origin header. The Origin header is absent on same-origin
+   non-CORS posts, and a bare scheme+host cannot tell /demo from an ads lander,
+   which is exactly the distinction a fraud review wants to see. */
 function readPartnerStackRequestContext(req, page_url) {
   const fwd = (req.headers['x-forwarded-for'] || '').toString();
   const ip_address = (fwd.split(',')[0] || '').trim() || req.ip || null;
   const user_agent = (req.headers['user-agent'] || '').toString().slice(0, 500) || null;
-
-  let origin = (req.headers['origin'] || '').toString().slice(0, 200) || null;
-  if (!origin && page_url) {
-    try { origin = new URL(page_url).origin; } catch { /* not a URL; leave it absent */ }
-  }
+  const origin = (page_url || '').toString().trim().slice(0, 1000) || null;
   return { ip_address, user_agent, origin };
 }
 
@@ -5293,6 +5406,141 @@ function runPartnerStackEligibility({ session_id, email, website, ps }) {
       console.warn('[PartnerStack] Eligibility check failed (non-blocking):', err.message);
       recordFailure('PartnerStack', (email || session_id) + ' (eligibility)', err.message);
     });
+}
+
+/* ── STEP 6: who is the partner? ─────────────────────────────────────
+   The cookie gives us a key like 785ec78e1ee4688, which is meaningless to an
+   SDR reading Slack. This turns it into a name and an email, once per key.
+
+   THREE layers, cheapest first, because the same handful of partners will
+   send most of the traffic and re-asking the API for each of their leads is
+   pure waste:
+     1. process memory, for the life of the dyno
+     2. any earlier lead row already carrying a resolved name for that key
+     3. the v2 API — Basic base64(public_key:secret_key), NOT the tracking
+        token that the conversion endpoint uses
+
+   Deliberately does NOT gate anything. An unresolved partner is a cosmetic
+   problem: Slack falls back to the raw key, the dashboard falls back to the
+   raw key, and the conversion has already fired regardless. So every failure
+   path here is a warning and a return, never a throw. */
+const _psPartnerCache = new Map();
+
+async function resolvePartnerIdentity(partnerKey) {
+  if (!partnerKey) return null;
+  if (_psPartnerCache.has(partnerKey)) return _psPartnerCache.get(partnerKey);
+
+  // Someone else's lead may already have paid for this lookup.
+  try {
+    const { rows } = await pool.query(
+      `SELECT ps_partner_name, ps_partner_email
+         FROM leads
+        WHERE ps_partner_key = $1 AND ps_partner_name IS NOT NULL
+        LIMIT 1`,
+      [partnerKey]
+    );
+    if (rows[0]) {
+      const known = { name: rows[0].ps_partner_name, email: rows[0].ps_partner_email };
+      _psPartnerCache.set(partnerKey, known);
+      return known;
+    }
+  } catch (err) {
+    console.warn('[PartnerStack] Partner cache lookup failed (will try the API):', err.message);
+  }
+
+  const out = await fetchPartnership(partnerKey);
+  if (!out.ok) {
+    console.warn(`[PartnerStack] Could not resolve partner ${partnerKey}: ${out.reason}`);
+    /* NOT cached. A failure is usually transient (rate limit, blip) and
+       caching it would pin every future lead from this partner to "unknown"
+       for the life of the process. */
+    return null;
+  }
+  const identity = { name: out.name, email: out.email };
+  _psPartnerCache.set(partnerKey, identity);
+  console.log(`[PartnerStack] Resolved partner ${partnerKey} -> ${identity.name || '(no name)'} <${identity.email || 'no email'}>`);
+  return identity;
+}
+
+/* Resolve and stamp the row. Returns the identity so the caller can put it in
+   Slack without a second lookup. */
+async function runPartnerStackIdentity({ session_id, ps }) {
+  if (!ps || !ps.ps_partner_key) return null;
+  const identity = await resolvePartnerIdentity(ps.ps_partner_key);
+  if (!identity || (!identity.name && !identity.email)) return null;
+  try {
+    await pool.query(
+      `UPDATE leads
+          SET ps_partner_name  = COALESCE($2, ps_partner_name),
+              ps_partner_email = COALESCE($3, ps_partner_email),
+              updated_at = NOW()
+        WHERE session_id = $1`,
+      [session_id, identity.name || null, identity.email || null]
+    );
+  } catch (err) {
+    console.warn('[PartnerStack] Could not store the partner identity (non-blocking):', err.message);
+  }
+  syncPartnerIdentityToAWS(session_id, identity.name, identity.email);
+  return identity;
+}
+
+/* A NON-fetching read of the in-memory cache, for the Slack path.
+   Slack fires before res.json() and the resolver runs after it, so the very
+   first lead from a brand-new partner posts with the raw key. Every lead after
+   that hits this and shows the name. Peeking costs nothing; making Slack wait
+   for an HTTP round trip to a third party would cost a lead. */
+function peekPartnerIdentity(partnerKey) {
+  if (!partnerKey) return null;
+  return _psPartnerCache.get(partnerKey) || null;
+}
+
+/* ── STEP 7: hear_about_us on a partner lead ─────────────────────────
+   "Partner - Jane Smith" is what an AE sees in Salesforce, and it is the only
+   place the partner shows up in their workflow at all.
+
+   AN EXISTING REFERRAL WINS. gw_ref_email is a named human vouching for this
+   lead, set by prefillHearAboutUs in both form files as "Referral - <email>",
+   and it is a stronger signal than an affiliate link. If someone arrives on a
+   referral link AND a partner link, the referral is what the AE should see.
+   Anything already starting with "Referral -" is therefore left untouched.
+
+   Falls back to the raw partner key when the name has not resolved yet, which
+   happens for the very first lead from a brand-new partner: the resolver runs
+   after res.json() and the Salesforce push has already gone. That row is
+   upgraded in place by upgradePartnerHearAboutUs once the name lands. */
+const PS_HEAR_PREFIX = 'Partner - ';
+
+function partnerHearAboutUs({ hear_about_us, ps, identity }) {
+  if (!ps || !ps.ps_partner_key) return null;
+  const current = (hear_about_us || '').trim();
+  if (/^referral\s*-/i.test(current)) return null;          // a human referral wins
+  const label = (identity && identity.name) || ps.ps_partner_key;
+  const next = PS_HEAR_PREFIX + label;
+  return next === current ? null : next;
+}
+
+/* Once the name resolves, replace the key-shaped placeholder — in our row and
+   in Salesforce, where the AE is actually looking. Only ever rewrites a value
+   this code wrote: a referral, or anything a human typed, is left alone. */
+async function upgradePartnerHearAboutUs({ session_id, email, ps, identity }) {
+  if (!identity || !identity.name || !ps || !ps.ps_partner_key) return;
+  const placeholder = PS_HEAR_PREFIX + ps.ps_partner_key;
+  const resolved    = PS_HEAR_PREFIX + identity.name;
+  if (placeholder === resolved) return;
+  try {
+    const { rowCount } = await pool.query(
+      `UPDATE leads SET hear_about_us = $2, updated_at = NOW()
+        WHERE session_id = $1 AND hear_about_us = $3`,
+      [session_id, resolved, placeholder]
+    );
+    if (!rowCount) return;                                   // nothing of ours to upgrade
+    console.log(`[PartnerStack] hear_about_us upgraded to "${resolved}"`);
+    syncHearAboutUsToAWS(session_id, resolved);
+    const leadId = await findSFLeadByEmail(email);
+    if (leadId) await updateSFLead(leadId, { hear_about_us__c: resolved });
+  } catch (err) {
+    console.warn('[PartnerStack] Could not upgrade hear_about_us (non-blocking):', err.message);
+  }
 }
 
 /* ── STEP 5: the signup conversion ───────────────────────────────────
@@ -5393,6 +5641,139 @@ async function runPartnerStackSignup({ session_id, email, website, company, firs
   if (result.reason !== 'no_token') {
     recordFailure('PartnerStack', ps.ps_customer_key + ' (conversion)', result.reason + (result.body ? ' — ' + String(result.body).slice(0, 200) : ''));
   }
+}
+
+/* ── STEP 10: the qualification action ───────────────────────────────
+   An AE ticks Qualified_Demo__c on the Opportunity after the call; we poll
+   every 15 minutes and tell PartnerStack, which is what actually triggers the
+   affiliate's commission.
+
+   A POLLER, not a Salesforce Flow callout, deliberately: a Flow that calls out
+   fails inside Salesforce where nobody on this team would ever see it, and it
+   couples an AE ticking a box to our service being up at that instant. Polling
+   means a missed window is just a later window.
+
+   DOMAIN is the join. It is the only identifier both systems share —
+   PartnerStack knows the customer by the customer_key we sent at signup, which
+   came from the lead's website. Account.Website first, the primary contact's
+   email domain as a fallback, both normalised through partnerStackCustomerKey
+   so the two sides cannot disagree about what acme.com is called.
+
+   CLAIM-FIRST and once per domain, exactly like the signup conversion, and for
+   the same reason: two poller runs overlapping, or one Opportunity per contact
+   on the same account, would otherwise pay the affiliate twice for one
+   qualification. leads_ps_qualified_once_idx makes that impossible; the claim
+   is released if the send fails so the next run retries. */
+const PS_QUALIFY_INTERVAL_MS = 15 * 60 * 1000;
+const PS_QUALIFY_ACTION_TYPE = 'qualified_demo';
+let _psQualifyRunning = false;
+
+async function runPartnerStackQualificationPoll() {
+  /* One at a time. A slow Salesforce round trip must not let a second run
+     start and race the first for the same claims. */
+  if (_psQualifyRunning) {
+    console.log('[PartnerStack] Qualification poll already running — skipping this tick');
+    return;
+  }
+  _psQualifyRunning = true;
+  try {
+    const opps = await findQualifiedDemoOpportunities();
+    if (!opps.length) return;
+
+    /* Collapse to distinct domains first. Several Opportunities can point at
+       one account, and the action is per customer, not per Opportunity. */
+    const byKey = new Map();
+    for (const o of opps) {
+      const key = partnerStackCustomerKey(o.website) || partnerStackCustomerKey(o.contactEmail);
+      if (!key) {
+        console.log(`[PartnerStack] Qualified demo with no usable domain — Opportunity ${o.id} (${o.accountName || o.name || 'unnamed'})`);
+        continue;
+      }
+      if (!byKey.has(key)) byKey.set(key, o);
+    }
+    if (!byKey.size) return;
+
+    /* Only domains we actually told PartnerStack about at signup can be
+       qualified: an action for a customer_key it has never seen is a no-op at
+       best. ps_signup_sent_at IS NOT NULL is that filter. */
+    const { rows } = await pool.query(
+      `SELECT DISTINCT ps_customer_key
+         FROM leads
+        WHERE ps_customer_key = ANY($1)
+          AND ps_signup_sent_at IS NOT NULL
+          AND ps_qualified_sent_at IS NULL`,
+      [Array.from(byKey.keys())]
+    );
+    if (!rows.length) return;
+
+    for (const r of rows) {
+      await sendQualificationForDomain(r.ps_customer_key);
+    }
+  } catch (err) {
+    console.warn('[PartnerStack] Qualification poll failed (non-blocking):', err.message);
+    recordFailure('PartnerStack', 'qualification poll', err.message);
+  } finally {
+    _psQualifyRunning = false;
+  }
+}
+
+async function sendQualificationForDomain(customerKey) {
+  let claimedSession = null;
+  try {
+    // Claim before sending — see the note above runPartnerStackSignup.
+    const claim = await pool.query(
+      `UPDATE leads
+          SET ps_qualified_sent_at = NOW(), updated_at = NOW()
+        WHERE session_id = (
+              SELECT session_id FROM leads
+               WHERE ps_customer_key = $1 AND ps_signup_sent_at IS NOT NULL
+               ORDER BY ps_signup_sent_at ASC LIMIT 1)
+          AND ps_qualified_sent_at IS NULL
+          AND NOT EXISTS (
+                SELECT 1 FROM leads o
+                 WHERE o.ps_customer_key = $1 AND o.ps_qualified_sent_at IS NOT NULL)
+        RETURNING session_id`,
+      [customerKey]
+    );
+    if (claim.rowCount === 0) return;                 // already qualified, or nothing to claim
+    claimedSession = claim.rows[0].session_id;
+  } catch (err) {
+    if (err && err.code === '23505') return;          // concurrent claim won
+    console.warn(`[PartnerStack] Could not claim ${customerKey} for qualification:`, err.message);
+    recordFailure('PartnerStack', customerKey + ' (qualify claim)', err.message);
+    return;
+  }
+
+  const result = await sendAction({
+    customer_key: customerKey,
+    type: PS_QUALIFY_ACTION_TYPE,
+    value: 1,
+  });
+
+  if (result.ok) {
+    console.log(`[PartnerStack] ✅ Qualification sent: ${customerKey}`);
+    return;
+  }
+
+  try {
+    await pool.query(
+      `UPDATE leads SET ps_qualified_sent_at = NULL, updated_at = NOW() WHERE session_id = $1`,
+      [claimedSession]
+    );
+  } catch (err) {
+    console.error(`[PartnerStack] ⚠ Qualification failed AND the claim could not be released for ${customerKey}:`, err.message);
+    recordFailure('PartnerStack', customerKey + ' (stuck qualify claim)', err.message);
+  }
+  console.warn(`[PartnerStack] ⛔ Qualification NOT sent (${result.reason}): ${customerKey}`);
+  if (result.reason !== 'no_credentials') {
+    recordFailure('PartnerStack', customerKey + ' (qualification)', result.reason + (result.body ? ' — ' + String(result.body).slice(0, 200) : ''));
+  }
+}
+
+function startPartnerStackQualificationPoll() {
+  const t = setInterval(runPartnerStackQualificationPoll, PS_QUALIFY_INTERVAL_MS);
+  if (t.unref) t.unref();
+  console.log(`[PartnerStack] Qualification poller started (every ${PS_QUALIFY_INTERVAL_MS / 60000} min)`);
 }
 
 /* Rejections are logged in one place so the format cannot drift between call
@@ -5535,6 +5916,11 @@ app.post('/partial', async (req, res) => {
      step 1 and drops would otherwise have no partner on the row at all —
      including for the drop-off recovery cron. */
   const ps = readPartnerStackPayload(req.body, { email, website });
+  /* Step 7. peek only — never an API call here. The identity resolver runs
+     after res.json(); a brand-new partner key lands as the key and is upgraded
+     in place once the name arrives. */
+  const psHear = partnerHearAboutUs({ hear_about_us, ps, identity: peekPartnerIdentity(ps.ps_partner_key) });
+  const hearAboutUsFinal = psHear || hear_about_us;
 
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
@@ -5589,11 +5975,11 @@ app.post('/partial', async (req, res) => {
         ps_customer_key       = COALESCE(EXCLUDED.ps_customer_key,       leads.ps_customer_key),
         ps_click_at           = COALESCE(EXCLUDED.ps_click_at,           leads.ps_click_at),
         ps_click_history      = COALESCE(EXCLUDED.ps_click_history,      leads.ps_click_history)
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hear_about_us||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null]);
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null]);
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/partial] Enrichment sync failed (non-blocking):', err.message));
 
-    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false,...ps});
+    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false,...ps});
 
     // StartTrial fires ONLY for qualified (B2B) leads on BUSINESS emails —
     // free-mailbox leads (gmail/yahoo/...) are skipped so Meta optimises
@@ -5648,6 +6034,11 @@ app.post('/submit', async (req, res) => {
   const website_check_reason = (req.body.website_check_reason || '').toString().trim().slice(0, 100);
   // PartnerStack attribution. Read once, stored below and mirrored to AWS.
   const ps = readPartnerStackPayload(req.body, { email, website });
+  /* Step 7. peek only — never an API call here. The identity resolver runs
+     after res.json(); a brand-new partner key lands as the key and is upgraded
+     in place once the name arrives. */
+  const psHear = partnerHearAboutUs({ hear_about_us, ps, identity: peekPartnerIdentity(ps.ps_partner_key) });
+  const hearAboutUsFinal = psHear || hear_about_us;
 
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
@@ -5709,16 +6100,16 @@ app.post('/submit', async (req, res) => {
         ps_customer_key       = COALESCE(EXCLUDED.ps_customer_key,       leads.ps_customer_key),
         ps_click_at           = COALESCE(EXCLUDED.ps_click_at,           leads.ps_click_at),
         ps_click_history      = COALESCE(EXCLUDED.ps_click_history,      leads.ps_click_history)
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hear_about_us||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null]);
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null]);
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/submit] Enrichment sync failed (non-blocking):', err.message));
 
-    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true,...ps});
+    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true,...ps});
 
     if (!alreadyCompleted) {
-      slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,elv_status:elv?.status||null,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
+      slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us:hearAboutUsFinal,ps_partner_key:ps.ps_partner_key,ps_partner_name:(peekPartnerIdentity(ps.ps_partner_key)||{}).name,ps_partner_email:(peekPartnerIdentity(ps.ps_partner_key)||{}).email,ps_click_at:ps.ps_click_at,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,elv_status:elv?.status||null,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
 
-      pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'form completed', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
+      pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,hear_about_us:hearAboutUsFinal,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'form completed', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
 
       // Meta CAPI Lead — suppressed when the website check failed (temporary
       // non-blocking mode still lets the lead through, but keeps the Lead
@@ -5741,6 +6132,9 @@ app.post('/submit', async (req, res) => {
 
     // Off the critical path on purpose — the lead is no longer waiting.
     if (!elv && !alreadyCompleted) finaliseElvVerdict({ session_id, email, website_check_reason });
+    if (!alreadyCompleted) runPartnerStackIdentity({ session_id, ps })
+      .then(identity => upgradePartnerHearAboutUs({ session_id, email, ps, identity }))
+      .catch(err => console.warn('[PartnerStack] Partner identity failed (non-blocking):', err.message));
     if (!alreadyCompleted) runPartnerStackEligibility({ session_id, email, website, ps });
     if (!alreadyCompleted) runPartnerStackSignup({ session_id, email, website, company, first_name, last_name, ps, ctx: readPartnerStackRequestContext(req, page_url) })
       .catch(err => console.warn('[PartnerStack] Signup conversion failed (non-blocking):', err.message));
@@ -6213,6 +6607,7 @@ async function start() {
       auditStartupConfig();
       startHeartbeat();
       startPartnerStackCacheWarm();
+      startPartnerStackQualificationPoll();
     });
   } catch (err) { console.error('[GW API] Failed to start:', err); process.exit(1); }
 }
