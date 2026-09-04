@@ -438,8 +438,23 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     ok('mvp: the conversion path does not call the eligibility check',
        !/partnerStackEligibility|PS_ELIGIBILITY_ENABLED/.test(fn));
     ok('conversion: skips our own test addresses', /isPartnerStackTestEmail\(email\)/.test(fn));
-    ok('conversion: requires a customer key', /if \(!ps\.ps_customer_key\) return;/.test(fn));
-    ok('conversion: requires ps_xid', /if \(!ps \|\| !ps\.ps_xid\) return;/.test(fn));
+    /* A B2C or waitlist signup must never pay an affiliate. Today no
+       disqualified lead reaches /submit at all — that is a property of the
+       frontend flow, and the frontend is two forked files that have drifted
+       before. The guard does not rely on it. */
+    ok('conversion: skips DISQUALIFIED leads', /if \(disqualified\) \{[\s\S]{0,200}?return;/.test(fn));
+    ok('conversion: the disqualified guard runs before the domain and email checks',
+       fn.indexOf('if (disqualified)') !== -1 &&
+       fn.indexOf('if (disqualified)') < fn.indexOf('isPartnerStackTestEmail'));
+    /* Without this, an organic lead logs nothing at all and the logs cannot
+       distinguish "no partner traffic" from "capture is broken". */
+    ok('conversion: every submit logs whether a partner was present',
+       /No partner on this submit/.test(fn));
+    ok('conversion: each skip says WHY', (fn.match(/Skipped conversion —/g) || []).length >= 3);
+    ok('conversion: requires a customer key',
+       /if \(!ps\.ps_customer_key\) \{[\s\S]{0,200}?return;/.test(fn));
+    ok('conversion: requires ps_xid',
+       /if \(!ps \|\| !ps\.ps_xid\) \{[\s\S]{0,200}?return;/.test(fn));
 
     /* ONCE PER DOMAIN. The claim has to precede the HTTP call — checking then
        sending races, and PartnerStack cannot undo a double credit. */
@@ -535,7 +550,9 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     ok('conversion: runs in /submit', signAt !== -1);
     ok('conversion: runs AFTER res.json(), never before', resAt !== -1 && signAt > resAt,
        `res.json at ${resAt}, signup at ${signAt}`);
-    ok('conversion: is not awaited', !/await runPartnerStackSignup/.test(seg));
+      ok('conversion: is not awaited', !/await runPartnerStackSignup/.test(seg));
+  ok('conversion: /submit passes disqualified through to the guard',
+       /runPartnerStackSignup\(\{[^}]*\bdisqualified\b/.test(seg));
     ok('conversion: its rejection cannot reach the response', /runPartnerStackSignup\([\s\S]{0,200}?\.catch\(/.test(seg));
   }
 
