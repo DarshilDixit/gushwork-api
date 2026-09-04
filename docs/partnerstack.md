@@ -351,7 +351,28 @@ otherwise.
 
 ## Monitoring
 
-**Overview → Partner gaps** — the alert. Two ways a referral silently never pays:
+**Overview → Partner gaps** — the alert. **Derived from the lifecycle ladder,
+not from its own query.** Two independent queries once told two different
+stories about the same four domains: this card said "2 no conversion" while the
+Partners tab said one failure and one correct skip. A skip is the system working
+and is reported separately, never counted as a gap — counting it meant a
+test-address lead sat in the alert forever with no way to clear.
+
+"0 no Opportunity" now distinguishes three states: *unavailable* (Salesforce
+could not be reached), *none eligible to check yet* (nothing had a past demo, so
+Salesforce was never called), and *N no Opportunity of M checked*.
+
+**Per-domain Salesforce state** (`partner_domain_sf_state`, refreshed every 15
+minutes for EVERY partner domain): `ticked`, `exists_unticked`,
+`create_errored`, `no_opportunity`. `exists_unticked` is the row to action
+daily — the Opportunity exists and no AE has ticked `Qualified_Demo__c`, so the
+$50 cannot fire. `create_errored` comes from `gist.sf_lead_conversion_log`,
+joined on **`prospect_email`, not on domain** — that table is email-keyed and a
+domain join would silently match nothing. It is a warehouse table, so the error
+state costs no Salesforce API call, and `Qualified_Demo__c` rides along on the
+Opportunity query already being made.
+
+The old note: Two ways a referral silently never pays:
 
 - **No conversion ever sent** for that domain (pure DB, unambiguous)
 - **Demo happened 3+ days ago and no Opportunity exists** (the sfopp gap)
@@ -366,6 +387,15 @@ so the queue would fill with correct non-payments and hide the real failures.
 
 When Salesforce cannot be reached, the card shows `N+?` and the panel says the
 result is not clean. "We could not check" is never "we checked and it is fine".
+
+**The whole partner view is now ONE point of failure.** The gap card used to
+run its own query and would survive `partnerLifecycle()` breaking. It no longer
+does: check A reads the ladder, so if `partnerLifecycle()` throws,
+`/monitor/partner-gaps` 500s as well as `/monitor/partners`. That was a
+deliberate trade — two independent queries told two different stories about the
+same domains, and one classification is worth more than independent failure
+modes — but it means a single bad ladder query takes out both surfaces at once.
+If you are changing `PS_LADDER_SQL`, you are changing both.
 
 **Partners tab** — the operational view. Cards for partner leads (total and last
 24h), conversions sent, qualified demos fired, partner bookings, and lead→booking

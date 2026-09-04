@@ -480,6 +480,39 @@ async function initDB() {
     }
 
     /* -------------------------------------------------------
+       PARTNER DOMAIN — SALESFORCE STATE
+
+       Per-DOMAIN, refreshed by the qualification poller for every partner
+       domain rather than only the ones already eligible to qualify. The row
+       worth acting on daily is "Opportunity exists, checkbox unticked" — an AE
+       has not marked the demo, and until they do the $50 cannot fire. That row
+       is invisible if you only look at domains that already passed every other
+       filter.
+
+       Its own table, not columns on `leads`: the state is per domain and
+       `leads` is per lead, so columns there would be written N times and read
+       inconsistently.
+
+       Wrapped in try/catch like the other optional tables — initDB throwing
+       exits the process, and a reporting table must never take the form down.
+    ------------------------------------------------------- */
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS partner_domain_sf_state (
+          customer_key      TEXT PRIMARY KEY,
+          sf_state          TEXT,          -- ticked | exists_unticked | create_errored | no_opportunity
+          sf_opportunity_id TEXT,
+          sf_error          TEXT,
+          checked_at        TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS partner_sf_state_idx ON partner_domain_sf_state (sf_state);
+      `);
+      console.log('[DB] Partner SF-state table ready');
+    } catch (err) {
+      console.error('[DB] Partner SF-state table init FAILED (non-fatal):', err.message);
+    }
+
+    /* -------------------------------------------------------
        ONE-OFF BACKFILL — the four partner leads that predate the
        skip/failure columns (batch A, 4 Sept 2026).
 

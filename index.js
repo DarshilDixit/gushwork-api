@@ -2800,6 +2800,7 @@ app.get('/monitor', (req, res) => {
   '<div class="mgrid">' +
   '<div class="mc" title="Partner domains in a FAILED lifecycle state \u2014 a conversion or a qualification that did not land. This is the only number here that means someone has to do something today. Sums the two red states of the lifecycle ladder."><div class="ml">Needs attention</div><div class="mv" id="p-attn">&#8212;</div><div class="ms" id="p-attn-sub">failed conversions or qualifications</div></div>' +
   '<div class="mc" title="Every partner-sourced domain, in exactly one lifecycle state. The states always sum to this total."><div class="ml">Partner domains</div><div class="mv" id="p-domains">&#8212;</div><div class="ms" id="p-states">&#8212;</div></div>' +
+  '<div class="mc" title="Salesforce state per partner domain, refreshed every 15 minutes for EVERY partner domain. &quot;Waiting on an AE&quot; is the row to action daily: the Opportunity exists but nobody has ticked Qualified_Demo__c, so the $50 cannot fire yet. &quot;Opportunity never created&quot; means sfopp failed and no AE can ever tick it."><div class="ml">Waiting on an AE</div><div class="mv" id="p-sfwait">&#8212;</div><div class="ms" id="p-sfstates">&#8212;</div></div>' +
   '<div class="mc" title="Distinct people (deduped by lower(email)) who arrived on a partner link."><div class="ml">Partner leads</div><div class="mv" id="p-leads">&#8212;</div><div class="ms" id="p-leads24">&#8212;</div></div>' +
   '<div class="mc" title="Distinct customer DOMAINS with a conversion sent. Per domain, not per person &#8212; PartnerStack counts one conversion per customer key, ever."><div class="ml">Conversions sent</div><div class="mv" id="p-conv">&#8212;</div><div class="ms">domains, one per customer</div></div>' +
   '<div class="mc" title="Distinct customer DOMAINS with a qualified_demo action sent. This is the event that pays the affiliate."><div class="ml">Qualified demos fired</div><div class="mv" id="p-qual">&#8212;</div><div class="ms">domains, one per customer</div></div>' +
@@ -3119,7 +3120,11 @@ app.get('/monitor', (req, res) => {
      compute is shown as unknown, never as zero. */
   'var sfBad=d.opportunityCheck&&!d.opportunityCheck.ok;' +
   'if(el)el.textContent=sfBad?(mc+"+?"):String(tot);' +
-  'if(sub)sub.textContent=sfBad?("no conversion: "+mc+" · Opportunity check unavailable"):(mc+" no conversion · "+mo+" no Opportunity");' +
+  /* Three distinct states, three distinct labels. "0 no Opportunity" used to
+     render identically whether Salesforce came back clean or was never asked. */
+  'var oc=d.opportunityCheck||{};' +
+  'var oppTxt=sfBad?"Opportunity check unavailable":(oc.checked===false?"none eligible to check yet":(mo+" no Opportunity of "+(oc.candidates||0)+" checked"));' +
+  'if(sub)sub.textContent=mc+" no conversion · "+oppTxt;' +
   'var box=document.getElementById("psgapbox");if(!box)return;' +
   'if(!tot&&!sfBad){box.style.display="none";box.innerHTML="";return;}' +
   'var h="<div class=\'card\' style=\'margin-bottom:16px\'><div class=\'ml\' style=\'margin-bottom:8px\'>\u{1F91D} Partner revenue gaps</div>";' +
@@ -3131,8 +3136,10 @@ app.get('/monitor', (req, res) => {
   '+"<td>"+esc(g.email||"—")+"</td>"' +
   '+"<td class=\'psna\'>"+esc(et(g.met_at||g.first_seen))+"</td></tr>";}).join("");' +
   'return t+"</table>";}' +
-  'h+=tbl("No conversion ever sent",d.missedConversions||[],"the affiliate gets nothing and step 10 can never fire");' +
-  'h+=tbl("Demo happened, no Opportunity exists",d.missingOpportunity||[],"sfopp gap — no AE can mark these qualified");' +
+  'h+=tbl("No conversion sent",d.missedConversions||[],"the affiliate gets nothing, and the $50 can never fire either");' +
+  'h+=tbl("Demo happened, no Opportunity exists",d.missingOpportunity||[],"sfopp gap — no AE can mark these qualified, so the $50 never fires");' +
+  /* Reported, not alarming: these are the system working correctly. */
+  'if((d.skipped||[]).length)h+="<div class=\'psm\'>Skipped, correctly ("+d.skipped.length+") — not counted as gaps: "+d.skipped.map(function(x){return esc(x.customer_key)+" ("+esc(x.reason||"?")+")";}).join(", ")+"</div>";' +
   'if(d.awaitingQualification)h+="<div class=\'psna\' style=\'font-size:11px;margin-top:6px\'>"+d.awaitingQualification+" partner demo(s) past the "+d.graceDays+"-day mark in total; the ones with an Opportunity are waiting on an AE and are not listed.</div>";' +
   'box.innerHTML=h+"</div>";box.style.display="block";' +
   '}catch(e){var el2=document.getElementById("m-psgap");if(el2)el2.textContent="?";' +
@@ -3162,6 +3169,17 @@ app.get('/monitor', (req, res) => {
      with no usable domain cannot be keyed by one. */
   'if(lc.noCustomerKeyLeads)chips+="<span class=\'pschip\' title=\'Counted as LEADS, not companies \\u2014 these have no usable domain to key by, so they cannot appear in the domain states above.\'>"+lc.noCustomerKeyLeads+" no customer key (leads, not companies)</span>";' +
   'var se=document.getElementById("p-states");if(se)se.innerHTML=chips||"no partner domains yet";' +
+  /* Salesforce state. Read from the table the poller owns; a domain with no
+     row simply has not been checked yet, and says so rather than implying a
+     clean result. */
+  'var sf=lc.bySfState||{};set("p-sfwait",sf.exists_unticked||0);' +
+  'var sfl={ticked:"ticked, will fire",exists_unticked:"waiting on an AE",create_errored:"Opportunity never created",no_opportunity:"no Opportunity yet"};' +
+  'var sfo=["exists_unticked","create_errored","ticked","no_opportunity"];' +
+  'var sfc=sfo.filter(function(k){return sf[k];}).map(function(k){' +
+  'return "<span class=\'pschip"+(k==="create_errored"?" bad":"")+"\'>"+sf[k]+" "+sfl[k]+"</span>";}).join("");' +
+  'var unchecked=(lc.totalDomains||0)-Object.values(sf).reduce(function(a,b){return a+b;},0);' +
+  'if(unchecked>0)sfc+="<span class=\'pschip\' title=\'The poller has not checked these yet. NOT the same as having no Opportunity.\'>"+unchecked+" not checked yet</span>";' +
+  'var sfe=document.getElementById("p-sfstates");if(sfe)sfe.innerHTML=sfc||"not checked yet";' +
   /* A rate over zero leads is not 0%, it is undefined — show a dash. */
   'set("p-rate",(t.bookingRate===null||t.bookingRate===undefined)?"—":(t.bookingRate+"%"));' +
   'partnerRows=d.partners||[];renderPartners();' +
@@ -6106,6 +6124,11 @@ async function runPartnerStackQualificationPoll() {
   } finally {
     _psQualifyRunning = false;
   }
+  /* AFTER the qualification work and outside its try, so a Salesforce hiccup
+     in the refresh cannot stop actions from firing. Its own failures are
+     swallowed inside. */
+  await refreshPartnerDomainSfState()
+    .catch((err) => console.warn('[PartnerStack] SF state refresh failed (non-blocking):', err.message));
 }
 
 async function sendQualificationForDomain(customerKey) {
@@ -6208,25 +6231,26 @@ async function partnerRevenueGaps() {
     return _psGapCache.data;
   }
 
-  /* A — no conversion ever sent for this domain. */
-  const missedConversions = await pool.query(`
-    SELECT ps_customer_key                       AS customer_key,
-           MIN(created_at)                       AS first_seen,
-           MAX(ps_partner_key)                   AS partner_key,
-           MAX(ps_partner_name)                  AS partner_name,
-           MAX(email)                            AS email,
-           COUNT(*)                              AS leads
-      FROM leads
-     WHERE ps_xid IS NOT NULL
-       AND ps_customer_key IS NOT NULL
-       AND completed IS TRUE
-       AND disqualified IS NOT TRUE
-       AND created_at < NOW() - INTERVAL '${PS_GAP_CONVERSION_GRACE_H} hours'
-     GROUP BY ps_customer_key
-    HAVING COUNT(ps_signup_sent_at) = 0
-     ORDER BY MIN(created_at)
-     LIMIT 200
-  `);
+  /* A — derived from THE LADDER, not from a second bespoke query.
+     Two independent queries told two different stories about the same four
+     domains: this card said "2 no conversion" while the Partners tab said
+     one failure and one correct skip. Reading the ladder means they cannot
+     disagree, because there is only one classification.
+
+     A SKIP IS NOT A GAP. gushwork.ai hit the test-address guard, which is
+     correct behaviour — counting it here meant it sat in the alert forever
+     and could never clear. Skips are reported separately and are not
+     actionable. */
+  const lifecycle = await partnerLifecycle();
+  const graceMs = PS_GAP_CONVERSION_GRACE_H * 3600000;
+  const missed = lifecycle.domains.filter((d) => {
+    if (d.state === 'conversion_failed') return true;                 // tried, failed
+    // Never attempted at all, and past the grace window.
+    return d.state === 'conversion_pending'
+        && d.first_seen && (Date.now() - new Date(d.first_seen).getTime()) > graceMs;
+  });
+  const skippedDomains = lifecycle.domains.filter((d) => d.state === 'skipped');
+  const missedConversions = { rows: missed };
 
   /* B candidates — the demo has happened and we have not qualified them.
      start_time is TEXT, so the cast is wrapped in a CASE: a WHERE clause
@@ -6265,7 +6289,7 @@ async function partnerRevenueGaps() {
         if (k) have.add(k);
       }
       missingOpportunity = qualifyCandidates.rows.filter(r => !have.has(r.customer_key));
-      opportunityCheck = { ok: true, opportunityDomains: have.size, truncated: !!sf.truncated };
+      opportunityCheck = { ok: true, checked: true, opportunityDomains: have.size, candidates: qualifyCandidates.rows.length, truncated: !!sf.truncated };
     } else {
       /* "We could not check" is NOT "we checked and it is fine". Reporting an
          unreachable Salesforce as zero gaps would be the exact inversion this
@@ -6273,12 +6297,18 @@ async function partnerRevenueGaps() {
       opportunityCheck = { ok: false, reason: sf.reason || 'unavailable' };
     }
   } else {
-    opportunityCheck = { ok: true, opportunityDomains: 0, truncated: false };
+    /* NOT the same as "we checked and everything has an Opportunity".
+       Nothing was eligible to check, so Salesforce was never called — and
+       rendering that identically to a clean result is the same conflation
+       this card exists to avoid. `checked: false` is what the UI reads. */
+    opportunityCheck = { ok: true, checked: false, reason: 'no_candidates', opportunityDomains: 0, truncated: false };
   }
 
   const data = {
     missedConversions: missedConversions.rows,
     missingOpportunity,
+    /* Reported, never counted as a gap — these are the system working. */
+    skipped: skippedDomains.map((d) => ({ customer_key: d.customer_key, reason: d.skipped_reason })),
     awaitingQualification: qualifyCandidates.rows.length,
     opportunityCheck,
     graceHours: PS_GAP_CONVERSION_GRACE_H,
@@ -6365,7 +6395,7 @@ const PS_LADDER_FAILED = ['conversion_failed', 'qualification_failed'];
 const PS_LADDER_WINDOW_D = 180;
 
 async function partnerLifecycle() {
-  const [domains, noKey] = await Promise.all([
+  const [domains, noKey, sfState] = await Promise.all([
     pool.query(`
       SELECT ps_customer_key                    AS customer_key,
              ${PS_LADDER_SQL}                   AS state,
@@ -6377,7 +6407,8 @@ async function partnerLifecycle() {
              MAX(ps_qualify_fail_reason)        AS qualify_fail_reason,
              MAX(ps_signup_skipped_reason)      AS skipped_reason,
              BOOL_OR(ps_signup_verified_at IS NOT NULL) AS signup_verified,
-             MAX(created_at)                    AS last_seen
+             MAX(created_at)                    AS last_seen,
+             MIN(created_at)                    AS first_seen
         FROM leads
        WHERE ps_xid IS NOT NULL AND ps_customer_key IS NOT NULL
          AND (created_at >= NOW() - INTERVAL '${PS_LADDER_WINDOW_D} days'
@@ -6393,7 +6424,21 @@ async function partnerLifecycle() {
         FROM leads
        WHERE ps_xid IS NOT NULL AND ps_customer_key IS NULL
          AND created_at >= NOW() - INTERVAL '${PS_LADDER_WINDOW_D} days'`),
+    /* Read, never recomputed here: the poller owns this table. Missing rows
+       simply mean the poller has not run since that domain appeared. */
+    pool.query(`SELECT customer_key, sf_state, sf_opportunity_id, sf_error, checked_at
+                  FROM partner_domain_sf_state`).catch(() => ({ rows: [] })),
   ]);
+
+  const sfByDomain = new Map(sfState.rows.map((r) => [r.customer_key, r]));
+  for (const d of domains.rows) {
+    const sf = sfByDomain.get(d.customer_key);
+    d.sf_state = sf ? sf.sf_state : null;
+    d.sf_opportunity_id = sf ? sf.sf_opportunity_id : null;
+    d.sf_error = sf ? sf.sf_error : null;
+  }
+  const bySfState = {};
+  for (const d of domains.rows) if (d.sf_state) bySfState[d.sf_state] = (bySfState[d.sf_state] || 0) + 1;
 
   const byState = {};
   for (const r of domains.rows) byState[r.state] = (byState[r.state] || 0) + 1;
@@ -6407,6 +6452,8 @@ async function partnerLifecycle() {
     /* Deliberately its own field and its own unit. */
     noCustomerKeyLeads: Number(noKey.rows[0].leads) || 0,
     failedStates: PS_LADDER_FAILED,
+    bySfState,
+    sfStates: PS_SF_STATES,
   };
 }
 
@@ -6485,6 +6532,105 @@ app.get('/monitor/partner-gaps', async (req, res) => {
     res.status(500).json({ error: 'Partner gap query failed', detail: err.message });
   }
 });
+
+/* ── PER-DOMAIN SALESFORCE STATE ─────────────────────────────────────
+   Refreshed on every poll for EVERY partner domain, not only the ones already
+   eligible to qualify. The row worth acting on daily is "Opportunity exists,
+   checkbox unticked" — an AE has not marked the demo, and until they do the
+   $50 cannot fire. That row is invisible if you only look at domains that
+   already passed every other filter.
+
+   Four states:
+     ticked           an AE has marked it; the poller will fire the $50
+     exists_unticked  waiting on an AE — the daily action list
+     create_errored   sfopp failed to create the Opportunity, so no AE can
+                      ever tick it. A silent missed $50
+     no_opportunity   nothing in Salesforce yet
+
+   COST is one extra query, not one per domain: Qualified_Demo__c rides along
+   on the Opportunity query already being made, and the error state comes from
+   gist.sf_lead_conversion_log on the WAREHOUSE, which costs no Salesforce API
+   call at all.
+
+   That log is keyed by prospect_email, NOT by domain — so the join is on the
+   lead's email, not on the customer key. Assuming a domain key here would
+   silently match nothing. */
+const PS_SF_STATES = ['ticked', 'exists_unticked', 'create_errored', 'no_opportunity'];
+
+async function refreshPartnerDomainSfState() {
+  const { rows: domains } = await pool.query(`
+    SELECT ps_customer_key AS customer_key, ARRAY_AGG(DISTINCT LOWER(email)) AS emails
+      FROM leads
+     WHERE ps_xid IS NOT NULL AND ps_customer_key IS NOT NULL AND email IS NOT NULL
+     GROUP BY ps_customer_key
+     LIMIT 1000`);
+  if (!domains.length) return { ok: true, updated: 0 };
+
+  const sf = await findOpportunityDomains({ sinceDays: PS_GAP_SF_LOOKBACK_D });
+  if (!sf.ok) {
+    /* Leave the table alone. A stale row that says what we last verified is
+       more useful than one overwritten with a guess during an outage. */
+    console.warn('[PartnerStack] SF state refresh skipped — Salesforce unavailable:', sf.reason);
+    return { ok: false, reason: sf.reason };
+  }
+
+  // domain -> { qualified, id }, keeping a ticked Opportunity over an unticked one
+  const byDomain = new Map();
+  for (const r of sf.records) {
+    const k = partnerStackCustomerKey(r.website) || partnerStackCustomerKey(r.contactEmail);
+    if (!k) continue;
+    const prev = byDomain.get(k);
+    if (!prev || (r.qualified && !prev.qualified)) byDomain.set(k, { qualified: !!r.qualified, id: r.id });
+  }
+
+  /* The sfopp failures, from the warehouse rather than Salesforce. Keyed by
+     prospect_email, so this is matched against the lead emails above. */
+  const errorsByEmail = new Map();
+  if (awsPool) {
+    try {
+      const { rows } = await withTimeout(awsPool.query(`
+        SELECT LOWER(prospect_email) AS email, status, error_message
+          FROM gist.sf_lead_conversion_log
+         WHERE status IN ('error', 'not_in_sf')
+      `), PS_CUSTOMER_QUERY_TIMEOUT_MS, 'sfopp conversion log');
+      for (const r of rows) errorsByEmail.set(r.email, r.error_message || r.status);
+    } catch (err) {
+      /* Non-fatal: without it a genuinely errored domain reads as
+         no_opportunity, which is still a gap, just less specific. */
+      console.warn('[PartnerStack] Could not read sf_lead_conversion_log:', err.message);
+    }
+  }
+
+  let updated = 0;
+  for (const d of domains) {
+    const opp = byDomain.get(d.customer_key);
+    let state, oppId = null, error = null;
+    if (opp) {
+      state = opp.qualified ? 'ticked' : 'exists_unticked';
+      oppId = opp.id;
+    } else {
+      const hit = (d.emails || []).map((e) => errorsByEmail.get(e)).find(Boolean);
+      if (hit) { state = 'create_errored'; error = String(hit).slice(0, 300); }
+      else     { state = 'no_opportunity'; }
+    }
+    try {
+      await pool.query(`
+        INSERT INTO partner_domain_sf_state (customer_key, sf_state, sf_opportunity_id, sf_error, checked_at)
+        VALUES ($1,$2,$3,$4,NOW())
+        ON CONFLICT (customer_key) DO UPDATE SET
+          sf_state = EXCLUDED.sf_state,
+          sf_opportunity_id = EXCLUDED.sf_opportunity_id,
+          sf_error = EXCLUDED.sf_error,
+          checked_at = NOW()`,
+        [d.customer_key, state, oppId, error]);
+      updated++;
+    } catch (err) {
+      console.warn(`[PartnerStack] Could not store SF state for ${d.customer_key}:`, err.message);
+    }
+  }
+  console.log(`[PartnerStack] SF state refreshed for ${updated} domain(s)`);
+  return { ok: true, updated };
+}
 
 function startPartnerStackQualificationPoll() {
   const t = setInterval(runPartnerStackQualificationPoll, PS_QUALIFY_INTERVAL_MS);
