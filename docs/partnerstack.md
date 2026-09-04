@@ -279,7 +279,23 @@ Every 15 minutes, `runPartnerStackQualificationPoll()`:
    contact's email domain as fallback, both through `partnerStackCustomerKey()`
 3. Keeps only domains where `ps_signup_sent_at IS NOT NULL` and
    `ps_qualified_sent_at IS NULL`
-4. Claims, then `POST /v2/actions` with `{customer_key, type: "qualified_demo", value: 1}`
+4. Claims, then `POST /v2/actions`:
+
+```json
+{ "type": "qualified_demo", "value": 1, "target_type": "customer", "target_key": "<domain>" }
+```
+
+**All four fields are required, and there is no `customer_key` on this
+endpoint** — that name belongs to `/conversion/xid`, and the two endpoints do
+not share a schema. Sending `customer_key` returns
+`400 'target_type' is a required property`, which reads like one missing field
+and is actually two missing plus one unrecognised.
+
+`target_type` is `"customer"`, not `"partnership"`: the action attaches to the
+customer the conversion created, and PartnerStack resolves the partner from
+that customer's existing attribution. Targeting the partnership would record a
+partner-level event with no customer context — a *different* event that would
+still return 200.
 
 **A poller, not a Salesforce Flow callout**, deliberately: a Flow that calls out
 fails inside Salesforce where nobody on this team would see it, and it couples an
