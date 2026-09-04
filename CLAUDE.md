@@ -61,6 +61,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `.gitignore` | Keeps `node_modules/`, `.env`, logs, and local Claude settings out of the repo |
 | `README.md` | Repo landing blurb, not living documentation. This file is |
 | `tests/` | The test files described under Deploying |
+| `docs/partnerstack.md` | PartnerStack handover: the two-step model, every ps_ column, env vars, test procedure, known gaps |
 | `CLAUDE.md` | This file |
 
 **`gushwork-form.js` and `gushwork-form-popup.js` are in this repo, not a separate
@@ -356,6 +357,9 @@ produce no PartnerStack line at all, so the logs could not tell "no partner
 traffic yet" from "capture is broken" — which cost real time on the first
 deploy. `[PartnerStack] No partner on this submit (…)` is the negative case, and
 each skip says which guard stopped it.
+
+**The PartnerStack handover doc is `docs/partnerstack.md`.** Anything below is
+the short version; that file has the full picture including the known gaps.
 
 **Two PartnerStack hosts, two auth schemes, one env.** The conversion goes to
 `partnerlinks.io/conversion/xid` with `PARTNERSTACK_TRACKING_TOKEN` as a

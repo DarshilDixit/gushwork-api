@@ -6,7 +6,17 @@
 //
 // POST https://partnerlinks.io/conversion/xid
 //   Authorization: Bearer <PARTNERSTACK_TRACKING_TOKEN>
-//   { xid, customer_key, email, name, ip_address, user_agent, origin }
+//   { xid, customer_key, email, name, ip_address, user_agent, origin, meta }
+//
+// `name` is the CONTACT's name, not the company. It is what titles the
+// record in PartnerStack, and whoever approves payouts opens that record —
+// sending the company there made every customer read as the company with
+// Company Name / Website / Phone all "Not Available".
+//
+// There is no company or website parameter on this endpoint. They go in
+// `meta`, whose keys must match custom CUSTOMER fields configured in
+// PartnerStack Settings first; keys with no matching field are dropped
+// silently, which looks exactly like the integration working.
 //
 // xid and customer_key are required; the rest are optional. ip_address,
 // user_agent and origin feed PartnerStack's fraud detection, so they are
@@ -56,7 +66,7 @@ function logCall(direction, payload) {
  * Send one signup conversion.
  * Resolves { ok, status, body, reason } — never rejects.
  */
-async function sendConversion({ xid, customer_key, email, name, ip_address, user_agent, origin }) {
+async function sendConversion({ xid, customer_key, email, name, ip_address, user_agent, origin, meta }) {
   const token = process.env.PARTNERSTACK_TRACKING_TOKEN;
   if (!token) {
     console.warn('[PartnerStack] PARTNERSTACK_TRACKING_TOKEN not set — conversion NOT sent');
@@ -74,6 +84,14 @@ async function sendConversion({ xid, customer_key, email, name, ip_address, user
     user_agent: user_agent || undefined,
     origin:     origin     || undefined,
   };
+  /* Only sent when there is something in it. An empty object is not a
+     meaningful payload and PartnerStack has no reason to see one. */
+  const metaClean = {};
+  for (const [k, v] of Object.entries(meta || {})) {
+    const val = (v === null || v === undefined) ? '' : String(v).trim();
+    if (val) metaClean[k] = val.slice(0, 500);
+  }
+  if (Object.keys(metaClean).length) payload.meta = metaClean;
   logCall('-> POST /conversion/xid', payload);
 
   const controller = new AbortController();
