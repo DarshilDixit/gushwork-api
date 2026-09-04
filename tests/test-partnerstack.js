@@ -1099,8 +1099,34 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   ok('v10: the poller is started at boot', /startPartnerStackQualificationPoll\(\);/.test(src));
   ok('v10: the action posts to /v2/actions with Basic auth',
      /`\$\{V2_BASE\}\/actions`/.test(psmod) && /sendAction[\s\S]{0,600}?v2AuthHeader\(\)/.test(psmod));
-  ok('v10: the action payload is customer_key + type + value',
-     /const payload = \{ customer_key, type, value: value === undefined \? 1 : value \};/.test(psmod));
+  /* FOUR required fields, and there is no customer_key on this endpoint —
+     that name belongs to /conversion/xid. Sending it returned 400
+     "'target_type' is a required property", which reads like one missing
+     field and was actually two missing plus one unrecognised. */
+  {
+    const fn = psmod.slice(psmod.indexOf('async function sendAction'), psmod.indexOf('module.exports'));
+    ok('v10: the action payload carries all four required fields',
+       /const payload = \{\s*type,\s*value: value === undefined \? 1 : value,\s*target_type: 'customer',\s*target_key: customer_key,\s*\}/.test(fn));
+    /* The payload's KEYS, not a substring search — `target_key: customer_key`
+       legitimately mentions the identifier as a VALUE, so a naive negative
+       match on "customer_key" fails against correct code. */
+    {
+      const lit = fn.slice(fn.indexOf('const payload = {'), fn.indexOf('};', fn.indexOf('const payload = {')));
+      const keys = [...lit.matchAll(/^\s*([a-z_]+)\s*[:,]/gm)].map(m => m[1]).filter(k => k !== 'payload');
+      eq('v10: the payload sends exactly the four documented fields',
+         keys.sort(), ['target_key', 'target_type', 'type', 'value']);
+      ok('v10: customer_key is not one of them', !keys.includes('customer_key'));
+    }
+    /* "customer" not "partnership": the action attaches to the customer the
+       conversion created and PartnerStack resolves the partner from its
+       attribution. Targeting the partnership is a different event that would
+       still return 200. */
+    ok("v10: target_type is 'customer', not 'partnership'",
+       /target_type: 'customer'/.test(fn) && !/target_type: 'partnership'/.test(fn));
+    ok('v10: target_key is the customer key', /target_key: customer_key/.test(fn));
+    ok('v10: a missing customer key is still rejected before the call',
+       /if \(!customer_key\) return \{ ok: false, reason: 'no_customer_key' \};/.test(fn));
+  }
 
   /* ============================================================
      4d. PARTNER REVENUE GAPS — the two money-leak checks

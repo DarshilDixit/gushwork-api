@@ -196,6 +196,20 @@ async function fetchPartnership(partnerKey) {
 
 /* POST /v2/actions — the qualification event.
    Basic auth, like the partnerships lookup and unlike the conversion.
+
+   FOUR required fields: type, value, target_type, target_key. There is NO
+   customer_key field on this endpoint — that name belongs to
+   /conversion/xid, and the two endpoints do not share a schema. Sending
+   customer_key here returns 400 "'target_type' is a required property",
+   which reads like one missing field and is actually two missing plus one
+   unrecognised.
+
+   target_type is "customer" here, not "partnership": the action attaches to
+   the customer the conversion created, and PartnerStack resolves the partner
+   from that customer's existing attribution. Targeting the partnership would
+   attach a partner-level event with no customer context — a different event
+   that would still return 200.
+
    Resolves { ok, status, body, reason } — never rejects. */
 async function sendAction({ customer_key, type, value }) {
   const auth = v2AuthHeader();
@@ -206,7 +220,12 @@ async function sendAction({ customer_key, type, value }) {
   if (!customer_key) return { ok: false, reason: 'no_customer_key' };
   if (!type)         return { ok: false, reason: 'no_type' };
 
-  const payload = { customer_key, type, value: value === undefined ? 1 : value };
+  const payload = {
+    type,
+    value: value === undefined ? 1 : value,
+    target_type: 'customer',
+    target_key: customer_key,
+  };
   logCall('-> POST /v2/actions', payload);
 
   const controller = new AbortController();
