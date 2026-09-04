@@ -389,8 +389,22 @@ fact**:
    since the first commit**, and nothing ever read it. 5,898 Opportunities
    existed and we read 1,252.
 
+5. **Clicks** were computed server-side, returned in the payload, and had no
+   column, no cell and no sort entry. Present in the API, absent from the
+   screen — and it would have been reported as working.
+
 **The rule now: any completeness or confidence signal must reach the UI or fail
-loudly. It may never be silently dropped.** Concretely —
+loudly. It may never be silently dropped.**
+
+**And its corollary, learned the hard way five times: anything computed
+server-side must be VERIFIED AS RENDERED, not merely confirmed present in the
+payload.** "It is in the response" is not evidence anyone can see it. Check the
+header, the cell, and the sort entry — or assert it in a test that executes the
+renderer. Five for five: the email-not-domain join, the gap card's silent zero,
+`truncated` never read, a `LIMIT` defeating its own guard, and a column that
+was never added.
+
+Concretely —
 
 - An incomplete Opportunity read returns `ok: false` and writes nothing, rather
   than handing back a partial list. Returning `ok: true` with 40% of the records
