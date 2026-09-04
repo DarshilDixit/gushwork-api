@@ -430,6 +430,15 @@ async function initDB() {
          lead who arrived on a paid ad is two real facts and we kept one.
          Written once and never overwritten: the first non-empty value sticks. */
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS hear_about_us_raw TEXT`,
+      /* Acknowledging a failure. NOT clearing it — the stamp and the reason
+         stay, so the history is intact and the row keeps its state; this only
+         removes it from the alert and the Needs attention count.
+         test.com's phantom_200 was a real 200-with-no-customer, but the cause
+         was a customer deleted in PartnerStack by hand, not a lost $50.
+         Housekeeping and a genuinely missed payout produce the same stamp, and
+         they should not demand the same attention. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_failure_ack_at TIMESTAMPTZ`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_failure_ack_note TEXT`,
       /* The lifecycle ladder groups by domain and filters on the failure
          stamps; both are read on every dashboard load. */
       `CREATE INDEX IF NOT EXISTS leads_ps_failed_idx

@@ -1108,8 +1108,11 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
       ok('ladderA: no-key leads are NOT folded into the domain total',
          out.totalDomains === 4 && out.noCustomerKeyLeads === 7);
     }
-    ok('ladderA: needsAttention sums only the red states',
-       /PS_LADDER_FAILED\.reduce/.test(fn));
+    /* Was a reduce over byState; PR1.8 made it a filter over the domains so it
+       can also exclude acknowledged failures. The property is unchanged: only
+       the red states count. */
+    ok('ladderA: needsAttention counts only the red states',
+       /PS_LADDER_FAILED\.includes\(d\.state\)/.test(fn));
     eq('ladderA: exactly two red states',
        (/const PS_LADDER_FAILED = \[([^\]]+)\]/.exec(src)[1].match(/'/g) || []).length / 2, 2);
   }
@@ -1785,6 +1788,82 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        /catch \{ \/\* identity is a nicety; never let it stop the alert \*\/ \}/.test(fn));
     ok('alertH: the caller passes the partner key so no query is needed',
        /partner_key: ps\.ps_partner_key/.test(src));
+  }
+
+  /* ── PR1.8: acknowledge, CSV, SDR list ───────────────────────────── */
+
+  /* The raw value has to be able to LEAVE the dashboard. */
+  ok('exportH: the CSV carries hear_about_us_raw',
+     /'sell_to','hear_about_us','hear_about_us_raw'/.test(src));
+  /* An SDR opening a call wants to know how the person said they found us —
+     on a partner lead hear_about_us reads "Partner - X". */
+  ok('sdrH: the SDR list selects it', /l\.hear_about_us_raw,\s*\n\s*l\.ps_partner_name,/.test(src));
+
+  /* The acknowledge flag. It SUPPRESSES ALERTS, so its failure mode is
+     silence — every guard below matters more than usual. */
+  ok('ackH: the columns exist', /ps_failure_ack_at TIMESTAMPTZ/.test(dbjs) && /ps_failure_ack_note TEXT/.test(dbjs));
+  ok('ackH: and on the mirror', /gw_form_leads ADD COLUMN IF NOT EXISTS ps_failure_ack_at/.test(src));
+  {
+    const fn = src.slice(src.indexOf("app.post('/monitor/partner-ack'"), src.indexOf("app.get('/monitor/partners'"));
+    /* Second mutating /monitor route ever. The first shipped as a GET that
+       rewrote lead rows. */
+    ok('ackH: it is a POST', /app\.post\('\/monitor\/partner-ack'/.test(src));
+    ok('ackH: token-guarded', /req\.query\.token !== token/.test(fn));
+    ok('ackH: customer_key is required', /if \(!customer_key\) return res\.status\(400\)/.test(fn));
+    /* It must NEVER clear the failure — the history is the point. */
+    ok('ackH: it never clears the failure stamp',
+       !/ps_signup_failed_at = NULL/.test(fn) && !/ps_qualify_failed_at = NULL/.test(fn));
+    ok('ackH: it only writes the ack columns',
+       /SET ps_failure_ack_at = \$\{acknowledged \? 'NOW\(\)' : 'NULL'\}/.test(fn));
+    /* Acknowledging a domain with nothing wrong would pre-silence a future
+       genuine failure. */
+    ok('ackH: only rows that actually carry a failure can be acknowledged',
+       /AND \(ps_signup_failed_at IS NOT NULL OR ps_qualify_failed_at IS NOT NULL\)/.test(fn));
+    ok('ackH: acknowledging nothing is a 404, not a silent success',
+       /if \(r\.rowCount === 0\)[\s\S]{0,160}?404/.test(fn));
+    ok('ackH: it is reversible', /acknowledged = req\.body\.acknowledged !== false/.test(fn));
+    ok('ackH: every ack is logged', /Acknowledged' : 'Un-acknowledged'/.test(fn));
+  }
+  /* Both consumers must respect it, or the alert still fires. */
+  ok('ackH: Needs attention excludes acknowledged failures',
+     /PS_LADDER_FAILED\.includes\(d\.state\) && d\.acknowledged !== true/.test(src));
+  ok('ackH: acknowledged failures are counted separately, not hidden',
+     /const acknowledged = domains\.rows\.filter\(/.test(src));
+  eq('ackH: the health row ignores acknowledged failures on BOTH kinds',
+     (src.match(/AND ps_failure_ack_at IS NULL\)/g) || []).length, 2);
+
+  /* Rendered, per the five-for-five rule. */
+  {
+    const i = src.indexOf("'var partnerRows=[],pSort=");
+    const j = src.indexOf("'function debounce()");
+    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const els = {};
+    const mk = () => ({ textContent: '', innerHTML: '', style: {}, className: '', querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
+    const doc = { getElementById: (id) => (els[id] = els[id] || mk()), createElement: () => ({ value: '', textContent: '' }) };
+    const F = (new Function('API','TP','esc','et','set','fetch','AbortSignal','document','showTab','loadFilterOptions','loadLeads','Array','prompt','alert',
+      client + '; return {loadPartners};'));
+    const lc = {
+      byState: { conversion_failed: 2 }, totalDomains: 2, needsAttention: 1, acknowledged: 1,
+      failedStates: ['conversion_failed', 'qualification_failed'], bySfState: {}, sfActionable: 0, sfUnactionable: 0,
+      sfNewestCheckedAt: new Date().toISOString(), sfStaleAfterMin: 45,
+      domains: [
+        { customer_key: 'test.com', state: 'conversion_failed', signup_fail_reason: 'phantom_200', acknowledged: true, ack_note: 'deleted by hand' },
+        { customer_key: 'real.com', state: 'conversion_failed', signup_fail_reason: 'http_500', acknowledged: false }],
+      sfLastRead: { ok: true, records: 1, totalSize: 1, pages: 1 }, domainsCapped: false, domainsLimit: 500,
+    };
+    await F('', '', (x) => String(x == null ? '' : x), (x) => String(x == null ? '' : x),
+      (id, v) => { doc.getElementById(id).textContent = String(v); },
+      async () => ({ ok: true, json: async () => ({ totals: {}, partners: [], lifecycle: lc }) }),
+      { timeout: () => null }, doc, () => {}, async () => {}, () => {}, Array, () => '', () => {}).loadPartners();
+    const h = els['pdtbody'].innerHTML;
+    eq('ackH UI: the count excludes the acknowledged one', els['p-attn'].textContent, '1');
+    ok('ackH UI: the acknowledged row is marked', h.includes("ack'd"));
+    /* Still visible and still red — the history is the point. */
+    eq('ackH UI: both failures still render red', (h.match(/pschip bad/g) || []).length, 2);
+    ok('ackH UI: an un-ack is offered on the acknowledged one', h.includes('un-ack'));
+    ok('ackH UI: the button carries the key as data, not an inline handler',
+       h.includes('data-ack=') && !h.includes('onclick='));
+    ok('ackH UI: the note is shown on hover', h.includes('deleted by hand'));
   }
 
   /* Step 8. */

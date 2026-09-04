@@ -198,6 +198,8 @@ async function initAWSTable() {
         ps_qualify_failed_at    TIMESTAMPTZ,
         ps_qualify_fail_reason  TEXT,
         hear_about_us_raw       TEXT,
+        ps_failure_ack_at       TIMESTAMPTZ,
+        ps_failure_ack_note     TEXT,
         ps_qualified_sent_at    TIMESTAMPTZ,
         created_at              TIMESTAMPTZ DEFAULT NOW(),
         updated_at              TIMESTAMPTZ DEFAULT NOW()
@@ -258,6 +260,8 @@ async function initAWSTable() {
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_qualify_failed_at TIMESTAMPTZ`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_qualify_fail_reason TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS hear_about_us_raw TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_failure_ack_at TIMESTAMPTZ`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_failure_ack_note TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_qualified_sent_at TIMESTAMPTZ`,
     ];
 
@@ -1455,9 +1459,11 @@ async function checkPartnerStackHealth(db) {
         COUNT(DISTINCT ps_customer_key) FILTER (
           WHERE ps_qualified_sent_at >= NOW() - INTERVAL '${HEALTH_PARTNERSTACK_WINDOW_H} hours') AS qualifications,
         COUNT(DISTINCT ps_customer_key) FILTER (
-          WHERE ps_signup_failed_at >= NOW() - INTERVAL '${HEALTH_PARTNERSTACK_WINDOW_H} hours')  AS signup_failures,
+          WHERE ps_signup_failed_at >= NOW() - INTERVAL '${HEALTH_PARTNERSTACK_WINDOW_H} hours'
+            AND ps_failure_ack_at IS NULL)                                                        AS signup_failures,
         COUNT(DISTINCT ps_customer_key) FILTER (
-          WHERE ps_qualify_failed_at >= NOW() - INTERVAL '${HEALTH_PARTNERSTACK_WINDOW_H} hours') AS qualify_failures,
+          WHERE ps_qualify_failed_at >= NOW() - INTERVAL '${HEALTH_PARTNERSTACK_WINDOW_H} hours'
+            AND ps_failure_ack_at IS NULL)                                                        AS qualify_failures,
         COUNT(*) FILTER (
           WHERE ps_xid IS NOT NULL
             AND created_at >= NOW() - INTERVAL '${HEALTH_PARTNERSTACK_WINDOW_H} hours')           AS partner_leads
@@ -2547,7 +2553,7 @@ app.get('/monitor/leads', async (req, res) => {
     if (format === 'csv') {
       const allRows = await pool.query(baseSelect + ` ${orderBy}`, params);
       const cols = [
-        'email','first_name','last_name','company','website','phone','sell_to','hear_about_us',
+        'email','first_name','last_name','company','website','phone','sell_to','hear_about_us','hear_about_us_raw',
         'completed','booking_uid','disqualified','step_reached','created_at','submitted_at','booked_at',
         'utm_source','utm_medium','utm_campaign','utm_term','referrer','prefill_source',
         'landing_page','previous_page','page_url','website_check_failed','website_check_reason','prior_attempts','prior_disqualified',
@@ -2667,6 +2673,12 @@ app.get('/monitor/sdr', async (req, res) => {
           l.phone,
           l.sell_to,
           l.hear_about_us,
+          /* What they came in saying, beside what the AE-facing field shows.
+             On a partner lead hear_about_us reads "Partner - X", so without
+             this an SDR has no idea how the person said they found us — which
+             is the thing you open a call with. */
+          l.hear_about_us_raw,
+          l.ps_partner_name,
           l.completed,
           l.step_reached,
           l.submitted_at,
@@ -2899,8 +2911,8 @@ app.get('/monitor', (req, res) => {
   '<div class="mc" title="Distinct customer DOMAINS with a qualified_demo action sent. This is the event that pays the affiliate."><div class="ml">Qualified demos fired</div><div class="mv" id="p-qual">&#8212;</div><div class="ms">domains, one per customer</div></div>' +
   '</div>' +
   '<div class="card"><div class="ml" style="margin-bottom:8px">Per domain <span class="psna" style="font-weight:400;font-size:11px">&#8212; one row, one lifecycle state. The states above are counts of this column.</span></div>' +
-  '<div style="overflow-x:auto"><table class="lt"><thead><tr><th>Domain</th><th>State</th><th>Partner</th><th>Salesforce</th><th>Detail</th><th>Last seen</th></tr></thead>' +
-  '<tbody id="pdtbody"><tr><td colspan="6" class="nd">Loading...</td></tr></tbody></table></div></div>' +
+  '<div style="overflow-x:auto"><table class="lt"><thead><tr><th>Domain</th><th>State</th><th>Partner</th><th>Salesforce</th><th>Detail</th><th></th><th>Last seen</th></tr></thead>' +
+  '<tbody id="pdtbody"><tr><td colspan="7" class="nd">Loading...</td></tr></tbody></table></div></div>' +
   '<div class="card"><div class="ml" style="margin-bottom:8px">Per partner <span class="psna" style="font-weight:400;font-size:11px">&#8212; companies, not people. Click a row to see that partner\'s leads.</span></div>' +
   '<div class="psm">Clicks that never reached the form are NOT in our data at all &#8212; only PartnerStack has them. This funnel starts at step 1, not at the click.</div>' +
   '<div style="overflow-x:auto"><table class="lt"><thead><tr>' +
@@ -3274,7 +3286,7 @@ app.get('/monitor', (req, res) => {
   'var lc=d.lifecycle||{};var bs=lc.byState||{};var failed=lc.failedStates||[];' +
   'var attn=document.getElementById("p-attn");' +
   'if(attn){attn.textContent=String(lc.needsAttention||0);attn.className="mv"+((lc.needsAttention||0)>0?" psattn":"");}' +
-  'set("p-attn-sub",(lc.needsAttention||0)>0?"act on these today":"nothing failing");' +
+  'set("p-attn-sub",(lc.needsAttention||0)>0?"act on these today":((lc.acknowledged||0)>0?(lc.acknowledged+" acknowledged, not counted"):"nothing failing"));' +
   'set("p-domains",lc.totalDomains||0);' +
   'var order=["qualified","qualification_failed","conversion_failed","demo_done_not_qualified","awaiting_demo","converted","skipped","conversion_pending"];' +
   'var lbl={qualified:"qualified",qualification_failed:"qualification failed",conversion_failed:"conversion failed",demo_done_not_qualified:"demo done, not qualified",awaiting_demo:"awaiting demo",converted:"converted",skipped:"skipped",conversion_pending:"pending"};' +
@@ -3326,7 +3338,7 @@ app.get('/monitor', (req, res) => {
      appear in one and not the other. */
   'var dtb=document.getElementById("pdtbody");' +
   'if(dtb){var dl=lc.domains||[];' +
-  'if(!dl.length){dtb.innerHTML="<tr><td colspan=\'6\' class=\'nd\'>No partner domains yet.</td></tr>";}else{' +
+  'if(!dl.length){dtb.innerHTML="<tr><td colspan=\'7\' class=\'nd\'>No partner domains yet.</td></tr>";}else{' +
   /* Per ROW, so it can say whether the $50 actually landed — the summary chip
      alone was not enough, this is the line you read for a specific domain.
      Also distinguishes an unticked Opportunity that could never be qualified
@@ -3341,12 +3353,15 @@ app.get('/monitor', (req, res) => {
   'var bad=(failed.indexOf(x.state)>=0);' +
   'var det=x.signup_fail_reason||x.qualify_fail_reason||x.skipped_reason||"";' +
   'var sfs=x.sf_state?sfLabel(x):"not checked yet";' +
+
   'return "<tr><td><code>"+esc(x.customer_key)+"</code></td>"' +
   '+"<td><span class=\'pschip"+(bad?" bad":"")+"\'>"+esc((lbl[x.state]||x.state))+"</span></td>"' +
   '+"<td>"+esc(x.partner_name||x.partner_email||x.partner_key||"—")+"</td>"' +
   '+"<td"+(x.sf_state==="create_errored"?" class=\'psattn\'":"")+">"+esc(sfs)+"</td>"' +
-  '+"<td class=\'psna\'>"+esc(det||"—")+"</td>"' +
-  '+"<td class=\'psna\' style=\'white-space:nowrap\'>"+esc(et(x.last_seen))+"</td></tr>";}).join("");}}' +
+  '+"<td class=\'psna\'>"+esc(det||"—")+(x.acknowledged?(" <span class=\'pschip\' title=\'Acknowledged"+(x.ack_note?": "+esc(x.ack_note):"")+". Still shown and still red \u2014 it just no longer counts as needing attention.\'>ack\'d</span>"):"")+"</td>"' +
+  /* Only offered where there is a failure to acknowledge. */
+  '+"<td>"+(bad?("<button class=\'btn\' data-ack=\'"+esc(x.customer_key)+"\' data-on=\'"+(x.acknowledged?"0":"1")+"\'>"+(x.acknowledged?"un-ack":"ack")+"</button>"):"")+"</td>"' +
+  '+"<td class=\'psna\' style=\'white-space:nowrap\'>"+esc(et(x.last_seen))+"</td></tr>";}).join("");wireAck();}}' +
   '}catch(e){document.getElementById("ptbody").innerHTML="<tr><td colspan=\'8\' class=\'nd\' style=\'color:#b91c1c\'>Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function sortPartners(c){if(pSort===c)pDir=(pDir==="asc"?"desc":"asc");else{pSort=c;pDir=(c==="partner_name")?"asc":"desc";}renderPartners();}' +
   'function renderPartners(){var tb=document.getElementById("ptbody");' +
@@ -3375,6 +3390,17 @@ app.get('/monitor', (req, res) => {
   '+"<td>"+(p.qualified||0)+"</td>"' +
   '+"<td style=\'color:#999;white-space:nowrap\'>"+(p.last_click?esc(et(p.last_click)):"—")+"</td></tr>";}).join("");' +
   'Array.prototype.forEach.call(tb.querySelectorAll(".prow"),function(tr){tr.onclick=function(){partnerDrill(tr.getAttribute("data-pk"));};});}' +
+  /* Delegated like the partner rows, for the same reason: an inline handler
+     would need the key quoted three deep. */
+  'function wireAck(){var box=document.getElementById("pdtbody");if(!box)return;' +
+  'Array.prototype.forEach.call(box.querySelectorAll("[data-ack]"),function(b){b.onclick=async function(){' +
+  'var key=b.getAttribute("data-ack"),on=b.getAttribute("data-on")==="1";' +
+  'var note=on?(prompt("Why is this not a real loss? (optional)")||""):"";' +
+  'b.disabled=true;b.textContent="...";' +
+  'try{var r=await fetch(API+"/monitor/partner-ack"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),' +
+  '{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({customer_key:key,note:note,acknowledged:on})});' +
+  'if(!r.ok)throw new Error("HTTP "+r.status);await loadPartners();}' +
+  'catch(e){b.disabled=false;b.textContent=on?"ack":"un-ack";alert("Could not update: "+e.message);}};});}' +
   /* Drill-down REUSES the All Leads view and its existing partner filter
      rather than building a second leads table. The detail panel, the stage
      ladder and the CSV export all come along for free, and there is only one
@@ -6616,6 +6642,9 @@ async function partnerLifecycle() {
              BOOL_OR(ps_signup_sent_at IS NOT NULL)     AS signup_sent,
              BOOL_OR(ps_qualified_sent_at IS NOT NULL)  AS qualified_sent,
              BOOL_OR(ps_signup_verified_at IS NOT NULL) AS signup_verified,
+             BOOL_OR(ps_failure_ack_at IS NOT NULL)     AS acknowledged,
+             MAX(ps_failure_ack_note)                   AS ack_note,
+             MAX(ps_failure_ack_at)                     AS acked_at,
              MAX(created_at)                    AS last_seen,
              MIN(created_at)                    AS first_seen
         FROM leads
@@ -6669,13 +6698,20 @@ async function partnerLifecycle() {
 
   const byState = {};
   for (const r of domains.rows) byState[r.state] = (byState[r.state] || 0) + 1;
-  const needsAttention = PS_LADDER_FAILED.reduce((n, k) => n + (byState[k] || 0), 0);
+  /* Acknowledged failures keep their state and their red chip — the history is
+     the point — but they stop demanding action. An alert that was wrong the
+     first time it fired gets ignored, and this one was. */
+  const needsAttention = domains.rows.filter(
+    (d) => PS_LADDER_FAILED.includes(d.state) && d.acknowledged !== true).length;
+  const acknowledged = domains.rows.filter(
+    (d) => PS_LADDER_FAILED.includes(d.state) && d.acknowledged === true).length;
 
   return {
     domains: domains.rows,
     byState,
     totalDomains: domains.rows.length,
     needsAttention,
+    acknowledged,
     /* Deliberately its own field and its own unit. */
     noCustomerKeyLeads: Number(noKey.rows[0].leads) || 0,
     failedStates: PS_LADDER_FAILED,
@@ -6779,6 +6815,57 @@ async function partnerOverview() {
     partners: rows.rows,
   };
 }
+
+/* ── ACKNOWLEDGING A FAILURE ─────────────────────────────────────────
+   A POST, and the second mutating route on /monitor. The first was
+   /monitor/website-recheck, which shipped as a GET that rewrote lead rows —
+   a link prefetch or an unfurled URL could have fired it. Same rules apply
+   here: POST only, token-guarded, nothing in the UI links to it as a URL.
+
+   This SUPPRESSES ALERTS, which makes it the one route whose failure mode is
+   silence. So it deliberately does the least it can:
+     - it never clears ps_signup_failed_at or the reason. The history stays,
+       the domain keeps its red state, the chip still shows.
+     - it only removes the domain from Needs attention and from the health row.
+     - it is reversible: acknowledged: false unsets it.
+
+   Why it exists: test.com's phantom_200 was a genuine 200-with-no-customer,
+   but the cause was a customer deleted in PartnerStack by hand. Housekeeping
+   and a genuinely missed payout produce the same stamp today, and an alert
+   that is wrong the first time it fires gets ignored. */
+app.post('/monitor/partner-ack', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+
+  const customer_key = (req.body.customer_key || '').toString().trim().slice(0, 200);
+  const note         = (req.body.note || '').toString().trim().slice(0, 300);
+  const acknowledged = req.body.acknowledged !== false;   // default true; false un-acks
+  if (!customer_key) return res.status(400).json({ error: 'customer_key required' });
+
+  try {
+    /* Scoped to rows that actually carry a failure. Acknowledging a domain
+       with nothing wrong would create a stamp meaning nothing, and would let
+       a future genuine failure arrive pre-silenced. */
+    const r = await pool.query(
+      `UPDATE leads
+          SET ps_failure_ack_at = ${acknowledged ? 'NOW()' : 'NULL'},
+              ps_failure_ack_note = ${acknowledged ? '$2' : 'NULL'},
+              updated_at = NOW()
+        WHERE ps_customer_key = $1
+          AND (ps_signup_failed_at IS NOT NULL OR ps_qualify_failed_at IS NOT NULL)`,
+      acknowledged ? [customer_key, note || null] : [customer_key]
+    );
+    if (r.rowCount === 0) {
+      return res.status(404).json({ error: 'No failed row for that customer_key', customer_key });
+    }
+    console.log(`[PartnerStack] ${acknowledged ? 'Acknowledged' : 'Un-acknowledged'} failure for ${customer_key}` +
+      (note ? ` — ${note}` : '') + ` (${r.rowCount} row${r.rowCount === 1 ? '' : 's'})`);
+    res.json({ ok: true, customer_key, acknowledged, rows: r.rowCount });
+  } catch (err) {
+    console.error('[/monitor/partner-ack]', err.message);
+    res.status(500).json({ error: 'Acknowledge failed', detail: err.message });
+  }
+});
 
 app.get('/monitor/partners', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;

@@ -99,6 +99,7 @@ All on `leads`, and all mirrored to `gw_form_leads` on the AWS warehouse.
 | `ps_signup_sent_at` | `runPartnerStackSignup` | Claimed *before* the HTTP call, released if it fails |
 | `ps_signup_verified_at` | The read-back sweep | Proof the customer really exists, not just that PartnerStack said 200 |
 | `hear_about_us_raw` | `/partial`, `/submit` | What the visitor came in saying, before the partner overwrite. First non-empty value wins and is never overwritten |
+| `ps_failure_ack_at` / `_note` | `POST /monitor/partner-ack` | Acknowledges a failure. Never clears the stamp — the row keeps its state and stays red; it only drops out of Needs attention and the health row |
 | `ps_signup_skipped_reason` / `_at` | The skip guards | `test_email`, `disqualified`, `no_customer_key`, `already_sent` |
 | `ps_signup_fail_reason` / `ps_signup_failed_at` | Conversion failure + phantom sweep | Cleared on a later success |
 | `ps_qualify_fail_reason` / `ps_qualify_failed_at` | Qualification failure | Cleared on a later success |
@@ -493,6 +494,31 @@ The pattern was audited across the repo. `lookupElvStatus`,
 inside a try with code after it, and all three are **correct** — the early
 return is "found" or "did not win the claim", and the code after is the
 intended fallback. The poller was the only genuine instance.
+
+## Acknowledging a failure
+
+`POST /monitor/partner-ack` — **the second mutating route on `/monitor`**. The
+first, `/monitor/website-recheck`, shipped as a GET that rewrote lead rows,
+which a link prefetch could have fired. Same rules: POST only, token-guarded,
+never linked as a URL.
+
+It exists because `phantom_200` covers two different things. `test.com`'s was a
+genuine 200-with-no-customer, but the cause was a customer deleted in
+PartnerStack by hand — housekeeping, not a lost $50. The two produce the same
+stamp, and **an alert that is wrong the first time it fires gets ignored**
+(which is also why the `/partial` health row is worth revisiting).
+
+**This route suppresses alerts, so its failure mode is silence.** It therefore
+does the least it can:
+
+- it never clears `ps_signup_failed_at` or the reason — the history stays and
+  the domain keeps its red chip
+- it only removes the domain from **Needs attention** and from the **health
+  row**, and both consumers are asserted
+- it refuses to acknowledge a domain with no failure, which would otherwise
+  pre-silence a future genuine one
+- acknowledging nothing is a 404, never a silent success
+- it is reversible with `acknowledged: false`
 
 ## Monitoring
 
