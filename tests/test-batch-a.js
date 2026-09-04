@@ -639,6 +639,12 @@ function liftClientJs(startMarker, endMarker) {
     eq('health/alert: Booking is a warning',  H.HEALTH_SEVERITY.booking,  'warning');
     eq('health/alert: Cron is a warning',     H.HEALTH_SEVERITY.cron,     'warning');
     eq('health/alert: Recovery is a warning', H.HEALTH_SEVERITY.recovery, 'warning');
+    /* PartnerStack is a WARNING, not critical. Critical pages by email and the
+       three rows that do are a recorded owner decision; the money path already
+       alerts at the moment of failure via recordPartnerStackFailure, so this
+       row is a backstop. It also goes red on a single transient 4xx that the
+       claim-release recovered from — right for money, wrong to page at 3am. */
+    eq('health/alert: PartnerStack is a warning', H.HEALTH_SEVERITY.partnerstack, 'warning');
     eq('health/alert: exactly three rows page by email',
        Object.keys(H.HEALTH_SEVERITY).filter((k) => H.HEALTH_SEVERITY[k] === 'critical').sort(),
        ['aws', 'partial', 'submit']);
@@ -695,7 +701,7 @@ function liftClientJs(startMarker, endMarker) {
     eq('health/ui: grey renders grey, never the green class', CB.HCLS.insufficient_data, 'bx');
     eq('health/ui: red renders red', CB.HCLS.red, 'br');
     eq('health/ui: every check id maps to a row', Object.keys(CB.HIDS).sort(),
-       ['apollo', 'aws', 'booking', 'cron', 'partial', 'recovery', 'submit']);
+       ['apollo', 'aws', 'booking', 'cron', 'partial', 'partnerstack', 'recovery', 'submit']);
 
     CB.paintHealth({ checks: {
       partial: { state: 'green', text: 'ok', detail: 'why' },

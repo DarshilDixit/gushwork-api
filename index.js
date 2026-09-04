@@ -1419,6 +1419,67 @@ async function checkPartialHealth(db) {
   }
 }
 
+/* ── PartnerStack — the money path ──────────────────────────────────
+   System Health covered /partial, /submit, ELV, Apollo, RevenueHero, cron, the
+   AWS mirror and email recovery — and nothing for the path that actually pays
+   affiliates. Today's 400 on the qualification would have been caught here.
+
+   RED ON ANY FAILURE IN THE WINDOW, deliberately, and this is a real
+   trade-off: a single transient 4xx that the claim-release already recovered
+   from will still turn the row red for 24 hours. That is the right way round
+   for money — a failed conversion means an affiliate is not being paid and
+   somebody should look — but it WILL fire on a blip, and if it becomes noisy
+   the fix is to alert on unresolved failures rather than to raise the
+   threshold. The failure stamps are cleared on a later success, so a
+   self-healing failure does clear itself once that domain converts again.
+
+   Green with zero activity is NOT claimed: with no partner traffic at all
+   there is nothing to verify, so it reports insufficient_data rather than a
+   green badge that means "we checked nothing". */
+const HEALTH_PARTNERSTACK_WINDOW_H = 24;
+
+async function checkPartnerStackHealth(db) {
+  try {
+    const r = await db.query(`
+      SELECT
+        COUNT(DISTINCT ps_customer_key) FILTER (
+          WHERE ps_signup_sent_at >= NOW() - INTERVAL '${HEALTH_PARTNERSTACK_WINDOW_H} hours')    AS conversions,
+        COUNT(DISTINCT ps_customer_key) FILTER (
+          WHERE ps_qualified_sent_at >= NOW() - INTERVAL '${HEALTH_PARTNERSTACK_WINDOW_H} hours') AS qualifications,
+        COUNT(DISTINCT ps_customer_key) FILTER (
+          WHERE ps_signup_failed_at >= NOW() - INTERVAL '${HEALTH_PARTNERSTACK_WINDOW_H} hours')  AS signup_failures,
+        COUNT(DISTINCT ps_customer_key) FILTER (
+          WHERE ps_qualify_failed_at >= NOW() - INTERVAL '${HEALTH_PARTNERSTACK_WINDOW_H} hours') AS qualify_failures,
+        COUNT(*) FILTER (
+          WHERE ps_xid IS NOT NULL
+            AND created_at >= NOW() - INTERVAL '${HEALTH_PARTNERSTACK_WINDOW_H} hours')           AS partner_leads
+        FROM leads
+    `);
+    const q    = r.rows[0];
+    const conv = parseInt(q.conversions)      || 0;
+    const qual = parseInt(q.qualifications)   || 0;
+    const f1   = parseInt(q.signup_failures)  || 0;
+    const f2   = parseInt(q.qualify_failures) || 0;
+    const lds  = parseInt(q.partner_leads)    || 0;
+    const win  = HEALTH_PARTNERSTACK_WINDOW_H + 'h';
+    const fails = f1 + f2;
+    const summary = `${conv} conversions · ${qual} qualifications in the last ${win}`;
+
+    if (fails > 0) {
+      const parts = [];
+      if (f1) parts.push(`${f1} conversion${f1 > 1 ? 's' : ''}`);
+      if (f2) parts.push(`${f2} qualification${f2 > 1 ? 's' : ''}`);
+      return hc('partnerstack', 'red', `${parts.join(' and ')} failed in the last ${win}`,
+        summary + '. A failed conversion means the affiliate is not credited; a failed qualification means the $50 did not fire. Claims are released, so these retry.');
+    }
+    if (conv || qual || lds) return hc('partnerstack', 'green', summary, `${lds} partner lead${lds === 1 ? '' : 's'} in the same window, no failures`);
+    return hc('partnerstack', 'insufficient_data', `No partner activity in the last ${win}`,
+      'Nothing to verify — this is not evidence the money path works.');
+  } catch (err) {
+    return hc('partnerstack', 'red', 'Could not check', err && err.message);
+  }
+}
+
 /* ── Step 2 — /submit ───────────────────────────────────────────────
    The old row asked whether there had EVER been a completion, so it went
    green in July and stayed there. This asks about the last 24 hours, and
@@ -1691,6 +1752,7 @@ async function runHealthChecks() {
     safeCheck('cron',     () => checkCronHealth(now, _lastCronRunAt, _cronRanThisProcess, _processStartedAt)),
     safeCheck('aws',      () => checkAwsHealth(awsPool, pool)),
     safeCheck('recovery', () => checkRecoveryHealth(pool)),
+    safeCheck('partnerstack', () => checkPartnerStackHealth(pool)),
   ]);
   const checks = {};
   for (const c of results) checks[c.id] = c;
@@ -1720,6 +1782,15 @@ const HEALTH_SEVERITY = {
   booking:  'warning',
   cron:     'warning',
   recovery: 'warning',
+  /* WARNING, not critical, and that is a deliberate downgrade from the first
+     draft. Critical pages by email, and the three rows that do are a recorded
+     owner decision from Aug 2026 — adding a fourth was not asked for. The
+     urgent notification already exists: recordPartnerStackFailure fires an
+     alertOps at the MOMENT of failure, so this row is a backstop, not the
+     primary signal. It will also go red on a single transient 4xx that the
+     claim-release already recovered from, which is the right way round for
+     money but the wrong thing to page someone about at 3am. */
+  partnerstack: 'warning',
 };
 
 const HEALTH_ALERT_META = {
@@ -1730,6 +1801,7 @@ const HEALTH_ALERT_META = {
   booking:  { source: 'Booking',          title: 'No bookings are being recorded',   impact: 'People are completing the form and no booking is landing on any lead.',  action: 'Check the RevenueHero and Cal webhooks — booking arrives by three routes.' },
   cron:     { source: 'Recovery cron',    title: 'Has not run recently',             impact: 'Drop-off follow-up emails are not being sent.',                          action: 'Check the scheduler that calls POST /cron/send-partials.' },
   recovery: { source: 'Email recovery',   title: 'Follow-ups are stuck in the queue', impact: 'Leads are eligible for a follow-up and are not being picked up.',        action: 'Check the Gmail credentials and the cron logs.' },
+  partnerstack: { source: 'PartnerStack', title: 'The money path is failing',        impact: 'A conversion or qualification did not land, so an affiliate is not being credited.', action: 'Check the [PartnerStack] lines in the Railway logs, and the Partner gaps card. Claims are released, so these retry.' },
 };
 
 const _healthState = new Map(); // check id -> the last state we reported on: 'green' or 'red'
@@ -2867,6 +2939,7 @@ app.get('/monitor', (req, res) => {
   '<div class="sr"><div><div class="sn">Booking &#8212; RevenueHero</div><div class="sd">People booked / people completed, last 7 days</div></div><span class="badge bx" id="s-cal">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">Cron &#8212; drop-off recovery</div><div class="sd">Time since the scheduler last called us</div></div><span class="badge bx" id="s-cron">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">AWS sync</div><div class="sd">gw_form_leads mirror, queried live against Railway</div></div><span class="badge bx" id="s-aws">Checking...</span></div>' +
+  '<div class="sr"><div><div class="sn">PartnerStack</div><div class="sd">Conversions and qualifications in the last 24h &#8212; red on any failure</div></div><span class="badge bx" id="s-ps">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">Email recovery</div><div class="sd">Follow-up queue &#8212; anything stuck past 5 hours</div></div><span class="badge bx" id="s-loops">Checking...</span></div>' +
   '</div>' +
   '<div class="ms" style="margin:-16px 0 24px 2px"><span id="hupd">&#8212;</span> &#183; grey means there was not enough traffic to judge, never that a check was skipped.</div>' +
@@ -2967,7 +3040,7 @@ app.get('/monitor', (req, res) => {
      "not enough traffic to judge"; it must never also mean "we could not
      ask". Same rule the server side follows. */
   'var HCLS={green:"bg",amber:"ba",red:"br",insufficient_data:"bx"};' +
-  'var HIDS={partial:"s-partial",submit:"s-submit",apollo:"s-enrich",booking:"s-cal",cron:"s-cron",aws:"s-aws",recovery:"s-loops"};' +
+  'var HIDS={partial:"s-partial",submit:"s-submit",apollo:"s-enrich",booking:"s-cal",cron:"s-cron",aws:"s-aws",recovery:"s-loops",partnerstack:"s-ps"};' +
   'function hkeys(){return Object.keys(HIDS);}' +
   'function paintHealth(d){hkeys().forEach(function(k){var c=d&&d.checks&&d.checks[k];' +
   'if(!c||!HCLS[c.state]){badge(HIDS[k],"No result","br");return;}' +
@@ -6197,11 +6270,6 @@ async function runPartnerStackQualificationPoll() {
   } finally {
     _psQualifyRunning = false;
   }
-  /* AFTER the qualification work and outside its try, so a Salesforce hiccup
-     in the refresh cannot stop actions from firing. Its own failures are
-     swallowed inside. */
-  await refreshPartnerDomainSfState()
-    .catch((err) => console.warn('[PartnerStack] SF state refresh failed (non-blocking):', err.message));
 }
 
 async function sendQualificationForDomain(customerKey) {
@@ -6531,7 +6599,7 @@ async function partnerLifecycle() {
 }
 
 async function partnerOverview() {
-  const [totals, rows] = await Promise.all([
+  const [totals, clicksRow, rows] = await Promise.all([
     pool.query(`
       /* DOMAINS throughout, matching the funnel and the ladder. These counted
          people while the funnel counted companies, which put two units on one
@@ -6549,6 +6617,21 @@ async function partnerOverview() {
         FROM leads
        WHERE ps_partner_key IS NOT NULL AND ps_customer_key IS NOT NULL
     `),
+    /* OUR clicks, from ps_click_history. COUNT(DISTINCT xid), never
+       SUM(jsonb_array_length): the cookie is cumulative per VISITOR, so a
+       person who clicks, submits, clicks again and submits again carries the
+       first click in both leads' histories. Against real data the naive sum
+       said 5 and the truth was 4 — one xid appeared under two domains.
+
+       This is OUR count and it is not PartnerStack's. Clicks that never
+       reached the form are not in our data at all. */
+    pool.query(`
+      SELECT COUNT(DISTINCT e->>'xid') AS clicks
+        FROM leads l, LATERAL jsonb_array_elements(l.ps_click_history) AS e
+       WHERE l.ps_partner_key IS NOT NULL
+         AND jsonb_typeof(l.ps_click_history) = 'array'
+         AND e->>'xid' IS NOT NULL
+    `).catch(() => ({ rows: [{ clicks: null }] })),
     pool.query(`
       /* EVERY column counts DOMAINS, so the funnel actually nests:
          step 1 >= completed >= converted >= booked >= qualified. Mixing people
@@ -6568,8 +6651,13 @@ async function partnerOverview() {
                WHERE booking_uid IS NOT NULL)                               AS booked,
              COUNT(DISTINCT ps_customer_key) FILTER (
                WHERE ps_qualified_sent_at IS NOT NULL)                      AS qualified,
-             MAX(ps_click_at)                                               AS last_click
-        FROM leads
+             MAX(ps_click_at)                                               AS last_click,
+             (SELECT COUNT(DISTINCT e->>'xid')
+                FROM leads c, LATERAL jsonb_array_elements(c.ps_click_history) AS e
+               WHERE c.ps_partner_key = l.ps_partner_key
+                 AND jsonb_typeof(c.ps_click_history) = 'array'
+                 AND e->>'xid' IS NOT NULL)                                   AS clicks
+        FROM leads l
        WHERE ps_partner_key IS NOT NULL AND ps_customer_key IS NOT NULL
        GROUP BY ps_partner_key
        ORDER BY COUNT(DISTINCT ps_customer_key) DESC, MAX(ps_click_at) DESC NULLS LAST
@@ -6587,6 +6675,9 @@ async function partnerOverview() {
       qualified:  Number(t.qualified)   || 0,
       booked,
       partners:   Number(t.partners)    || 0,
+      /* null, not 0, when the query could not run — "not measured" and "none"
+         are different answers. */
+      clicks: clicksRow.rows[0].clicks === null ? null : Number(clicksRow.rows[0].clicks),
       // Guarded: a partner programme with no leads yet must show a dash, not NaN.
       bookingRate: leads ? Math.round((booked / leads) * 1000) / 10 : null,
     },
@@ -6648,7 +6739,10 @@ async function refreshPartnerDomainSfState() {
      WHERE ps_xid IS NOT NULL AND ps_customer_key IS NOT NULL AND email IS NOT NULL
      GROUP BY ps_customer_key
      LIMIT 1000`);
-  if (!domains.length) return { ok: true, updated: 0 };
+  if (!domains.length) {
+    console.log('[PartnerStack] SF state refresh: no partner domains yet');
+    return { ok: true, updated: 0 };
+  }
 
   const sf = await findOpportunityDomains({ sinceDays: PS_GAP_SF_LOOKBACK_D });
   if (!sf.ok) {
@@ -6714,6 +6808,32 @@ async function refreshPartnerDomainSfState() {
   }
   console.log(`[PartnerStack] SF state refreshed for ${updated} domain(s)`);
   return { ok: true, updated };
+}
+
+/* ITS OWN JOB, not chained onto the qualification poll.
+
+   It was chained, and it never ran once. runPartnerStackQualificationPoll has
+   three `return`s inside its try block, and a return there exits the WHOLE
+   function — the `finally` still fires, so the flag resets and everything
+   looks healthy, but any call placed after the try/finally is skipped. The
+   common case takes an early return: once everything qualified has been sent,
+   the pending-domains query is empty and the poll returns at that line on
+   every subsequent tick, forever.
+
+   Adding a boot-time call would have "fixed" it in the most misleading way
+   possible — it would have run once per deploy, populated the column, and
+   looked correct. Separate scheduling is the actual fix, and it matches
+   startPartnerStackCacheWarm and startPartnerStackConversionVerify, which both
+   already do boot-then-interval. */
+const PS_SF_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
+
+function startPartnerStackSfStateRefresh() {
+  const run = (why) => refreshPartnerDomainSfState()
+    .catch((err) => console.warn(`[PartnerStack] SF state refresh failed (${why}, non-blocking):`, err.message));
+  run('boot');
+  const t = setInterval(() => run('scheduled'), PS_SF_REFRESH_INTERVAL_MS);
+  if (t.unref) t.unref();
+  console.log(`[PartnerStack] SF state refresh started (boot + every ${PS_SF_REFRESH_INTERVAL_MS / 60000} min)`);
 }
 
 function startPartnerStackQualificationPoll() {
@@ -7557,6 +7677,7 @@ async function start() {
       startPartnerStackCacheWarm();
       startPartnerStackQualificationPoll();
       startPartnerStackConversionVerify();
+      startPartnerStackSfStateRefresh();
     });
   } catch (err) { console.error('[GW API] Failed to start:', err); process.exit(1); }
 }
