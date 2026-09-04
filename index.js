@@ -3281,6 +3281,13 @@ app.get('/monitor', (req, res) => {
   'return "<span class=\'pschip"+(k==="create_errored"?" bad":"")+"\'>"+sf[k]+" "+sfl[k]+"</span>";}).join("");' +
   'var unchecked=(lc.totalDomains||0)-Object.values(sf).reduce(function(a,b){return a+b;},0);' +
   'if(unchecked>0)sfc+="<span class=\'pschip\' title=\'The poller has not checked these yet. NOT the same as having no Opportunity.\'>"+unchecked+" not checked yet</span>";' +
+  /* The completeness signals, on screen. Every one of these was already
+     computed somewhere and thrown away; a number nobody can audit is a number
+     that will be wrong silently. */
+  'var lr=lc.sfLastRead||{};' +
+  'if(lr.ok===false)sfc+="<span class=\'pschip bad\' title=\'The Opportunity list could not be read completely, so these states are stale. Nothing was overwritten with a guess.\'>Salesforce read FAILED ("+esc(lr.reason||"unknown")+")</span>";' +
+  'else if(lr.ok===true)sfc+="<span class=\'pschip\' title=\'Every Opportunity in the window was read, across paged requests. If this is ever short of the total, the refresh refuses to write rather than reporting a partial list as complete.\'>read "+lr.records+"/"+lr.totalSize+" opportunities · "+lr.pages+" pages</span>";' +
+  'if(lc.domainsCapped)sfc+="<span class=\'pschip bad\' title=\'More partner domains exist than this view returns. The states above are a page, not the population.\'>capped at "+lc.domainsLimit+" domains</span>";' +
   'var sfe=document.getElementById("p-sfstates");if(sfe)sfe.innerHTML=sfc||"not checked yet";' +
   'partnerRows=d.partners||[];renderPartners();' +
   /* The per-domain table. Same source as the chips above, so a domain cannot
@@ -6534,6 +6541,7 @@ const PS_LADDER_FAILED = ['conversion_failed', 'qualification_failed'];
    "Needs attention", which is the one number on the tab that has to be
    complete. leads_ps_failed_idx covers that arm of the OR. */
 const PS_LADDER_WINDOW_D = 180;
+const PS_LADDER_LIMIT    = 500;
 
 async function partnerLifecycle() {
   const [domains, noKey, sfState] = await Promise.all([
@@ -6557,7 +6565,7 @@ async function partnerLifecycle() {
               OR ps_qualify_failed_at IS NOT NULL)
        GROUP BY ps_customer_key
        ORDER BY MAX(created_at) DESC
-       LIMIT 500`),
+       LIMIT ${PS_LADDER_LIMIT}`),
     /* Counted as LEADS, not domains — there is no domain to key them by.
        Reported separately so the domain counts stay one honest unit. */
     pool.query(`
@@ -6595,6 +6603,11 @@ async function partnerLifecycle() {
     failedStates: PS_LADDER_FAILED,
     bySfState,
     sfStates: PS_SF_STATES,
+    sfLastRead: _psSfLastRead,
+    /* The domain list is capped. Say so rather than letting a page-1 view read
+       as the whole population — same failure as the Opportunity truncation. */
+    domainsCapped: domains.rows.length >= PS_LADDER_LIMIT,
+    domainsLimit: PS_LADDER_LIMIT,
   };
 }
 
@@ -6730,6 +6743,13 @@ app.get('/monitor/partner-gaps', async (req, res) => {
    That log is keyed by prospect_email, NOT by domain — so the join is on the
    lead's email, not on the customer key. Assuming a domain key here would
    silently match nothing. */
+/* What the last Opportunity read actually saw. Surfaced on the tab, because
+   the bug this fixes was a completeness signal that was computed and dropped:
+   findOpportunityDomains has always returned `truncated`, it has always been
+   true, and nothing ever looked at it. A number nobody can audit is a number
+   that will be wrong silently. */
+let _psSfLastRead = { ok: null, at: null };
+
 const PS_SF_STATES = ['ticked', 'exists_unticked', 'create_errored', 'no_opportunity'];
 
 async function refreshPartnerDomainSfState() {
@@ -6747,10 +6767,15 @@ async function refreshPartnerDomainSfState() {
   const sf = await findOpportunityDomains({ sinceDays: PS_GAP_SF_LOOKBACK_D });
   if (!sf.ok) {
     /* Leave the table alone. A stale row that says what we last verified is
-       more useful than one overwritten with a guess during an outage. */
-    console.warn('[PartnerStack] SF state refresh skipped — Salesforce unavailable:', sf.reason);
+       more useful than one overwritten with a guess during an outage — and
+       'incomplete' now lands here too, so a partial Opportunity list can never
+       be written as if it were the whole picture. */
+    console.warn(`[PartnerStack] SF state refresh skipped — ${sf.reason}` +
+      (sf.totalSize ? ` (${sf.fetched} of ${sf.totalSize})` : ''));
+    _psSfLastRead = { ok: false, reason: sf.reason, at: new Date().toISOString() };
     return { ok: false, reason: sf.reason };
   }
+  _psSfLastRead = { ok: true, records: sf.records.length, totalSize: sf.totalSize, pages: sf.pages, at: new Date().toISOString() };
 
   // domain -> { qualified, id }, keeping a ticked Opportunity over an unticked one
   const byDomain = new Map();

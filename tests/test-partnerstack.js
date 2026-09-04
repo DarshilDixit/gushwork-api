@@ -87,6 +87,13 @@ function lift(s, decl) {
    cannot be used here: PS_LADDER_SQL contains a regex with [0-9]{4} in it, so
    bracket matching truncates the SQL mid-statement and the eval fails
    somewhere unrelated. Match the backticks instead. */
+/* Negative assertions over source must ignore comments: the comment that
+   explains WHY we avoid a construct necessarily contains that construct, so a
+   raw match fails against correct code. Third time tonight. */
+function codeOnly(s) {
+  return s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+}
+
 function liftTemplate(s, decl) {
   const i = s.indexOf('\n' + decl);
   if (i === -1) throw new Error('not found: ' + decl);
@@ -1085,6 +1092,8 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
       const L = (new Function('pool', 'console',
         liftLine(src, 'const PS_LADDER_FAILED =') + '\n' +
         liftLine(src, 'const PS_LADDER_WINDOW_D =') + '\n' +
+        liftLine(src, 'const PS_LADDER_LIMIT') + '\n' +
+        liftLine(src, 'let _psSfLastRead =') + '\n' +
         liftLine(src, 'const PS_SF_STATES =') + '\n' +
         liftTemplate(src, 'const PS_LADDER_SQL =') + '\n' +
         lift(src, 'async function partnerLifecycle(') +
@@ -1257,7 +1266,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     /* A stale row saying what we last verified beats one overwritten with a
        guess during an outage. */
     ok('sfB: an unavailable Salesforce leaves the table untouched',
-       /if \(!sf\.ok\)[\s\S]{0,300}?return \{ ok: false, reason: sf\.reason \}/.test(fn));
+       /if \(!sf\.ok\)[\s\S]*?return \{ ok: false, reason: sf\.reason \}/.test(fn));
     ok('sfB: a missing sfopp log degrades to no_opportunity, it does not throw',
        /Could not read sf_lead_conversion_log/.test(fn));
   }
@@ -1485,6 +1494,78 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   ok('healthC: it has alert metadata', /partnerstack: \{ source: 'PartnerStack'/.test(src));
   ok('healthC: it has a dashboard row', /id="s-ps"/.test(src));
   ok('healthC: the client id map includes it', /partnerstack:"s-ps"/.test(src));
+
+  /* ── PR1.5: pagination, and completeness signals that reach the UI ── */
+  {
+    const fn = sfmod.slice(sfmod.indexOf('async function findOpportunityDomains'), sfmod.indexOf('module.exports'));
+    /* Salesforce pages at ~1,250 regardless of LIMIT. Taking page one and
+       stopping meant 5,898 Opportunities existed and we read 1,252 — every
+       domain among the other 79% reported "no Opportunity", including one we
+       had just qualified. */
+    ok('pageD: it follows nextRecordsUrl', /data\.nextRecordsUrl/.test(fn) && /while \(url && pages < SF_MAX_PAGES\)/.test(fn));
+    ok('pageD: there is a page cap', /const SF_MAX_PAGES = \d+/.test(sfmod));
+    /* A LIMIT caps totalSize as well as the rows, so records.length ===
+       totalSize is satisfied by a truncated result — the LIMIT defeats the
+       guard meant to catch it. Measured: LIMIT 2000 reported totalSize 2000
+       and "completed" at 2,000 of 5,898. */
+    ok('pageD: the SOQL has NO LIMIT',
+       !/LIMIT \$\{/.test(codeOnly(fn)) && !/LIMIT 2000/.test(codeOnly(fn)));
+    ok('pageD: the limit parameter is gone from the signature',
+       /async function findOpportunityDomains\(\{ sinceDays = 180 \} = \{\}\)/.test(sfmod));
+    /* FAIL LOUDLY. Returning ok:true with a partial set reproduces the bug one
+       page later. */
+    ok('pageD: hitting the page cap refuses to return a partial set',
+       /reason: 'pagination_incomplete', records: \[\]/.test(fn));
+    ok('pageD: a short read refuses too', /reason: 'incomplete', records: \[\]/.test(fn));
+    ok('pageD: a successful read reports what it saw',
+       /return \{ ok: true, records, pages, totalSize, truncated: false \}/.test(fn));
+  }
+  {
+    const fn = src.slice(src.indexOf('async function refreshPartnerDomainSfState'),
+                         src.indexOf('const PS_SF_REFRESH_INTERVAL_MS'));
+    ok('signalD: an incomplete read lands in the not-ok branch and writes nothing',
+       /if \(!sf\.ok\)[\s\S]*?return \{ ok: false, reason: sf\.reason \}/.test(fn) &&
+       /_psSfLastRead = \{ ok: false/.test(fn));
+    ok('signalD: what the last read saw is recorded', /_psSfLastRead = \{ ok: true, records: sf\.records\.length/.test(fn));
+    ok('signalD: a failed read is recorded too', /_psSfLastRead = \{ ok: false, reason: sf\.reason/.test(fn));
+  }
+  /* THE ACTUAL LESSON. `truncated` was computed from the first commit, was
+     true on every call, and nothing ever read it. A completeness signal that
+     does not reach the UI is the same as not computing it. */
+  ok('signalD: the last-read result reaches the payload', /sfLastRead: _psSfLastRead/.test(src));
+  ok('signalD: it reaches the UI', /read "\+lr\.records\+"\/"\+lr\.totalSize\+" opportunities/.test(src));
+  ok('signalD: a failed read renders RED, not as an absence',
+     /lr\.ok===false\)sfc\+="<span class=\\'pschip bad\\'/.test(src));
+  /* The domain list is capped; a page must not read as the population. */
+  ok('signalD: the ladder cap is a named constant', /const PS_LADDER_LIMIT    = 500;/.test(src));
+  ok('signalD: hitting the cap is reported', /domainsCapped: domains\.rows\.length >= PS_LADDER_LIMIT/.test(src));
+  ok('signalD: and rendered', /capped at "\+lc\.domainsLimit\+" domains/.test(src));
+
+  /* Executed: the three states the strip can be in. */
+  {
+    const i = src.indexOf("'var partnerRows=[],pSort=");
+    const j = src.indexOf("'function debounce()");
+    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const els = {};
+    const mk = () => ({ textContent: '', innerHTML: '', style: {}, className: '', querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
+    const doc = { getElementById: (id) => (els[id] = els[id] || mk()), createElement: () => ({ value: '', textContent: '' }) };
+    const F = (new Function('API','TP','esc','et','set','fetch','AbortSignal','document','showTab','loadFilterOptions','loadLeads','Array',
+      client + '; return {loadPartners};'));
+    const run = (lifecycle) => F('', '', (x) => String(x == null ? '' : x), (x) => String(x == null ? '' : x),
+      (id, v) => { doc.getElementById(id).textContent = String(v); },
+      async () => ({ ok: true, json: async () => ({ totals: {}, partners: [], lifecycle }) }),
+      { timeout: () => null }, doc, () => {}, async () => {}, () => {}, Array).loadPartners();
+    const base = { byState: { qualified: 1 }, totalDomains: 1, needsAttention: 0, failedStates: [], bySfState: { ticked: 1 } };
+
+    await run({ ...base, sfLastRead: { ok: true, records: 5900, totalSize: 5900, pages: 6 }, domainsCapped: false, domainsLimit: 500 });
+    ok('signalD UI: a complete read shows what it read',
+       els['p-sfstates'].innerHTML.includes('read 5900/5900 opportunities · 6 pages'));
+    await run({ ...base, bySfState: {}, sfLastRead: { ok: false, reason: 'incomplete' }, domainsCapped: false, domainsLimit: 500 });
+    ok('signalD UI: a failed read is red and named',
+       els['p-sfstates'].innerHTML.includes('pschip bad') && els['p-sfstates'].innerHTML.includes('incomplete'));
+    await run({ ...base, totalDomains: 500, bySfState: { ticked: 500 }, sfLastRead: { ok: true, records: 10, totalSize: 10, pages: 1 }, domainsCapped: true, domainsLimit: 500 });
+    ok('signalD UI: a capped domain list says so', els['p-sfstates'].innerHTML.includes('capped at 500 domains'));
+  }
 
   /* Step 8. */
   {
