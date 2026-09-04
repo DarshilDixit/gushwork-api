@@ -319,6 +319,41 @@ came from the lead's website.
 
 ---
 
+## The funnel is CUMULATIVE, and that is a deliberate trade
+
+Nine stages: Clicks, Reached step 1, Completed, Conversion sent, Conversion
+verified, Booked, Opportunity created, Qualified Demo ticked, the payment
+fired. Defined once in `PS_FUNNEL_STAGE_SQL` and interpolated into both the
+programme-wide and per-partner queries, so a partner column and the headline
+are computed by the same expressions and cannot disagree.
+
+**Every stage repeats all prior conditions**, so each is a strict subset of the
+one before and the funnel nests by construction. Filtering each stage
+independently does NOT nest — a dry run against real data showed "Opportunity
+created" at 2 sitting after "Booked" at 0, because Salesforce Opportunities
+exist for companies that never booked through our form.
+
+**The trade-off, stated:** a domain that reaches a later stage without passing
+an earlier one drops out of the funnel entirely. That is right for a funnel
+measuring the path to the money — without a conversion the payment cannot fire
+whatever else is true — but **the funnel is not a census of Salesforce**. The
+per-domain table is. If a number here looks lower than the Salesforce column,
+that is the reason.
+
+The programme row is **its own ungrouped query, not a sum of the per-partner
+rows**: a domain can carry leads from two partners, and summing would count it
+twice.
+
+**Losses sit beside the stage where the money leaks** — conversion failed and
+skipped at the conversion stage, booked-with-no-Opportunity and sfopp-errored
+at the Opportunity stage, qualification failed at the payment stage. Never left
+as the gap between two numbers: that is arithmetic the reader should not have
+to do, and it hides which of several causes it was. A zero loss is not
+rendered.
+
+**Rates are suppressed below `PS_RATE_MIN` (10)** and say so, naming the base:
+`too few to rate (n=9)`. One of two is "50%" and means nothing.
+
 ## Units: everything on the Partners tab counts COMPANIES
 
 The funnel is **step 1 → completed → converted → booked → qualified**, and every

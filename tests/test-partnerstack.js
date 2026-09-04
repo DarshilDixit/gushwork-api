@@ -809,34 +809,40 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        query — two mutations survived on exactly that. */
     const qTotals = fn.slice(fn.indexOf('pool.query('), fn.indexOf('pool.query(', fn.indexOf('pool.query(') + 5));
     const qRows   = fn.slice(fn.indexOf('pool.query(', fn.indexOf('pool.query(') + 5));
-    for (const [label, q] of [['totals', qTotals], ['per-partner', qRows]]) {
+    /* The per-partner stage expressions moved into PS_FUNNEL_STAGE_SQL in PR2,
+       shared with the programme query. Asserting there covers BOTH, which is
+       strictly better than checking one query's inline text. */
+    const qShared = src.slice(src.indexOf('const PS_FUNNEL_STAGE_SQL = `'), src.indexOf('const PS_FUNNEL_FROM'));
+    for (const [label, q] of [['totals', qTotals], ['funnel-stages', qShared]]) {
       /* DOMAINS throughout as of batch C. These counted PEOPLE while the funnel
          counted companies, which put two units on one screen — exactly what the
          per-domain rework removes. */
       ok(`partners (${label}): leads count DOMAINS, not people`,
-         /COUNT\(DISTINCT ps_customer_key\)\s+AS (leads|step1)/.test(q), q.slice(0, 80));
+         /COUNT\(DISTINCT (l\.)?ps_customer_key\)\s+AS (leads|step1)/.test(q), q.slice(0, 80));
       ok(`partners (${label}): leads are NOT a raw row count`,
          !/COUNT\(\*\)\s+AS leads/.test(q));
       ok(`partners (${label}): no column counts people`,
          !/COUNT\(DISTINCT LOWER\(email\)\)/.test(q));
       ok(`partners (${label}): bookings count DOMAINS`,
-         /COUNT\(DISTINCT ps_customer_key\) FILTER \(\s*WHERE booking_uid IS NOT NULL\)/.test(q));
+         /COUNT\(DISTINCT (l\.)?ps_customer_key\) FILTER \([\s\S]{0,200}?booking_uid IS NOT NULL/.test(q));
       ok(`partners (${label}): conversions are per DOMAIN`,
-         /COUNT\(DISTINCT ps_customer_key\) FILTER \([\s\S]{0,80}?ps_signup_sent_at IS NOT NULL\)/.test(q));
+         /COUNT\(DISTINCT (l\.)?ps_customer_key\) FILTER \([\s\S]{0,200}?ps_signup_sent_at IS NOT NULL/.test(q));
       ok(`partners (${label}): qualified is per DOMAIN`,
-         /COUNT\(DISTINCT ps_customer_key\) FILTER \([\s\S]{0,80}?ps_qualified_sent_at IS NOT NULL\)/.test(q));
+         /COUNT\(DISTINCT (l\.)?ps_customer_key\) FILTER \([\s\S]{0,300}?ps_qualified_sent_at IS NOT NULL/.test(q));
       /* A domain count and a people count are different units. Presenting one
          as the other is the exact drift the Definitions section exists to
          stop. */
 
     }
     ok('partners: only partner-sourced leads are counted',
-       (fn.match(/WHERE ps_partner_key IS NOT NULL/g) || []).length === 2);
-    /* A rate over zero leads is undefined, not 0%. */
-    ok('partners: the booking rate is null when there are no leads',
-       /leads \? Math\.round\(\(booked \/ leads\) \* 1000\) \/ 10 : null/.test(fn));
+       /WHERE ps_partner_key IS NOT NULL/.test(fn) &&
+       /WHERE l\.ps_partner_key IS NOT NULL AND l\.ps_customer_key IS NOT NULL/.test(src));
+    /* bookingRate was removed in PR2: its card was dropped in batch C, so it
+       had one reference and no consumer. Rates now live in the funnel, where
+       they are suppressed below PS_RATE_MIN. */
+    ok('partners: the dead bookingRate is gone', !/bookingRate/.test(src));
     ok('partners: the per-partner list resolves a name via MAX over the key',
-       /GROUP BY ps_partner_key/.test(fn) && /MAX\(ps_partner_name\)/.test(fn));
+       /GROUP BY l\.ps_partner_key/.test(fn) && /MAX\(l\.ps_partner_name\)/.test(fn));
   }
   ok('partners: the route is token-guarded',
      /partners'[\s\S]{0,200}?req\.query\.token !== token/.test(src));
@@ -1421,10 +1427,11 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
      old row impossible to read left to right. */
   {
     const fn = src.slice(src.indexOf('async function partnerOverview'), src.indexOf("app.get('/monitor/partners'"));
-    const q = fn.slice(fn.indexOf('ps_partner_key                                                 AS partner_key'));
+    /* Moved into the shared fragment in PR2. */
+    const q = src.slice(src.indexOf('const PS_FUNNEL_STAGE_SQL = `'), src.indexOf('const PS_FUNNEL_FROM'));
     for (const c of ['step1', 'completed', 'conversions', 'booked', 'qualified'])
       ok(`funnelC: ${c} counts DOMAINS`,
-         new RegExp('COUNT\\(DISTINCT ps_customer_key\\)[\\s\\S]{0,120}?AS ' + c).test(q));
+         new RegExp('COUNT\\(DISTINCT l\\.ps_customer_key\\)[\\s\\S]{0,400}?AS +' + c).test(q));
     ok('funnelC: no column counts people, so the funnel nests',
        !/COUNT\(DISTINCT LOWER\(email\)\)/.test(q));
   }
@@ -1865,6 +1872,100 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        h.includes('data-ack=') && !h.includes('onclick='));
     ok('ackH UI: the note is shown on hover', h.includes('deleted by hand'));
   }
+
+  /* ── PR2: the funnel, and the SDR Source column ───────────────────── */
+
+  /* Defined ONCE and interpolated into both queries, so a partner column and
+     the headline are computed by the same expressions. */
+  ok('funnel: the stage SQL is a shared fragment', /const PS_FUNNEL_STAGE_SQL = `/.test(src));
+  ok('funnel: the per-partner query uses it', /\$\{PS_FUNNEL_STAGE_SQL\},\s*\n\s*MAX\(l\.ps_click_at\)/.test(src));
+  ok('funnel: the programme query uses the same one',
+     /pool\.query\(`SELECT \$\{PS_FUNNEL_STAGE_SQL\}, \$\{PS_CLICKS_SQL\} \$\{PS_FUNNEL_FROM\}`\)/.test(src));
+  /* Not a sum of the per-partner rows: a domain can carry leads from two
+     partners and summing would count it twice. */
+  ok('funnel: the programme row is its own query, not a sum',
+     /NOT a sum of the per-partner rows/.test(src));
+
+  /* CUMULATIVE, or it does not nest. A dry run showed opportunity=2 after
+     booked=0, because Salesforce Opportunities exist for companies that never
+     booked through our form. */
+  {
+    const frag = src.slice(src.indexOf('const PS_FUNNEL_STAGE_SQL = `'), src.indexOf('const PS_FUNNEL_FROM'));
+    const stage = (name) => {
+      const i = frag.indexOf('AS ' + name);
+      return frag.slice(frag.lastIndexOf('COUNT(DISTINCT', i), i);
+    };
+    ok('funnel: conversions requires completed', /completed IS TRUE/.test(stage('conversions')));
+    ok('funnel: verified requires the conversion to have been sent',
+       /ps_signup_sent_at IS NOT NULL/.test(stage('verified')));
+    ok('funnel: booked requires verified', /ps_signup_verified_at IS NOT NULL/.test(stage('booked')));
+    ok('funnel: opportunity requires booked', /booking_uid IS NOT NULL/.test(stage('opportunity')));
+    ok('funnel: ticked requires an Opportunity', /sf_state = 'ticked'/.test(stage('ticked')));
+    ok('funnel: the payment stage requires ticked',
+       /sf_state = 'ticked'[\s\S]{0,120}?ps_qualified_sent_at IS NOT NULL/.test(stage('qualified')));
+    /* Every stage counts domains; clicks are the exception and live elsewhere. */
+    ok('funnel: every stage counts DISTINCT DOMAINS',
+       !/COUNT\(DISTINCT LOWER\(email\)\)/.test(frag) && !/COUNT\(\*\)/.test(frag));
+  }
+  /* Losses beside the stage where the money leaks, never inferred from a gap. */
+  {
+    const L = (new Function(lift(src, 'const PS_FUNNEL_LOSSES = {') + '\n return PS_FUNNEL_LOSSES;'))();
+    ok('funnel: conversion losses are attached to the conversion stage',
+       (L.conversions || []).some((x) => x.key === 'lost_conversion'));
+    ok('funnel: the sfopp gap is attached to the Opportunity stage',
+       (L.opportunity || []).some((x) => x.key === 'lost_no_opp') &&
+       (L.opportunity || []).some((x) => x.key === 'lost_sfopp'));
+    ok('funnel: a failed qualification is attached to the payment stage',
+       (L.qualified || []).some((x) => x.key === 'lost_qualification'));
+    ok('funnel: real losses are flagged bad, a skip is not',
+       (L.conversions || []).find((x) => x.key === 'lost_conversion').bad === true &&
+       !(L.conversions || []).find((x) => x.key === 'lost_skipped').bad);
+  }
+  eq('funnel: rates are suppressed below 10', /const PS_RATE_MIN = (\d+)/.exec(src)[1], '10');
+
+  /* RENDERED — executed, per the five-for-five rule. */
+  {
+    const i = src.indexOf("'var partnerRows=[],pSort=");
+    const j = src.indexOf("'function debounce()");
+    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const els = {};
+    const mk = () => ({ textContent: '', innerHTML: '', style: {}, className: '', querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
+    const doc = { getElementById: (id) => (els[id] = els[id] || mk()), createElement: () => ({ value: '', textContent: '' }) };
+    const F = (new Function('API','TP','esc','et','set','fetch','AbortSignal','document','showTab','loadFilterOptions','loadLeads','Array','prompt','alert',
+      client + '; return {loadPartners};'));
+    const stages = (new Function(lift(src, 'const PS_FUNNEL_STAGES = [') + '\n return PS_FUNNEL_STAGES;'))();
+    const losses = (new Function(lift(src, 'const PS_FUNNEL_LOSSES = {') + '\n return PS_FUNNEL_LOSSES;'))();
+    const prog = { clicks: 40, step1: 30, completed: 24, conversions: 20, verified: 19, booked: 12,
+      opportunity: 9, ticked: 6, qualified: 5, lost_conversion: 2, lost_skipped: 2, lost_no_opp: 3, lost_sfopp: 0, lost_qualification: 1 };
+    await F('', '', (x) => String(x == null ? '' : x), (x) => String(x == null ? '' : x),
+      (id, v) => { doc.getElementById(id).textContent = String(v); },
+      async () => ({ ok: true, json: async () => ({ totals: {}, partners: [],
+        funnel: { stages, losses, rateMin: 10, programme: prog },
+        lifecycle: { byState: {}, totalDomains: 0, needsAttention: 0, failedStates: [], bySfState: {}, domains: [] } }) }),
+      { timeout: () => null }, doc, () => {}, async () => {}, () => {}, Array, () => '', () => {}).loadPartners();
+    const h = els['pfn'].innerHTML;
+    eq('funnel UI: all nine stages render', h.split("class='pfs'").length - 1, 9);
+    ok('funnel UI: the counts are shown', h.includes('>40<') && h.includes('>5<'));
+    ok('funnel UI: a rate over a large base is shown', h.includes('80% of previous'));
+    /* 1 of 2 is "50%" and means nothing. */
+    ok('funnel UI: a rate over a small base is suppressed and names the base',
+       h.includes('too few to rate (n=9)'));
+    ok('funnel UI: clicks carry no rate and are flagged as a different unit',
+       h.includes('clicks, not companies'));
+    ok('funnel UI: losses render beside their stage', h.includes('2 conversion failed') && h.includes('3 booked, no Opportunity'));
+    ok('funnel UI: a real loss renders red, a skip does not',
+       /pfl bad'>2 conversion failed/.test(h) && /pfl'>2 skipped/.test(h));
+    ok('funnel UI: a zero loss is not rendered at all', !h.includes('sfopp errored'));
+    ok('funnel UI: the note says clicks are not ours',
+       els['pfn-note'].innerHTML.includes('only PartnerStack has those'));
+  }
+
+  /* The SDR Source column — rendered, not merely selected. */
+  ok('sdrCol: the query selects it', /l\.hear_about_us_raw,\s*\n\s*l\.ps_partner_name,/.test(src));
+  ok('sdrCol: there is a Source header', /<th title="How they said they found us/.test(src));
+  ok('sdrCol: the cell is built', /var src2=\[l\.ps_partner_name/.test(src));
+  ok('sdrCol: and rendered into the row', /\+src2\+"<\/td>/.test(src));
+  ok('sdrCol: the colspans were widened with it', /colspan="11" class="nd">Loading/.test(src));
 
   /* Step 8. */
   {
