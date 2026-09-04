@@ -98,6 +98,9 @@ All on `leads`, and all mirrored to `gw_form_leads` on the AWS warehouse.
 | `ps_click_history` | `/partial`, `/submit` from `gw_ps_clicks` | JSONB, oldest first, max 10. Reporting and disputes only — **attribution reads `ps_xid` and nothing else** |
 | `ps_signup_sent_at` | `runPartnerStackSignup` | Claimed *before* the HTTP call, released if it fails |
 | `ps_signup_verified_at` | The read-back sweep | Proof the customer really exists, not just that PartnerStack said 200 |
+| `ps_signup_skipped_reason` / `_at` | The skip guards | `test_email`, `disqualified`, `no_customer_key`, `already_sent` |
+| `ps_signup_fail_reason` / `ps_signup_failed_at` | Conversion failure + phantom sweep | Cleared on a later success |
+| `ps_qualify_fail_reason` / `ps_qualify_failed_at` | Qualification failure | Cleared on a later success |
 | `ps_qualified_sent_at` | `sendQualificationForDomain` | Same claim-first pattern |
 | `ps_eligible` | `runPartnerStackEligibility` | **Null today** — the check is off |
 | `ps_ineligible_reason` | `runPartnerStackEligibility` | **Null today.** The contractual rejection record |
@@ -313,6 +316,27 @@ PartnerStack knows the customer by the `customer_key` we sent at signup, which
 came from the lead's website.
 
 ---
+
+## Units: everything on the Partners tab counts COMPANIES
+
+The funnel is **step 1 → completed → converted → booked → qualified**, and every
+column counts distinct `ps_customer_key`. That is deliberate and it is a change
+from the first version, which mixed people and domains: a funnel implies each
+column is a subset of the last, and a people count sitting next to a domain
+count does not nest. Companies is also the truthful unit, since PartnerStack
+pays per customer.
+
+The one exception is stated on screen: leads with **no usable domain** cannot be
+keyed by one, so they are counted as **leads** and the chip says
+"leads, not companies".
+
+**Clicks that never reached the form are not in our data at all.** They exist
+only in PartnerStack, and the v2 API exposes no click endpoint we can reach —
+`/v2/links`, `/v2/clicks` and `/v2/partnerships/{key}/stats` all 404 with our
+credentials. The funnel therefore starts at step 1, not at the click, and the
+tab says so. The only remaining route is a custom report configured in the
+PartnerStack UI and pulled via `/v2/vendor/report-export/{key}`, which nobody
+has set up.
 
 ## The read-back guard
 

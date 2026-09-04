@@ -226,6 +226,7 @@ ok('test: guard reads ELV_EXCLUDED_DOMAINS rather than redefining it',
    ============================================================ */
 const P = (new Function(
   liftLine(src, 'const PS_CLICK_HISTORY_MAX =') + '\n' +
+  lift(src, 'function normalisePartnerKey(') + '\n' +
   lift(src, 'function parsePartnerStackClickAt(') + '\n' +
   lift(src, 'function parsePartnerStackClickHistory(') +
   '\n return { parsePartnerStackClickAt, parsePartnerStackClickHistory, PS_CLICK_HISTORY_MAX };'))();
@@ -802,12 +803,17 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     const qTotals = fn.slice(fn.indexOf('pool.query('), fn.indexOf('pool.query(', fn.indexOf('pool.query(') + 5));
     const qRows   = fn.slice(fn.indexOf('pool.query(', fn.indexOf('pool.query(') + 5));
     for (const [label, q] of [['totals', qTotals], ['per-partner', qRows]]) {
-      ok(`partners (${label}): leads are deduped by email (people)`,
-         /COUNT\(DISTINCT LOWER\(email\)\)\s+AS leads/.test(q), q.slice(0, 80));
+      /* DOMAINS throughout as of batch C. These counted PEOPLE while the funnel
+         counted companies, which put two units on one screen — exactly what the
+         per-domain rework removes. */
+      ok(`partners (${label}): leads count DOMAINS, not people`,
+         /COUNT\(DISTINCT ps_customer_key\)\s+AS (leads|step1)/.test(q), q.slice(0, 80));
       ok(`partners (${label}): leads are NOT a raw row count`,
          !/COUNT\(\*\)\s+AS leads/.test(q));
-      ok(`partners (${label}): bookings are deduped by email (people)`,
-         /COUNT\(DISTINCT LOWER\(email\)\) FILTER \(\s*WHERE booking_uid IS NOT NULL\)/.test(q));
+      ok(`partners (${label}): no column counts people`,
+         !/COUNT\(DISTINCT LOWER\(email\)\)/.test(q));
+      ok(`partners (${label}): bookings count DOMAINS`,
+         /COUNT\(DISTINCT ps_customer_key\) FILTER \(\s*WHERE booking_uid IS NOT NULL\)/.test(q));
       ok(`partners (${label}): conversions are per DOMAIN`,
          /COUNT\(DISTINCT ps_customer_key\) FILTER \([\s\S]{0,80}?ps_signup_sent_at IS NOT NULL\)/.test(q));
       ok(`partners (${label}): qualified is per DOMAIN`,
@@ -815,8 +821,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
       /* A domain count and a people count are different units. Presenting one
          as the other is the exact drift the Definitions section exists to
          stop. */
-      ok(`partners (${label}): conversions are NOT deduped by email`,
-         !/COUNT\(DISTINCT LOWER\(email\)\) FILTER \([\s\S]{0,80}?ps_signup_sent_at IS NOT NULL\)/.test(q));
+
     }
     ok('partners: only partner-sourced leads are counted',
        (fn.match(/WHERE ps_partner_key IS NOT NULL/g) || []).length === 2);
@@ -849,8 +854,8 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
       async () => ({ ok: true, json: async () => ({
         totals: { leads: 12, leads24h: 3, conversions: 5, qualified: 2, booked: 7, bookingRate: 58.3 },
         partners: [
-          { partner_key: 'k1', partner_name: 'Jane', partner_email: 'j@x.com', leads: 8, conversions: 4, booked: 5, qualified: 2, last_click: '2026-09-04' },
-          { partner_key: 'k2', partner_name: null, partner_email: null, leads: 4, conversions: 1, booked: 2, qualified: 0, last_click: null }] }) }),
+          { partner_key: 'k1', partner_name: 'Jane', partner_email: 'j@x.com', step1: 8, completed: 6, conversions: 4, booked: 5, qualified: 2, last_click: '2026-09-04' },
+          { partner_key: 'k2', partner_name: null, partner_email: null, step1: 4, completed: 2, conversions: 1, booked: 2, qualified: 0, last_click: null }] }) }),
       { timeout: () => null }, doc,
       (t) => { tabShown = t; }, async () => {}, () => { leadsLoaded++; }, Array);
     await F.loadPartners();
@@ -858,8 +863,10 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     eq('partners UI: 24h subtitle', els['p-leads24'].textContent, '3 in the last 24h');
     eq('partners UI: conversions card', els['p-conv'].textContent, '5');
     eq('partners UI: qualified card', els['p-qual'].textContent, '2');
-    eq('partners UI: bookings card', els['p-booked'].textContent, '7');
-    eq('partners UI: booking rate', els['p-rate'].textContent, '58.3%');
+    /* Partner bookings and Lead->booking were dropped in batch C: structurally
+       zero at this volume, and a card reading 0 makes the tab look broken. */
+    ok('partners UI: the two zero-volume cards are gone',
+       els['p-booked'] === undefined && els['p-rate'] === undefined);
     ok('partners UI: one row per partner', (els['ptbody'].innerHTML.match(/<tr /g) || []).length === 2);
     ok('partners UI: an unresolved partner falls back to the key',
        els['ptbody'].innerHTML.includes("data-pk='k2'"));
@@ -867,11 +874,13 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        is how this markup broke the first time. */
     ok('partners UI: rows use data-pk + delegation, not an inline onclick',
        !els['ptbody'].innerHTML.includes('onclick'));
-    F.sortPartners('leads');
+    /* "leads" became "step1" in batch C: the funnel counts companies now, so
+       every column nests. */
+    F.sortPartners('step1');
     ok('partners UI: clicking the active column flips direction',
-       els['psar-leads'].textContent === '▲');
+       els['psar-step1'].textContent === '▲');
     F.sortPartners('partner_name');
-    ok('partners UI: switching column resets the arrow', els['psar-leads'].textContent === '');
+    ok('partners UI: switching column resets the arrow', els['psar-step1'].textContent === '');
     // Drill-down reuses All Leads and its existing partner filter.
     await F.partnerDrill('k1');
     eq('partners UI: drill-down switches to the leads tab', tabShown, 'leads');
@@ -892,7 +901,6 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
       async () => ({ ok: true, json: async () => ({ totals: { leads: 0, bookingRate: null }, partners: [] }) }),
       { timeout: () => null }, doc, () => {}, async () => {}, () => {}, Array);
     await F.loadPartners();
-    eq('partners UI: no leads shows a dash, not 0% or NaN', els['p-rate'].textContent, '—');
     ok('partners UI: an empty list says so', els['ptbody'].innerHTML.includes('No partner-sourced leads yet'));
   }
 
@@ -902,7 +910,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   ok('regression: the leads API still accepts the partner filter',
      /const partner      = req\.query\.partner/.test(src));
   ok('regression: psPanel is still wired into enrichPanel',
-     /'var pp=psPanel\(l\);' \+/.test(src) && /'return pp\+"<div class=/.test(src));
+     /'var pp=psPanel\(l\);' \+/.test(src) && /'var out=pp;' \+/.test(src));
 
   /* ── Read-back guard ────────────────────────────────────────────────
      /conversion/xid answers 200 with an EMPTY body, so a 200 that created
@@ -1271,6 +1279,129 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   ok('sfB: unchecked is derived from the domain total minus checked states',
      /var unchecked=\(lc\.totalDomains\|\|0\)-Object\.values\(sf\)\.reduce/.test(src));
   ok('sfB: create_errored renders red', /k==="create_errored"\?" bad":""/.test(src));
+
+  /* ── Batch C: mirror sync, key normalisation, display ─────────────── */
+
+  /* The two mirror-sync bugs. These three columns existed on gw_form_leads and
+     were never written, so the mirror showed NULL for every row and could not
+     answer "did this convert?" — which is why an earlier question had to be
+     answered from logs instead of data. */
+  {
+    const sync = src.slice(src.indexOf('function syncToAWS'), src.indexOf('function syncBookingToAWS'));
+    for (const c of ['ps_signup_sent_at', 'ps_signup_verified_at', 'ps_qualified_sent_at']) {
+      ok(`mirrorC: syncToAWS now writes ${c}`,
+         new RegExp('\\b' + c + '\\b').test(sync.slice(0, sync.indexOf('VALUES'))));
+      ok(`mirrorC: ${c} is COALESCEd, so a partial sync cannot wipe a stamp`,
+         new RegExp(c + '\\s*=\\s*COALESCE\\(EXCLUDED\\.' + c).test(sync));
+    }
+    const cols = parenBody(sync, sync.indexOf('INSERT INTO gw_form_leads')).split(',').map(x => x.trim()).filter(Boolean);
+    const vr = parenBody(sync, sync.indexOf('VALUES'));
+    let d = 0, cur = '', vals = [];
+    for (const ch of vr) { if (ch === '(') d++; if (ch === ')') d--; if (ch === ',' && !d) { vals.push(cur.trim()); cur = ''; } else cur += ch; }
+    vals.push(cur.trim());
+    const dollars = vals.filter(v => v.startsWith('$')).map(v => +v.slice(1));
+    eq('mirrorC: column count still equals value count', cols.length, vals.length);
+    eq('mirrorC: params array still equals max $n', countArrayEntries(sync, '`, ['), Math.max(...dollars));
+    eq('mirrorC: no duplicated or skipped $n', new Set(dollars).size, dollars.length);
+  }
+  /* Scoped to the /monitor/leads SELECT. Matching anywhere in the file passed
+     with the column removed from the route, because the same name appears in
+     the sync and the ladder. */
+  {
+    const seg = src.slice(src.indexOf("app.get('/monitor/leads'"), src.indexOf("app.get('/monitor/filter-options'"));
+    const sel = seg.slice(seg.indexOf('const baseSelect'), seg.indexOf('FROM leads l'));
+    ok('mirrorC: ps_signup_verified_at is returned by /monitor/leads',
+       /l\.ps_signup_verified_at/.test(sel));
+    ok('mirrorC: the reasons are returned too, so "not sent" can say why',
+       /l\.ps_signup_skipped_reason/.test(sel) && /l\.ps_signup_fail_reason/.test(sel) &&
+       /l\.ps_qualify_fail_reason/.test(sel));
+  }
+
+  /* Partner-key normalisation. The cookie carried BOTH forms on 4 Sept —
+     base64 before 12:07, decoded after — so one partner had two strings in one
+     JSONB column. */
+  {
+    const N = (new Function(lift(src, 'function normalisePartnerKey(') + '\n return normalisePartnerKey;'))();
+    eq('keyC: base64 is decoded', N('Nzg1ZWM3OGUxZWU0Njg4'), '785ec78e1ee4688');
+    eq('keyC: an already-decoded key is untouched', N('785ec78e1ee4688'), '785ec78e1ee4688');
+    eq('keyC: empty stays empty', N(''), '');
+    eq('keyC: non-base64 is untouched', N('not base64!'), 'not base64!');
+    /* Decoding blindly would mangle a decoded value that happens to be valid
+       base64, so the decode must round-trip AND look like a key. */
+    eq('keyC: a short decode is rejected rather than mangling the value', N('YWJj'), 'YWJj');
+    eq('keyC: a value that does not round-trip is untouched', N('abcd='), 'abcd=');
+    ok('keyC: the guard is a round-trip, not a regex guess',
+       /reencoded !== pk/.test(src));
+    ok('keyC: normalisation is applied on WRITE', /pk  = normalisePartnerKey\(/.test(src));
+  }
+  ok('keyC: the one base64 row is backfilled',
+     /jsonb_set\(e, '\{pk\}', to_jsonb\(convert_from\(decode\(e->>'pk','base64'\),'UTF8'\)\)\)/.test(dbjs));
+  /* The guard has to be in BOTH places — the CASE that rewrites and the EXISTS
+     that selects rows. Asserting once passed with the CASE stripped, which
+     would rewrite entries that do not round-trip. */
+  eq('keyC: the round-trip guard appears in both the CASE and the EXISTS',
+     (dbjs.match(/encode\(decode\(e->>'pk','base64'\),'base64'\) = e->>'pk'/g) || []).length, 2);
+  eq('keyC: the shape check appears in both too',
+     (dbjs.match(/convert_from\(decode\(e->>'pk','base64'\),'UTF8'\) ~ '\^\[A-Za-z0-9\._-\]\{6,120\}\$'/g) || []).length, 2);
+  ok('keyC: the backfill is idempotent — it stops matching once normalised',
+     /AND EXISTS \([\s\S]{0,400}?jsonb_array_elements\(ps_click_history\)/.test(dbjs));
+
+  /* Display. The funnel must NEST — mixing people and domains is what made the
+     old row impossible to read left to right. */
+  {
+    const fn = src.slice(src.indexOf('async function partnerOverview'), src.indexOf("app.get('/monitor/partners'"));
+    const q = fn.slice(fn.indexOf('ps_partner_key                                                 AS partner_key'));
+    for (const c of ['step1', 'completed', 'conversions', 'booked', 'qualified'])
+      ok(`funnelC: ${c} counts DOMAINS`,
+         new RegExp('COUNT\\(DISTINCT ps_customer_key\\)[\\s\\S]{0,120}?AS ' + c).test(q));
+    ok('funnelC: no column counts people, so the funnel nests',
+       !/COUNT\(DISTINCT LOWER\(email\)\)/.test(q));
+  }
+  ok('funnelC: the table says companies, not people', /companies, not people/.test(src));
+  /* Clicks are not in our data at all — only PartnerStack has them. */
+  ok('funnelC: the tab states that clicks are not ours',
+     /Clicks that never reached the form are NOT in our data/.test(src));
+  /* Structurally zero at this volume; they made the tab look broken. */
+  ok('funnelC: the two zero-volume cards are gone',
+     !/id="p-booked"/.test(src) && !/id="p-rate"/.test(src));
+
+  /* The per-domain table: same source as the chips, so they cannot disagree. */
+  ok('tableC: there is a per-domain lifecycle table', /id="pdtbody"/.test(src));
+  ok('tableC: it renders from lc.domains, the same source as the chips',
+     /var dl=lc\.domains\|\|\[\]/.test(src));
+  ok('tableC: failed states render red in the table', /failed\.indexOf\(x\.state\)>=0/.test(src));
+  ok('tableC: an unchecked Salesforce state says so', /"not checked yet"/.test(src));
+
+  /* The detail panel: grouped, partner first. */
+  {
+    const i = src.indexOf("'function psPanel(l){");
+    const j = src.indexOf('  /* Loaded on its OWN cadence');
+    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const F = (new Function('esc', 'et', 'wlabel', client + '; return {enrichPanel,psPanel};'))(
+      (x) => String(x == null ? '' : x), (x) => String(x == null ? '' : x), (x) => String(x));
+    const html = F.enrichPanel({ ps_partner_key: 'k1', ps_partner_name: 'Jane', company: 'Acme',
+      utm_source: 'google', session_id: 'sid', fbc: 'fb.1' });
+    const secs = (html.match(/class="psm">[^<]+/g) || []).map((x) => x.split('>')[1]);
+    eq('panelC: three groups, in order', secs,
+       ['Form &amp; enrichment', 'Journey &amp; attribution', 'Technical']);
+    ok('panelC: the partner block comes first', html.indexOf('psb') < html.indexOf('psm'));
+    const organic = F.enrichPanel({ company: 'Acme', utm_source: 'google', session_id: 'sid' });
+    ok('panelC: an organic lead renders no partner block', !organic.includes('psb'));
+    ok('panelC: an organic lead still gets its groups',
+       (organic.match(/class="psm">/g) || []).length === 3);
+    /* Sent and VERIFIED are different facts. */
+    ok('panelC: verified is shown beside sent',
+       F.psPanel({ ps_partner_key: 'k', ps_signup_sent_at: 'T1', ps_signup_verified_at: 'T2' }).includes('Conversion verified'));
+    ok('panelC: sent-but-unverified says it is awaiting read-back',
+       F.psPanel({ ps_partner_key: 'k', ps_signup_sent_at: 'T1' }).includes('awaiting read-back'));
+    /* "not sent" meaning two different things is the ambiguity C removes. */
+    ok('panelC: a failed conversion says why',
+       F.psPanel({ ps_partner_key: 'k', ps_signup_fail_reason: 'http_400' }).includes('http_400'));
+    ok('panelC: a skipped conversion says it was skipped, not failed',
+       F.psPanel({ ps_partner_key: 'k', ps_signup_skipped_reason: 'test_email' }).includes('skipped: test_email'));
+    ok('panelC: a failed qualification says why',
+       F.psPanel({ ps_partner_key: 'k', ps_qualify_fail_reason: 'http_400' }).includes('failed: http_400'));
+  }
 
   /* Step 8. */
   {

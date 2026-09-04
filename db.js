@@ -559,8 +559,37 @@ async function initDB() {
            AND ps_signup_skipped_reason IS NULL
            AND ps_signup_sent_at IS NULL
            AND created_at < ${CUTOFF}`);
-      if (phantom.rowCount || skipped.rowCount) {
-        console.log(`[DB] PartnerStack backfill: ${phantom.rowCount} phantom, ${skipped.rowCount} skipped`);
+      /* The one row whose ps_click_history carries the BASE64 partner key.
+         The gw_ps_clicks cookie changed shape mid-morning on 4 Sept, so this
+         row stores Nzg1ZWM3OGUxZWU0Njg4 where every later row stores
+         785ec78e1ee4688 — same partner, two strings in one JSONB column.
+
+         Rewritten by decoding each entry's pk, and ONLY where the decode
+         round-trips exactly, so an already-normalised row cannot be mangled.
+         The WHERE clause makes it idempotent: once no entry looks like base64
+         the row stops matching. */
+      const clicks = await client.query(`
+        UPDATE leads
+           SET ps_click_history = (
+                 SELECT jsonb_agg(
+                          CASE WHEN e->>'pk' ~ '^[A-Za-z0-9+/]+={0,2}$'
+                                AND length(e->>'pk') % 4 = 0
+                                AND encode(decode(e->>'pk','base64'),'base64') = e->>'pk'
+                                AND convert_from(decode(e->>'pk','base64'),'UTF8') ~ '^[A-Za-z0-9._-]{6,120}$'
+                               THEN jsonb_set(e, '{pk}', to_jsonb(convert_from(decode(e->>'pk','base64'),'UTF8')))
+                               ELSE e END
+                          ORDER BY ord)
+                   FROM jsonb_array_elements(ps_click_history) WITH ORDINALITY AS t(e, ord))
+         WHERE ps_click_history IS NOT NULL
+           AND jsonb_typeof(ps_click_history) = 'array'
+           AND EXISTS (
+                 SELECT 1 FROM jsonb_array_elements(ps_click_history) AS e
+                  WHERE e->>'pk' ~ '^[A-Za-z0-9+/]+={0,2}$'
+                    AND length(e->>'pk') % 4 = 0
+                    AND encode(decode(e->>'pk','base64'),'base64') = e->>'pk'
+                    AND convert_from(decode(e->>'pk','base64'),'UTF8') ~ '^[A-Za-z0-9._-]{6,120}$')`);
+      if (phantom.rowCount || skipped.rowCount || clicks.rowCount) {
+        console.log(`[DB] PartnerStack backfill: ${phantom.rowCount} phantom, ${skipped.rowCount} skipped, ${clicks.rowCount} click-history normalised`);
       }
     } catch (err) {
       console.warn('[DB] PartnerStack backfill failed (non-fatal):', err.message);

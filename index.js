@@ -288,8 +288,9 @@ function syncToAWS(data) {
        disqualified, disqualified_reason,
        step_reached, completed, submitted_at, loops_sent,
        ps_xid, ps_partner_key, ps_partner_name, ps_partner_email, ps_customer_key,
-       ps_click_at, ps_click_history, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,NOW())
+       ps_click_at, ps_click_history,
+       ps_signup_sent_at, ps_signup_verified_at, ps_qualified_sent_at, updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,NOW())
     ON CONFLICT (session_id) DO UPDATE SET
       page_url                = COALESCE(EXCLUDED.page_url,                gw_form_leads.page_url),
       email                   = COALESCE(EXCLUDED.email,                   gw_form_leads.email),
@@ -342,6 +343,14 @@ function syncToAWS(data) {
       ps_customer_key         = COALESCE(EXCLUDED.ps_customer_key,         gw_form_leads.ps_customer_key),
       ps_click_at             = COALESCE(EXCLUDED.ps_click_at,             gw_form_leads.ps_click_at),
       ps_click_history        = COALESCE(EXCLUDED.ps_click_history,        gw_form_leads.ps_click_history),
+      /* These three exist on the mirror and were never written by this
+         function — they are only ever stamped by targeted UPDATEs on Railway,
+         so gw_form_leads showed NULL for every row and the mirror could not
+         answer "did this convert?" at all. COALESCE so a later partial sync
+         cannot wipe a stamp that a targeted write has already set. */
+      ps_signup_sent_at       = COALESCE(EXCLUDED.ps_signup_sent_at,       gw_form_leads.ps_signup_sent_at),
+      ps_signup_verified_at   = COALESCE(EXCLUDED.ps_signup_verified_at,   gw_form_leads.ps_signup_verified_at),
+      ps_qualified_sent_at    = COALESCE(EXCLUDED.ps_qualified_sent_at,    gw_form_leads.ps_qualified_sent_at),
       updated_at              = NOW()
   `, [
     data.session_id,                        data.page_url                  || null,
@@ -371,7 +380,9 @@ function syncToAWS(data) {
     data.ps_partner_name         || null,   data.ps_partner_email          || null,
     data.ps_customer_key         || null,
     data.ps_click_at             || null,
-    data.ps_click_history ? JSON.stringify(data.ps_click_history) : null
+    data.ps_click_history ? JSON.stringify(data.ps_click_history) : null,
+    data.ps_signup_sent_at       || null,   data.ps_signup_verified_at     || null,
+    data.ps_qualified_sent_at    || null
   ]).then(() => {
     console.log(`[AWS] ✅ Synced session ${data.session_id}`);
   }).catch(err => {
@@ -2419,7 +2430,8 @@ app.get('/monitor/leads', async (req, res) => {
       l.elv_status, l.elv_checked_at,
       l.ps_partner_key, l.ps_partner_name, l.ps_partner_email,
       l.ps_xid, l.ps_customer_key, l.ps_click_at, l.ps_click_history,
-      l.ps_signup_sent_at, l.ps_qualified_sent_at,
+      l.ps_signup_sent_at, l.ps_signup_verified_at, l.ps_qualified_sent_at,
+      l.ps_signup_skipped_reason, l.ps_signup_fail_reason, l.ps_qualify_fail_reason,
       (SELECT COUNT(*) FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at) AS prior_attempts,
       (SELECT COUNT(*) FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at AND pa.disqualified IS TRUE) AS prior_disqualified,
       l.utm_source, l.utm_medium, l.utm_campaign, l.utm_term, l.referrer, l.prefill_source,
@@ -2801,22 +2813,25 @@ app.get('/monitor', (req, res) => {
   '<div class="mc" title="Partner domains in a FAILED lifecycle state \u2014 a conversion or a qualification that did not land. This is the only number here that means someone has to do something today. Sums the two red states of the lifecycle ladder."><div class="ml">Needs attention</div><div class="mv" id="p-attn">&#8212;</div><div class="ms" id="p-attn-sub">failed conversions or qualifications</div></div>' +
   '<div class="mc" title="Every partner-sourced domain, in exactly one lifecycle state. The states always sum to this total."><div class="ml">Partner domains</div><div class="mv" id="p-domains">&#8212;</div><div class="ms" id="p-states">&#8212;</div></div>' +
   '<div class="mc" title="Salesforce state per partner domain, refreshed every 15 minutes for EVERY partner domain. &quot;Waiting on an AE&quot; is the row to action daily: the Opportunity exists but nobody has ticked Qualified_Demo__c, so the $50 cannot fire yet. &quot;Opportunity never created&quot; means sfopp failed and no AE can ever tick it."><div class="ml">Waiting on an AE</div><div class="mv" id="p-sfwait">&#8212;</div><div class="ms" id="p-sfstates">&#8212;</div></div>' +
-  '<div class="mc" title="Distinct people (deduped by lower(email)) who arrived on a partner link."><div class="ml">Partner leads</div><div class="mv" id="p-leads">&#8212;</div><div class="ms" id="p-leads24">&#8212;</div></div>' +
+  '<div class="mc" title="Distinct COMPANIES that arrived on a partner link. Companies, not people, so this reconciles with the funnel and the lifecycle states below."><div class="ml">Partner companies</div><div class="mv" id="p-leads">&#8212;</div><div class="ms" id="p-leads24">&#8212;</div></div>' +
   '<div class="mc" title="Distinct customer DOMAINS with a conversion sent. Per domain, not per person &#8212; PartnerStack counts one conversion per customer key, ever."><div class="ml">Conversions sent</div><div class="mv" id="p-conv">&#8212;</div><div class="ms">domains, one per customer</div></div>' +
   '<div class="mc" title="Distinct customer DOMAINS with a qualified_demo action sent. This is the event that pays the affiliate."><div class="ml">Qualified demos fired</div><div class="mv" id="p-qual">&#8212;</div><div class="ms">domains, one per customer</div></div>' +
-  '<div class="mc" title="Distinct people from a partner link who hold a booking."><div class="ml">Partner bookings</div><div class="mv" id="p-booked">&#8212;</div><div class="ms">people</div></div>' +
-  '<div class="mc" title="Partner-sourced people with a booking, over partner-sourced people. Both sides are deduped by email, so this is people-to-people and not a domain count over a people count."><div class="ml">Lead &#8594; booking</div><div class="mv" id="p-rate">&#8212;</div><div class="ms">partner leads only</div></div>' +
   '</div>' +
-  '<div class="card"><div class="ml" style="margin-bottom:8px">Per partner <span class="psna" style="font-weight:400;font-size:11px">&#8212; click a row to see that partner\'s leads</span></div>' +
+  '<div class="card"><div class="ml" style="margin-bottom:8px">Per domain <span class="psna" style="font-weight:400;font-size:11px">&#8212; one row, one lifecycle state. The states above are counts of this column.</span></div>' +
+  '<div style="overflow-x:auto"><table class="lt"><thead><tr><th>Domain</th><th>State</th><th>Partner</th><th>Salesforce</th><th>Detail</th><th>Last seen</th></tr></thead>' +
+  '<tbody id="pdtbody"><tr><td colspan="6" class="nd">Loading...</td></tr></tbody></table></div></div>' +
+  '<div class="card"><div class="ml" style="margin-bottom:8px">Per partner <span class="psna" style="font-weight:400;font-size:11px">&#8212; companies, not people. Click a row to see that partner\'s leads.</span></div>' +
+  '<div class="psm">Clicks that never reached the form are NOT in our data at all &#8212; only PartnerStack has them. This funnel starts at step 1, not at the click.</div>' +
   '<div style="overflow-x:auto"><table class="lt"><thead><tr>' +
   '<th class="sortable" onclick="sortPartners(\'partner_name\')">Partner <span id="psar-partner_name"></span></th>' +
   '<th>Email</th><th>Key</th>' +
-  '<th class="sortable" onclick="sortPartners(\'leads\')">Leads <span id="psar-leads"></span></th>' +
-  '<th class="sortable" onclick="sortPartners(\'conversions\')">Conversions <span id="psar-conversions"></span></th>' +
-  '<th class="sortable" onclick="sortPartners(\'booked\')">Bookings <span id="psar-booked"></span></th>' +
+  '<th class="sortable" onclick="sortPartners(\'step1\')" title="Companies that reached step 1. Every column in this funnel counts COMPANIES, so they nest: step 1 &#8805; completed &#8805; converted &#8805; booked &#8805; qualified.">Step 1 <span id="psar-step1"></span></th>' +
+  '<th class="sortable" onclick="sortPartners(\'completed\')">Completed <span id="psar-completed"></span></th>' +
+  '<th class="sortable" onclick="sortPartners(\'conversions\')">Converted <span id="psar-conversions"></span></th>' +
+  '<th class="sortable" onclick="sortPartners(\'booked\')">Booked <span id="psar-booked"></span></th>' +
   '<th class="sortable" onclick="sortPartners(\'qualified\')">Qualified <span id="psar-qualified"></span></th>' +
   '<th class="sortable" onclick="sortPartners(\'last_click\')">Last click <span id="psar-last_click"></span></th>' +
-  '</tr></thead><tbody id="ptbody"><tr><td colspan="8" class="nd">Loading...</td></tr></tbody></table></div></div>' +
+  '</tr></thead><tbody id="ptbody"><tr><td colspan="9" class="nd">Loading...</td></tr></tbody></table></div></div>' +
   '</div>' +
   '<div class="tp" id="tp-sdr">' +
   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
@@ -3039,8 +3054,13 @@ app.get('/monitor', (req, res) => {
   '["Partner key",l.ps_partner_name?C(l.ps_partner_key):null],' +
   '["Clicked",l.ps_click_at?esc(et(l.ps_click_at)):null],' +
   '["Customer key",l.ps_customer_key?C(l.ps_customer_key):null],' +
-  '["Conversion sent",l.ps_signup_sent_at?esc(et(l.ps_signup_sent_at)):"<span class=\'psna\'>not sent</span>"],' +
-  '["Qualified sent",l.ps_qualified_sent_at?esc(et(l.ps_qualified_sent_at)):null]' +
+  /* Sent and VERIFIED are different facts. "Sent" only means PartnerStack
+     answered 200 to an empty-bodied endpoint; "verified" means we read the
+     customer back. Showing sent alone is why the mirror question had to be
+     answered from logs. And "not sent" now says WHY. */
+  '["Conversion sent",l.ps_signup_sent_at?esc(et(l.ps_signup_sent_at)):("<span class=\'psna\'>not sent</span>"+(l.ps_signup_fail_reason?" <span class=\'psattn\'>("+esc(l.ps_signup_fail_reason)+")</span>":(l.ps_signup_skipped_reason?" <span class=\'psna\'>(skipped: "+esc(l.ps_signup_skipped_reason)+")</span>":"")))],' +
+  '["Conversion verified",l.ps_signup_verified_at?esc(et(l.ps_signup_verified_at)):(l.ps_signup_sent_at?"<span class=\'psna\'>awaiting read-back</span>":null)],' +
+  '["Qualified sent",l.ps_qualified_sent_at?esc(et(l.ps_qualified_sent_at)):(l.ps_qualify_fail_reason?("<span class=\'psattn\'>failed: "+esc(l.ps_qualify_fail_reason)+"</span>"):null)]' +
   '].filter(function(r){return r[1];});' +
   'var h="<div class=\'psb\'><div class=\'psh\'>\u{1F91D} Partner</div><div class=\'egrid\'>";' +
   'h+=rows.map(function(r){return "<div class=\'ef\'><div class=\'efl\'>"+r[0]+"</div><div>"+r[1]+"</div></div>";}).join("");' +
@@ -3057,57 +3077,66 @@ app.get('/monitor', (req, res) => {
   'h+="</table>";}' +
   'return h+"</div>";}' +
   'function enrichPanel(l){var loc=[l.enriched_city,l.enriched_state,l.enriched_country].filter(Boolean).join(", ");var fields=[' +
-  '{lb:"Title",v:l.enriched_title},' +
-  '{lb:"Seniority",v:l.enriched_seniority},' +
-  '{lb:"Department",v:l.enriched_departments},' +
-  '{lb:"Email status",v:l.enriched_email_status},' +
-  '{lb:"Company",v:l.company||l.e_company},' +
-  '{lb:"Company size",v:l.enriched_company_size},' +
-  '{lb:"Industry",v:l.enriched_industry},' +
-  '{lb:"Founded",v:l.enriched_founded_year},' +
-  '{lb:"Annual revenue",v:l.enriched_annual_revenue},' +
-  '{lb:"Total funding",v:l.enriched_total_funding},' +
-  '{lb:"Funding stage",v:l.enriched_funding_stage},' +
-  '{lb:"Funding events",v:l.enriched_funding_events},' +
-  '{lb:"Alexa rank",v:l.enriched_alexa_ranking},' +
-  '{lb:"Keywords",v:l.enriched_keywords},' +
-  '{lb:"Person location",v:loc||null},' +
-  '{lb:"Company HQ",v:l.enriched_org_hq},' +
-  '{lb:"LinkedIn",v:l.enriched_linkedin,lnk:true},' +
-  '{lb:"Phone",v:l.e_phone||l.phone},' +
-  '{lb:"Website",v:l.website,lnk:true},' +
-  '{lb:"\\u26A0\\uFE0F Website check",v:l.website_check_failed?wlabel(l.website_check_reason):null},' +
-  '{lb:"\\u2139\\uFE0F Website check",v:(!l.website_check_failed&&l.website_check_reason&&l.website_check_reason!=="social_profile_url"&&["content_clean","resolved","ok","test_email_skipped"].indexOf(l.website_check_reason)===-1)?wlabel(l.website_check_reason):null},' +
-  '{lb:"\\uD83D\\uDD17 Website type",v:(!l.website_check_failed&&l.website_check_reason==="social_profile_url")?"Social profile (no company site)":null},' +
+  '{g:1,lb:"Title",v:l.enriched_title},' +
+  '{g:1,lb:"Seniority",v:l.enriched_seniority},' +
+  '{g:1,lb:"Department",v:l.enriched_departments},' +
+  '{g:1,lb:"Email status",v:l.enriched_email_status},' +
+  '{g:1,lb:"Company",v:l.company||l.e_company},' +
+  '{g:1,lb:"Company size",v:l.enriched_company_size},' +
+  '{g:1,lb:"Industry",v:l.enriched_industry},' +
+  '{g:1,lb:"Founded",v:l.enriched_founded_year},' +
+  '{g:1,lb:"Annual revenue",v:l.enriched_annual_revenue},' +
+  '{g:1,lb:"Total funding",v:l.enriched_total_funding},' +
+  '{g:1,lb:"Funding stage",v:l.enriched_funding_stage},' +
+  '{g:1,lb:"Funding events",v:l.enriched_funding_events},' +
+  '{g:1,lb:"Alexa rank",v:l.enriched_alexa_ranking},' +
+  '{g:1,lb:"Keywords",v:l.enriched_keywords},' +
+  '{g:1,lb:"Person location",v:loc||null},' +
+  '{g:1,lb:"Company HQ",v:l.enriched_org_hq},' +
+  '{g:1,lb:"LinkedIn",v:l.enriched_linkedin,lnk:true},' +
+  '{g:1,lb:"Phone",v:l.e_phone||l.phone},' +
+  '{g:1,lb:"Website",v:l.website,lnk:true},' +
+  '{g:1,lb:"\\u26A0\\uFE0F Website check",v:l.website_check_failed?wlabel(l.website_check_reason):null},' +
+  '{g:1,lb:"\\u2139\\uFE0F Website check",v:(!l.website_check_failed&&l.website_check_reason&&l.website_check_reason!=="social_profile_url"&&["content_clean","resolved","ok","test_email_skipped"].indexOf(l.website_check_reason)===-1)?wlabel(l.website_check_reason):null},' +
+  '{g:1,lb:"\\uD83D\\uDD17 Website type",v:(!l.website_check_failed&&l.website_check_reason==="social_profile_url")?"Social profile (no company site)":null},' +
   // The flag arrives pre-computed as l.unverifiable_pair. Deliberately not
   // re-derived here from elv_status + website_check_reason: that would put a
   // second copy of the verdict list in a JS string, which is exactly the
   // trap the label map fell into.
-  '{lb:"\\u26A0\\uFE0F Nothing verified",v:l.unverifiable_pair?"Catch-all email, unreachable website. Nothing confirmed this lead.":null},' +
-  '{lb:"Email check",v:l.elv_status},' +
-  '{lb:"\\uD83D\\uDD01 Attempts",v:(Number(l.prior_attempts)>0)?("Attempt "+(Number(l.prior_attempts)+1)+" \\u2014 "+l.prior_attempts+" prior"+(Number(l.prior_disqualified)>0?", "+l.prior_disqualified+" disqualified":"")):null},' +
-  '{lb:"Hear about us",v:l.hear_about_us},' +
-  '{lb:"UTM source",v:l.utm_source},' +
-  '{lb:"UTM medium",v:l.utm_medium},' +
-  '{lb:"UTM campaign",v:l.utm_campaign},' +
-  '{lb:"Referrer",v:l.referrer},' +
-  '{lb:"Prefill",v:l.prefill_source},' +
-  '{lb:"UTM term",v:l.utm_term},' +
-  '{lb:"\\uD83D\\uDEEC Landing Page",v:l.landing_page,lnk:true},' +
-  '{lb:"\\u2B05\\uFE0F Previous Page",v:l.previous_page,lnk:true},' +
-  '{lb:"\\uD83D\\uDCC4 Form Page",v:l.page_url,lnk:true},' +
-  '{lb:"Meta fbc",v:l.fbc},' +
-  '{lb:"Meta fbp",v:l.fbp},' +
-  '{lb:"Submitted",v:et(l.submitted_at)},' +
-  '{lb:"Booked at",v:et(l.booked_at)},' +
-  '{lb:"Meeting",v:l.start_time?et(l.start_time):null},' +
-  '{lb:"Email sent",v:l.loops_sent?"Yes":"No"},' +
-  '{lb:"Session ID",v:l.session_id,mono:true},' +
-  '{lb:"Enriched at",v:et(l.enriched_at)}' +
+  '{g:1,lb:"\\u26A0\\uFE0F Nothing verified",v:l.unverifiable_pair?"Catch-all email, unreachable website. Nothing confirmed this lead.":null},' +
+  '{g:1,lb:"Email check",v:l.elv_status},' +
+  '{g:1,lb:"\\uD83D\\uDD01 Attempts",v:(Number(l.prior_attempts)>0)?("Attempt "+(Number(l.prior_attempts)+1)+" \\u2014 "+l.prior_attempts+" prior"+(Number(l.prior_disqualified)>0?", "+l.prior_disqualified+" disqualified":"")):null},' +
+  '{g:1,lb:"Hear about us",v:l.hear_about_us},' +
+  '{g:2,lb:"UTM source",v:l.utm_source},' +
+  '{g:2,lb:"UTM medium",v:l.utm_medium},' +
+  '{g:2,lb:"UTM campaign",v:l.utm_campaign},' +
+  '{g:2,lb:"Referrer",v:l.referrer},' +
+  '{g:2,lb:"Prefill",v:l.prefill_source},' +
+  '{g:2,lb:"UTM term",v:l.utm_term},' +
+  '{g:2,lb:"\\uD83D\\uDEEC Landing Page",v:l.landing_page,lnk:true},' +
+  '{g:2,lb:"\\u2B05\\uFE0F Previous Page",v:l.previous_page,lnk:true},' +
+  '{g:2,lb:"\\uD83D\\uDCC4 Form Page",v:l.page_url,lnk:true},' +
+  '{g:3,lb:"Meta fbc",v:l.fbc},' +
+  '{g:3,lb:"Meta fbp",v:l.fbp},' +
+  '{g:2,lb:"Submitted",v:et(l.submitted_at)},' +
+  '{g:2,lb:"Booked at",v:et(l.booked_at)},' +
+  '{g:2,lb:"Meeting",v:l.start_time?et(l.start_time):null},' +
+  '{g:2,lb:"Email sent",v:l.loops_sent?"Yes":"No"},' +
+  '{g:3,lb:"Session ID",v:l.session_id,mono:true},' +
+  '{g:3,lb:"Enriched at",v:et(l.enriched_at)}' +
   '].filter(function(f){return f.v;});' +
   'var pp=psPanel(l);' +
   'if(!fields.length)return pp||"<div style=\\"color:#999;font-size:12px\\">No enrichment data.</div>";' +
-  'return pp+"<div class=\\"egrid\\">"+fields.map(function(f){var val=f.lnk&&f.v?"<a href=\\""+(f.v.startsWith("http")?"":"https://")+esc(f.v)+"\\" target=\\"_blank\\">"+esc(f.v)+"</a>":f.mono?"<code style=\\"font-size:10px\\">"+esc(f.v)+"</code>":esc(f.v);return"<div class=\\"ef\\"><div class=\\"efl\\">"+f.lb+"</div><div class=\\"efv\\">"+val+"</div></div>";}).join("")+"</div>";}' +
+  /* Grouped rather than one flat run of ~20 fields. Partner first, because on
+     a partner lead that is the thing that changes who owns the conversation.
+     A field with no group falls into Form data rather than disappearing. */
+  'var GRP=[[1,"Form &amp; enrichment"],[2,"Journey &amp; attribution"],[3,"Technical"]];' +
+  'function efCell(f){var val=f.lnk&&f.v?"<a href=\\""+(f.v.startsWith("http")?"":"https://")+esc(f.v)+"\\" target=\\"_blank\\">"+esc(f.v)+"</a>":f.mono?"<code style=\\"font-size:10px\\">"+esc(f.v)+"</code>":esc(f.v);return "<div class=\\"ef\\"><div class=\\"efl\\">"+f.lb+"</div><div class=\\"efv\\">"+val+"</div></div>";}' +
+  'var out=pp;' +
+  'GRP.forEach(function(g){var inGroup=fields.filter(function(f){return (f.g||1)===g[0];});' +
+  'if(!inGroup.length)return;' +
+  'out+="<div class=\\"psm\\">"+g[1]+"</div><div class=\\"egrid\\">"+inGroup.map(efCell).join("")+"</div>";});' +
+  'return out;}' +
   /* Loaded on its OWN cadence, not the 60-second metrics poll: check B hits
      Salesforce across the network, exactly like /monitor/health. At load, then
      every 10 minutes, matching the server-side cache. */
@@ -3147,12 +3176,12 @@ app.get('/monitor', (req, res) => {
   /* Partners tab. Sorting is client-side over a single fetched page, like the
      SDR list — there are tens of partners, not thousands, and a round trip per
      column click would be worse than useless. */
-  'var partnerRows=[],pSort="leads",pDir="desc";' +
+  'var partnerRows=[],pSort="step1",pDir="desc";' +
   'async function loadPartners(){try{' +
   'var r=await fetch(API+"/monitor/partners"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(20000)});' +
   'if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();var t=d.totals||{};' +
   'set("p-leads",t.leads);set("p-leads24",(t.leads24h||0)+" in the last 24h");' +
-  'set("p-conv",t.conversions);set("p-qual",t.qualified);set("p-booked",t.booked);' +
+  'set("p-conv",t.conversions);set("p-qual",t.qualified);' +
   /* The ladder. Every figure here is a sum of ONE column, so the chips always
      add up to the domain total and cannot disagree with the cards above. */
   'var lc=d.lifecycle||{};var bs=lc.byState||{};var failed=lc.failedStates||[];' +
@@ -3180,9 +3209,23 @@ app.get('/monitor', (req, res) => {
   'var unchecked=(lc.totalDomains||0)-Object.values(sf).reduce(function(a,b){return a+b;},0);' +
   'if(unchecked>0)sfc+="<span class=\'pschip\' title=\'The poller has not checked these yet. NOT the same as having no Opportunity.\'>"+unchecked+" not checked yet</span>";' +
   'var sfe=document.getElementById("p-sfstates");if(sfe)sfe.innerHTML=sfc||"not checked yet";' +
-  /* A rate over zero leads is not 0%, it is undefined — show a dash. */
-  'set("p-rate",(t.bookingRate===null||t.bookingRate===undefined)?"—":(t.bookingRate+"%"));' +
   'partnerRows=d.partners||[];renderPartners();' +
+  /* The per-domain table. Same source as the chips above, so a domain cannot
+     appear in one and not the other. */
+  'var dtb=document.getElementById("pdtbody");' +
+  'if(dtb){var dl=lc.domains||[];' +
+  'if(!dl.length){dtb.innerHTML="<tr><td colspan=\'6\' class=\'nd\'>No partner domains yet.</td></tr>";}else{' +
+  'var sfl2={ticked:"ticked, will fire",exists_unticked:"waiting on an AE",create_errored:"Opportunity never created",no_opportunity:"no Opportunity yet"};' +
+  'dtb.innerHTML=dl.map(function(x){' +
+  'var bad=(failed.indexOf(x.state)>=0);' +
+  'var det=x.signup_fail_reason||x.qualify_fail_reason||x.skipped_reason||"";' +
+  'var sfs=x.sf_state?(sfl2[x.sf_state]||x.sf_state):"not checked yet";' +
+  'return "<tr><td><code>"+esc(x.customer_key)+"</code></td>"' +
+  '+"<td><span class=\'pschip"+(bad?" bad":"")+"\'>"+esc((lbl[x.state]||x.state))+"</span></td>"' +
+  '+"<td>"+esc(x.partner_name||x.partner_email||x.partner_key||"—")+"</td>"' +
+  '+"<td"+(x.sf_state==="create_errored"?" class=\'psattn\'":"")+">"+esc(sfs)+"</td>"' +
+  '+"<td class=\'psna\'>"+esc(det||"—")+"</td>"' +
+  '+"<td class=\'psna\' style=\'white-space:nowrap\'>"+esc(et(x.last_seen))+"</td></tr>";}).join("");}}' +
   '}catch(e){document.getElementById("ptbody").innerHTML="<tr><td colspan=\'8\' class=\'nd\' style=\'color:#b91c1c\'>Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function sortPartners(c){if(pSort===c)pDir=(pDir==="asc"?"desc":"asc");else{pSort=c;pDir=(c==="partner_name")?"asc":"desc";}renderPartners();}' +
   'function renderPartners(){var tb=document.getElementById("ptbody");' +
@@ -3192,7 +3235,7 @@ app.get('/monitor', (req, res) => {
   'else if(pSort==="last_click"){x=x?new Date(x).getTime():0;y=y?new Date(y).getTime():0;}' +
   'else{x=Number(x)||0;y=Number(y)||0;}' +
   'if(x<y)return pDir==="asc"?-1:1;if(x>y)return pDir==="asc"?1:-1;return 0;});' +
-  '["partner_name","leads","conversions","booked","qualified","last_click"].forEach(function(c){var el=document.getElementById("psar-"+c);if(el)el.textContent=(pSort===c)?(pDir==="asc"?"▲":"▼"):"";});' +
+  '["partner_name","step1","completed","conversions","booked","qualified","last_click"].forEach(function(c){var el=document.getElementById("psar-"+c);if(el)el.textContent=(pSort===c)?(pDir==="asc"?"▲":"▼"):"";});' +
   /* name -> email -> key, the same chain as Slack and the detail panel. */
   /* Event delegation rather than an inline onclick: the key would otherwise
      need quotes nested three deep (HTML attribute inside a client JS string
@@ -3203,7 +3246,8 @@ app.get('/monitor', (req, res) => {
   '+"<td>"+esc(label)+"</td>"' +
   '+"<td>"+esc(p.partner_email||"—")+"</td>"' +
   '+"<td><code style=\'font-size:10px\'>"+esc(p.partner_key)+"</code></td>"' +
-  '+"<td>"+(p.leads||0)+"</td>"' +
+  '+"<td>"+(p.step1||0)+"</td>"' +
+  '+"<td>"+(p.completed||0)+"</td>"' +
   '+"<td>"+(p.conversions||0)+"</td>"' +
   '+"<td>"+(p.booked||0)+"</td>"' +
   '+"<td>"+(p.qualified||0)+"</td>"' +
@@ -5448,6 +5492,35 @@ function parsePartnerStackClickAt(raw) {
   return d;
 }
 
+/* The gw_ps_clicks cookie has carried the partner key BOTH ways: the lead of
+   4 Sept 11:48 stored Nzg1ZWM3OGUxZWU0Njg4 (the base64 URL-param form) and
+   every lead from 12:07 stored 785ec78e1ee4688 (decoded), because the
+   site-wide script changed between them. Same partner, two strings, one JSONB
+   column — anything grouping on it splits one partner into two.
+
+   The ps_partner_key COLUMN was decoded throughout, so nothing today groups on
+   the history and the damage was confined to one row. Normalising on write is
+   defence against the cookie regressing again rather than a fix for a live
+   bug.
+
+   ROUND-TRIP GUARDED: only decode when re-encoding reproduces the input
+   exactly AND the result looks like a key. Otherwise an already-decoded value
+   that happens to be valid base64 would be mangled — decoding is not safe to
+   attempt blindly. */
+function normalisePartnerKey(pk) {
+  if (!pk) return '';
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(pk) || pk.length % 4 !== 0) return pk.slice(0, 120);
+  try {
+    const decoded = Buffer.from(pk, 'base64').toString('utf8');
+    const reencoded = Buffer.from(decoded, 'utf8').toString('base64');
+    if (reencoded !== pk) return pk.slice(0, 120);
+    if (!/^[A-Za-z0-9._-]{6,120}$/.test(decoded)) return pk.slice(0, 120);
+    return decoded;
+  } catch {
+    return pk.slice(0, 120);
+  }
+}
+
 function parsePartnerStackClickHistory(raw) {
   let arr = raw;
   if (typeof arr === 'string') {
@@ -5458,7 +5531,7 @@ function parsePartnerStackClickHistory(raw) {
   for (const item of arr.slice(0, PS_CLICK_HISTORY_MAX)) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
     const xid = (item.xid || '').toString().trim().slice(0, 200);
-    const pk  = (item.pk  || '').toString().trim().slice(0, 120);
+    const pk  = normalisePartnerKey((item.pk || '').toString().trim().slice(0, 200));
     const at  = parsePartnerStackClickAt(item.at);
     if (!xid && !pk) continue;
     out.push({ xid: xid || null, pk: pk || null, at: at ? at.toISOString() : null });
@@ -6460,35 +6533,46 @@ async function partnerLifecycle() {
 async function partnerOverview() {
   const [totals, rows] = await Promise.all([
     pool.query(`
+      /* DOMAINS throughout, matching the funnel and the ladder. These counted
+         people while the funnel counted companies, which put two units on one
+         screen again — the thing the per-domain rework exists to remove. */
       SELECT
-        COUNT(DISTINCT LOWER(email))                                        AS leads,
-        COUNT(DISTINCT LOWER(email)) FILTER (
+        COUNT(DISTINCT ps_customer_key)                                     AS leads,
+        COUNT(DISTINCT ps_customer_key) FILTER (
           WHERE created_at >= NOW() - INTERVAL '24 hours')                  AS leads_24h,
         COUNT(DISTINCT ps_customer_key) FILTER (
           WHERE ps_signup_sent_at IS NOT NULL)                              AS conversions,
         COUNT(DISTINCT ps_customer_key) FILTER (
           WHERE ps_qualified_sent_at IS NOT NULL)                           AS qualified,
-        COUNT(DISTINCT LOWER(email)) FILTER (WHERE booking_uid IS NOT NULL) AS booked,
+        COUNT(DISTINCT ps_customer_key) FILTER (WHERE booking_uid IS NOT NULL) AS booked,
         COUNT(DISTINCT ps_partner_key)                                      AS partners
         FROM leads
-       WHERE ps_partner_key IS NOT NULL
+       WHERE ps_partner_key IS NOT NULL AND ps_customer_key IS NOT NULL
     `),
     pool.query(`
+      /* EVERY column counts DOMAINS, so the funnel actually nests:
+         step 1 >= completed >= converted >= booked >= qualified. Mixing people
+         and domains is what made the old row impossible to read left to right
+         — a domain count sitting next to a people count looks like a funnel
+         and is not one. Companies is also the truthful unit here, since
+         PartnerStack pays per customer. */
       SELECT ps_partner_key                                                 AS partner_key,
              MAX(ps_partner_name)                                           AS partner_name,
              MAX(ps_partner_email)                                          AS partner_email,
-             COUNT(DISTINCT LOWER(email))                                   AS leads,
+             COUNT(DISTINCT ps_customer_key)                                AS step1,
+             COUNT(DISTINCT ps_customer_key) FILTER (
+               WHERE completed IS TRUE)                                     AS completed,
              COUNT(DISTINCT ps_customer_key) FILTER (
                WHERE ps_signup_sent_at IS NOT NULL)                         AS conversions,
-             COUNT(DISTINCT LOWER(email)) FILTER (
+             COUNT(DISTINCT ps_customer_key) FILTER (
                WHERE booking_uid IS NOT NULL)                               AS booked,
              COUNT(DISTINCT ps_customer_key) FILTER (
                WHERE ps_qualified_sent_at IS NOT NULL)                      AS qualified,
              MAX(ps_click_at)                                               AS last_click
         FROM leads
-       WHERE ps_partner_key IS NOT NULL
+       WHERE ps_partner_key IS NOT NULL AND ps_customer_key IS NOT NULL
        GROUP BY ps_partner_key
-       ORDER BY COUNT(DISTINCT LOWER(email)) DESC, MAX(ps_click_at) DESC NULLS LAST
+       ORDER BY COUNT(DISTINCT ps_customer_key) DESC, MAX(ps_click_at) DESC NULLS LAST
        LIMIT 200
     `),
   ]);
