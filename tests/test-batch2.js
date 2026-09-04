@@ -207,6 +207,85 @@ const R = (new Function(ruleSrc + `
        !/fetch\(|elvRecheckStatusOnly/.test(lookupBody));
 
     /* ============================================================
+       syncToAWS: a COALESCE against a never-NULL value is a NO-OP
+       ------------------------------------------------------------
+       This is the bug that put 14 people on the mirror with
+       completed = false while Railway had true, so the sdr-calling dialer
+       read form completers as step-1 drop-offs. The clause was
+         completed = COALESCE(EXCLUDED.completed, gw_form_leads.completed)
+       and the bound value is `data.completed || false` — never null. So the
+       COALESCE never fell through and the incoming false always won. A
+       /partial sync after a /submit sync clobbered the flag.
+
+       Asserted STRUCTURALLY rather than column by column, so a future column
+       added with the same shape is caught by this test rather than by a
+       dialer calling the wrong people for three months.
+       ============================================================ */
+    {
+      const sync = src.slice(src.indexOf('function syncToAWS'), src.indexOf('function syncBookingToAWS'));
+      /* The boundary is the end of the SQL template literal, backtick-comma-
+         bracket. Slicing on '], [' finds nothing — that was the first version
+         of this test and it silently gave empty strings, which made three
+         assertions fail loudly rather than pass vacuously. Worth the note:
+         an empty slice that passes is the same class of bug as everything
+         else in this file. */
+      const bound   = /`,\s*\[/.exec(sync).index;
+      const values  = sync.slice(bound, sync.indexOf(']).then'));
+      const clauses = sync.slice(sync.indexOf('ON CONFLICT'), bound);
+
+      /* Every column whose bound value can never be NULL. `|| null` is the
+         safe majority and is deliberately excluded. */
+      const neverNull = Array.from(
+        values.matchAll(/data\.([a-z_]+)\s*(?:\|\||\?\?)\s*(?:false|true|1)\b/g)
+      ).map((m) => m[1]);
+      ok('mirror: the never-NULL binds are still the four we know about',
+         JSON.stringify(neverNull.slice().sort()) ===
+         JSON.stringify(['completed', 'disqualified', 'loops_sent', 'step_reached']),
+         neverNull.join(','));
+
+      /* THE RULE. For a never-NULL bind, a plain
+         COALESCE(EXCLUDED.x, gw_form_leads.x) is a no-op that silently lets
+         the incoming value win. It must be something that cannot regress:
+         an OR for a monotonic flag, GREATEST for a monotonic number, or a
+         deliberate bare EXCLUDED that someone has signed off. */
+      for (const col of neverNull) {
+        const m = new RegExp('^\\s*' + col + '\\s*=\\s*(.+?),\\s*$', 'm').exec(clauses);
+        ok(`mirror: ${col} has a conflict clause at all`, !!m, clauses.slice(0, 120));
+        if (!m) continue;
+        const rhs = m[1];
+        const noop = new RegExp('^COALESCE\\(EXCLUDED\\.' + col + ',\\s*gw_form_leads\\.' + col + '\\)$').test(rhs.trim());
+        ok(`mirror: ${col} is not guarded by a no-op COALESCE`, !noop, rhs);
+      }
+
+      /* The two monotonic flags specifically. A follow-up email cannot be
+         un-sent and a form submission cannot be un-submitted, so neither flag
+         may ever go from true back to false. */
+      for (const col of ['completed', 'loops_sent']) {
+        const m = new RegExp('^\\s*' + col + '\\s*=\\s*(.+?),\\s*$', 'm').exec(clauses);
+        ok(`mirror: ${col} can only ever turn ON`,
+           /^\(COALESCE\(gw_form_leads\.\w+, false\) OR COALESCE\(EXCLUDED\.\w+, false\)\)$/.test(m[1].trim()),
+           m[1]);
+      }
+      /* step_reached is monotonic by GREATEST, which is the same idea. */
+      ok('mirror: step_reached is monotonic via GREATEST',
+         /step_reached\s*=\s*GREATEST\(/.test(clauses));
+      /* disqualified is a bare EXCLUDED and that is KNOWN and documented —
+         it is why syncBookingToAWS and friends exist. Pinned so the day
+         someone changes it, they do it deliberately. */
+      ok('mirror: disqualified is still the known bare-EXCLUDED exception',
+         /disqualified\s*=\s*EXCLUDED\.disqualified,/.test(clauses));
+
+      /* submitted_at is NOT a submission time on the mirror. It is
+         `new Date()` at sync time, written only when data.completed is
+         truthy. Pinned with the comment that says so, because the column name
+         invites every reader to assume the opposite. */
+      ok('mirror: submitted_at is still bound to sync time, not a lead field',
+         /data\.completed \? new Date\(\) : null/.test(values), values.slice(0, 80));
+      ok('mirror: and the trap is documented at the bind site',
+         /NOT the lead's submission time|sync clock|sync time, not/i.test(sync));
+    }
+
+    /* ============================================================
        backfill-sf.js — the selector, and the allow-list
        ------------------------------------------------------------
        5 Sept 2026. This tool writes to Salesforce and is reached for during

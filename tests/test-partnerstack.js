@@ -89,7 +89,13 @@ function lift(s, decl) {
    somewhere unrelated. Match the backticks instead. */
 /* Negative assertions over source must ignore comments: the comment that
    explains WHY we avoid a construct necessarily contains that construct, so a
-   raw match fails against correct code. Third time tonight. */
+   raw match fails against correct code. Third time tonight.
+
+   ARITY counting needs it too, for a different reason. The house style puts a
+   comment right at the line it explains, including inside the syncToAWS column
+   list and its params array — and a comment containing a comma counted as one
+   extra column and three extra parameters, failing four assertions that were
+   otherwise correct. A comment is not a column. */
 function codeOnly(s) {
   return s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 }
@@ -1361,14 +1367,15 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
       ok(`mirrorC: ${c} is COALESCEd, so a partial sync cannot wipe a stamp`,
          new RegExp(c + '\\s*=\\s*COALESCE\\(EXCLUDED\\.' + c).test(sync));
     }
-    const cols = parenBody(sync, sync.indexOf('INSERT INTO gw_form_leads')).split(',').map(x => x.trim()).filter(Boolean);
-    const vr = parenBody(sync, sync.indexOf('VALUES'));
+    const syncNC = codeOnly(sync);
+    const cols = parenBody(syncNC, syncNC.indexOf('INSERT INTO gw_form_leads')).split(',').map(x => x.trim()).filter(Boolean);
+    const vr = parenBody(syncNC, syncNC.indexOf('VALUES'));
     let d = 0, cur = '', vals = [];
     for (const ch of vr) { if (ch === '(') d++; if (ch === ')') d--; if (ch === ',' && !d) { vals.push(cur.trim()); cur = ''; } else cur += ch; }
     vals.push(cur.trim());
     const dollars = vals.filter(v => v.startsWith('$')).map(v => +v.slice(1));
     eq('mirrorC: column count still equals value count', cols.length, vals.length);
-    eq('mirrorC: params array still equals max $n', countArrayEntries(sync, '`, ['), Math.max(...dollars));
+    eq('mirrorC: params array still equals max $n', countArrayEntries(syncNC, '`, ['), Math.max(...dollars));
     eq('mirrorC: no duplicated or skipped $n', new Set(dollars).size, dollars.length);
   }
   /* Scoped to the /monitor/leads SELECT. Matching anywhere in the file passed
@@ -2566,8 +2573,9 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   }
   // Arity: a shifted parameter here writes one column's value into another.
   {
-    const cols = parenBody(sync, sync.indexOf('INSERT INTO gw_form_leads')).split(',').map(x => x.trim()).filter(Boolean);
-    const vr = parenBody(sync, sync.indexOf('VALUES'));
+    const syncNC = codeOnly(sync);
+    const cols = parenBody(syncNC, syncNC.indexOf('INSERT INTO gw_form_leads')).split(',').map(x => x.trim()).filter(Boolean);
+    const vr = parenBody(syncNC, syncNC.indexOf('VALUES'));
     let d = 0, cur = '', vals = [];
     for (const ch of vr) { if (ch === '(') d++; if (ch === ')') d--; if (ch === ',' && !d) { vals.push(cur.trim()); cur = ''; } else cur += ch; }
     vals.push(cur.trim());
@@ -2579,7 +2587,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        WRONG COLUMN, which is the single nastiest way this function can fail
        and is invisible to a column-versus-placeholder check alone. */
     eq('sync: params array length equals max $n',
-       countArrayEntries(sync, '`, ['), Math.max(...dollars));
+       countArrayEntries(syncNC, '`, ['), Math.max(...dollars));
   }
 
   // /submit and /partial both capture, using ONE reader so they cannot drift.
