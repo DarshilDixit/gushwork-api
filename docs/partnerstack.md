@@ -130,17 +130,22 @@ Do **not** create fields called "Company Name" or "Website" in Settings — you
 would get duplicates with slugged api_names like `company_name_1`, and the ones
 we send to would then be the wrong ones.
 
-Every field on the account today reports `read_only: true`, which is what a
-built-in field looks like. Whether `meta` populates a built-in field or only a
-user-created custom one is **not settled** — the documentation says `meta` is
-"additional custom fields configured in your dashboard" and does not say what
-happens for built-ins. The cheapest way to find out is one conversion from a
-fresh domain, then reading `data.fields[]` back:
+**VERIFIED 4 Sept 2026.** `meta` does write to the built-in fields, despite
+every field reporting `read_only: true`. A conversion for `hello.com` carrying
+`meta: {"company_name":"Gushwork","website":"https://hello.com/"}` came back
+with both populated, alongside the contact name in `name`. Nothing needs
+creating in Settings.
 
-- `company_name` and `website` populated → `meta` maps onto built-ins, done.
-- still null → they need real custom fields, created in Settings with api_names
-  that do **not** collide with the built-ins (e.g. `gw_company_name`), and
-  `PS_META_COMPANY` / `PS_META_WEBSITE` in `index.js` updated to match.
+**Read the values back from `data.fields[]` or `data.mdata`, NOT `data.meta`.**
+PartnerStack accepts `meta` on write and returns it as `{}` on read, surfacing
+the values under `mdata` and `field_data` instead. Checking `data.meta` alone
+would make a working integration look broken — which is the same silent-failure
+shape this section exists to warn about.
+
+`website` is stored as the raw form value (`https://hello.com/`), not
+normalised. That is deliberate: `ps_customer_key` is the normalised join key
+and appears as `external_key`, while the Website field shows what the lead
+actually typed, which is more use to a human reviewing the record.
 
 ### Which environment did a conversion land in?
 
@@ -405,6 +410,6 @@ choice between decoding on read here and fixing the site-wide script is open.
 and unit-tested but dormant. Turning the flag on for the first time should be
 watched, not assumed.
 
-**6. `meta` -> built-in field mapping is unverified.** See the custom fields
-section. The keys we send (`company_name`, `website`) match existing built-in
-api_names, but whether `meta` writes to a built-in field is untested.
+**6. Nothing outstanding on the payload.** The `meta` mapping is verified —
+see the custom fields section. Kept as a numbered entry so the list does not
+renumber against older links.
