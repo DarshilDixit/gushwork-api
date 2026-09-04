@@ -96,17 +96,22 @@ Two problems in one line:
 
 ## Suggested fixes
 
-1. **`backfill-sf.js`: select on `submitted_at IS NOT NULL`**, or add an
-   explicit `includeWebhookRows` option so the caller chooses. Change `= true`
-   to `IS TRUE` while there.
-2. **Add an `emails` allow-list** to `runBackfill` so it can target named rows
-   instead of a whole window. Without it, backfilling six leads means replaying
-   every completed lead in the window — 2,180 people for a mid-June start.
-   (Wanted independently: see
-   `form-submissions-with-no-salesforce-lead`, i.e.
-   `apollo-enrichment-not-reaching-salesforce.md`.)
+1. **DONE 5 Sept** — `backfill-sf.js` selects on `submitted_at IS NOT NULL`
+   instead of `completed = true`, so it no longer replays booking-webhook rows
+   as though they were form submissions.
+2. **DONE 5 Sept** — `runBackfill` takes an `emails` allow-list, so it can
+   target named rows instead of a whole window. Without it, backfilling six
+   leads meant replaying every completed lead in the window — ~2,180 people for
+   a mid-June start. Shipped **separately from any run**: the six leads it was
+   written for were deliberately not backfilled, and
+   `apollo-enrichment-not-reaching-salesforce.md` records why.
 3. **Investigate the 14 drift rows** and re-sync them, so the dialer stops
-   seeing completers as drop-offs.
+   seeing completers as drop-offs. **This is the live half of this ticket.**
+   Everything else here is correctness and clarity — the stage ladder is right,
+   the cron does not read the flag, the bad Slack label is unreachable. The
+   mirror drift is the only part that is outward-facing and happening now,
+   because the sdr-calling dialer reads `gw_form_leads`. Under investigation as
+   of 5 Sept.
 4. **Correct CLAUDE.md's caveat** about whether the safety-net branches set
    `submitted_at`. They do not always.
 
