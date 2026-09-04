@@ -1041,9 +1041,13 @@ function buildJourneyBlocks(blocks, d) {
      response and every later lead reads the cache. A key is ugly but it is
      true, and an SDR can still search it. */
   if (hasPartner) {
+    /* name -> email -> raw key. An email tells an SDR who they are dealing
+       with; a hex key tells them nothing they can act on or search for. */
     const who = d.ps_partner_name
       ? `*${d.ps_partner_name}*` + (d.ps_partner_email ? ` (${d.ps_partner_email})` : '')
-      : `\`${d.ps_partner_key}\`  _(name not resolved yet)_`;
+      : d.ps_partner_email
+        ? `*${d.ps_partner_email}*  _(name not resolved yet)_`
+        : `\`${d.ps_partner_key}\`  _(partner not resolved yet)_`;
     const clicked = d.ps_click_at ? ` — clicked ${etStamp(d.ps_click_at)}` : '';
     blocks.push(bSection(`🤝 *Partner:* ${who}${clicked}`));
   }
@@ -2988,7 +2992,8 @@ app.get('/monitor', (req, res) => {
      answering "why partner A and not B?" without opening the database. */
   'function psPanel(l){if(!l.ps_partner_key)return "";' +
   'function C(v){return "<code>"+esc(v)+"</code>";}' +
-  'var who=l.ps_partner_name?esc(l.ps_partner_name):(C(l.ps_partner_key)+" <span class=\'psna\'>(name not resolved)</span>");' +
+  /* name -> email -> raw key, the same chain Slack and hear_about_us use. */
+  'var who=l.ps_partner_name?esc(l.ps_partner_name):(l.ps_partner_email?(esc(l.ps_partner_email)+" <span class=\'psna\'>(name not resolved)</span>"):(C(l.ps_partner_key)+" <span class=\'psna\'>(partner not resolved)</span>"));' +
   'var rows=[["Partner",who],' +
   '["Partner email",l.ps_partner_email?esc(l.ps_partner_email):null],' +
   '["Partner key",l.ps_partner_name?C(l.ps_partner_key):null],' +
@@ -5459,16 +5464,32 @@ function runPartnerStackEligibility({ session_id, email, website, ps }) {
    path here is a warning and a return, never a throw. */
 const _psPartnerCache = new Map();
 
-async function resolvePartnerIdentity(partnerKey) {
+/* What to SHOW for a partner, in falling order of usefulness. An email tells an
+   SDR who they are dealing with; a hex key tells them nothing and cannot be
+   searched for in any system they use. One chain, used by Slack, the dashboard
+   and hear_about_us, so the three cannot disagree about the same partner. */
+function partnerDisplayName(identity, partnerKey) {
+  return (identity && identity.name) || (identity && identity.email) || partnerKey || null;
+}
+
+/* Memory, then the database. NO network — this is the version that is safe to
+   await before Slack fires.
+
+   The memory-only peek this replaces was the bug: every deploy clears the Map,
+   so the first partner lead after a restart posted to Slack with a raw hex key
+   even though the row from an earlier lead already carried the name. The API
+   call is the slow part and stays deferred; the DB layer is a single indexed
+   lookup (leads_ps_partner_key_resolved_idx) and only runs when there is a
+   partner key at all, so organic leads pay nothing. */
+async function partnerIdentityNoNetwork(partnerKey) {
   if (!partnerKey) return null;
   if (_psPartnerCache.has(partnerKey)) return _psPartnerCache.get(partnerKey);
-
-  // Someone else's lead may already have paid for this lookup.
   try {
     const { rows } = await pool.query(
       `SELECT ps_partner_name, ps_partner_email
          FROM leads
-        WHERE ps_partner_key = $1 AND ps_partner_name IS NOT NULL
+        WHERE ps_partner_key = $1
+          AND (ps_partner_name IS NOT NULL OR ps_partner_email IS NOT NULL)
         LIMIT 1`,
       [partnerKey]
     );
@@ -5478,8 +5499,16 @@ async function resolvePartnerIdentity(partnerKey) {
       return known;
     }
   } catch (err) {
-    console.warn('[PartnerStack] Partner cache lookup failed (will try the API):', err.message);
+    console.warn('[PartnerStack] Partner identity lookup failed (non-blocking):', err.message);
   }
+  return null;
+}
+
+async function resolvePartnerIdentity(partnerKey) {
+  if (!partnerKey) return null;
+  // Memory, then any earlier lead row that already paid for this lookup.
+  const known = await partnerIdentityNoNetwork(partnerKey);
+  if (known) return known;
 
   const out = await fetchPartnership(partnerKey);
   if (!out.ok) {
@@ -5517,16 +5546,6 @@ async function runPartnerStackIdentity({ session_id, ps }) {
   return identity;
 }
 
-/* A NON-fetching read of the in-memory cache, for the Slack path.
-   Slack fires before res.json() and the resolver runs after it, so the very
-   first lead from a brand-new partner posts with the raw key. Every lead after
-   that hits this and shows the name. Peeking costs nothing; making Slack wait
-   for an HTTP round trip to a third party would cost a lead. */
-function peekPartnerIdentity(partnerKey) {
-  if (!partnerKey) return null;
-  return _psPartnerCache.get(partnerKey) || null;
-}
-
 /* ── STEP 7: hear_about_us on a partner lead ─────────────────────────
    "Partner - Jane Smith" is what an AE sees in Salesforce, and it is the only
    place the partner shows up in their workflow at all.
@@ -5547,7 +5566,8 @@ function partnerHearAboutUs({ hear_about_us, ps, identity }) {
   if (!ps || !ps.ps_partner_key) return null;
   const current = (hear_about_us || '').trim();
   if (/^referral\s*-/i.test(current)) return null;          // a human referral wins
-  const label = (identity && identity.name) || ps.ps_partner_key;
+  const label = partnerDisplayName(identity, ps.ps_partner_key);
+  if (!label) return null;
   const next = PS_HEAR_PREFIX + label;
   return next === current ? null : next;
 }
@@ -5556,15 +5576,21 @@ function partnerHearAboutUs({ hear_about_us, ps, identity }) {
    in Salesforce, where the AE is actually looking. Only ever rewrites a value
    this code wrote: a referral, or anything a human typed, is left alone. */
 async function upgradePartnerHearAboutUs({ session_id, email, ps, identity }) {
-  if (!identity || !identity.name || !ps || !ps.ps_partner_key) return;
-  const placeholder = PS_HEAR_PREFIX + ps.ps_partner_key;
-  const resolved    = PS_HEAR_PREFIX + identity.name;
-  if (placeholder === resolved) return;
+  if (!identity || !ps || !ps.ps_partner_key) return;
+  const resolved = PS_HEAR_PREFIX + partnerDisplayName(identity, ps.ps_partner_key);
+  /* Both weaker rungs of the display chain are upgradeable: a row may be
+     carrying the raw key (nothing known yet) or the email (email known, name
+     not). Only values THIS code wrote are candidates — a referral, or anything
+     a human typed, is never touched. */
+  const weaker = [PS_HEAR_PREFIX + ps.ps_partner_key];
+  if (identity.email) weaker.push(PS_HEAR_PREFIX + identity.email);
+  const candidates = weaker.filter(v => v !== resolved);
+  if (!candidates.length) return;
   try {
     const { rowCount } = await pool.query(
       `UPDATE leads SET hear_about_us = $2, updated_at = NOW()
-        WHERE session_id = $1 AND hear_about_us = $3`,
-      [session_id, resolved, placeholder]
+        WHERE session_id = $1 AND hear_about_us = ANY($3)`,
+      [session_id, resolved, candidates]
     );
     if (!rowCount) return;                                   // nothing of ours to upgrade
     console.log(`[PartnerStack] hear_about_us upgraded to "${resolved}"`);
@@ -6107,7 +6133,8 @@ app.post('/partial', async (req, res) => {
   /* Step 7. peek only — never an API call here. The identity resolver runs
      after res.json(); a brand-new partner key lands as the key and is upgraded
      in place once the name arrives. */
-  const psHear = partnerHearAboutUs({ hear_about_us, ps, identity: peekPartnerIdentity(ps.ps_partner_key) });
+  const psIdentity = await partnerIdentityNoNetwork(ps.ps_partner_key);
+  const psHear = partnerHearAboutUs({ hear_about_us, ps, identity: psIdentity });
   const hearAboutUsFinal = psHear || hear_about_us;
 
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
@@ -6225,7 +6252,8 @@ app.post('/submit', async (req, res) => {
   /* Step 7. peek only — never an API call here. The identity resolver runs
      after res.json(); a brand-new partner key lands as the key and is upgraded
      in place once the name arrives. */
-  const psHear = partnerHearAboutUs({ hear_about_us, ps, identity: peekPartnerIdentity(ps.ps_partner_key) });
+  const psIdentity = await partnerIdentityNoNetwork(ps.ps_partner_key);
+  const psHear = partnerHearAboutUs({ hear_about_us, ps, identity: psIdentity });
   const hearAboutUsFinal = psHear || hear_about_us;
 
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
@@ -6295,7 +6323,7 @@ app.post('/submit', async (req, res) => {
     syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true,...ps});
 
     if (!alreadyCompleted) {
-      slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us:hearAboutUsFinal,ps_partner_key:ps.ps_partner_key,ps_partner_name:(peekPartnerIdentity(ps.ps_partner_key)||{}).name,ps_partner_email:(peekPartnerIdentity(ps.ps_partner_key)||{}).email,ps_click_at:ps.ps_click_at,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,elv_status:elv?.status||null,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
+      slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us:hearAboutUsFinal,ps_partner_key:ps.ps_partner_key,ps_partner_name:(psIdentity||{}).name,ps_partner_email:(psIdentity||{}).email,ps_click_at:ps.ps_click_at,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,elv_status:elv?.status||null,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
 
       pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,hear_about_us:hearAboutUsFinal,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'form completed', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
 

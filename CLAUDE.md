@@ -367,13 +367,27 @@ rather than the wrong scheme. A test asserts `sendConversion` never reaches for
 the key pair.
 
 **Partner identity resolves in three layers and never blocks a lead.** Process
-memory, then any earlier lead row already carrying a resolved name for that key,
-then the v2 API. A FAILED lookup is deliberately not cached — caching it would
-pin every future lead from that partner to "unknown" for the life of the dyno.
-Slack and `hear_about_us` read a non-fetching `peekPartnerIdentity()` and fall
-back to the raw key, so the very first lead from a brand-new partner shows the
-key and is upgraded in place by `upgradePartnerHearAboutUs` once the name lands
-— in our row, on the AWS mirror, and in Salesforce where the AE is looking.
+memory, then any earlier lead row already carrying the name, then the v2 API. A
+FAILED lookup is deliberately not cached — caching it would pin every future
+lead from that partner to "unknown" for the life of the dyno.
+
+`partnerIdentityNoNetwork()` is the first two layers only and is awaited BEFORE
+Slack fires. An earlier version peeked at the in-memory Map alone, which meant
+every deploy cleared it and the first partner lead after a restart posted a raw
+hex key to Slack even though the database already had the name from an earlier
+lead. The database layer is one indexed lookup
+(`leads_ps_partner_key_resolved_idx`) and only runs when a partner key is
+present, so organic leads pay nothing. The API call is the slow part and stays
+deferred; `upgradePartnerHearAboutUs` corrects the row afterwards — in our
+table, on the AWS mirror, and in Salesforce where the AE is looking.
+
+**One display chain, three surfaces: name → email → raw key.**
+`partnerDisplayName()` is used by Slack, the dashboard and `hear_about_us` so
+the same partner cannot read three different ways. An email tells an SDR who
+they are dealing with; a hex key tells them nothing they can search for. The
+`hear_about_us` upgrade treats BOTH weaker rungs as replaceable, so a row
+showing the email is lifted to the name when it resolves — but only values this
+code wrote, never a referral or anything a human typed.
 
 **`hear_about_us`: an existing referral outranks a partner.** `gw_ref_email` is a
 named human vouching for the lead and is a stronger signal than an affiliate

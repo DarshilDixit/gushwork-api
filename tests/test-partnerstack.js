@@ -581,9 +581,10 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   {
     const fn = src.slice(src.indexOf('async function resolvePartnerIdentity'),
                          src.indexOf('async function runPartnerStackIdentity'));
-    ok('v6: memory cache is checked first', /_psPartnerCache\.has\(partnerKey\)/.test(fn));
+    ok('v6: memory cache is checked first',
+       /_psPartnerCache\.has\(partnerKey\)/.test(src));
     ok('v6: an earlier lead row is checked before the API',
-       /FROM leads[\s\S]{0,120}?ps_partner_key = \$1 AND ps_partner_name IS NOT NULL/.test(fn));
+       /FROM leads[\s\S]{0,200}?ps_partner_key = \$1/.test(src));
     /* Caching a failure would pin every future lead from this partner to
        "unknown" for the life of the process. */
     /* Caching a failure would pin every future lead from this partner to
@@ -608,11 +609,19 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   {
     const fn = src.slice(src.indexOf('function partnerHearAboutUs'), src.indexOf('async function upgradePartnerHearAboutUs'));
     const H = (new Function(
-      liftLine(src, 'const PS_HEAR_PREFIX =') + '\n' + fn + '\n return partnerHearAboutUs;'))();
+      liftLine(src, 'const PS_HEAR_PREFIX =') + '\n' +
+      lift(src, 'function partnerDisplayName(') + '\n' +
+      fn + '\n return partnerHearAboutUs;'))();
     eq('v7: sets Partner - <name> when resolved',
        H({ hear_about_us: '', ps: { ps_partner_key: 'k1' }, identity: { name: 'Jane Smith' } }), 'Partner - Jane Smith');
-    eq('v7: falls back to the raw key when unresolved',
+    /* name -> email -> raw key. An email tells an AE who the partner is; a hex
+       key tells them nothing they can search for. */
+    eq('v7: falls back to the partner EMAIL when the name is missing',
+       H({ hear_about_us: '', ps: { ps_partner_key: 'k1' }, identity: { email: 'p@x.com' } }), 'Partner - p@x.com');
+    eq('v7: falls back to the raw key when nothing is resolved',
        H({ hear_about_us: '', ps: { ps_partner_key: 'k1' }, identity: null }), 'Partner - k1');
+    eq('v7: a name outranks an email',
+       H({ hear_about_us: '', ps: { ps_partner_key: 'k1' }, identity: { name: 'Jane', email: 'p@x.com' } }), 'Partner - Jane');
     eq('v7: an existing REFERRAL wins',
        H({ hear_about_us: 'Referral - bob@x.com', ps: { ps_partner_key: 'k1' }, identity: { name: 'Jane' } }), null);
     eq('v7: referral match is case-insensitive',
@@ -627,8 +636,15 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     const fn = src.slice(src.indexOf('async function upgradePartnerHearAboutUs'), src.indexOf('/* ── STEP 5'));
     /* Only ever rewrites the placeholder this code wrote — never a referral
        and never anything a human typed. */
-    ok('v7: the upgrade only replaces our own key-shaped placeholder',
-       /WHERE session_id = \$1 AND hear_about_us = \$3/.test(fn));
+    /* Both weaker rungs are upgradeable — a row may carry the raw key (nothing
+       known) or the email (email known, name not) — but ONLY values this code
+       wrote. A referral or a human-typed value is never a candidate. */
+    ok('v7: the upgrade only replaces placeholders this code wrote',
+       /WHERE session_id = \$1 AND hear_about_us = ANY\(\$3\)/.test(fn));
+    ok('v7: the email placeholder is upgradeable to a name',
+       /if \(identity\.email\) weaker\.push\(PS_HEAR_PREFIX \+ identity\.email\)/.test(fn));
+    ok('v7: it never rewrites to the value it already has',
+       /candidates = weaker\.filter\(v => v !== resolved\)/.test(fn));
     ok('v7: the upgrade reaches Salesforce, where the AE looks',
        /findSFLeadByEmail\(email\)/.test(fn) && /hear_about_us__c: resolved/.test(fn));
     /* A targeted UPDATE, never syncToAWS. That upsert sets
@@ -653,6 +669,77 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   }
   ok('v7: Salesforce receives the final hear_about_us',
      /pushToSalesforce\(\{[^}]*hear_about_us:hearAboutUsFinal/.test(src));
+
+  /* The regression that prompted the display chain: a deploy clears the
+     in-memory Map, so the memory-only peek fell back to a raw hex key in Slack
+     even though the database already had the name from an earlier lead. */
+  {
+    const fn = src.slice(src.indexOf('async function partnerIdentityNoNetwork'),
+                         src.indexOf('async function resolvePartnerIdentity'));
+    /* EXECUTED, not text-matched. Asserting the query string is present passes
+       even when a `return null` above it makes the query unreachable — a
+       mutation survived on exactly that, which is the original bug restored. */
+    {
+      let queried = 0;
+      const fakePool = { query: async () => { queried++; return { rows: [{ ps_partner_name: 'Jane', ps_partner_email: 'p@x.com' }] }; } };
+      const L = (new Function('pool', 'console',
+        'const _psPartnerCache = new Map();\n' + fn + '\n return { partnerIdentityNoNetwork, _psPartnerCache };'
+      ))(fakePool, { warn() {}, log() {} });
+      const got = await L.partnerIdentityNoNetwork('k1');
+      eq('identity: an empty memory cache still returns the DB row',
+         got, { name: 'Jane', email: 'p@x.com' });
+      ok('identity: it actually hit the database', queried === 1, `queried ${queried}x`);
+      // Second call must be served from memory, not re-queried.
+      await L.partnerIdentityNoNetwork('k1');
+      ok('identity: the result is memoised, so repeat leads cost nothing', queried === 1, `queried ${queried}x`);
+      eq('identity: no partner key means no query at all',
+         await L.partnerIdentityNoNetwork(null), null);
+    }
+    {
+      // A partner nobody has resolved yet must come back null, not throw.
+      const emptyPool = { query: async () => ({ rows: [] }) };
+      const L = (new Function('pool', 'console',
+        'const _psPartnerCache = new Map();\n' + fn + '\n return { partnerIdentityNoNetwork };'
+      ))(emptyPool, { warn() {}, log() {} });
+      eq('identity: an unknown partner returns null', await L.partnerIdentityNoNetwork('nope'), null);
+    }
+    {
+      // A database blip must not throw into the route.
+      const badPool = { query: async () => { throw new Error('db down'); } };
+      const L = (new Function('pool', 'console',
+        'const _psPartnerCache = new Map();\n' + fn + '\n return { partnerIdentityNoNetwork };'
+      ))(badPool, { warn() {}, log() {} });
+      eq('identity: a DB failure returns null rather than throwing',
+         await L.partnerIdentityNoNetwork('k1'), null);
+    }
+    ok('identity: it makes NO network call', !/fetchPartnership/.test(fn));
+    ok('identity: it accepts a row with only an email',
+       /ps_partner_name IS NOT NULL OR ps_partner_email IS NOT NULL/.test(fn));
+    ok('identity: the memory-only peek is gone', !/function peekPartnerIdentity/.test(src));
+  }
+  for (const [route, from, to] of [
+    ['/partial', "app.post('/partial'", "app.post('/submit'"],
+    ['/submit',  "app.post('/submit'",  "app.post('/booking-confirmed'"]]) {
+    const seg = src.slice(src.indexOf(from), src.indexOf(to));
+    ok(`identity: ${route} awaits the DB-backed lookup`,
+       /await partnerIdentityNoNetwork\(ps\.ps_partner_key\)/.test(seg));
+  }
+  ok('identity: Slack reuses the already-fetched identity, no second lookup',
+     /ps_partner_name:\(psIdentity\|\|\{\}\)\.name/.test(src));
+
+  /* One chain, three surfaces. If they drift, the same partner reads three
+     different ways across Slack, the dashboard and Salesforce. */
+  {
+    const D = (new Function(lift(src, 'function partnerDisplayName(') + '\n return partnerDisplayName;'))();
+    eq('chain: name wins',        D({ name: 'Jane', email: 'p@x.com' }, 'k1'), 'Jane');
+    eq('chain: email is next',    D({ email: 'p@x.com' }, 'k1'),               'p@x.com');
+    eq('chain: key is the floor', D(null, 'k1'),                               'k1');
+    eq('chain: nothing at all',   D(null, null),                               null);
+    eq('chain: empty name falls through to email', D({ name: '', email: 'p@x.com' }, 'k1'), 'p@x.com');
+  }
+  ok('chain: hear_about_us uses it', /const label = partnerDisplayName\(identity, ps\.ps_partner_key\)/.test(src));
+  ok('chain: Slack has an email rung', /d\.ps_partner_email\s*\n?\s*\? `\*\$\{d\.ps_partner_email\}\*/.test(src));
+  ok('chain: the dashboard has an email rung', /l\.ps_partner_email\?\(esc\(l\.ps_partner_email\)/.test(src));
 
   /* Step 8. */
   {
@@ -707,8 +794,10 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     eq('v9: exactly one click is marked WON', (html.match(/WON/g) || []).length, 1);
     const lastIdx = html.lastIndexOf('kA'), wonIdx = html.indexOf('WON');
     ok('v9: the WON badge is on the LAST click, not the first', wonIdx > lastIdx);
-    ok('v9: an unresolved partner shows the key and says so',
-       F.psPanel({ ps_partner_key: 'k9' }).includes('name not resolved'));
+    ok('v9: a partner with only an email shows the email, not the key',
+       F.psPanel({ ps_partner_key: 'k9', ps_partner_email: 'p@x.com' }).includes('p@x.com'));
+    ok('v9: a fully unresolved partner shows the key and says so',
+       F.psPanel({ ps_partner_key: 'k9' }).includes('partner not resolved'));
     ok('v9: a stringified history is still parsed',
        F.psPanel({ ps_partner_key: 'k1', ps_click_history: JSON.stringify([{ xid: 'a', pk: 'b', at: 'c' }]) }).includes('WON'));
     ok('v9: a corrupt history cannot break the panel',
