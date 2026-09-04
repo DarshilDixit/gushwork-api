@@ -373,6 +373,56 @@ It also flags a record that comes back `test: true`, because a production
 integration writing test records pays nobody and looks completely healthy
 otherwise.
 
+## The recurring bug: a completeness signal computed and dropped
+
+This has now happened four times in one integration, and every instance had the
+same shape — **we had evidence the answer was incomplete and rendered it as
+fact**:
+
+1. The sfopp log joined on **domain** when it is keyed by `prospect_email`.
+   Zero rows would have rendered as "no sfopp errors anywhere".
+2. The gap card's `0 no Opportunity` rendered identically whether Salesforce
+   came back clean or was **never asked**.
+3. `already_opp` rows with **no `sf_opportunity_id`** (124 of 391) look like
+   every other row. *Still open — to be surfaced with the Salesforce view.*
+4. `findOpportunityDomains` returned `truncated`, it was **true on every call
+   since the first commit**, and nothing ever read it. 5,898 Opportunities
+   existed and we read 1,252.
+
+**The rule now: any completeness or confidence signal must reach the UI or fail
+loudly. It may never be silently dropped.** Concretely —
+
+- An incomplete Opportunity read returns `ok: false` and writes nothing, rather
+  than handing back a partial list. Returning `ok: true` with 40% of the records
+  reproduces the bug one page later.
+- The tab shows what the last read actually saw
+  (`read 5,900/5,900 opportunities · 6 pages`), red when it failed.
+- The domain list cap is a named constant and hitting it renders
+  `capped at 500 domains`, so a page never reads as the population.
+
+**A `LIMIT` can defeat the guard that is meant to catch it.** With
+`LIMIT 2000`, Salesforce reports `totalSize: 2000`, so `records.length ===
+totalSize` is satisfied by a truncated result. The completeness check passed on
+2,000 of 5,898. The SOQL now carries no `LIMIT` at all; pagination plus
+`SF_MAX_PAGES` is the bound.
+
+## Small datasets catch bugs that large ones hide
+
+This was found because **`hello.com` contradicted itself at n=4**: the tab said
+`no_opportunity` for a domain we had qualified an hour earlier, which requires
+an Opportunity to exist. With four domains that contradiction is unmissable.
+
+At 400 domains, `no_opportunity` on most of them would have looked entirely
+plausible — a young partner programme where few companies have reached an
+Opportunity yet. The number would have been wrong by 79% and nobody would have
+had a reason to doubt it.
+
+So: **verify against the smallest real dataset available, not the largest.** A
+handful of rows you can check by hand beats a plausible aggregate. The same
+logic applies to the dry-run habit below — every bug caught tonight by running
+a statement against real data was caught because the result set was small enough
+to read.
+
 ## A control-flow trap worth knowing
 
 `refreshPartnerDomainSfState` was chained onto the end of

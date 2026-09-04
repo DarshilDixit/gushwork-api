@@ -345,7 +345,9 @@ async function findQualifiedDemoOpportunities(limit = 200) {
    are opposite conclusions and collapsing them would report a broken
    integration as a clean bill of health.
 -------------------------------------------------------- */
-async function findOpportunityDomains({ sinceDays = 180, limit = 2000 } = {}) {
+const SF_MAX_PAGES = 25;   // 25 x ~1,250 = ~31k Opportunities before we refuse
+
+async function findOpportunityDomains({ sinceDays = 180 } = {}) {
   try {
     const { accessToken, instanceUrl } = await getSalesforceToken();
     const days = parseInt(sinceDays, 10) || 180;
@@ -355,19 +357,22 @@ async function findOpportunityDomains({ sinceDays = 180, limit = 2000 } = {}) {
          cost one call between them, not two. */
       `SELECT Id, Account.Website, Qualified_Demo__c, ` +
       `(SELECT Contact.Email FROM OpportunityContactRoles ORDER BY IsPrimary DESC LIMIT 1) ` +
-      `FROM Opportunity WHERE CreatedDate = LAST_N_DAYS:${days} ` +
-      `LIMIT ${parseInt(limit, 10) || 2000}`;
-    const res = await fetch(
-      `${instanceUrl}/services/data/v60.0/query/?q=${encodeURIComponent(soql)}`,
-      { method: 'GET', headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-    if (!res.ok) {
-      const err = await res.text();
-      console.warn('[SF] Opportunity-domain query failed:', err.slice(0, 300));
-      return { ok: false, reason: `http_${res.status}`, records: [] };
-    }
-    const data = await res.json();
-    const records = (data.records || []).map((r) => {
+      `FROM Opportunity WHERE CreatedDate = LAST_N_DAYS:${days}`;
+    /* NO `LIMIT`. A LIMIT caps totalSize as well as the rows, so
+       records.length === totalSize is satisfied by a truncated result and the
+       completeness check below passes on an incomplete set — the LIMIT defeats
+       the very guard meant to catch it. Measured: with LIMIT 2000 the API
+       reported totalSize 2000 and we "completed" at 2,000 of 5,898, with the
+       one ticked Opportunity we cared about outside the set. Pagination plus
+       SF_MAX_PAGES is the bound. */
+    /* PAGINATED. Salesforce returns ~1,250 records per page regardless of the
+       LIMIT, and this used to take the first page and stop: 5,898 Opportunities
+       existed and we read 1,252 of them — 21%. Every domain among the other
+       79% reported "no Opportunity", which is a clean-looking wrong answer, and
+       it is how a domain we had just qualified came back as having none.
+
+       nextRecordsUrl is the mechanism Salesforce provides for this. */
+    const map = (data) => (data.records || []).map((r) => {
       const roles = r.OpportunityContactRoles && r.OpportunityContactRoles.records;
       const contactEmail = roles && roles[0] && roles[0].Contact && roles[0].Contact.Email;
       return {
@@ -377,7 +382,39 @@ async function findOpportunityDomains({ sinceDays = 180, limit = 2000 } = {}) {
         qualified: r.Qualified_Demo__c === true,
       };
     });
-    return { ok: true, records, truncated: data.totalSize > records.length };
+
+    let url = `${instanceUrl}/services/data/v60.0/query/?q=${encodeURIComponent(soql)}`;
+    let records = [];
+    let totalSize = null;
+    let pages = 0;
+    while (url && pages < SF_MAX_PAGES) {
+      const res = await fetch(url, { method: 'GET', headers: { Authorization: `Bearer ${accessToken}` } });
+      if (!res.ok) {
+        const err = await res.text();
+        console.warn('[SF] Opportunity-domain query failed:', err.slice(0, 300));
+        return { ok: false, reason: `http_${res.status}`, records: [] };
+      }
+      const data = await res.json();
+      if (totalSize === null) totalSize = data.totalSize;
+      records = records.concat(map(data));
+      pages++;
+      url = data.done === false && data.nextRecordsUrl ? instanceUrl + data.nextRecordsUrl : null;
+    }
+
+    /* FAIL LOUDLY rather than return a partial set. An incomplete list read as
+       complete is what caused the bug this pagination fixes; handing back
+       ok:true with 40% of the records would reproduce it one page later. */
+    if (url) {
+      console.warn(`[SF] Opportunity pagination hit the page cap (${SF_MAX_PAGES}) with ${records.length} of ${totalSize} — refusing to return a partial set`);
+      return { ok: false, reason: 'pagination_incomplete', records: [], totalSize, fetched: records.length };
+    }
+    const incomplete = totalSize !== null && records.length < totalSize;
+    if (incomplete) {
+      console.warn(`[SF] Opportunity query returned ${records.length} of ${totalSize} — refusing to return a partial set`);
+      return { ok: false, reason: 'incomplete', records: [], totalSize, fetched: records.length };
+    }
+    console.log(`[SF] Opportunity domains: ${records.length} record(s) over ${pages} page(s)`);
+    return { ok: true, records, pages, totalSize, truncated: false };
   } catch (err) {
     console.warn('[SF] Opportunity-domain query error:', err.message);
     return { ok: false, reason: 'error', error: err.message, records: [] };
