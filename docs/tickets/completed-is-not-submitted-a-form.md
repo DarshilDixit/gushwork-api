@@ -105,13 +105,9 @@ Two problems in one line:
    a mid-June start. Shipped **separately from any run**: the six leads it was
    written for were deliberately not backfilled, and
    `apollo-enrichment-not-reaching-salesforce.md` records why.
-3. **Investigate the 14 drift rows** and re-sync them, so the dialer stops
-   seeing completers as drop-offs. **This is the live half of this ticket.**
-   Everything else here is correctness and clarity — the stage ladder is right,
-   the cron does not read the flag, the bad Slack label is unreachable. The
-   mirror drift is the only part that is outward-facing and happening now,
-   because the sdr-calling dialer reads `gw_form_leads`. Under investigation as
-   of 5 Sept.
+3. **The 14 drift rows are residue from a bug that was already fixed on
+   18 July 2026** — diagnosed 5 Sept, see the section below. They need a
+   one-off backfill, not a code fix. Nothing is drifting today.
 4. **Correct CLAUDE.md's caveat** about whether the safety-net branches set
    `submitted_at`. They do not always.
 
@@ -124,3 +120,99 @@ Two problems in one line:
 - The lesson from the same evening, in `../partnerstack.md`: a denominator is a
   population, not whatever a `LIMIT` returned. This ticket is its sibling — a
   *predicate* is a definition, not the nearest available column.
+
+---
+
+## The mirror drift: diagnosed 5 Sept 2026
+
+**Cause: a `COALESCE` against a value that can never be NULL, which makes it a
+no-op. Already fixed; the 14 rows are residue.**
+
+Before commit `fb09128` (18 July 2026, 16:30 IST) the `syncToAWS` conflict
+clause read:
+
+```sql
+completed = COALESCE(EXCLUDED.completed, gw_form_leads.completed)
+```
+
+and the value bound into it is, at `index.js:385`:
+
+```js
+data.completed || false,          // completed      — NEVER null
+data.completed ? new Date() : null,  // submitted_at — null on a partial
+```
+
+`EXCLUDED.completed` is therefore always `true` or `false` and never NULL, so
+the `COALESCE` never falls through to the stored value. **The incoming value
+always won.** A `/partial` sync landing after a `/submit` sync — a visitor who
+submits and then goes back and edits step 1 — wrote `completed = false` over a
+completed row.
+
+`submitted_at` survived the same statement because its bound value is
+*genuinely* null on a partial, so its `COALESCE` worked exactly as intended.
+**That asymmetry is the drift signature**: `submitted_at` set, `completed`
+false, in a row where both are written from the same field.
+
+It was fixed on 18 July by replacing the `COALESCE` with an OR, which can only
+ever turn the flag on:
+
+```sql
+completed = (COALESCE(gw_form_leads.completed, false) OR COALESCE(EXCLUDED.completed, false))
+```
+
+### The evidence
+
+| | |
+|---|---|
+| Drift rows created **before** the 18 Jul fix | **14 of 14** |
+| Drift rows created **after** it | **0** |
+| Submitted rows created since the fix, for scale | 1,315 |
+| Oldest / newest drift row | 9 Apr / 13 Jul 2026 |
+
+So it was **not** a missed sync and **not** out-of-order writes in the sense of
+a lost message. The write arrived and did the wrong thing, deterministically,
+and the ordering that triggered it (a partial after a submit) is ordinary
+visitor behaviour.
+
+### The sibling check — every never-NULL bind in the same statement
+
+Exactly four columns bind a value that can never be NULL. The audit:
+
+| Column | Bound value | Conflict clause | Verdict |
+|---|---|---|---|
+| `completed` | `\|\| false` | `(old OR new)` | **fixed** 18 Jul; residue above |
+| `loops_sent` | `\|\| false` | `COALESCE(EXCLUDED, old)` | **same latent bug, not firing** |
+| `disqualified` | `?? false` | `EXCLUDED.disqualified` | known; CLAUDE.md documents it |
+| `step_reached` | `\|\| 1` | `GREATEST(...)` | safe, monotonic |
+
+Every other column binds `|| null`, so its `COALESCE` behaves as written.
+
+**`loops_sent` carries the identical defect and is not currently firing.** Its
+only writer is a *targeted* `UPDATE gw_form_leads SET loops_sent = true` in the
+recovery cron (`index.js` ~8042/8057/8101) — correct per CLAUDE.md's rule for a
+late-arriving single field — and it runs at least two hours after the form
+session, by which point nothing calls `syncToAWS` for that session again.
+Verified empirically: Railway reports 79 follow-ups processed in the last 7
+days and the mirror holds exactly 79. It would bite the moment any path ran a
+full `syncToAWS` for a session after Loops had fired. Worth fixing to an OR
+while someone is in there, but it is not an incident.
+
+### A separate trap found on the way, worth knowing
+
+**`gw_form_leads.submitted_at` is not the lead's submission time.** It is
+`new Date()` at sync time, written only when `data.completed` is truthy. Its
+*presence* is a reliable "this row was synced while completed", which is what
+this ticket and the held-vs-sent join use it for. Its *value* is a sync
+timestamp, and any analysis treating it as when the form was submitted is
+reading the wrong clock. Railway's `leads.submitted_at` is the real one.
+
+### Recommended, not done
+
+- **Backfill the 14 rows** — a targeted `UPDATE gw_form_leads SET completed =
+  true` for those session_ids, which is safe precisely because the flag is
+  monotonic. Deliberately left undone pending a decision: it is a write to the
+  mirror the dialer reads.
+- **Change `loops_sent` to the same OR form**, so the latent version cannot
+  wake up.
+- **Note the `submitted_at` semantics** in CLAUDE.md beside the existing mirror
+  caveats.
