@@ -350,7 +350,10 @@ async function findOpportunityDomains({ sinceDays = 180, limit = 2000 } = {}) {
     const { accessToken, instanceUrl } = await getSalesforceToken();
     const days = parseInt(sinceDays, 10) || 180;
     const soql =
-      `SELECT Id, Account.Website, ` +
+      /* Qualified_Demo__c comes back on the SAME query that establishes
+         existence, so "does an Opportunity exist" and "has the AE ticked it"
+         cost one call between them, not two. */
+      `SELECT Id, Account.Website, Qualified_Demo__c, ` +
       `(SELECT Contact.Email FROM OpportunityContactRoles ORDER BY IsPrimary DESC LIMIT 1) ` +
       `FROM Opportunity WHERE CreatedDate = LAST_N_DAYS:${days} ` +
       `LIMIT ${parseInt(limit, 10) || 2000}`;
@@ -368,8 +371,10 @@ async function findOpportunityDomains({ sinceDays = 180, limit = 2000 } = {}) {
       const roles = r.OpportunityContactRoles && r.OpportunityContactRoles.records;
       const contactEmail = roles && roles[0] && roles[0].Contact && roles[0].Contact.Email;
       return {
+        id: r.Id,
         website: (r.Account && r.Account.Website) || null,
         contactEmail: contactEmail || null,
+        qualified: r.Qualified_Demo__c === true,
       };
     });
     return { ok: true, records, truncated: data.totalSize > records.length };

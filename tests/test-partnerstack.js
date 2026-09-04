@@ -1065,6 +1065,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
       const calls = [];
       const fakePool = { query: async (q) => {
         calls.push(q);
+        if (q.includes('partner_domain_sf_state')) return { rows: [{ customer_key: 'a.com', sf_state: 'ticked' }] };
         return q.includes('ps_customer_key IS NULL')
           ? { rows: [{ leads: '7' }] }
           : { rows: [
@@ -1076,6 +1077,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
       const L = (new Function('pool', 'console',
         liftLine(src, 'const PS_LADDER_FAILED =') + '\n' +
         liftLine(src, 'const PS_LADDER_WINDOW_D =') + '\n' +
+        liftLine(src, 'const PS_SF_STATES =') + '\n' +
         liftTemplate(src, 'const PS_LADDER_SQL =') + '\n' +
         lift(src, 'async function partnerLifecycle(') +
         '\n return partnerLifecycle;'))(fakePool, { warn() {}, log() {} });
@@ -1176,6 +1178,99 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        new RegExp(`recordPartnerStackSkip\\(session_id, '${r}'\\)`).test(src));
   ok('skipA: a phantom conversion records a failure, not a skip',
      /reason: 'phantom_200'/.test(src));
+
+  /* ── Batch B: gap card derived from the ladder, per-domain SF state ── */
+
+  /* The live inconsistency this fixes: Overview said "2 no conversion" while
+     the Partners tab said one failure and one correct skip — two independent
+     queries telling two stories about the same four domains. */
+  {
+    const fn = src.slice(src.indexOf('async function partnerRevenueGaps'),
+                         src.indexOf("app.get('/monitor/partner-gaps'"));
+    ok('gapB: check A reads the ladder rather than its own query',
+       /const lifecycle = await partnerLifecycle\(\)/.test(fn));
+    ok('gapB: it no longer runs a second bespoke missed-conversion query',
+       !/HAVING COUNT\(ps_signup_sent_at\) = 0/.test(fn));
+    /* A skip is the system working. Counting it meant gushwork.ai sat in the
+       alert forever and could never clear. */
+    /* Scoped to the `missed` filter itself. Asserting against the whole
+       function passed even with 'skipped' added back INTO the gap list,
+       because skippedDomains legitimately mentions it just below — a mutation
+       survived on exactly that, restoring the live inconsistency. */
+    {
+      const missedFilter = fn.slice(fn.indexOf('const missed ='), fn.indexOf('const skippedDomains'));
+      ok('gapB: a SKIPPED domain is not counted as a gap',
+         missedFilter.length > 40 && !/skipped/.test(missedFilter), missedFilter.slice(0, 160));
+      ok('gapB: skipped domains are collected separately', /skippedDomains = lifecycle\.domains\.filter/.test(fn));
+    }
+    ok('gapB: a failed conversion IS a gap', /d\.state === 'conversion_failed'/.test(fn));
+    ok('gapB: never-attempted counts only past the grace window',
+       /d\.state === 'conversion_pending'[\s\S]{0,200}?graceMs/.test(fn));
+    ok('gapB: skips are still reported, separately from gaps', /skipped: skippedDomains\.map/.test(fn));
+    /* "Nothing was eligible to check" must not render as "checked and clean". */
+    ok('gapB: no-candidates is flagged checked:false',
+       /checked: false, reason: 'no_candidates'/.test(fn));
+    ok('gapB: a real check is flagged checked:true with the candidate count',
+       /checked: true, opportunityDomains: have\.size, candidates:/.test(fn));
+  }
+  ok('gapB: the UI distinguishes unavailable / none-eligible / checked',
+     /oc\.checked===false\?"none eligible to check yet"/.test(src) &&
+     /Opportunity check unavailable/.test(src));
+  /* "step 10" meant nothing to anyone but the person who wrote it. */
+  ok('gapB: the label names the money, not the step number',
+     /the \$50 can never fire either/.test(src) && !/step 10 can never fire/.test(src));
+
+  /* Per-domain Salesforce state. */
+  ok('sfB: the state table is declared', /CREATE TABLE IF NOT EXISTS partner_domain_sf_state/.test(dbjs));
+  ok('sfB: keyed by domain', /customer_key      TEXT PRIMARY KEY/.test(dbjs));
+  ok('sfB: table init cannot kill boot',
+     /Partner SF-state table init FAILED \(non-fatal\)/.test(dbjs));
+  {
+    const fn = src.slice(src.indexOf('async function refreshPartnerDomainSfState'),
+                         src.indexOf('function startPartnerStackQualificationPoll'));
+    eq('sfB: four states', /const PS_SF_STATES = \[([^\]]+)\]/.exec(src)[1].split(',').length, 4);
+    ok('sfB: refreshed for ALL partner domains, not just qualify candidates',
+       /FROM leads\s*\n\s*WHERE ps_xid IS NOT NULL AND ps_customer_key IS NOT NULL/.test(fn) &&
+       !/ps_signup_sent_at IS NOT NULL/.test(fn));
+    /* Qualified_Demo__c rides along on the existence query, so ticked vs
+       unticked costs no extra Salesforce call. */
+    ok('sfB: ticked state comes from the same Opportunity query',
+       /Qualified_Demo__c/.test(sfmod) && /qualified: r\.Qualified_Demo__c === true/.test(sfmod));
+    ok('sfB: a ticked Opportunity wins over an unticked one for the same domain',
+       /if \(!prev \|\| \(r\.qualified && !prev\.qualified\)\)/.test(fn));
+    /* sf_lead_conversion_log is keyed by prospect_email, NOT by domain —
+       assuming a domain key would silently match nothing. */
+    ok('sfB: the sfopp log is joined on EMAIL, not on domain',
+       /LOWER\(prospect_email\) AS email/.test(fn) && /errorsByEmail/.test(fn));
+    ok('sfB: it costs no Salesforce call — the log is on the warehouse',
+       /awsPool\.query\([\s\S]{0,120}?gist\.sf_lead_conversion_log/.test(fn));
+    ok('sfB: the warehouse read is bounded by a timeout',
+       /withTimeout\(awsPool\.query\([\s\S]{0,400}?PS_CUSTOMER_QUERY_TIMEOUT_MS/.test(fn));
+    /* A stale row saying what we last verified beats one overwritten with a
+       guess during an outage. */
+    ok('sfB: an unavailable Salesforce leaves the table untouched',
+       /if \(!sf\.ok\)[\s\S]{0,300}?return \{ ok: false, reason: sf\.reason \}/.test(fn));
+    ok('sfB: a missing sfopp log degrades to no_opportunity, it does not throw',
+       /Could not read sf_lead_conversion_log/.test(fn));
+  }
+  /* The refresh must not be able to stop actions firing. */
+  ok('sfB: the refresh runs AFTER the qualification work, outside its try',
+     /_psQualifyRunning = false;\s*\n\s*\}[\s\S]{0,300}?await refreshPartnerDomainSfState\(\)/.test(src));
+  ok('sfB: its failure is non-blocking',
+     /refreshPartnerDomainSfState\(\)\s*\n\s*\.catch/.test(src));
+  ok('sfB: the lifecycle reads the table but never recomputes it',
+     /FROM partner_domain_sf_state/.test(src));
+  ok('sfB: a missing SF row does not crash the join', /\.catch\(\(\) => \(\{ rows: \[\] \}\)\)/.test(src));
+  /* "Waiting on an AE" is the daily action row. */
+  ok('sfB: waiting-on-an-AE is its own card', /id="p-sfwait"/.test(src));
+  /* Pinned to the CHIP, not to the phrase: "not checked yet" also appears in
+     the tooltip and the empty-state fallback, so a loose match passed with the
+     chip itself deleted. */
+  ok('sfB: a domain not yet checked says so, rather than reading as clean',
+     /\+unchecked\+" not checked yet<\/span>"/.test(src));
+  ok('sfB: unchecked is derived from the domain total minus checked states',
+     /var unchecked=\(lc\.totalDomains\|\|0\)-Object\.values\(sf\)\.reduce/.test(src));
+  ok('sfB: create_errored renders red', /k==="create_errored"\?" bad":""/.test(src));
 
   /* Step 8. */
   {
@@ -1325,20 +1420,19 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     const fn = src.slice(src.indexOf('async function partnerRevenueGaps'),
                          src.indexOf("app.get('/monitor/partner-gaps'"));
 
-    /* Check A is keyed by DOMAIN, not by lead. The conversion fires once per
-       domain ever, so the SECOND lead from a domain legitimately has a null
-       ps_signup_sent_at — per-lead this would flag every repeat visitor. */
-    ok('gaps A: grouped by customer key, not by lead',
-       /GROUP BY ps_customer_key[\s\S]{0,120}?HAVING COUNT\(ps_signup_sent_at\) = 0/.test(fn));
-    /* Scoped to check A's own query. Asserting against the whole function let
-       check B's identical clause satisfy a guard deleted from A — a mutation
-       survived on exactly that. */
-    const qA = fn.slice(fn.indexOf('const missedConversions'), fn.indexOf('const qualifyCandidates'));
-    ok('gaps A: only partner leads', /ps_xid IS NOT NULL/.test(qA));
-    ok('gaps A: excludes disqualified', /disqualified IS NOT TRUE/.test(qA));
+    /* Check A no longer has a query of its own — batch B replaced it with a
+       read of the ladder, because two independent queries told two different
+       stories about the same four domains. Its properties are now inherited
+       from the ladder and asserted under "gapB:" below. What remains here is
+       that the bespoke query is genuinely GONE, not merely bypassed. */
+    ok('gaps A: the bespoke missed-conversion query is gone',
+       !/HAVING COUNT\(ps_signup_sent_at\) = 0/.test(fn));
+    ok('gaps A: check A is derived from the ladder',
+       /const lifecycle = await partnerLifecycle\(\)/.test(fn));
     /* IS NOT TRUE, never = false — a null flag has to land somewhere. */
-    ok('gaps A: uses IS NOT TRUE, not = false', !/disqualified = false/.test(qA));
-    ok('gaps A: has a grace period', /INTERVAL '\$\{PS_GAP_CONVERSION_GRACE_H\} hours'/.test(fn));
+    ok('gaps A: uses IS NOT TRUE, not = false', !/disqualified = false/.test(fn));
+    ok('gaps A: the grace window still applies to never-attempted domains',
+       /PS_GAP_CONVERSION_GRACE_H \* 3600000/.test(fn));
 
     /* start_time is TEXT. A WHERE clause does not guarantee the regex runs
        before the cast, so one malformed row would take the query down. */
@@ -1389,9 +1483,17 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     ok('gaps: runHealthChecks does not call the gap check',
        hcFn.length > 200 && !/partnerRevenueGaps/.test(hcFn), `slice ${hcFn.length}`);
   }
-  ok('gaps: the Salesforce query asks for ANY Opportunity, not qualified ones',
-     /function findOpportunityDomains[\s\S]{0,900}?CreatedDate = LAST_N_DAYS/.test(sfmod) &&
-     !/findOpportunityDomains[\s\S]{0,900}?Qualified_Demo__c/.test(sfmod));
+  /* It must SELECT Qualified_Demo__c (batch B needs ticked vs unticked) but
+     must never FILTER on it — filtering would hide every domain whose
+     Opportunity exists and has not been ticked, which is the row worth acting
+     on daily. */
+  {
+    const fn = sfmod.slice(sfmod.indexOf('async function findOpportunityDomains'), sfmod.indexOf('module.exports'));
+    ok('gaps: the Salesforce query asks for ANY Opportunity, not just qualified ones',
+       /CreatedDate = LAST_N_DAYS/.test(fn) && !/WHERE[^`]*Qualified_Demo__c/.test(fn));
+    ok('gaps: it selects the ticked flag so state can be derived',
+       /SELECT Id, Account\.Website, Qualified_Demo__c/.test(fn));
+  }
   ok('gaps: the SF helper distinguishes "none" from "could not ask"',
      /return \{ ok: false, reason: `http_\$\{res\.status\}`, records: \[\] \}/.test(sfmod) &&
      /return \{ ok: true, records/.test(sfmod));
