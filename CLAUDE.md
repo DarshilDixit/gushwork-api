@@ -388,6 +388,35 @@ object passes `disqualified` as false and CLEARS a real disqualification on the
 mirror the dialer reads. `syncBookingToAWS`, `syncPartnerIdentityToAWS` and
 `syncHearAboutUsToAWS` all exist for this reason. A test catches the regression.
 
+**Partner revenue gaps is a WORK QUEUE, not a health check.** `/monitor/partner-gaps`
+finds the two ways a partner referral silently never pays: (A) no conversion was
+ever sent for that domain, and (B) the demo happened and no Opportunity exists
+for an AE to tick. It is deliberately NOT in System Health — a green badge there
+means "verified working, just now", and a lead waiting on an AE is normal
+latency, so wiring it in would leave the dashboard permanently amber and train
+people to ignore it. A test asserts `runHealthChecks` never calls it.
+
+The tempting version of this check — "booked but no `ps_qualified_sent_at`" —
+is wrong and was rejected. It conflates three states and only one is a bug: no
+Opportunity (broken), Opportunity awaiting an AE (normal), and Opportunity the
+AE deliberately did not tick (correct, and PERMANENT). The third never clears,
+so the queue fills with correct non-payments and the real failures become
+invisible inside it.
+
+Check A is keyed by DOMAIN, not by lead: the conversion fires once per domain
+ever, so the second lead from a domain legitimately has a null
+`ps_signup_sent_at`. Only a domain where NO row was ever sent is a miss.
+
+`leads.start_time` is TEXT, so every cast to timestamptz there is wrapped in a
+`CASE WHEN start_time ~ '^[0-9]{4}...'`. A bare cast in a WHERE clause is not
+safe: Postgres does not guarantee the regex runs first, and one malformed row
+takes the whole query down.
+
+When Salesforce cannot be reached, check B reports **unavailable**, never zero.
+The card shows `N+?` rather than a total. "We could not check" is not "we
+checked and it is fine" — the same rule the lead-path checkers follow, pointed
+the other way.
+
 **Step 10 is a POLLER, not a Salesforce Flow callout.** A Flow that calls out
 fails inside Salesforce where nobody on this team would see it, and it couples an
 AE ticking `Qualified_Demo__c` to our service being up at that instant. Polling

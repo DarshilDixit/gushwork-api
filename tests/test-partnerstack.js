@@ -767,6 +767,128 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   ok('v10: the action payload is customer_key + type + value',
      /const payload = \{ customer_key, type, value: value === undefined \? 1 : value \};/.test(psmod));
 
+  /* ============================================================
+     4d. PARTNER REVENUE GAPS — the two money-leak checks
+     ============================================================ */
+  {
+    const fn = src.slice(src.indexOf('async function partnerRevenueGaps'),
+                         src.indexOf("app.get('/monitor/partner-gaps'"));
+
+    /* Check A is keyed by DOMAIN, not by lead. The conversion fires once per
+       domain ever, so the SECOND lead from a domain legitimately has a null
+       ps_signup_sent_at — per-lead this would flag every repeat visitor. */
+    ok('gaps A: grouped by customer key, not by lead',
+       /GROUP BY ps_customer_key[\s\S]{0,120}?HAVING COUNT\(ps_signup_sent_at\) = 0/.test(fn));
+    /* Scoped to check A's own query. Asserting against the whole function let
+       check B's identical clause satisfy a guard deleted from A — a mutation
+       survived on exactly that. */
+    const qA = fn.slice(fn.indexOf('const missedConversions'), fn.indexOf('const qualifyCandidates'));
+    ok('gaps A: only partner leads', /ps_xid IS NOT NULL/.test(qA));
+    ok('gaps A: excludes disqualified', /disqualified IS NOT TRUE/.test(qA));
+    /* IS NOT TRUE, never = false — a null flag has to land somewhere. */
+    ok('gaps A: uses IS NOT TRUE, not = false', !/disqualified = false/.test(qA));
+    ok('gaps A: has a grace period', /INTERVAL '\$\{PS_GAP_CONVERSION_GRACE_H\} hours'/.test(fn));
+
+    /* start_time is TEXT. A WHERE clause does not guarantee the regex runs
+       before the cast, so one malformed row would take the query down. */
+    /* EVERY cast, not merely some: one unguarded start_time::timestamptz is
+       enough to take the whole query down on a single malformed row, and a
+       WHERE clause does not guarantee the regex runs first. */
+    {
+      const casts  = (fn.match(/start_time::timestamptz/g) || []).length;
+      const guarded = (fn.match(/CASE WHEN start_time ~ '\^\[0-9\]\{4\}[^]*?THEN start_time::timestamptz/g) || []).length;
+      ok('gaps B: every start_time cast is guarded by CASE', casts > 0 && casts === guarded,
+         `${casts} cast(s), ${guarded} guarded`);
+    }
+    ok('gaps B: keys off the meeting time plus a 3-day grace',
+       /const PS_GAP_QUALIFY_GRACE_D    = 3;/.test(src) &&
+       /INTERVAL '\$\{PS_GAP_QUALIFY_GRACE_D\} days'/.test(fn));
+    ok('gaps B: only leads that actually booked', /booking_uid IS NOT NULL/.test(fn));
+
+    /* The whole point of B: "no Opportunity exists", not "not yet qualified". */
+    ok('gaps B: filters candidates against real Opportunity domains',
+       /missingOpportunity = qualifyCandidates\.rows\.filter\(r => !have\.has\(r\.customer_key\)\)/.test(fn));
+    ok('gaps B: domains normalised with the same helper as everything else',
+       /partnerStackCustomerKey\(r\.website\) \|\| partnerStackCustomerKey\(r\.contactEmail\)/.test(fn));
+
+    /* "We could not check" is not "we checked and it is fine". */
+    ok('gaps B: an unreachable Salesforce is reported, not counted as zero',
+       /opportunityCheck = \{ ok: false, reason: sf\.reason \|\| 'unavailable' \}/.test(fn));
+    ok('gaps B: the unreachable branch does not populate missingOpportunity',
+       !/sf\.ok[\s\S]{0,400}?else[\s\S]{0,200}?missingOpportunity =/.test(fn));
+    ok('gaps: leads merely awaiting an AE are counted separately, not flagged',
+       /awaitingQualification: qualifyCandidates\.rows\.length/.test(fn));
+    ok('gaps: cached, because check B crosses the network',
+       /_psGapCache/.test(fn) && /PS_GAP_CACHE_TTL_MS/.test(src));
+  }
+  ok('gaps: exposed on its own route', /app\.get\('\/monitor\/partner-gaps'/.test(src));
+  ok('gaps: the route is token-guarded like the rest of /monitor',
+     /partner-gaps'[\s\S]{0,200}?req\.query\.token !== token/.test(src));
+  /* Deliberately NOT a health check: a lead waiting on an AE is normal
+     latency, and System Health going amber for it would train people to
+     ignore it. */
+  /* Deliberately not a health check: a green badge there means "verified
+     working, just now", and a lead waiting on an AE is normal latency. Wiring
+     this in would leave System Health permanently amber and train people to
+     ignore it. The property that matters is that runHealthChecks never calls
+     it — not merely that no id happens to be spelled "partner". */
+  {
+    const hcFn = src.slice(src.indexOf('async function runHealthChecks'),
+                           src.indexOf("app.get('/monitor/health'"));
+    ok('gaps: runHealthChecks does not call the gap check',
+       hcFn.length > 200 && !/partnerRevenueGaps/.test(hcFn), `slice ${hcFn.length}`);
+  }
+  ok('gaps: the Salesforce query asks for ANY Opportunity, not qualified ones',
+     /function findOpportunityDomains[\s\S]{0,900}?CreatedDate = LAST_N_DAYS/.test(sfmod) &&
+     !/findOpportunityDomains[\s\S]{0,900}?Qualified_Demo__c/.test(sfmod));
+  ok('gaps: the SF helper distinguishes "none" from "could not ask"',
+     /return \{ ok: false, reason: `http_\$\{res\.status\}`, records: \[\] \}/.test(sfmod) &&
+     /return \{ ok: true, records/.test(sfmod));
+
+  /* The card and list are real client JS; lift and run them. */
+  {
+    const i = src.indexOf("'async function loadPartnerGaps()");
+    const j = src.indexOf("'function debounce()");
+    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const els = {};
+    const doc = { getElementById: (id) => (els[id] = els[id] || { textContent: '', innerHTML: '', style: {} }) };
+    const mk = (payload) => (new Function('API', 'TP', 'esc', 'et', 'fetch', 'AbortSignal', 'document',
+      client + '; return loadPartnerGaps;'))(
+      '', '', (x) => String(x == null ? '' : x), (x) => String(x == null ? '' : x),
+      async () => ({ ok: true, json: async () => payload }),
+      { timeout: () => null }, doc);
+
+    // Clean state: no gaps, Salesforce answered.
+    await mk({ missedConversions: [], missingOpportunity: [], awaitingQualification: 0,
+               opportunityCheck: { ok: true }, graceDays: 3 })();
+    eq('gaps UI: a clean state shows 0', els['m-psgap'].textContent, '0');
+    eq('gaps UI: the list is hidden when there is nothing to act on', els['psgapbox'].style.display, 'none');
+
+    // Real gaps.
+    await mk({ missedConversions: [{ customer_key: 'a.com', partner_name: 'Jane', email: 'x@a.com', first_seen: 'T1' }],
+               missingOpportunity: [{ customer_key: 'b.com', partner_key: 'k2', email: 'y@b.com', met_at: 'T2' }],
+               awaitingQualification: 5, opportunityCheck: { ok: true }, graceDays: 3 })();
+    eq('gaps UI: counts both checks', els['m-psgap'].textContent, '2');
+    ok('gaps UI: the list becomes visible', els['psgapbox'].style.display === 'block');
+    ok('gaps UI: names the no-conversion domain', els['psgapbox'].innerHTML.includes('a.com'));
+    ok('gaps UI: names the no-Opportunity domain', els['psgapbox'].innerHTML.includes('b.com'));
+    ok('gaps UI: says how many are merely awaiting an AE', els['psgapbox'].innerHTML.includes('5 partner demo'));
+
+    /* The inversion that matters: Salesforce down must never render as a
+       clean bill of health. */
+    await mk({ missedConversions: [{ customer_key: 'a.com', email: 'x@a.com', first_seen: 'T1' }],
+               missingOpportunity: [], awaitingQualification: 2,
+               opportunityCheck: { ok: false, reason: 'http_503' }, graceDays: 3 })();
+    ok('gaps UI: an unreachable Salesforce does NOT read as zero',
+       els['m-psgap'].textContent === '1+?', els['m-psgap'].textContent);
+    ok('gaps UI: the subtitle says the check was unavailable',
+       els['m-psgap-sub'].textContent.includes('unavailable'));
+    ok('gaps UI: the panel warns it is not a clean result',
+       els['psgapbox'].innerHTML.includes('NOT a clean result'));
+    ok('gaps UI: the panel is shown even with only check A failing open',
+       els['psgapbox'].style.display === 'block');
+  }
+
   /* The three fixes that keep the warehouse off the lead's critical path. */
   ok('hazard: the customer query is wrapped in withTimeout',
      /withTimeout\(awsPool\.query\(/.test(src));

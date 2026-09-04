@@ -8,7 +8,7 @@ const rateLimit = require('express-rate-limit');
 const { Pool }  = require('pg');
 const { pool, initDB } = require('./db');
 const { sendConversion, fetchPartnership, sendAction } = require('./partnerstack');
-const { pushToSalesforce, findSFLeadByEmail, updateSFLead, findQualifiedDemoOpportunities } = require('./salesforce');
+const { pushToSalesforce, findSFLeadByEmail, updateSFLead, findQualifiedDemoOpportunities, findOpportunityDomains } = require('./salesforce');
 const { pushFormEventsToMeta, pushStartTrialToMeta } = require('./meta-capi');
 const createLeadMagnetRouter = require('./lead-magnet');
 
@@ -2726,6 +2726,7 @@ app.get('/monitor', (req, res) => {
   '<div class="g4">' +
   '<div class="mc" title="Distinct qualified B2B people who COMPLETED the form and have no booking on any of their sessions. The SDR List is deliberately wider &#8212; it has no completed filter, so it also carries people who entered an email and never finished. Expect the SDR List to be the larger number."><div class="ml">No booking yet (SDR)</div><div class="mv" id="m-nb">&#8212;</div><div class="ms" id="m-nbs">&#8212;</div></div>' +
   '<div class="mc" title="People who completed the form without booking, and later booked on another session &#8212; your follow-up emails / prefill links / SDR nudges working."><div class="ml">Recovered bookings</div><div class="mv" id="m-rec">&#8212;</div><div class="ms">booked on a later session</div></div>' +
+  '<div class="mc" title="Partner-referred leads that will never pay the affiliate unless someone acts. Two separate failures: no conversion was ever sent for that domain, or the demo happened and no Opportunity exists for an AE to mark qualified. Leads simply waiting on an AE are NOT counted &#8212; that is normal latency, not a gap."><div class="ml">Partner gaps</div><div class="mv" id="m-psgap">&#8212;</div><div class="ms" id="m-psgap-sub">unpaid partner referrals</div></div>' +
   '<div class="mc" title="Sessions older than 2 hours, not yet emailed, where nobody has booked with that address SINCE the session started. A booking made before the session does not count as resolving it &#8212; the person came back, started again and dropped again. That is why this number and the SDR List can disagree about the same address."><div class="ml">Pending recovery</div><div class="mv" id="m-pend">&#8212;</div><div class="ms">&gt;2h, no booking since the session</div></div>' +
   '<div class="mc" title="Sessions where the drop-off recovery email has been sent (loops_sent = true)."><div class="ml">Recovery emails sent</div><div class="mv" id="m-mail">&#8212;</div><div class="ms">follow-ups dispatched</div></div>' +
   '</div>' +
@@ -2769,6 +2770,7 @@ app.get('/monitor', (req, res) => {
   '<th>Stage</th><th>Booked</th><th>Enrichment</th>' +
   '<th class="sortable" onclick="sortBy(\'created_at\')">Created (ET) <span class="sar" id="sar-created_at"></span></th>' +
   '<th>Source</th>' +
+  '<div id="psgapbox" style="display:none"></div>' +
   '</tr></thead><tbody id="ltbody"><tr><td colspan="10" class="nd">Loading leads...</td></tr></tbody></table></div></div>' +
   '<div class="pg" id="lpag"></div>' +
   '</div>' +
@@ -3061,6 +3063,36 @@ app.get('/monitor', (req, res) => {
   'var pp=psPanel(l);' +
   'if(!fields.length)return pp||"<div style=\\"color:#999;font-size:12px\\">No enrichment data.</div>";' +
   'return pp+"<div class=\\"egrid\\">"+fields.map(function(f){var val=f.lnk&&f.v?"<a href=\\""+(f.v.startsWith("http")?"":"https://")+esc(f.v)+"\\" target=\\"_blank\\">"+esc(f.v)+"</a>":f.mono?"<code style=\\"font-size:10px\\">"+esc(f.v)+"</code>":esc(f.v);return"<div class=\\"ef\\"><div class=\\"efl\\">"+f.lb+"</div><div class=\\"efv\\">"+val+"</div></div>";}).join("")+"</div>";}' +
+  /* Loaded on its OWN cadence, not the 60-second metrics poll: check B hits
+     Salesforce across the network, exactly like /monitor/health. At load, then
+     every 10 minutes, matching the server-side cache. */
+  'async function loadPartnerGaps(){try{' +
+  'var r=await fetch(API+"/monitor/partner-gaps"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(30000)});' +
+  'if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
+  'var mc=(d.missedConversions||[]).length,mo=(d.missingOpportunity||[]).length,tot=mc+mo;' +
+  'var el=document.getElementById("m-psgap"),sub=document.getElementById("m-psgap-sub");' +
+  /* Salesforce unreachable must not read as "no gaps". A number we could not
+     compute is shown as unknown, never as zero. */
+  'var sfBad=d.opportunityCheck&&!d.opportunityCheck.ok;' +
+  'if(el)el.textContent=sfBad?(mc+"+?"):String(tot);' +
+  'if(sub)sub.textContent=sfBad?("no conversion: "+mc+" · Opportunity check unavailable"):(mc+" no conversion · "+mo+" no Opportunity");' +
+  'var box=document.getElementById("psgapbox");if(!box)return;' +
+  'if(!tot&&!sfBad){box.style.display="none";box.innerHTML="";return;}' +
+  'var h="<div class=\'card\' style=\'margin-bottom:16px\'><div class=\'ml\' style=\'margin-bottom:8px\'>\u{1F91D} Partner revenue gaps</div>";' +
+  'if(sfBad)h+="<div style=\'font-size:12px;color:#b91c1c;margin-bottom:8px\'>Opportunity check unavailable ("+esc(d.opportunityCheck.reason||"unknown")+"). This is NOT a clean result — the second check did not run.</div>";' +
+  'function tbl(title,rows,note){if(!rows.length)return "";' +
+  'var t="<div class=\'psm\'>"+title+" ("+rows.length+")"+(note?" — "+note:"")+"</div><table class=\'pst\'>";' +
+  't+=rows.map(function(g){return "<tr><td><code>"+esc(g.customer_key)+"</code></td>"' +
+  '+"<td>"+esc(g.partner_name||g.partner_key||"—")+"</td>"' +
+  '+"<td>"+esc(g.email||"—")+"</td>"' +
+  '+"<td class=\'psna\'>"+esc(et(g.met_at||g.first_seen))+"</td></tr>";}).join("");' +
+  'return t+"</table>";}' +
+  'h+=tbl("No conversion ever sent",d.missedConversions||[],"the affiliate gets nothing and step 10 can never fire");' +
+  'h+=tbl("Demo happened, no Opportunity exists",d.missingOpportunity||[],"sfopp gap — no AE can mark these qualified");' +
+  'if(d.awaitingQualification)h+="<div class=\'psna\' style=\'font-size:11px;margin-top:6px\'>"+d.awaitingQualification+" partner demo(s) past the "+d.graceDays+"-day mark in total; the ones with an Opportunity are waiting on an AE and are not listed.</div>";' +
+  'box.innerHTML=h+"</div>";box.style.display="block";' +
+  '}catch(e){var el2=document.getElementById("m-psgap");if(el2)el2.textContent="?";' +
+  'var s2=document.getElementById("m-psgap-sub");if(s2)s2.textContent="could not check";}}' +
   'function debounce(){clearTimeout(stimer);stimer=setTimeout(function(){loadLeads(1);},400);}' +
   'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("fsellto").value="all";document.getElementById("fsource").value="all";document.getElementById("fenrich").value="all";document.getElementById("fwebsitecheck").value="all";document.getElementById("frepeat").value="all";document.getElementById("fpartner").value="all";document.getElementById("fhear").value="";document.getElementById("fpreset").value="";document.getElementById("ffrom").value="";document.getElementById("fto").value="";curSort="created_at";curDir="desc";renderSortArrows();loadLeads(1);}' +
   'function renderSortArrows(){["email","name","company","sell_to","created_at"].forEach(function(c){var el=document.getElementById("sar-"+c);if(el)el.textContent=(curSort===c)?(curDir==="asc"?"\\u25B2":"\\u25BC"):"";});}' +
@@ -3333,6 +3365,7 @@ app.get('/monitor', (req, res) => {
   'function toggleDupeRow(i){var row=document.getElementById("dupe-er-"+i);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=document.getElementById("dupe-xbtn-"+i);if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";}' +
   'renderSortArrows();loadAll();setInterval(loadAll,60000);' +
   'checkHealth();setInterval(checkHealth,300000);' +
+  'loadPartnerGaps();setInterval(loadPartnerGaps,600000);' +
   '<\/script></body></html>';
 
   res.setHeader('Content-Type', 'text/html');
@@ -5793,6 +5826,137 @@ async function sendQualificationForDomain(customerKey) {
     recordFailure('PartnerStack', customerKey + ' (qualification)', result.reason + (result.body ? ' — ' + String(result.body).slice(0, 200) : ''));
   }
 }
+
+/* ── PARTNER REVENUE GAPS — money we are quietly not collecting ──────
+   Two ways a partner-referred lead silently never pays, and they are separate
+   failures with separate fixes:
+
+     A. NO CONVERSION. The lead completed, we had a domain, and no row for
+        that domain ever got ps_signup_sent_at. PartnerStack does not know the
+        customer exists, so the affiliate gets nothing and step 10 can never
+        fire for them either. Pure DB, unambiguous: we either sent it or we
+        did not.
+
+     B. NO OPPORTUNITY. The demo happened and sfopp never created an
+        Opportunity (its log shows these stuck at not_in_sf or error), so no
+        AE can tick Qualified_Demo__c and the qualification can never fire.
+
+   WHY NOT "booked but no ps_qualified_sent_at": that conflates three states
+   and only one is a bug — no Opportunity (broken), Opportunity awaiting an AE
+   (normal), and Opportunity the AE deliberately did not tick (correct, and
+   PERMANENT). The third never clears, so within weeks the queue is mostly
+   correct non-payments and the real failures are invisible inside it.
+
+   Deliberately NOT a System Health check. A green badge there means "verified
+   working, just now", and a lead waiting on an AE is not a system failure —
+   putting this in health would leave the dashboard permanently amber for
+   normal business latency. It is a work queue, like Pending recovery.
+
+   Check A is keyed by DOMAIN, not by lead. The conversion fires once per
+   domain ever, so the second lead from a domain legitimately has a null
+   ps_signup_sent_at; only a domain where NO row was ever sent is a miss. */
+const PS_GAP_CONVERSION_GRACE_H = 1;     // the conversion is deferred, not slow
+const PS_GAP_QUALIFY_GRACE_D    = 3;     // days after the meeting, for the AE
+const PS_GAP_SF_LOOKBACK_D      = 180;
+const PS_GAP_CACHE_TTL_MS       = 10 * 60 * 1000;
+let _psGapCache = { at: 0, data: null };
+
+async function partnerRevenueGaps() {
+  if (_psGapCache.data && Date.now() - _psGapCache.at < PS_GAP_CACHE_TTL_MS) {
+    return _psGapCache.data;
+  }
+
+  /* A — no conversion ever sent for this domain. */
+  const missedConversions = await pool.query(`
+    SELECT ps_customer_key                       AS customer_key,
+           MIN(created_at)                       AS first_seen,
+           MAX(ps_partner_key)                   AS partner_key,
+           MAX(ps_partner_name)                  AS partner_name,
+           MAX(email)                            AS email,
+           COUNT(*)                              AS leads
+      FROM leads
+     WHERE ps_xid IS NOT NULL
+       AND ps_customer_key IS NOT NULL
+       AND completed IS TRUE
+       AND disqualified IS NOT TRUE
+       AND created_at < NOW() - INTERVAL '${PS_GAP_CONVERSION_GRACE_H} hours'
+     GROUP BY ps_customer_key
+    HAVING COUNT(ps_signup_sent_at) = 0
+     ORDER BY MIN(created_at)
+     LIMIT 200
+  `);
+
+  /* B candidates — the demo has happened and we have not qualified them.
+     start_time is TEXT, so the cast is wrapped in a CASE: a WHERE clause
+     alone does not guarantee the regex runs before the cast, and one
+     malformed row would take the whole query down. */
+  const qualifyCandidates = await pool.query(`
+    SELECT ps_customer_key                       AS customer_key,
+           MAX(ps_partner_key)                   AS partner_key,
+           MAX(ps_partner_name)                  AS partner_name,
+           MAX(email)                            AS email,
+           MIN(CASE WHEN start_time ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
+                    THEN start_time::timestamptz END) AS met_at
+      FROM leads
+     WHERE ps_xid IS NOT NULL
+       AND ps_customer_key IS NOT NULL
+       AND booking_uid IS NOT NULL
+       AND disqualified IS NOT TRUE
+     GROUP BY ps_customer_key
+    HAVING COUNT(ps_qualified_sent_at) = 0
+       AND MIN(CASE WHEN start_time ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
+                    THEN start_time::timestamptz END) < NOW() - INTERVAL '${PS_GAP_QUALIFY_GRACE_D} days'
+     ORDER BY 5
+     LIMIT 200
+  `);
+
+  let missingOpportunity = [];
+  let opportunityCheck = { ok: false, reason: 'not_run' };
+  if (qualifyCandidates.rows.length) {
+    const sf = await findOpportunityDomains({ sinceDays: PS_GAP_SF_LOOKBACK_D });
+    if (sf.ok) {
+      /* Normalised with the SAME helper as everything else, so the two sides
+         cannot disagree about what acme.com is called. */
+      const have = new Set();
+      for (const r of sf.records) {
+        const k = partnerStackCustomerKey(r.website) || partnerStackCustomerKey(r.contactEmail);
+        if (k) have.add(k);
+      }
+      missingOpportunity = qualifyCandidates.rows.filter(r => !have.has(r.customer_key));
+      opportunityCheck = { ok: true, opportunityDomains: have.size, truncated: !!sf.truncated };
+    } else {
+      /* "We could not check" is NOT "we checked and it is fine". Reporting an
+         unreachable Salesforce as zero gaps would be the exact inversion this
+         codebase refuses to make elsewhere. */
+      opportunityCheck = { ok: false, reason: sf.reason || 'unavailable' };
+    }
+  } else {
+    opportunityCheck = { ok: true, opportunityDomains: 0, truncated: false };
+  }
+
+  const data = {
+    missedConversions: missedConversions.rows,
+    missingOpportunity,
+    awaitingQualification: qualifyCandidates.rows.length,
+    opportunityCheck,
+    graceHours: PS_GAP_CONVERSION_GRACE_H,
+    graceDays: PS_GAP_QUALIFY_GRACE_D,
+    generatedAt: new Date().toISOString(),
+  };
+  _psGapCache = { at: Date.now(), data };
+  return data;
+}
+
+app.get('/monitor/partner-gaps', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    res.json(await partnerRevenueGaps());
+  } catch (err) {
+    console.error('[/monitor/partner-gaps]', err.message);
+    res.status(500).json({ error: 'Partner gap query failed', detail: err.message });
+  }
+});
 
 function startPartnerStackQualificationPoll() {
   const t = setInterval(runPartnerStackQualificationPoll, PS_QUALIFY_INTERVAL_MS);

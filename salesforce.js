@@ -331,4 +331,52 @@ async function findQualifiedDemoOpportunities(limit = 200) {
   }
 }
 
-module.exports = { pushToSalesforce, findSFLeadByEmail, updateSFLead, getSalesforceToken, findQualifiedDemoOpportunities };
+/* --------------------------------------------------------
+   findOpportunityDomains — "does an Opportunity exist at all?"
+
+   The step 10 poller asks which Opportunities are QUALIFIED. This asks a
+   different question: which domains have an Opportunity of any kind. The gap
+   between the two is the sfopp failure mode — a show-up stuck at not_in_sf or
+   error means no Opportunity was ever created, so no AE can tick the box, so
+   a partner is silently never paid.
+
+   Returns { ok, records } rather than a bare array, because the caller has to
+   tell "no Opportunity exists" apart from "Salesforce did not answer". Those
+   are opposite conclusions and collapsing them would report a broken
+   integration as a clean bill of health.
+-------------------------------------------------------- */
+async function findOpportunityDomains({ sinceDays = 180, limit = 2000 } = {}) {
+  try {
+    const { accessToken, instanceUrl } = await getSalesforceToken();
+    const days = parseInt(sinceDays, 10) || 180;
+    const soql =
+      `SELECT Id, Account.Website, ` +
+      `(SELECT Contact.Email FROM OpportunityContactRoles ORDER BY IsPrimary DESC LIMIT 1) ` +
+      `FROM Opportunity WHERE CreatedDate = LAST_N_DAYS:${days} ` +
+      `LIMIT ${parseInt(limit, 10) || 2000}`;
+    const res = await fetch(
+      `${instanceUrl}/services/data/v60.0/query/?q=${encodeURIComponent(soql)}`,
+      { method: 'GET', headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (!res.ok) {
+      const err = await res.text();
+      console.warn('[SF] Opportunity-domain query failed:', err.slice(0, 300));
+      return { ok: false, reason: `http_${res.status}`, records: [] };
+    }
+    const data = await res.json();
+    const records = (data.records || []).map((r) => {
+      const roles = r.OpportunityContactRoles && r.OpportunityContactRoles.records;
+      const contactEmail = roles && roles[0] && roles[0].Contact && roles[0].Contact.Email;
+      return {
+        website: (r.Account && r.Account.Website) || null,
+        contactEmail: contactEmail || null,
+      };
+    });
+    return { ok: true, records, truncated: data.totalSize > records.length };
+  } catch (err) {
+    console.warn('[SF] Opportunity-domain query error:', err.message);
+    return { ok: false, reason: 'error', error: err.message, records: [] };
+  }
+}
+
+module.exports = { pushToSalesforce, findSFLeadByEmail, updateSFLead, getSalesforceToken, findQualifiedDemoOpportunities, findOpportunityDomains };
