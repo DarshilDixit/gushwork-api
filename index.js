@@ -197,6 +197,7 @@ async function initAWSTable() {
         ps_signup_fail_reason   TEXT,
         ps_qualify_failed_at    TIMESTAMPTZ,
         ps_qualify_fail_reason  TEXT,
+        hear_about_us_raw       TEXT,
         ps_qualified_sent_at    TIMESTAMPTZ,
         created_at              TIMESTAMPTZ DEFAULT NOW(),
         updated_at              TIMESTAMPTZ DEFAULT NOW()
@@ -256,6 +257,7 @@ async function initAWSTable() {
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_signup_fail_reason TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_qualify_failed_at TIMESTAMPTZ`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_qualify_fail_reason TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS hear_about_us_raw TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ps_qualified_sent_at TIMESTAMPTZ`,
     ];
 
@@ -289,8 +291,8 @@ function syncToAWS(data) {
        step_reached, completed, submitted_at, loops_sent,
        ps_xid, ps_partner_key, ps_partner_name, ps_partner_email, ps_customer_key,
        ps_click_at, ps_click_history,
-       ps_signup_sent_at, ps_signup_verified_at, ps_qualified_sent_at, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,NOW())
+       ps_signup_sent_at, ps_signup_verified_at, ps_qualified_sent_at, hear_about_us_raw, updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,NOW())
     ON CONFLICT (session_id) DO UPDATE SET
       page_url                = COALESCE(EXCLUDED.page_url,                gw_form_leads.page_url),
       email                   = COALESCE(EXCLUDED.email,                   gw_form_leads.email),
@@ -351,6 +353,8 @@ function syncToAWS(data) {
       ps_signup_sent_at       = COALESCE(EXCLUDED.ps_signup_sent_at,       gw_form_leads.ps_signup_sent_at),
       ps_signup_verified_at   = COALESCE(EXCLUDED.ps_signup_verified_at,   gw_form_leads.ps_signup_verified_at),
       ps_qualified_sent_at    = COALESCE(EXCLUDED.ps_qualified_sent_at,    gw_form_leads.ps_qualified_sent_at),
+      /* Existing first, like the Railway side: first non-empty wins. */
+      hear_about_us_raw       = COALESCE(gw_form_leads.hear_about_us_raw,   EXCLUDED.hear_about_us_raw),
       updated_at              = NOW()
   `, [
     data.session_id,                        data.page_url                  || null,
@@ -382,7 +386,7 @@ function syncToAWS(data) {
     data.ps_click_at             || null,
     data.ps_click_history ? JSON.stringify(data.ps_click_history) : null,
     data.ps_signup_sent_at       || null,   data.ps_signup_verified_at     || null,
-    data.ps_qualified_sent_at    || null
+    data.ps_qualified_sent_at    || null,   data.hear_about_us_raw         || null
   ]).then(() => {
     console.log(`[AWS] ✅ Synced session ${data.session_id}`);
   }).catch(err => {
@@ -1075,6 +1079,10 @@ function buildJourneyBlocks(blocks, d) {
         : `\`${d.ps_partner_key}\`  _(partner not resolved yet)_`;
     const clicked = d.ps_click_at ? ` — clicked ${etStamp(d.ps_click_at)}` : '';
     blocks.push(bSection(`🤝 *Partner:* ${who}${clicked}`));
+    /* What they arrived saying, kept beside the partner rather than replaced
+       by it. On a partner lead hear_about_us reads "Partner - X", so without
+       this line the ad attribution or their own answer is invisible. */
+    if (d.hear_about_us_raw) blocks.push(bContext(`💬 *Came in saying:* ${d.hear_about_us_raw}`));
   }
 
   if (hasAttribution) {
@@ -2504,6 +2512,7 @@ app.get('/monitor/leads', async (req, res) => {
       l.ps_xid, l.ps_customer_key, l.ps_click_at, l.ps_click_history,
       l.ps_signup_sent_at, l.ps_signup_verified_at, l.ps_qualified_sent_at,
       l.ps_signup_skipped_reason, l.ps_signup_fail_reason, l.ps_qualify_fail_reason,
+      l.hear_about_us_raw,
       (SELECT COUNT(*) FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at) AS prior_attempts,
       (SELECT COUNT(*) FROM leads pa WHERE LOWER(pa.email) = LOWER(l.email) AND pa.created_at < l.created_at AND pa.disqualified IS TRUE) AS prior_disqualified,
       l.utm_source, l.utm_medium, l.utm_campaign, l.utm_term, l.referrer, l.prefill_source,
@@ -3125,6 +3134,10 @@ app.get('/monitor', (req, res) => {
   'var who=l.ps_partner_name?esc(l.ps_partner_name):(l.ps_partner_email?(esc(l.ps_partner_email)+" <span class=\'psna\'>(name not resolved)</span>"):(C(l.ps_partner_key)+" <span class=\'psna\'>(partner not resolved)</span>"));' +
   'var rows=[["Partner",who],' +
   '["Partner email",l.ps_partner_email?esc(l.ps_partner_email):null],' +
+  /* Two facts, not one. hear_about_us shows "Partner - X" because the partner
+     overwrites it; this is what the visitor actually arrived saying — the ad
+     prefill or their own words — which used to be destroyed. */
+  '["Came in saying",l.hear_about_us_raw?esc(l.hear_about_us_raw):(l.hear_about_us&&l.hear_about_us.indexOf("Partner - ")!==0?esc(l.hear_about_us):"<span class=\'psna\'>nothing recorded</span>")],' +
   '["Partner key",l.ps_partner_name?C(l.ps_partner_key):null],' +
   '["Clicked",l.ps_click_at?esc(et(l.ps_click_at)):null],' +
   '["Customer key",l.ps_customer_key?C(l.ps_customer_key):null],' +
@@ -5943,7 +5956,7 @@ async function recordPartnerStackSkip(session_id, reason) {
    to remember to check is half a fix. alertOps de-duplicates on
    severity:source:title with a 3h cooldown for critical, so a systemic outage
    sends one alert naming the scale rather than one per lead. */
-async function recordPartnerStackFailure(kind, { session_id, customer_key, email, reason, detail }) {
+async function recordPartnerStackFailure(kind, { session_id, customer_key, email, reason, detail, partner_key }) {
   const isSignup = kind === 'signup';
   const cols = isSignup
     ? 'ps_signup_failed_at = NOW(), ps_signup_fail_reason = $2'
@@ -5956,12 +5969,24 @@ async function recordPartnerStackFailure(kind, { session_id, customer_key, email
   } catch (err) {
     console.warn('[PartnerStack] Could not record failure reason (non-blocking):', err.message);
   }
+  /* Every fact needed to decide what to do, in the message. "1 conversion
+     failed in the last 24h" was actionless — it named nothing you could look
+     up, so the only way to act was to open the dashboard. */
+  let partner = null;
+  try {
+    const pk = partner_key || (customer_key ? (await pool.query(
+      `SELECT ps_partner_key FROM leads WHERE ps_customer_key = $1 AND ps_partner_key IS NOT NULL LIMIT 1`,
+      [customer_key])).rows[0]?.ps_partner_key : null);
+    if (pk) partner = await partnerIdentityNoNetwork(pk);
+  } catch { /* identity is a nicety; never let it stop the alert */ }
+
   alertOps('critical', 'PartnerStack',
     isSignup ? 'Conversion failed — affiliate not credited'
              : 'Qualification failed — the $50 did not fire',
     {
       'Domain':  customer_key || '(unknown)',
-      'Email':   email || '(unknown)',
+      'Partner': partner ? `${partner.name || '(name unresolved)'}${partner.email ? ' <' + partner.email + '>' : ''}` : '(unresolved)',
+      'Lead':    email || '(unknown)',
       'Reason':  reason || 'unknown',
       'Detail':  (detail || '').toString().slice(0, 300) || '—',
       'Impact':  isSignup
@@ -6130,6 +6155,7 @@ async function runPartnerStackSignup({ session_id, email, website, company, phon
        adds the reason and the alert on top of it. */
     await recordPartnerStackFailure('signup', {
       session_id, customer_key: ps.ps_customer_key, email,
+      partner_key: ps.ps_partner_key,
       reason: result.reason, detail: result.body,
     });
   }
@@ -7080,8 +7106,8 @@ app.post('/partial', async (req, res) => {
     const elv = await lookupElvStatus(email);
 
     await pool.query(`
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW(),$29,$30,$31,$32,$33,$34,$35,$36,$37)
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW(),$29,$30,$31,$32,$33,$34,$35,$36,$37,$38)
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -7115,6 +7141,10 @@ app.post('/partial', async (req, res) => {
         website_check_reason  = COALESCE(EXCLUDED.website_check_reason,  leads.website_check_reason),
         elv_status            = COALESCE(EXCLUDED.elv_status,            leads.elv_status),
         elv_checked_at        = COALESCE(EXCLUDED.elv_checked_at,        leads.elv_checked_at),
+        /* EXISTING first, deliberately the opposite way round from every other
+           COALESCE here: the FIRST non-empty value sticks and nothing can
+           overwrite it. That is the whole point of the column. */
+        hear_about_us_raw     = COALESCE(leads.hear_about_us_raw,         EXCLUDED.hear_about_us_raw),
         /* COALESCE for the same reason as /submit: /partial fires repeatedly as
            the visitor moves through step 1, and a later call with an expired
            cookie must not wipe attribution captured by an earlier one. */
@@ -7123,11 +7153,11 @@ app.post('/partial', async (req, res) => {
         ps_customer_key       = COALESCE(EXCLUDED.ps_customer_key,       leads.ps_customer_key),
         ps_click_at           = COALESCE(EXCLUDED.ps_click_at,           leads.ps_click_at),
         ps_click_history      = COALESCE(EXCLUDED.ps_click_history,      leads.ps_click_history)
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null]);
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null]);
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/partial] Enrichment sync failed (non-blocking):', err.message));
 
-    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false,...ps});
+    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false,hear_about_us_raw:hear_about_us,...ps});
 
     // StartTrial fires ONLY for qualified (B2B) leads on BUSINESS emails —
     // free-mailbox leads (gmail/yahoo/...) are skipped so Meta optimises
@@ -7204,8 +7234,8 @@ app.post('/submit', async (req, res) => {
     const elv = await lookupElvStatus(email);
 
     await pool.query(`
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW(),$28,$29,$30,$31,$32,$33,$34,$35,$36)
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW(),$28,$29,$30,$31,$32,$33,$34,$35,$36,$37)
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -7241,6 +7271,10 @@ app.post('/submit', async (req, res) => {
         website_check_reason  = COALESCE(EXCLUDED.website_check_reason,  leads.website_check_reason),
         elv_status            = COALESCE(EXCLUDED.elv_status,            leads.elv_status),
         elv_checked_at        = COALESCE(EXCLUDED.elv_checked_at,        leads.elv_checked_at),
+        /* EXISTING first, deliberately the opposite way round from every other
+           COALESCE here: the FIRST non-empty value sticks and nothing can
+           overwrite it. That is the whole point of the column. */
+        hear_about_us_raw     = COALESCE(leads.hear_about_us_raw,         EXCLUDED.hear_about_us_raw),
         /* COALESCE, not overwrite: a second submit in the same session arrives
            with whatever cookies the browser still has. A partner cookie that
            has since expired must not erase the attribution we already captured. */
@@ -7249,14 +7283,14 @@ app.post('/submit', async (req, res) => {
         ps_customer_key       = COALESCE(EXCLUDED.ps_customer_key,       leads.ps_customer_key),
         ps_click_at           = COALESCE(EXCLUDED.ps_click_at,           leads.ps_click_at),
         ps_click_history      = COALESCE(EXCLUDED.ps_click_history,      leads.ps_click_history)
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null]);
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null]);
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/submit] Enrichment sync failed (non-blocking):', err.message));
 
-    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true,...ps});
+    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true,hear_about_us_raw:hear_about_us,...ps});
 
     if (!alreadyCompleted) {
-      slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us:hearAboutUsFinal,ps_partner_key:ps.ps_partner_key,ps_partner_name:(psIdentity||{}).name,ps_partner_email:(psIdentity||{}).email,ps_click_at:ps.ps_click_at,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,elv_status:elv?.status||null,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
+      slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us:hearAboutUsFinal,ps_partner_key:ps.ps_partner_key,ps_partner_name:(psIdentity||{}).name,ps_partner_email:(psIdentity||{}).email,ps_click_at:ps.ps_click_at,hear_about_us_raw:hear_about_us,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,elv_status:elv?.status||null,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
 
       pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,hear_about_us:hearAboutUsFinal,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'form completed', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
 
