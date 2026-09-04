@@ -212,7 +212,46 @@ reading the wrong clock. Railway's `leads.submitted_at` is the real one.
   true` for those session_ids, which is safe precisely because the flag is
   monotonic. Deliberately left undone pending a decision: it is a write to the
   mirror the dialer reads.
-- **Change `loops_sent` to the same OR form**, so the latent version cannot
-  wake up.
-- **Note the `submitted_at` semantics** in CLAUDE.md beside the existing mirror
-  caveats.
+- **DONE 5 Sept** — `loops_sent` changed to the same OR form, so the latent
+  version cannot wake up. `tests/test-batch2.js` now derives the never-NULL
+  column list from the bind site and asserts structurally that none of them is
+  guarded by a no-op `COALESCE`, so a future column added with the same shape
+  fails a test.
+- **DONE 5 Sept** — the `submitted_at` semantics are documented in
+  `../partnerstack.md` under the mirror traps, at the bind site, at the DDL,
+  and as a `COMMENT ON COLUMN` on the table itself so a SQL client shows it.
+
+### Renaming `gw_form_leads.submitted_at` — what it would cost
+
+Assessed 5 Sept, **not done**. The blockers are all outside this repo.
+
+**Inside the repo it is trivial** — three sites, all in `syncToAWS`: the
+`ADD COLUMN` migration, the INSERT column list, and the conflict clause.
+Nothing in this repo ever reads the column back off the mirror; it is
+write-only from here.
+
+**In the warehouse it is nearly free too.** Exactly one object depends on
+`gw_form_leads` — the view `gist.v_meta_ad_bookings_classified` — and it does
+**not** reference `submitted_at`. A `RENAME COLUMN` in Postgres is a metadata
+operation: instant, no table rewrite, no lock of consequence at this size.
+
+**The cost is entirely the unenumerable readers.** `gw_form_leads` is read by
+the sdr-calling dialer, which lives outside this repo and is not versioned
+here, plus any saved BI queries, dashboards or spreadsheets nobody can list
+from a SQL prompt. A rename breaks each of them **at once and silently** — a
+`SELECT submitted_at` starts erroring rather than degrading.
+
+So the honest options, cheapest first:
+
+1. **`COMMENT ON COLUMN`** — done. Discoverable in any SQL client or BI tool,
+   zero risk, zero coordination.
+2. **Add, dual-write, deprecate.** Add `synced_completed_at`, write both,
+   backfill `synced_completed_at = submitted_at`, tell the dialer owner, and
+   drop `submitted_at` after a window. Costs one migration, one deploy and one
+   conversation; breaks nothing at any point.
+3. **Straight `RENAME COLUMN`.** One statement, instant — and it needs the
+   dialer owner to ship a change in the same window, which is the whole cost.
+   Not worth it for a column whose presence is what everyone actually uses.
+
+Recommendation: option 1 is already in, and option 2 only if someone finds a
+consumer genuinely misreading the value.

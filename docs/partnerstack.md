@@ -827,6 +827,45 @@ passes `false` and clears a real disqualification on the mirror.
 `syncBookingToAWS`, `syncPartnerIdentityToAWS` and `syncHearAboutUsToAWS` exist
 for this reason.
 
+**`gw_form_leads.submitted_at` IS NOT A SUBMISSION TIME.** It is `new Date()`
+at the moment `syncToAWS` runs, written only when the lead is completed — the
+lead's real `submitted_at` is never sent to the mirror. On this table:
+
+- its **presence** is meaningful and safe to filter on: "this row was synced
+  while completed";
+- its **value** is a clock reading from our sync, sometimes hours later.
+
+Railway's `leads.submitted_at` is the real one. **The column name invites
+exactly the wrong assumption**, which is why this entry is here rather than in
+a code comment alone: anyone querying the warehouse — a BI tool, a spreadsheet,
+the next person sizing a funnel — will read it as submission time and be
+quietly wrong about when things happened. It is now also a
+`COMMENT ON COLUMN` on the table itself, so a SQL client shows the warning
+without anyone reading this file.
+
+Renaming it is deliberately **not** done: the dialer and any saved warehouse
+queries read this table from outside this repo, and a `RENAME COLUMN` breaks
+every one of them at once and silently. See
+`docs/tickets/completed-is-not-submitted-a-form.md` for the migration shape if
+someone decides it is worth the coordination.
+
+**A `COALESCE` against a value that can never be NULL is a NO-OP, and it
+silently lets the incoming value win.** This is how 14 people ended up on the
+mirror with `completed = false` while Railway had `true`, so the sdr-calling
+dialer read form completers as step-1 drop-offs for up to three months. The
+clause was `completed = COALESCE(EXCLUDED.completed, gw_form_leads.completed)`
+while the bound value is `data.completed || false` — never null. Fixed 18 July
+2026 by making it an OR; `loops_sent` carried the identical latent defect and
+was fixed 5 Sept.
+
+The rule for `syncToAWS`: **a flag whose bound value can never be NULL needs a
+clause that cannot regress** — an OR for a monotonic boolean, `GREATEST` for a
+monotonic number, or a bare `EXCLUDED` that someone signed off in writing
+(which is what `disqualified` is). A plain `COALESCE` there does nothing at
+all. `tests/test-batch2.js` now derives the never-NULL column list from the
+bind site and asserts this structurally, so a future column added with the
+same shape fails a test instead of misleading a dialer.
+
 **Postgres does not guarantee predicate order in an AND chain.** Two things in
 this integration have been bitten by it: `start_time::timestamptz` in the
 lifecycle ladder and `decode(pk,'base64')` in the click-history backfill. Both

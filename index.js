@@ -175,6 +175,10 @@ async function initAWSTable() {
         disqualified_reason     TEXT,
         step_reached            INT DEFAULT 1,
         completed               BOOLEAN DEFAULT FALSE,
+        /* SYNC time, not submission time. Set to NOW() by syncToAWS when the
+           lead is completed; the lead's real submitted_at is never sent here.
+           Misnamed, kept for compatibility — the dialer and warehouse queries
+           read this table. See the bind site in syncToAWS. */
         submitted_at            TIMESTAMPTZ,
         booking_uid             TEXT,
         start_time              TEXT,
@@ -210,6 +214,14 @@ async function initAWSTable() {
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS disqualified BOOLEAN DEFAULT FALSE`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS disqualified_reason TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ`,
+      /* The cheapest possible fix for a misnamed column that external
+         consumers read. A COMMENT is discoverable by anyone who inspects the
+         schema in a SQL client or a BI tool, costs nothing, breaks nothing,
+         and needs no coordination with the dialer — unlike a RENAME, which
+         would break every reader outside this repo silently and at once.
+         Idempotent like every other statement in this list. */
+      `COMMENT ON COLUMN gw_form_leads.submitted_at IS
+         'SYNC TIME, NOT SUBMISSION TIME. Set to NOW() by gushwork-api syncToAWS when the lead is completed; the lead''s real submission time is never written here. PRESENCE means "synced while completed" and is safe to filter on. The VALUE is a clock reading from our sync, sometimes hours after the form was submitted -- do not use it as a submission timestamp. The real one is leads.submitted_at on Railway.'`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS booking_uid TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS start_time TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS end_time TEXT`,
@@ -292,6 +304,8 @@ function syncToAWS(data) {
        enriched_funding_events, enriched_alexa_ranking, enriched_keywords,
        enriched_org_hq, enriched_total_funding, enriched_funding_stage,
        disqualified, disqualified_reason,
+       /* submitted_at is a SYNC timestamp on this table, not the lead's
+          submission time — see the bind site below. */
        step_reached, completed, submitted_at, loops_sent,
        ps_xid, ps_partner_key, ps_partner_name, ps_partner_email, ps_customer_key,
        ps_click_at, ps_click_history,
@@ -341,7 +355,21 @@ function syncToAWS(data) {
       step_reached            = GREATEST(EXCLUDED.step_reached,            gw_form_leads.step_reached),
       completed               = (COALESCE(gw_form_leads.completed, false) OR COALESCE(EXCLUDED.completed, false)),
       submitted_at            = COALESCE(EXCLUDED.submitted_at,            gw_form_leads.submitted_at),
-      loops_sent              = COALESCE(EXCLUDED.loops_sent,              gw_form_leads.loops_sent),
+      /* OR, not COALESCE, for the same reason completed is an OR since
+         18 Jul 2026: the bound value is data.loops_sent || false, which is
+         NEVER null, so COALESCE(EXCLUDED.loops_sent, ...) never falls through
+         to the stored value and the incoming false always wins. That is
+         exactly how 14 rows ended up with completed = false on the mirror
+         while Railway had true, and the dialer read those people as step-1
+         drop-offs. See docs/tickets/completed-is-not-submitted-a-form.md.
+
+         It was not firing here only because of WHEN the writer runs: the
+         recovery cron sets loops_sent with a targeted UPDATE at least two
+         hours after the session, by which point nothing calls syncToAWS for
+         that session again. That is a property of the call order, not a
+         guarantee, and one reordering away from being an incident. A follow-up
+         email is a thing you cannot un-send, so the flag must be monotonic. */
+      loops_sent              = (COALESCE(gw_form_leads.loops_sent, false) OR COALESCE(EXCLUDED.loops_sent, false)),
       ps_xid                  = COALESCE(EXCLUDED.ps_xid,                  gw_form_leads.ps_xid),
       ps_partner_key          = COALESCE(EXCLUDED.ps_partner_key,          gw_form_leads.ps_partner_key),
       ps_partner_name         = COALESCE(EXCLUDED.ps_partner_name,         gw_form_leads.ps_partner_name),
@@ -382,6 +410,15 @@ function syncToAWS(data) {
     data.enriched_org_hq         || null,   data.enriched_total_funding    || null,
     data.enriched_funding_stage  || null,   data.disqualified              ?? false,
     data.disqualified_reason     || null,   data.step_reached              || 1,
+    /* ⚠ submitted_at here is the SYNC TIME, NOT the lead's submission time.
+       It is new Date() at the moment this statement runs, written only when
+       data.completed is truthy — the lead's real submitted_at is never sent.
+       The column name says otherwise and that is the trap: on the mirror its
+       PRESENCE is meaningful ("this row was synced while completed") and its
+       VALUE is a clock reading from our sync, sometimes hours later. Railway's
+       leads.submitted_at is the real one. Any analysis on gw_form_leads that
+       treats this as when the form was submitted is reading the wrong column.
+       Documented in docs/partnerstack.md under the mirror traps. */
     data.completed               || false,  data.completed ? new Date() : null,
     data.loops_sent              || false,
     data.ps_xid                  || null,   data.ps_partner_key            || null,
