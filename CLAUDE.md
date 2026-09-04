@@ -343,6 +343,20 @@ twice or a real referral swallowed as a duplicate. Website, email and the three
 warehouse customer tables all go through this one function. Do not normalise a
 domain inline anywhere near this integration.
 
+**A disqualified lead never fires a conversion, and that is a GUARD now, not a
+flow property.** No disqualified lead reaches `/submit` today — `b2c_or_mixed`
+and `waitlist` both call `savePartial(1)` and then show a terminal step — but
+that lives in two forked frontend files which have drifted apart before, and the
+cost of the drift here is paying an affiliate $50 for a B2C waitlist signup.
+`runPartnerStackSignup` checks the flag explicitly and a test asserts it runs
+before the domain and test-email checks.
+
+**Every `/submit` logs whether a partner was present.** An organic lead used to
+produce no PartnerStack line at all, so the logs could not tell "no partner
+traffic yet" from "capture is broken" — which cost real time on the first
+deploy. `[PartnerStack] No partner on this submit (…)` is the negative case, and
+each skip says which guard stopped it.
+
 **Two PartnerStack hosts, two auth schemes, one env.** The conversion goes to
 `partnerlinks.io/conversion/xid` with `PARTNERSTACK_TRACKING_TOKEN` as a
 **Bearer** token. The partnerships lookup and the qualification action go to

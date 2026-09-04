@@ -5565,9 +5565,33 @@ async function upgradePartnerHearAboutUs({ session_id, email, ps, identity }) {
    The alternative — leaving the stamp on a conversion that never arrived — is
    the worse failure: it is silent, permanent, and costs the affiliate a real
    payout with nothing in the system saying so. */
-async function runPartnerStackSignup({ session_id, email, website, company, first_name, last_name, ps, ctx }) {
-  if (!ps || !ps.ps_xid) return;                       // not a partner lead
-  if (!ps.ps_customer_key) return;                     // no usable domain
+async function runPartnerStackSignup({ session_id, email, website, company, first_name, last_name, disqualified, ps, ctx }) {
+  /* Logged on EVERY submit, including organic ones. Without this an organic
+     lead produces no PartnerStack line at all, and the logs cannot tell
+     "no partner traffic yet" apart from "capture is broken" — which is exactly
+     the ambiguity we hit watching the first deploy. */
+  if (!ps || !ps.ps_xid) {
+    console.log(`[PartnerStack] No partner on this submit (${email || 'no email'}) — nothing to send`);
+    return;
+  }
+
+  /* Disqualified leads must never pay an affiliate. A B2C or waitlist signup
+     is not a customer, and $50 is a real cost.
+
+     Today no disqualified lead reaches /submit at all: both b2c_or_mixed and
+     waitlist call savePartial(1) and then show a terminal step, so the
+     conversion is already unreachable for them. That is a property of the
+     FRONTEND FLOW, not a guard — and the frontend is two forked files that
+     have drifted apart before. This makes it a guard. */
+  if (disqualified) {
+    console.log(`[PartnerStack] Skipped conversion — lead is disqualified: ${email}`);
+    return;
+  }
+
+  if (!ps.ps_customer_key) {
+    console.log(`[PartnerStack] Skipped conversion — no usable company domain: ${email}`);
+    return;
+  }
   if (isPartnerStackTestEmail(email)) {
     console.log(`[PartnerStack] Skipped conversion — internal or test address: ${email}`);
     return;
@@ -6136,7 +6160,7 @@ app.post('/submit', async (req, res) => {
       .then(identity => upgradePartnerHearAboutUs({ session_id, email, ps, identity }))
       .catch(err => console.warn('[PartnerStack] Partner identity failed (non-blocking):', err.message));
     if (!alreadyCompleted) runPartnerStackEligibility({ session_id, email, website, ps });
-    if (!alreadyCompleted) runPartnerStackSignup({ session_id, email, website, company, first_name, last_name, ps, ctx: readPartnerStackRequestContext(req, page_url) })
+    if (!alreadyCompleted) runPartnerStackSignup({ session_id, email, website, company, first_name, last_name, disqualified, ps, ctx: readPartnerStackRequestContext(req, page_url) })
       .catch(err => console.warn('[PartnerStack] Signup conversion failed (non-blocking):', err.message));
   } catch (err) { console.error('[/submit]', err.message); res.status(500).json({ error: 'Submit failed' }); }
 });
