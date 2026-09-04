@@ -22,11 +22,40 @@ touching the form". Confirmed on Railway:
 aasnj@meta.com   completed=true   submitted_at=NULL   booking_uid=1975833
 ```
 
-**CLAUDE.md is slightly wrong about this row's shape.** It says those branches
-create rows with "`submitted_at` already set". This one has `submitted_at =
-NULL`, so a reader who trusts the caveat and keys on `submitted_at` expecting
-it to be populated gets a different answer than one who keys on `completed`.
-Worth correcting in CLAUDE.md when someone confirms which branch produces which.
+**CORRECTED IN CLAUDE.md, 5 Sept 2026** — and the diagnosis was subtler than
+"the doc is wrong". All seven branches that write either column were read:
+
+| Branch | `completed` | `submitted_at` |
+|---|---|---|
+| `/partial` (~7632) | `false` on insert, absent from the conflict clause | never written |
+| `/submit` (~7760) | `true` | `NOW()` |
+| `/booking-confirmed` (~7869) | `true` | left alone |
+| `/booking-confirmed-webhook` (~7945) | `true` | left alone |
+| `/booking-confirmed-webhook` safety net (~7972) | `true` | `NOW()` |
+| `/booking-confirmed-webhook-rh` (~8247) | `true` | left alone |
+| `/booking-confirmed-webhook-rh` safety net (~8283) | `true` | `NOW()` |
+
+**The old caveat was not wrong about the safety-net branches — it was
+incomplete.** Those two `INSERT`s really do set `submitted_at`, verified
+empirically: all 10 webhook-origin rows on the mirror have it populated.
+
+The shape it failed to mention is the one that actually bites: the **three
+booking `UPDATE`s** set `completed = true` on a pre-existing row and leave
+`submitted_at` alone. That is `aasnj@meta.com` — someone who reached step 1,
+dropped, and booked through a link later. All 6 rows with
+`completed = true AND submitted_at IS NULL` are this shape, all 6 booked, all 6
+form traffic (`prefill_source` null or `url_param`), and none of them is a
+safety-net insert.
+
+So a reader who took the caveat at face value would conclude that `completed`
+implies `submitted_at` — because the only exception the doc named is one where
+both are set. That inference is exactly what produced the false positive in
+this ticket's own investigation. The corrected caveat is a table of all seven
+branches, so there is nothing left to infer.
+
+Also corrected while there: the neighbouring "Only 9 rows today" figure for
+webhook-origin leads is now 10, and **all 10 are `rh_webhook`** — the Cal
+safety net has never fired.
 
 Population, from the AWS mirror (a floor — see fact 2): **6 rows, 6 people, all
 6 with a booking**, spread 12 Apr – 17 Aug 2026.

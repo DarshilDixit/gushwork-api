@@ -146,11 +146,60 @@ session data before that and queries must say "not tracked" rather than 0.
 (step 1). Keys on `leads.created_at`. One person can have several leads. A lead is
 never deleted, so counts only go up.
 
-**Completed** — `leads.completed = true`. The visitor reached step 2 and `/submit`
-succeeded. Keys on **`submitted_at`**. Caveat that has bitten us: the Cal and
-RevenueHero safety-net branches create rows with `completed = true` and
-`submitted_at` already set for someone who booked without ever touching the form.
-They are real leads and they are not form completions.
+**Completed** — `leads.completed = true`. Keys on **`submitted_at`** where a time
+is needed.
+
+**`completed = true` does NOT mean "submitted the form", and `submitted_at` is
+not set everywhere `completed` is.** Seven branches write one or both. Read this
+table before using either column as a proxy for the other — the previous version
+of this caveat named only one of the two shapes below, and that omission is what
+misled a reader on 5 Sept 2026 with the doc open in front of them.
+
+| Branch | `completed` | `submitted_at` |
+|---|---|---|
+| `/partial` (~7632) | `false` on insert, and **absent from the conflict clause** | **never written** |
+| `/submit` (~7760) | `true` | `NOW()` |
+| `/booking-confirmed` (~7869) | `true` | **left alone** |
+| `/booking-confirmed-webhook` (~7945) | `true` | **left alone** |
+| `/booking-confirmed-webhook` safety net (~7972) | `true` | `NOW()` |
+| `/booking-confirmed-webhook-rh` (~8247) | `true` | **left alone** |
+| `/booking-confirmed-webhook-rh` safety net (~8283) | `true` | `NOW()` |
+
+`/submit` is the **only** branch that means "this person filled the form in".
+Note also that `/partial` leaving `completed` out of its conflict clause is
+load-bearing: it is why a visitor who submits and then goes back to edit step 1
+does not lose the flag on Railway.
+
+That produces **two** populations that are `completed` without being form
+completions, and they are not the same shape:
+
+1. **`completed = true` with `submitted_at IS NULL`** — reached step 1, dropped,
+   then booked through a link later. One of the three booking `UPDATE`s set
+   `completed` and left `submitted_at` alone. **6 rows today, all 6 booked, all
+   of them form traffic** (`prefill_source` null or `url_param`), e.g.
+   `aasnj@meta.com`. **This is the shape the old caveat did not mention**, and it
+   is the one that breaks "completed implies submitted".
+2. **`completed = true` with `submitted_at` set, never touched the form** — the
+   two safety-net `INSERT`s, for someone who booked with no form row at all.
+   **10 rows today, all `rh_webhook`, all with `submitted_at` set.** The old
+   caveat described these correctly.
+
+So:
+
+- **"Did this person fill the form in?"** → `submitted_at IS NOT NULL`. Never
+  `completed`.
+- **"Which stage is this lead in?"** → the stage ladder above, which uses
+  `completed IS TRUE` and is correct as written.
+- They are **not** interchangeable, in either direction.
+
+Both populations are real leads and neither is a form completion. Counting them
+under "Completed" on the dashboard is deliberate and documented; using
+`completed` to mean "submitted" in a *query* is a bug, and it is why
+`backfill-sf.js` selects on `submitted_at IS NOT NULL`.
+
+**On the AWS mirror, `gw_form_leads.submitted_at` is a different thing entirely
+— a sync timestamp, not a submission time.** Its presence is meaningful, its
+value is our clock. See the mirror traps in `docs/partnerstack.md`.
 
 **Booked** — `leads.booking_uid IS NOT NULL`. Keys on **`booked_at`**, falling back
 to `created_at` where `booked_at` is null (rows predating that column). Always use
@@ -280,8 +329,13 @@ repeat-attempt spikes that make a bad day visible. The label says "entries", not
 **Webhook-origin leads** (`prefill_source IN ('rh_webhook','cal_webhook')`) are
 included everywhere except `/monitor/funnel`, which excludes them from step1,
 submitted and booked and explains why at length. They never touched the form, so
-they inflate any form-conversion rate from both sides. Only 9 rows today; left in
-deliberately.
+they inflate any form-conversion rate from both sides. Left in deliberately.
+
+**10 rows on the mirror as of 5 Sept 2026, and all 10 are `rh_webhook`** — the
+Cal safety net has never fired once. The filter keeps `cal_webhook` because the
+branch exists and could fire tomorrow, not because it has. Was recorded as
+"9 rows" before 5 Sept; a count in a doc goes stale, so treat it as an order of
+magnitude and re-run the query rather than quoting it.
 
 ### Timezone
 
