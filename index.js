@@ -2897,13 +2897,14 @@ app.get('/monitor', (req, res) => {
   '<div style="overflow-x:auto"><table class="lt"><thead><tr>' +
   '<th class="sortable" onclick="sortPartners(\'partner_name\')">Partner <span id="psar-partner_name"></span></th>' +
   '<th>Email</th><th>Key</th>' +
+  '<th class="sortable" onclick="sortPartners(\'clicks\')" title="OUR clicks, from ps_click_history &#8212; counted as distinct xid, because the cookie is cumulative per visitor. Clicks that never reached the form are NOT in our data at all, only PartnerStack has those. This is the one column that is not a company count.">Clicks <span id="psar-clicks"></span></th>' +
   '<th class="sortable" onclick="sortPartners(\'step1\')" title="Companies that reached step 1. Every column in this funnel counts COMPANIES, so they nest: step 1 &#8805; completed &#8805; converted &#8805; booked &#8805; qualified.">Step 1 <span id="psar-step1"></span></th>' +
   '<th class="sortable" onclick="sortPartners(\'completed\')">Completed <span id="psar-completed"></span></th>' +
   '<th class="sortable" onclick="sortPartners(\'conversions\')">Converted <span id="psar-conversions"></span></th>' +
   '<th class="sortable" onclick="sortPartners(\'booked\')">Booked <span id="psar-booked"></span></th>' +
   '<th class="sortable" onclick="sortPartners(\'qualified\')">Qualified <span id="psar-qualified"></span></th>' +
   '<th class="sortable" onclick="sortPartners(\'last_click\')">Last click <span id="psar-last_click"></span></th>' +
-  '</tr></thead><tbody id="ptbody"><tr><td colspan="9" class="nd">Loading...</td></tr></tbody></table></div></div>' +
+  '</tr></thead><tbody id="ptbody"><tr><td colspan="10" class="nd">Loading...</td></tr></tbody></table></div></div>' +
   '</div>' +
   '<div class="tp" id="tp-sdr">' +
   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
@@ -2915,7 +2916,7 @@ app.get('/monitor', (req, res) => {
   '</div></div>' +
   '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
   '<th style="width:30px"></th><th>Email</th><th>Name</th><th>Company</th><th>Title</th><th>Industry</th><th>Company Size</th><th>Stage</th><th>LinkedIn</th><th>Date (ET)</th>' +
-  '</tr></thead><tbody id="sdr-tbody"><tr><td colspan="9" class="nd">Loading...</td></tr></tbody></table></div></div>' +
+  '</tr></thead><tbody id="sdr-tbody"><tr><td colspan="10" class="nd">Loading...</td></tr></tbody></table></div></div>' +
   '</div>' +
   '<div class="tp" id="tp-dupes">' +
   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
@@ -3274,10 +3275,24 @@ app.get('/monitor', (req, res) => {
   /* Salesforce state. Read from the table the poller owns; a domain with no
      row simply has not been checked yet, and says so rather than implying a
      clean result. */
-  'var sf=lc.bySfState||{};set("p-sfwait",sf.exists_unticked||0);' +
-  'var sfl={ticked:"ticked, will fire",exists_unticked:"waiting on an AE",create_errored:"Opportunity never created",no_opportunity:"no Opportunity yet"};' +
+  'var sf=lc.bySfState||{};set("p-sfwait",lc.sfActionable||0);' +
+  /* "will fire" was wrong for a domain whose $50 has already landed. */
+  'var sfl={exists_unticked:"waiting on an AE",create_errored:"Opportunity never created",no_opportunity:"no Opportunity yet"};' +
   'var sfo=["exists_unticked","create_errored","ticked","no_opportunity"];' +
+  'var dl0=lc.domains||[];' +
+  'var firedN=dl0.filter(function(x){return x.sf_state==="ticked"&&x.qualified_sent;}).length;' +
+  'var tickedN=(sf.ticked||0)-firedN;' +
   'var sfc=sfo.filter(function(k){return sf[k];}).map(function(k){' +
+  'if(k==="ticked"){var out="";' +
+  'if(firedN)out+="<span class=\'pschip\'>"+firedN+" ticked, $50 fired</span>";' +
+  'if(tickedN>0)out+="<span class=\'pschip\'>"+tickedN+" ticked, will fire next poll</span>";' +
+  'return out;}' +
+  /* Only the actionable ones read as an action; the rest are informational,
+     because a qualification cannot succeed where no conversion was sent. */
+  'if(k==="exists_unticked"){var out2="";' +
+  'if(lc.sfActionable)out2+="<span class=\'pschip\'>"+lc.sfActionable+" waiting on an AE</span>";' +
+  'if(lc.sfUnactionable)out2+="<span class=\'pschip\' title=\'An Opportunity exists and is unticked, but no conversion was sent for this domain, so a qualification could not succeed. Not an action item.\'>"+lc.sfUnactionable+" unticked, no conversion sent (not actionable)</span>";' +
+  'return out2;}' +
   'return "<span class=\'pschip"+(k==="create_errored"?" bad":"")+"\'>"+sf[k]+" "+sfl[k]+"</span>";}).join("");' +
   'var unchecked=(lc.totalDomains||0)-Object.values(sf).reduce(function(a,b){return a+b;},0);' +
   'if(unchecked>0)sfc+="<span class=\'pschip\' title=\'The poller has not checked these yet. NOT the same as having no Opportunity.\'>"+unchecked+" not checked yet</span>";' +
@@ -3287,7 +3302,11 @@ app.get('/monitor', (req, res) => {
   'var lr=lc.sfLastRead||{};' +
   'if(lr.ok===false)sfc+="<span class=\'pschip bad\' title=\'The Opportunity list could not be read completely, so these states are stale. Nothing was overwritten with a guess.\'>Salesforce read FAILED ("+esc(lr.reason||"unknown")+")</span>";' +
   'else if(lr.ok===true)sfc+="<span class=\'pschip\' title=\'Every Opportunity in the window was read, across paged requests. If this is ever short of the total, the refresh refuses to write rather than reporting a partial list as complete.\'>read "+lr.records+"/"+lr.totalSize+" opportunities · "+lr.pages+" pages</span>";' +
-  'if(lc.domainsCapped)sfc+="<span class=\'pschip bad\' title=\'More partner domains exist than this view returns. The states above are a page, not the population.\'>capped at "+lc.domainsLimit+" domains</span>";' +
+  /* A frozen checked_at is what a failed refresh looks like from here. */
+  'if(lc.sfNewestCheckedAt){var ageMin=Math.round((Date.now()-new Date(lc.sfNewestCheckedAt).getTime())/60000);' +
+  'if(ageMin>=(lc.sfStaleAfterMin||45))sfc+="<span class=\'pschip bad\' title=\'The newest Salesforce check is older than the refresh interval allows. The states above are stale and a refresh is probably failing.\'>STALE \u2014 last checked "+ageMin+" min ago</span>";' +
+  'else sfc+="<span class=\'pschip\'>checked "+ageMin+" min ago</span>";}' +
+    'if(lc.domainsCapped)sfc+="<span class=\'pschip bad\' title=\'More partner domains exist than this view returns. The states above are a page, not the population.\'>capped at "+lc.domainsLimit+" domains</span>";' +
   'var sfe=document.getElementById("p-sfstates");if(sfe)sfe.innerHTML=sfc||"not checked yet";' +
   'partnerRows=d.partners||[];renderPartners();' +
   /* The per-domain table. Same source as the chips above, so a domain cannot
@@ -3295,11 +3314,20 @@ app.get('/monitor', (req, res) => {
   'var dtb=document.getElementById("pdtbody");' +
   'if(dtb){var dl=lc.domains||[];' +
   'if(!dl.length){dtb.innerHTML="<tr><td colspan=\'6\' class=\'nd\'>No partner domains yet.</td></tr>";}else{' +
-  'var sfl2={ticked:"ticked, will fire",exists_unticked:"waiting on an AE",create_errored:"Opportunity never created",no_opportunity:"no Opportunity yet"};' +
+  /* Per ROW, so it can say whether the $50 actually landed — the summary chip
+     alone was not enough, this is the line you read for a specific domain.
+     Also distinguishes an unticked Opportunity that could never be qualified
+     because no conversion was sent. */
+  'function sfLabel(x){var st=x.sf_state;' +
+  'if(st==="ticked")return x.qualified_sent?"ticked, $50 fired":"ticked, will fire next poll";' +
+  'if(st==="exists_unticked")return x.signup_sent?"waiting on an AE":"unticked \u2014 no conversion sent, not actionable";' +
+  'if(st==="create_errored")return "Opportunity never created";' +
+  'if(st==="no_opportunity")return "no Opportunity yet";' +
+  'return st||"not checked yet";}' +
   'dtb.innerHTML=dl.map(function(x){' +
   'var bad=(failed.indexOf(x.state)>=0);' +
   'var det=x.signup_fail_reason||x.qualify_fail_reason||x.skipped_reason||"";' +
-  'var sfs=x.sf_state?(sfl2[x.sf_state]||x.sf_state):"not checked yet";' +
+  'var sfs=x.sf_state?sfLabel(x):"not checked yet";' +
   'return "<tr><td><code>"+esc(x.customer_key)+"</code></td>"' +
   '+"<td><span class=\'pschip"+(bad?" bad":"")+"\'>"+esc((lbl[x.state]||x.state))+"</span></td>"' +
   '+"<td>"+esc(x.partner_name||x.partner_email||x.partner_key||"—")+"</td>"' +
@@ -3315,7 +3343,7 @@ app.get('/monitor', (req, res) => {
   'else if(pSort==="last_click"){x=x?new Date(x).getTime():0;y=y?new Date(y).getTime():0;}' +
   'else{x=Number(x)||0;y=Number(y)||0;}' +
   'if(x<y)return pDir==="asc"?-1:1;if(x>y)return pDir==="asc"?1:-1;return 0;});' +
-  '["partner_name","step1","completed","conversions","booked","qualified","last_click"].forEach(function(c){var el=document.getElementById("psar-"+c);if(el)el.textContent=(pSort===c)?(pDir==="asc"?"▲":"▼"):"";});' +
+  '["partner_name","clicks","step1","completed","conversions","booked","qualified","last_click"].forEach(function(c){var el=document.getElementById("psar-"+c);if(el)el.textContent=(pSort===c)?(pDir==="asc"?"▲":"▼"):"";});' +
   /* name -> email -> key, the same chain as Slack and the detail panel. */
   /* Event delegation rather than an inline onclick: the key would otherwise
      need quotes nested three deep (HTML attribute inside a client JS string
@@ -3326,6 +3354,7 @@ app.get('/monitor', (req, res) => {
   '+"<td>"+esc(label)+"</td>"' +
   '+"<td>"+esc(p.partner_email||"—")+"</td>"' +
   '+"<td><code style=\'font-size:10px\'>"+esc(p.partner_key)+"</code></td>"' +
+  '+"<td>"+(p.clicks===null||p.clicks===undefined?"&#8212;":p.clicks)+"</td>"' +
   '+"<td>"+(p.step1||0)+"</td>"' +
   '+"<td>"+(p.completed||0)+"</td>"' +
   '+"<td>"+(p.conversions||0)+"</td>"' +
@@ -6542,6 +6571,9 @@ const PS_LADDER_FAILED = ['conversion_failed', 'qualification_failed'];
    complete. leads_ps_failed_idx covers that arm of the OR. */
 const PS_LADDER_WINDOW_D = 180;
 const PS_LADDER_LIMIT    = 500;
+/* Three refresh intervals. Past this the column is stale enough that a silent
+   failure is the likelier explanation than a slow tick. */
+const PS_SF_STALE_MIN    = 45;
 
 async function partnerLifecycle() {
   const [domains, noKey, sfState] = await Promise.all([
@@ -6555,6 +6587,8 @@ async function partnerLifecycle() {
              MAX(ps_signup_fail_reason)         AS signup_fail_reason,
              MAX(ps_qualify_fail_reason)        AS qualify_fail_reason,
              MAX(ps_signup_skipped_reason)      AS skipped_reason,
+             BOOL_OR(ps_signup_sent_at IS NOT NULL)     AS signup_sent,
+             BOOL_OR(ps_qualified_sent_at IS NOT NULL)  AS qualified_sent,
              BOOL_OR(ps_signup_verified_at IS NOT NULL) AS signup_verified,
              MAX(created_at)                    AS last_seen,
              MIN(created_at)                    AS first_seen
@@ -6589,6 +6623,24 @@ async function partnerLifecycle() {
   const bySfState = {};
   for (const d of domains.rows) if (d.sf_state) bySfState[d.sf_state] = (bySfState[d.sf_state] || 0) + 1;
 
+  /* "Waiting on an AE" is only ACTIONABLE where a qualification could actually
+     succeed — which means the conversion reached PartnerStack. gushwork.ai
+     reads exists_unticked because an Opportunity exists, but its conversion was
+     never sent (test address), so ticking the box would fire an action against
+     a customer PartnerStack has never heard of. Showing it as an action item
+     is a false errand.
+
+     The state is still shown per domain; it just does not count here. */
+  const sfActionable = domains.rows.filter((d) =>
+    d.sf_state === 'exists_unticked' && d.signup_sent === true && d.qualified_sent !== true).length;
+  const sfUnactionable = domains.rows.filter((d) =>
+    d.sf_state === 'exists_unticked' && d.signup_sent !== true).length;
+
+  /* Staleness. A refresh that fails leaves checked_at frozen and every row
+     looking current — the failure is invisible unless the AGE is shown. */
+  const checkedAts = sfState.rows.map((r) => r.checked_at).filter(Boolean).map((d) => new Date(d).getTime());
+  const newestCheck = checkedAts.length ? Math.max(...checkedAts) : null;
+
   const byState = {};
   for (const r of domains.rows) byState[r.state] = (byState[r.state] || 0) + 1;
   const needsAttention = PS_LADDER_FAILED.reduce((n, k) => n + (byState[k] || 0), 0);
@@ -6602,6 +6654,10 @@ async function partnerLifecycle() {
     noCustomerKeyLeads: Number(noKey.rows[0].leads) || 0,
     failedStates: PS_LADDER_FAILED,
     bySfState,
+    sfActionable,
+    sfUnactionable,
+    sfNewestCheckedAt: newestCheck ? new Date(newestCheck).toISOString() : null,
+    sfStaleAfterMin: PS_SF_STALE_MIN,
     sfStates: PS_SF_STATES,
     sfLastRead: _psSfLastRead,
     /* The domain list is capped. Say so rather than letting a page-1 view read

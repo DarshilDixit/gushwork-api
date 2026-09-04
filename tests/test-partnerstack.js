@@ -1093,6 +1093,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
         liftLine(src, 'const PS_LADDER_FAILED =') + '\n' +
         liftLine(src, 'const PS_LADDER_WINDOW_D =') + '\n' +
         liftLine(src, 'const PS_LADDER_LIMIT') + '\n' +
+        liftLine(src, 'const PS_SF_STALE_MIN') + '\n' +
         liftLine(src, 'let _psSfLastRead =') + '\n' +
         liftLine(src, 'const PS_SF_STATES =') + '\n' +
         liftTemplate(src, 'const PS_LADDER_SQL =') + '\n' +
@@ -1565,6 +1566,108 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        els['p-sfstates'].innerHTML.includes('pschip bad') && els['p-sfstates'].innerHTML.includes('incomplete'));
     await run({ ...base, totalDomains: 500, bySfState: { ticked: 500 }, sfLastRead: { ok: true, records: 10, totalSize: 10, pages: 1 }, domainsCapped: true, domainsLimit: 500 });
     ok('signalD UI: a capped domain list says so', els['p-sfstates'].innerHTML.includes('capped at 500 domains'));
+  }
+
+  /* ── PR1.6: display fixes ─────────────────────────────────────────── */
+
+  /* Clicks were computed server-side in PR1, returned in the payload, and had
+     no header, no cell and no sort entry. Computed and dropped — the fifth
+     instance of that pattern tonight. */
+  ok('clickCol: there is a Clicks header', /id="psar-clicks"/.test(src));
+  /* The onclick lives inside a JS string, so the quotes are backslash-escaped
+     in the source. */
+  ok('clickCol: it is sortable', /sortPartners\(\\'clicks\\'\)/.test(src));
+  ok('clickCol: it is in the sortable column list',
+     /\["partner_name","clicks","step1"/.test(src));
+  ok('clickCol: the row renders it', /p\.clicks===null\|\|p\.clicks===undefined\?"&#8212;":p\.clicks/.test(src));
+  /* It is the one column that is not a company count. */
+  ok('clickCol: the header says it is not a company count',
+     /This is the one column that is not a company count/.test(src));
+
+  /* "Waiting on an AE" must only count where a qualification could succeed.
+     gushwork.ai has an unticked Opportunity but never had a conversion sent,
+     so ticking the box would fire an action against a customer PartnerStack
+     has never heard of. */
+  {
+    const fn = src.slice(src.indexOf('async function partnerLifecycle'), src.indexOf('async function partnerOverview'));
+    ok('actionable: requires the conversion to have been sent',
+       /sfActionable = domains\.rows\.filter\([\s\S]{0,200}?d\.signup_sent === true/.test(fn));
+    ok('actionable: excludes domains already qualified',
+       /d\.qualified_sent !== true/.test(fn));
+    ok('actionable: the unactionable ones are counted separately, not hidden',
+       /sfUnactionable = domains\.rows\.filter\([\s\S]{0,160}?d\.signup_sent !== true/.test(fn));
+    ok('actionable: signup_sent comes from the query', /BOOL_OR\(ps_signup_sent_at IS NOT NULL\)\s+AS signup_sent/.test(fn));
+  }
+  ok('actionable: the card reads the actionable count, not the raw state count',
+     /set\("p-sfwait",lc\.sfActionable\|\|0\)/.test(src));
+  ok('actionable: the non-actionable ones say why', /not actionable/.test(src));
+
+  /* hello.com's $50 has already landed; "will fire" was wrong. */
+  ok('fired: a ticked domain whose qualification fired says so',
+     /ticked, \$50 fired/.test(src));
+  ok('fired: split on qualified_sent, not on the SF state alone',
+     /x\.sf_state==="ticked"&&x\.qualified_sent/.test(src));
+  /* The per-domain TABLE has its own label path, and fixing only the summary
+     chip left the row a reader actually looks at still saying "will fire" —
+     a mutation survived on exactly that. */
+  ok('fired: the per-domain row label is per-row, not a static map',
+     /function sfLabel\(x\)/.test(src) && /st==="ticked"\)return x\.qualified_sent\?"ticked, \$50 fired"/.test(src));
+  ok('fired: the row also flags an unticked domain with no conversion sent',
+     /st==="exists_unticked"\)return x\.signup_sent\?"waiting on an AE"/.test(src));
+  ok('fired: the stale static map no longer carries a ticked label',
+     !/var sfl=\{ticked:/.test(src));
+  /* The server must SEND the unactionable count, not just compute it. */
+  ok('actionable: sfUnactionable reaches the payload', /^\s*sfUnactionable,$/m.test(src));
+  ok('fired: one still awaiting the poll reads differently',
+     /ticked, will fire next poll/.test(src));
+
+  /* A failed refresh freezes checked_at and every row looks current. */
+  ok('stale: the newest check time is returned', /sfNewestCheckedAt: newestCheck/.test(src));
+  ok('stale: there is a staleness threshold', /const PS_SF_STALE_MIN    = 45;/.test(src));
+  ok('stale: going stale renders RED',
+     /ageMin>=\(lc\.sfStaleAfterMin\|\|45\)\)sfc\+="<span class=\\'pschip bad\\'/.test(src));
+  ok('stale: a fresh check shows its age too', /checked "\+ageMin\+" min ago/.test(src));
+
+  /* Executed. */
+  {
+    const i = src.indexOf("'var partnerRows=[],pSort=");
+    const j = src.indexOf("'function debounce()");
+    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const els = {};
+    const mk = () => ({ textContent: '', innerHTML: '', style: {}, className: '', querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
+    const doc = { getElementById: (id) => (els[id] = els[id] || mk()), createElement: () => ({ value: '', textContent: '' }) };
+    const F = (new Function('API','TP','esc','et','set','fetch','AbortSignal','document','showTab','loadFilterOptions','loadLeads','Array',
+      client + '; return {loadPartners};'));
+    const run = (lifecycle, partners) => F('', '', (x) => String(x == null ? '' : x), (x) => String(x == null ? '' : x),
+      (id, v) => { doc.getElementById(id).textContent = String(v); },
+      async () => ({ ok: true, json: async () => ({ totals: { clicks: 4 }, partners: partners || [], lifecycle }) }),
+      { timeout: () => null }, doc, () => {}, async () => {}, () => {}, Array).loadPartners();
+
+    const base = {
+      byState: { qualified: 1 }, totalDomains: 2, needsAttention: 0, failedStates: [],
+      bySfState: { ticked: 1, exists_unticked: 1 }, sfActionable: 0, sfUnactionable: 1,
+      sfNewestCheckedAt: new Date().toISOString(), sfStaleAfterMin: 45,
+      domains: [
+        { customer_key: 'hello.com', state: 'qualified', sf_state: 'ticked', qualified_sent: true, signup_sent: true },
+        { customer_key: 'gushwork.ai', state: 'skipped', sf_state: 'exists_unticked', qualified_sent: false, signup_sent: false }],
+      sfLastRead: { ok: true, records: 10, totalSize: 10, pages: 1 }, domainsCapped: false, domainsLimit: 500,
+    };
+    await run(base, [{ partner_key: 'k1', partner_name: 'T', clicks: 4, step1: 4, completed: 3, conversions: 2, booked: 0, qualified: 1 }]);
+    eq('PR16 UI: the AE card excludes the unactionable domain', els['p-sfwait'].textContent, '0');
+    ok('PR16 UI: it is labelled not actionable', els['p-sfstates'].innerHTML.includes('not actionable'));
+    ok('PR16 UI: a fired qualification reads "$50 fired"', els['p-sfstates'].innerHTML.includes('ticked, $50 fired'));
+    ok('PR16 UI: not "will fire" for one already fired',
+       !els['p-sfstates'].innerHTML.includes('ticked, will fire next poll'));
+    ok('PR16 UI: a fresh check shows its age', /checked \d+ min ago/.test(els['p-sfstates'].innerHTML));
+    ok('PR16 UI: the clicks cell renders', els['ptbody'].innerHTML.includes('>4</td>'));
+
+    // stale
+    await run({ ...base, sfNewestCheckedAt: new Date(Date.now() - 90 * 60000).toISOString() });
+    ok('PR16 UI: a stale column renders red and says how old',
+       els['p-sfstates'].innerHTML.includes('pschip bad') && /STALE — last checked 9\d min ago/.test(els['p-sfstates'].innerHTML));
+    // clicks unknown
+    await run(base, [{ partner_key: 'k1', partner_name: 'T', clicks: null, step1: 1 }]);
+    ok('PR16 UI: an unknown click count shows a dash, not 0', els['ptbody'].innerHTML.includes('&#8212;'));
   }
 
   /* Step 8. */

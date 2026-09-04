@@ -579,6 +579,14 @@ Verified end to end against live production data (4 Sept 2026):
 
 Do not mark any of these done on the strength of the code existing.
 
+## Related open tickets
+
+- **`docs/tickets/apollo-enrichment-not-reaching-salesforce.md`** — Apollo
+  enrichment reaches 0% of Salesforce Leads while we hold it for 49% of leads.
+  Found while investigating the partner list view. Not a PartnerStack bug, but
+  the same shape as the four below.
+- **`disqualified` read inconsistently** across six sites — see gap 3.
+
 ## Known gaps
 
 **1. sfopp failures mean no Opportunity, and no Opportunity means no payout.**
