@@ -1,7 +1,7 @@
 # gushwork-api
 
 Inbound lead capture, verification and routing for gushwork.ai. Node + Express on
-Railway, Postgres, no build step. `index.js` is ~4,400 lines and holds most of the
+Railway, Postgres, no build step. `index.js` is ~6,000 lines and holds most of the
 system.
 
 Explain things in plain language — no jargon, no making things sound more complex
@@ -51,6 +51,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `salesforce.js` | Lead upsert by email. Refresh-token OAuth |
 | `meta-capi.js` | Conversions API — `Lead`, `Schedule`, `StartTrial`, `Contact` |
 | `loops.js` | Loops.so contact push for the lead-magnet landing page |
+| `partnerstack.js` | The S2S affiliate conversion call. Bearer tracking token, NOT the v2 key pair |
 | `lead-magnet.js` | `/lm/*` routes. Separate table, deliberately not joined to `leads` |
 | `backfill-sf.js` | Manual recovery tool for re-syncing leads to Salesforce after a broken connection or outage. Not mounted by default — see below |
 | `gushwork-form.js` | The `/demo` form frontend. Lives here and is served live by jsDelivr — see below |
@@ -335,6 +336,84 @@ everything will miss most of it.
 Any change to booking behaviour has to be applied to all three. A fix on one is a
 fix on one third.
 
+**PartnerStack: `partnerStackCustomerKey` is the only place a domain becomes a
+customer key.** PartnerStack counts one conversion per customer key for the life
+of the account, so two spellings of one company means either an affiliate paid
+twice or a real referral swallowed as a duplicate. Website, email and the three
+warehouse customer tables all go through this one function. Do not normalise a
+domain inline anywhere near this integration.
+
+**The automated eligibility check is BUILT AND OFF for the MVP.** Rejections are
+decided by hand at payout approval. Everything below is dormant behind
+`PS_ELIGIBILITY_ENABLED`, default off — set it to the string `true` in the
+Railway env to turn it on, no rebuild needed. The conversion call deliberately
+does **not** consult it: today every partner lead that is not one of our own
+test addresses converts. Wiring the check into that path is a decision for
+someone to make, not a tidy-up, and a test asserts the two stay unconnected.
+
+**"Once per domain, ever" is enforced by the DATABASE, not by application
+code.** `leads_ps_signup_once_idx` is a UNIQUE PARTIAL index on
+`ps_customer_key WHERE ps_signup_sent_at IS NOT NULL`. `runPartnerStackSignup`
+CLAIMS the domain with a conditional UPDATE *before* the HTTP call and only the
+winner sends; a concurrent claim surfaces as `23505` and is read as
+"already sent". Checking then sending would race — two submits for one domain
+arriving together would both fire, and PartnerStack cannot undo a double credit.
+If the send fails the claim is RELEASED, because a stamp on a conversion that
+never arrived is silent, permanent, and costs the affiliate a real payout.
+
+**PartnerStack eligibility FAILS CLOSED, and that is deliberate.** It is the one
+check in the repo that does not follow "a lead is worth more than a verdict" —
+because it does not touch the lead at all. It decides whether an *affiliate* gets
+paid. The conversion call fires once per key forever and cannot be recalled,
+while a conversion we skipped is still in the log to send by hand, so a check
+that cannot run returns `check_failed` rather than waving it through. No lead is
+ever blocked, delayed or de-Meta'd by it.
+
+**PartnerStack eligibility runs AFTER `res.json()`, and must stay there.** It is
+fire-and-forget in `/submit`, next to `finaliseElvVerdict`, and it only runs when
+`ps_xid` is present. Three things keep the warehouse off a lead's critical path
+and all three are load-bearing:
+
+- the rule (b) query is wrapped in `withTimeout(..., PS_CUSTOMER_QUERY_TIMEOUT_MS)`
+  — `awsPool` has **no** `statement_timeout`, so an RDS instance that accepts
+  connections but answers slowly hangs forever otherwise. Fail-closed does not
+  save you here: a hang never reaches the catch. Three hung queries also exhaust
+  `awsPool` (`max: 3`) and starve `syncToAWS`.
+- the customer cache is warmed at boot and every 30 min by
+  `startPartnerStackCacheWarm()`, so no lead ever pays for the fetch. Measured
+  cost when healthy: 0.8–3.4s across the WAN.
+- eligibility is never awaited in the route.
+
+**Step 5's conversion call goes after this verdict, not before it.** Moving it
+earlier to "save a round trip" puts a third-party HTTP call in front of a waiting
+lead. `tests/test-partnerstack.js` asserts the ordering and that it is not
+awaited; both mutations are caught.
+
+**The contact source behind eligibility rule (a) is a registry, on purpose.**
+`PS_CONTACT_SOURCES` / `PS_CONTACT_ACTIVE` in `index.js`. Today it is prior
+inbound form leads only. The warehouse also holds two live outbound logs
+(`gist.gtm_coldemail_sends_master`, indexed on domain;
+`gist.gtm_outbound_multisource`, NOT indexed on `website_url`) which may be
+switched on later. Measure before switching one on: against 90 days of real
+leads, prior form lead rejects 9.7%, cold email in the 90 days before the submit
+25.6%, dials 4.9%. A naive "emailed in the last 90 calendar days" reading looks
+like 39.6%, but 17.4 points of that is our own sequencer following UP on an
+inbound lead, which is not prior contact.
+
+**Rule (b)'s 12-month clause is unenforceable and says so out loud.** Nothing in
+`gw_prod` can date a churn: `customer_contract_terms` has zero churned rows,
+`gist_accountsmaster` has an `End_Date` on 2 of 330 rows, and
+`public.subscriptions` has no row with a future billing date. Current-customer is
+checked; the 12-month half is returned as `unverified: ['customer_last_12_months']`
+on every pass so it is visible rather than silently passing. The clause stays in
+the affiliate terms — we just cannot enforce it here yet.
+
+**Six verification columns never reach the AWS mirror.** `elv_status`,
+`elv_checked_at`, `website_check_failed`, `website_check_reason`,
+`website_check_reason_prev` and `website_rechecked_at` exist on Railway `leads`
+and not on `gw_form_leads`. The dialer cannot see whether a lead was verified.
+Known, not fixed here.
+
 **Known open bug:** the duplicate-booking guard looks up the *newest* lead row per
 email and asks whether that row has a booking. A second form submission creates a
 newer row, so the same person can take two calendar slots. Known, deferred by the
@@ -354,12 +433,13 @@ node tests/test-batch1.js       # logic, no dependencies
 node tests/test-batch2.js       # logic, no dependencies
 node tests/test-batch-a.js      # logic, no dependencies
 node tests/test-ads-parity.js   # the two form files against each other, no dependencies
+node tests/test-partnerstack.js # PartnerStack steps 1-5, no dependencies
 node tests/test-batch1-db.js    # needs DATABASE_URL
 node tests/test-batch1-e2e.js   # boots the real server, needs DATABASE_URL
 ```
 
-**The four dependency-free suites are the bar.** They run anywhere in about a
-second each — run all four after any change to `index.js`, `lead-magnet.js`, or
+**The five dependency-free suites are the bar.** They run anywhere in about a
+second each — run all five after any change to `index.js`, `lead-magnet.js`, or
 either form file, always. Do not install Postgres and do not point anything at
 the production database from a feature branch.
 
