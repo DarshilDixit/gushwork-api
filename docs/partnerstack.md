@@ -787,6 +787,11 @@ failure here would look exactly like a partner with no Opportunity.
   re-pointed at what the investigation did find: form submissions with no
   Salesforce Lead at all, 6 people in 90 days, 3 of them booked.
 - **`disqualified` read inconsistently** across six sites — see gap 3.
+- **`docs/tickets/completed-is-not-submitted-a-form.md`** — `completed = true`
+  does not mean the visitor submitted the form, and the AWS mirror disagrees
+  with Railway about the flag for 14 people. Same class as gap 3. Audited
+  5 Sept: nothing outward-facing is wrong today, and `backfill-sf.js` selects
+  on the wrong column.
 - **`docs/tickets/health-alert-state-is-in-memory.md`** — a red health row
   re-alerts on every deploy, because the cooldown and the last-reported state
   are in-memory Maps. Affects every check, not just PartnerStack.
