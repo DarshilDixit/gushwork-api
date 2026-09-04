@@ -6,7 +6,18 @@
 //
 // POST https://partnerlinks.io/conversion/xid
 //   Authorization: Bearer <PARTNERSTACK_TRACKING_TOKEN>
-//   { xid, customer_key, email, name }
+//   { xid, customer_key, email, name, ip_address, user_agent, origin }
+//
+// xid and customer_key are required; the rest are optional. ip_address,
+// user_agent and origin feed PartnerStack's fraud detection, so they are
+// sent when we have them and OMITTED when we do not — an empty string is
+// worse than an absent field, because it looks like a real value that
+// failed to match.
+//
+// None of the three lives on the lead row: `leads` stores no IP and no
+// user agent (form_sessions stores the UA, keyed by session). They come
+// off the /submit request itself, which is the same source the Meta CAPI
+// call at that site already uses.
 //
 // NOT POST /v2/customers. That endpoint cannot attach a click, so the
 // customer is created with no partner against it and the attribution is
@@ -45,7 +56,7 @@ function logCall(direction, payload) {
  * Send one signup conversion.
  * Resolves { ok, status, body, reason } — never rejects.
  */
-async function sendConversion({ xid, customer_key, email, name }) {
+async function sendConversion({ xid, customer_key, email, name, ip_address, user_agent, origin }) {
   const token = process.env.PARTNERSTACK_TRACKING_TOKEN;
   if (!token) {
     console.warn('[PartnerStack] PARTNERSTACK_TRACKING_TOKEN not set — conversion NOT sent');
@@ -54,7 +65,15 @@ async function sendConversion({ xid, customer_key, email, name }) {
   if (!xid)          return { ok: false, reason: 'no_xid' };
   if (!customer_key) return { ok: false, reason: 'no_customer_key' };
 
-  const payload = { xid, customer_key, email: email || undefined, name: name || undefined };
+  const payload = {
+    xid,
+    customer_key,
+    email:      email      || undefined,
+    name:       name       || undefined,
+    ip_address: ip_address || undefined,
+    user_agent: user_agent || undefined,
+    origin:     origin     || undefined,
+  };
   logCall('-> POST /conversion/xid', payload);
 
   const controller = new AbortController();

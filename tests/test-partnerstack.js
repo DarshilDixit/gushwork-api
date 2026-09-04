@@ -470,8 +470,39 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
      /Bearer \$\{token\}/.test(psmod) && /process\.env\.PARTNERSTACK_TRACKING_TOKEN/.test(psmod));
   ok('module: does not reach for the v2 Basic key pair on this endpoint',
      !/PARTNERSTACK_SECRET_KEY|PARTNERSTACK_PUBLIC_KEY/.test(psmod));
-  ok('module: sends exactly the four documented fields',
-     /const payload = \{ xid, customer_key, email: email \|\| undefined, name: name \|\| undefined \};/.test(psmod));
+  ok('module: sends the two required fields plus the five optional ones',
+     /const payload = \{[\s\S]{0,400}?\bxid,[\s\S]{0,400}?\bcustomer_key,[\s\S]{0,400}?email:[\s\S]{0,400}?name:[\s\S]{0,400}?ip_address:[\s\S]{0,400}?user_agent:[\s\S]{0,400}?origin:[\s\S]{0,80}?\};/.test(psmod));
+  /* An empty string is worse than an absent field for fraud matching: it looks
+     like a real value that failed to match. Every optional field must collapse
+     to undefined, which JSON.stringify drops entirely. */
+  for (const f of ['email', 'name', 'ip_address', 'user_agent', 'origin'])
+    ok(`module: ${f} is omitted rather than sent empty`,
+       new RegExp(f + ':\\s*' + f + '\\s*\\|\\| undefined').test(psmod));
+  ok('module: fraud signals are accepted by the signature',
+     /async function sendConversion\(\{ xid, customer_key, email, name, ip_address, user_agent, origin \}\)/.test(psmod));
+
+  /* The request context. x-forwarded-for is a comma-separated CHAIN behind
+     Railway's proxy — sending the whole header as an IP is worse than sending
+     nothing, because it looks like a value and matches nothing. */
+  {
+    const fn = src.slice(src.indexOf('function readPartnerStackRequestContext'),
+                         src.indexOf('function readPartnerStackPayload'));
+    ok('ctx: takes only the FIRST x-forwarded-for entry',
+       /fwd\.split\(','\)\[0\]/.test(fn));
+    ok('ctx: falls back to req.ip', /\|\| req\.ip \|\| null/.test(fn));
+    ok('ctx: user agent is bounded', /user-agent[\s\S]{0,80}?slice\(0, 500\)/.test(fn));
+    ok('ctx: origin prefers the Origin header', /req\.headers\['origin'\]/.test(fn));
+    ok('ctx: origin falls back to the page URL origin', /new URL\(page_url\)\.origin/.test(fn));
+    ok('ctx: a non-URL page_url cannot throw out of the helper', /catch \{/.test(fn));
+    ok('ctx: absent values are null, never empty strings',
+       (fn.match(/\|\| null/g) || []).length >= 2);
+  }
+  ok('ctx: /submit supplies the context to the conversion',
+     /runPartnerStackSignup\(\{[^}]*ctx: readPartnerStackRequestContext\(req, page_url\)/.test(src));
+  ok('conversion: passes the fraud signals through to the module',
+     /ip_address: ctx && ctx\.ip_address/.test(src) &&
+     /user_agent: ctx && ctx\.user_agent/.test(src) &&
+     /origin:\s*ctx && ctx\.origin/.test(src));
   ok('module: the call is bounded by a timeout', /AbortController|signal: controller\.signal/.test(psmod));
   ok('module: logs the request', /logCall\('-> POST \/conversion\/xid'/.test(psmod));
   ok('module: logs the response including the body', /logCall\(`<- \$\{res\.status\}/.test(psmod));

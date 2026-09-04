@@ -5192,6 +5192,31 @@ function parsePartnerStackClickHistory(raw) {
   return out.length ? out : null;
 }
 
+/* The request-level signals PartnerStack's fraud detection wants. None of these
+   is stored on the lead — `leads` has no IP or user-agent column — so they are
+   read off the request at the moment of submit.
+
+   ip_address takes the FIRST entry of x-forwarded-for, not the whole header.
+   app.set('trust proxy', 1) means req.ip is already resolved, but Railway sits
+   behind a proxy chain and the raw header is a comma-separated list; sending
+   "1.2.3.4, 10.0.0.1" as an IP address is worse than sending nothing, because
+   it looks like a value and will never match anything.
+
+   origin is the browser's Origin header, falling back to the origin of the page
+   the form was on. The Origin header is absent on same-origin non-CORS posts,
+   and page_url is the closest honest substitute for "where did this happen". */
+function readPartnerStackRequestContext(req, page_url) {
+  const fwd = (req.headers['x-forwarded-for'] || '').toString();
+  const ip_address = (fwd.split(',')[0] || '').trim() || req.ip || null;
+  const user_agent = (req.headers['user-agent'] || '').toString().slice(0, 500) || null;
+
+  let origin = (req.headers['origin'] || '').toString().slice(0, 200) || null;
+  if (!origin && page_url) {
+    try { origin = new URL(page_url).origin; } catch { /* not a URL; leave it absent */ }
+  }
+  return { ip_address, user_agent, origin };
+}
+
 function readPartnerStackPayload(body, { email, website } = {}) {
   const ps_xid         = (body.ps_xid         || '').toString().trim().slice(0, 200);
   const ps_partner_key = (body.ps_partner_key || '').toString().trim().slice(0, 120);
@@ -5292,7 +5317,7 @@ function runPartnerStackEligibility({ session_id, email, website, ps }) {
    The alternative — leaving the stamp on a conversion that never arrived — is
    the worse failure: it is silent, permanent, and costs the affiliate a real
    payout with nothing in the system saying so. */
-async function runPartnerStackSignup({ session_id, email, website, company, first_name, last_name, ps }) {
+async function runPartnerStackSignup({ session_id, email, website, company, first_name, last_name, ps, ctx }) {
   if (!ps || !ps.ps_xid) return;                       // not a partner lead
   if (!ps.ps_customer_key) return;                     // no usable domain
   if (isPartnerStackTestEmail(email)) {
@@ -5343,6 +5368,10 @@ async function runPartnerStackSignup({ session_id, email, website, company, firs
     customer_key: ps.ps_customer_key,
     email,
     name,
+    // Fraud-detection signals. Absent rather than empty when we do not have them.
+    ip_address: ctx && ctx.ip_address,
+    user_agent: ctx && ctx.user_agent,
+    origin:     ctx && ctx.origin,
   });
 
   if (result.ok) {
@@ -5713,7 +5742,7 @@ app.post('/submit', async (req, res) => {
     // Off the critical path on purpose — the lead is no longer waiting.
     if (!elv && !alreadyCompleted) finaliseElvVerdict({ session_id, email, website_check_reason });
     if (!alreadyCompleted) runPartnerStackEligibility({ session_id, email, website, ps });
-    if (!alreadyCompleted) runPartnerStackSignup({ session_id, email, website, company, first_name, last_name, ps })
+    if (!alreadyCompleted) runPartnerStackSignup({ session_id, email, website, company, first_name, last_name, ps, ctx: readPartnerStackRequestContext(req, page_url) })
       .catch(err => console.warn('[PartnerStack] Signup conversion failed (non-blocking):', err.message));
   } catch (err) { console.error('[/submit]', err.message); res.status(500).json({ error: 'Submit failed' }); }
 });

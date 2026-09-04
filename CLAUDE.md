@@ -51,7 +51,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `salesforce.js` | Lead upsert by email. Refresh-token OAuth |
 | `meta-capi.js` | Conversions API — `Lead`, `Schedule`, `StartTrial`, `Contact` |
 | `loops.js` | Loops.so contact push for the lead-magnet landing page |
-| `partnerstack.js` | The S2S affiliate conversion call. Bearer tracking token, NOT the v2 key pair |
+| `partnerstack.js` | The S2S affiliate conversion call. Bearer tracking token, NOT the v2 key pair. Sends ip_address / user_agent / origin for fraud detection |
 | `lead-magnet.js` | `/lm/*` routes. Separate table, deliberately not joined to `leads` |
 | `backfill-sf.js` | Manual recovery tool for re-syncing leads to Salesforce after a broken connection or outage. Not mounted by default — see below |
 | `gushwork-form.js` | The `/demo` form frontend. Lives here and is served live by jsDelivr — see below |
