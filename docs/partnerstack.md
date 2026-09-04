@@ -504,6 +504,16 @@ passes `false` and clears a real disqualification on the mirror.
 `syncBookingToAWS`, `syncPartnerIdentityToAWS` and `syncHearAboutUsToAWS` exist
 for this reason.
 
+**Postgres does not guarantee predicate order in an AND chain.** Two things in
+this integration have been bitten by it: `start_time::timestamptz` in the
+lifecycle ladder and `decode(pk,'base64')` in the click-history backfill. Both
+are guarded by a `CASE` whose `WHEN` establishes the value is safe to convert,
+because a flat `WHERE regex AND cast(...)` lets the cast run first and one bad
+row takes the whole statement down. The backfill version was caught by running
+the statement as a read-only SELECT against real data before shipping —
+`invalid base64 end sequence` — which is worth doing for any statement that
+converts or casts untrusted text.
+
 **3. `disqualified` is read inconsistently across six sites.** The stage ladder
 uses `IS TRUE` / `IS NOT TRUE`; the dashboard metric counts, the recovery cron,
 the recovery health check, the backlog count and the SDR list all use

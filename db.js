@@ -568,15 +568,23 @@ async function initDB() {
          round-trips exactly, so an already-normalised row cannot be mangled.
          The WHERE clause makes it idempotent: once no entry looks like base64
          the row stops matching. */
+      /* NESTED CASE, not a flat AND chain. Postgres does not guarantee the
+         regex and length checks run before decode() in an AND, so a 15-char
+         key like 785ec78e1ee4688 reaches decode and raises
+         "invalid base64 end sequence" — which would have failed at boot. Same
+         evaluation-order trap as the start_time::timestamptz cast in the
+         ladder. The outer CASE gates the decode; only values that already look
+         like base64 ever reach it. */
       const clicks = await client.query(`
         UPDATE leads
            SET ps_click_history = (
                  SELECT jsonb_agg(
                           CASE WHEN e->>'pk' ~ '^[A-Za-z0-9+/]+={0,2}$'
                                 AND length(e->>'pk') % 4 = 0
-                                AND encode(decode(e->>'pk','base64'),'base64') = e->>'pk'
-                                AND convert_from(decode(e->>'pk','base64'),'UTF8') ~ '^[A-Za-z0-9._-]{6,120}$'
-                               THEN jsonb_set(e, '{pk}', to_jsonb(convert_from(decode(e->>'pk','base64'),'UTF8')))
+                               THEN CASE WHEN encode(decode(e->>'pk','base64'),'base64') = e->>'pk'
+                                          AND convert_from(decode(e->>'pk','base64'),'UTF8') ~ '^[A-Za-z0-9._-]{6,120}$'
+                                         THEN jsonb_set(e, '{pk}', to_jsonb(convert_from(decode(e->>'pk','base64'),'UTF8')))
+                                         ELSE e END
                                ELSE e END
                           ORDER BY ord)
                    FROM jsonb_array_elements(ps_click_history) WITH ORDINALITY AS t(e, ord))
@@ -584,10 +592,11 @@ async function initDB() {
            AND jsonb_typeof(ps_click_history) = 'array'
            AND EXISTS (
                  SELECT 1 FROM jsonb_array_elements(ps_click_history) AS e
-                  WHERE e->>'pk' ~ '^[A-Za-z0-9+/]+={0,2}$'
-                    AND length(e->>'pk') % 4 = 0
-                    AND encode(decode(e->>'pk','base64'),'base64') = e->>'pk'
-                    AND convert_from(decode(e->>'pk','base64'),'UTF8') ~ '^[A-Za-z0-9._-]{6,120}$')`);
+                  WHERE CASE WHEN e->>'pk' ~ '^[A-Za-z0-9+/]+={0,2}$'
+                              AND length(e->>'pk') % 4 = 0
+                             THEN encode(decode(e->>'pk','base64'),'base64') = e->>'pk'
+                              AND convert_from(decode(e->>'pk','base64'),'UTF8') ~ '^[A-Za-z0-9._-]{6,120}$'
+                             ELSE false END)`);
       if (phantom.rowCount || skipped.rowCount || clicks.rowCount) {
         console.log(`[DB] PartnerStack backfill: ${phantom.rowCount} phantom, ${skipped.rowCount} skipped, ${clicks.rowCount} click-history normalised`);
       }

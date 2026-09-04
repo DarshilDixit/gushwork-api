@@ -1341,6 +1341,16 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
      would rewrite entries that do not round-trip. */
   eq('keyC: the round-trip guard appears in both the CASE and the EXISTS',
      (dbjs.match(/encode\(decode\(e->>'pk','base64'\),'base64'\) = e->>'pk'/g) || []).length, 2);
+  /* THE TRAP THIS ACTUALLY HIT. A flat AND chain does not guarantee the regex
+     and length checks run before decode(), so a 15-char key reaches decode and
+     raises "invalid base64 end sequence" — the statement failed on real data
+     in a read-only dry run before it ever shipped. The decode must sit INSIDE
+     a CASE whose WHEN has already established the value looks like base64.
+     Same evaluation-order trap as the start_time::timestamptz cast. */
+  eq('keyC: decode is gated by a nested CASE in both places, not a flat AND',
+     (dbjs.match(/THEN CASE WHEN encode\(decode|THEN encode\(decode/g) || []).length, 2);
+  ok('keyC: no decode sits in a bare AND chain',
+     !/AND encode\(decode\(e->>'pk'/.test(dbjs));
   eq('keyC: the shape check appears in both too',
      (dbjs.match(/convert_from\(decode\(e->>'pk','base64'\),'UTF8'\) ~ '\^\[A-Za-z0-9\._-\]\{6,120\}\$'/g) || []).length, 2);
   ok('keyC: the backfill is idempotent — it stops matching once normalised',
