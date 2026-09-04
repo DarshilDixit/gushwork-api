@@ -373,6 +373,28 @@ It also flags a record that comes back `test: true`, because a production
 integration writing test records pays nobody and looks completely healthy
 otherwise.
 
+## A control-flow trap worth knowing
+
+`refreshPartnerDomainSfState` was chained onto the end of
+`runPartnerStackQualificationPoll`, after its `try/finally`. **It never ran
+once.** That poll has three `return`s inside its `try`, and a return there
+exits the whole function — the `finally` still fires, so the flag resets and
+everything looks healthy, but anything after the `try/finally` is skipped. The
+common case takes an early return: once everything qualified has been sent, the
+pending-domains query is empty and the poll returns at that line on every
+subsequent tick, forever.
+
+Adding a boot-time call would have been the *worst* fix — it would have run
+once per deploy, populated the column, and looked correct. The fix is separate
+scheduling, matching `startPartnerStackCacheWarm` and
+`startPartnerStackConversionVerify`, which both already do boot-then-interval.
+
+The pattern was audited across the repo. `lookupElvStatus`,
+`partnerIdentityNoNetwork` and `sendQualificationForDomain` all have returns
+inside a try with code after it, and all three are **correct** — the early
+return is "found" or "did not win the claim", and the code after is the
+intended fallback. The poller was the only genuine instance.
+
 ## Monitoring
 
 **Overview → Partner gaps** — the alert. **Derived from the lifecycle ladder,

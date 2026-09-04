@@ -1261,11 +1261,37 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     ok('sfB: a missing sfopp log degrades to no_opportunity, it does not throw',
        /Could not read sf_lead_conversion_log/.test(fn));
   }
-  /* The refresh must not be able to stop actions firing. */
-  ok('sfB: the refresh runs AFTER the qualification work, outside its try',
-     /_psQualifyRunning = false;\s*\n\s*\}[\s\S]{0,300}?await refreshPartnerDomainSfState\(\)/.test(src));
-  ok('sfB: its failure is non-blocking',
-     /refreshPartnerDomainSfState\(\)\s*\n\s*\.catch/.test(src));
+  /* IT IS ITS OWN JOB NOW, and this assertion is inverted from batch B on
+     purpose. Chaining it onto the qualification poll meant it never ran once:
+     that poll has three `return`s inside its try, and a return there exits the
+     whole function — the finally still fires so everything looks healthy, but
+     anything after the try/finally is skipped. The common case takes an early
+     return, so it was unreachable on every tick forever. A boot-time call
+     alone would have made it run once per deploy and look correct. */
+  {
+    /* Scoped to the poll function ONLY. Slicing to the scheduler constant ran
+       through refreshPartnerDomainSfState's own definition, so the name was
+       always present and the assertion could never fail. */
+    const poll = src.slice(src.indexOf('async function runPartnerStackQualificationPoll'),
+                           src.indexOf('async function sendQualificationForDomain'));
+    ok('sfC: the refresh is NOT chained onto the qualification poll',
+       !/refreshPartnerDomainSfState/.test(poll));
+    /* The pattern itself, so it cannot come back: nothing meaningful may sit
+       after the try/catch/finally in a function whose try contains a return. */
+    const afterFinally = poll.slice(poll.lastIndexOf('_psQualifyRunning = false;'));
+    ok('sfC: nothing is chained after the poll try/finally at all',
+       !/await [a-zA-Z]/.test(afterFinally.replace(/\/\*[\s\S]*?\*\//g, '')), afterFinally.slice(0, 120));
+  }
+  ok('sfC: the refresh has its own scheduler', /function startPartnerStackSfStateRefresh/.test(src));
+  ok('sfC: it runs at BOOT, not only on the interval',
+     /const run = \(why\) => refreshPartnerDomainSfState\(\)[\s\S]{0,200}?run\('boot'\);/.test(src));
+  ok('sfC: and on its own interval', /setInterval\(\(\) => run\('scheduled'\), PS_SF_REFRESH_INTERVAL_MS\)/.test(src));
+  ok('sfC: it is started from start()', /startPartnerStackSfStateRefresh\(\);/.test(src));
+  ok('sfC: its failure is non-blocking', /refreshPartnerDomainSfState\(\)\s*\n\s*\.catch/.test(src));
+  /* "Ran and found nothing" must be distinguishable from "never ran" — that
+     ambiguity is exactly what made this bug invisible. */
+  ok('sfC: a refresh that finds no domains says so',
+     /SF state refresh: no partner domains yet/.test(src));
   ok('sfB: the lifecycle reads the table but never recomputes it',
      /FROM partner_domain_sf_state/.test(src));
   ok('sfB: a missing SF row does not crash the join', /\.catch\(\(\) => \(\{ rows: \[\] \}\)\)/.test(src));
@@ -1412,6 +1438,53 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     ok('panelC: a failed qualification says why',
        F.psPanel({ ps_partner_key: 'k', ps_qualify_fail_reason: 'http_400' }).includes('failed: http_400'));
   }
+
+  /* ── PR1: clicks from our own history, and the health row ─────────── */
+
+  /* COUNT(DISTINCT xid), never SUM(jsonb_array_length). The cookie is
+     cumulative per VISITOR, so someone who clicks, submits, clicks again and
+     submits again carries the first click in BOTH leads' histories. Against
+     real data the naive sum said 5 and the truth was 4 — one xid appeared
+     under two domains. */
+  {
+    const fn = src.slice(src.indexOf('async function partnerOverview'), src.indexOf("app.get('/monitor/partners'"));
+    ok('clicksC: counted as DISTINCT xid', /COUNT\(DISTINCT e->>'xid'\)/.test(fn));
+    /* Comments stripped first: the comment explaining WHY we don't sum array
+       lengths contains the very string this forbids, so the raw negative match
+       failed against correct code. Any negative assertion over source needs
+       this. */
+    const fnCode = fn.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    ok('clicksC: never summed as array lengths', !/SUM\(jsonb_array_length/.test(fnCode));
+    ok('clicksC: only well-formed arrays are expanded',
+       /jsonb_typeof\([a-z]\.ps_click_history\) = 'array'/.test(fn));
+    /* "not measured" and "none" are different answers. */
+    ok('clicksC: a failed clicks query yields null, not 0',
+       /clicks: clicksRow\.rows\[0\]\.clicks === null \? null : Number/.test(fn));
+    ok('clicksC: per-partner clicks too', /AS clicks/.test(fn.slice(fn.indexOf('AS partner_key'))));
+  }
+
+  /* System Health had nothing for the path that pays affiliates. */
+  {
+    const fn = src.slice(src.indexOf('async function checkPartnerStackHealth'), src.indexOf('/* ── Step 2 — /submit'));
+    ok('healthC: red on ANY failure in the window', /if \(fails > 0\)[\s\S]{0,300}?'red'/.test(fn));
+    ok('healthC: counts both failure kinds', /signup_failures/.test(fn) && /qualify_failures/.test(fn));
+    /* Green with no traffic would be a badge meaning "we checked nothing". */
+    ok('healthC: no activity is insufficient_data, not green',
+       /return hc\('partnerstack', 'insufficient_data'/.test(fn));
+    ok('healthC: it says the claim was released and these retry', /Claims are released/.test(fn));
+    ok('healthC: a query failure is red, never green', /'Could not check'/.test(fn));
+    ok('healthC: the failure counts are per DOMAIN', /COUNT\(DISTINCT ps_customer_key\) FILTER \([\s\S]{0,120}?ps_signup_failed_at/.test(fn));
+  }
+  ok('healthC: the check is actually CALLED, not just defined',
+     /safeCheck\('partnerstack', \(\) => checkPartnerStackHealth\(pool\)\)/.test(src));
+  /* WARNING not critical: critical pages by email, the three that do are a
+     recorded owner decision, and the money path already alerts at the moment
+     of failure. */
+  ok('healthC: severity is warning, not a new email page',
+     /partnerstack: 'warning'/.test(src));
+  ok('healthC: it has alert metadata', /partnerstack: \{ source: 'PartnerStack'/.test(src));
+  ok('healthC: it has a dashboard row', /id="s-ps"/.test(src));
+  ok('healthC: the client id map includes it', /partnerstack:"s-ps"/.test(src));
 
   /* Step 8. */
   {
