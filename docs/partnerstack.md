@@ -98,6 +98,7 @@ All on `leads`, and all mirrored to `gw_form_leads` on the AWS warehouse.
 | `ps_click_history` | `/partial`, `/submit` from `gw_ps_clicks` | JSONB, oldest first, max 10. Reporting and disputes only — **attribution reads `ps_xid` and nothing else** |
 | `ps_signup_sent_at` | `runPartnerStackSignup` | Claimed *before* the HTTP call, released if it fails |
 | `ps_signup_verified_at` | The read-back sweep | Proof the customer really exists, not just that PartnerStack said 200 |
+| `hear_about_us_raw` | `/partial`, `/submit` | What the visitor came in saying, before the partner overwrite. First non-empty value wins and is never overwritten |
 | `ps_signup_skipped_reason` / `_at` | The skip guards | `test_email`, `disqualified`, `no_customer_key`, `already_sent` |
 | `ps_signup_fail_reason` / `ps_signup_failed_at` | Conversion failure + phantom sweep | Cleared on a later success |
 | `ps_qualify_fail_reason` / `ps_qualify_failed_at` | Qualification failure | Cleared on a later success |
@@ -337,6 +338,40 @@ credentials. The funnel therefore starts at step 1, not at the click, and the
 tab says so. The only remaining route is a custom report configured in the
 PartnerStack UI and pulled via `/v2/vendor/report-export/{key}`, which nobody
 has set up.
+
+## hear_about_us has three possible authors, and only one used to survive
+
+One column, written in sequence by:
+
+1. **`prefillHearAboutUs()`** (both form files, at init) — derives from
+   UTM/referrer into `Facebook (Paid)`, `Instagram (UGC) — Creator`,
+   `Google Ads`, `linkedin`, and **hides the input**, so the visitor cannot
+   type over it. A `gw_ref_email` cookie wins first as `Referral - <email>`.
+2. **The visitor** — reachable only when no prefill matched.
+3. **`partnerHearAboutUs()`** (server, both routes) — overwrites with
+   `Partner - {name}` unless the value starts with `Referral -`.
+
+1 and 2 are mutually exclusive on the client, so exactly one value arrives —
+and step 3 was **destroying** it, not hiding it. A partner-referred lead who
+came in on a paid ad is two real facts and we kept one.
+
+`hear_about_us_raw` now stores what arrived. **Its COALESCE runs the opposite
+way round from every other one in these queries** —
+`COALESCE(leads.hear_about_us_raw, EXCLUDED.hear_about_us_raw)` — because the
+FIRST non-empty value must stick and nothing may overwrite it.
+
+There is deliberately no third `_auto` column reconstructing the ad-derived
+value from the UTMs: since 1 and 2 are mutually exclusive, it would either
+duplicate `_raw` or be empty, and it would be a reconstruction rather than a
+record.
+
+**Recovery of the four historical leads: one of four.** The value is gone from
+Railway (single column, upserted), from the AWS mirror (it receives the final
+value), and from `form_sessions` (no such column). `test.com` is the exception
+— its Salesforce Lead still reads `Testing RevenueHero`, written before the
+partner logic shipped — and that one row is backfilled. The other three had
+`utm_source = null` and `referrer = direct`, so there was no ad attribution to
+lose either way.
 
 ## The read-back guard
 

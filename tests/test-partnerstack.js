@@ -1136,8 +1136,30 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        /ps_signup_failed_at IS NULL/.test(bf) && /ps_signup_skipped_reason IS NULL/.test(bf));
     ok('backfill: never overwrites a domain that has since converted',
        (bf.match(/ps_signup_sent_at IS NULL/g) || []).length === 2);
-    ok('backfill: bounded to rows predating the cutoff',
-       (bf.match(/created_at < \$\{CUTOFF\}/g) || []).length === 2);
+    /* Two kinds of backfill, and only one needs the cutoff.
+
+       A statement that targets a NAMED identity — a specific email or domain —
+       is a one-off historical repair and must be cutoff-bounded, or it could
+       touch a real lead that arrives on that domain later.
+
+       The click-history repair is different: it targets no identity, it is
+       keyed purely on the data condition, and it is idempotent because a
+       normalised row stops matching. Bounding it would stop it fixing a future
+       regression of the cookie, which is exactly what it is for. Asserting a
+       flat count across both broke the moment a third statement was added and
+       said nothing about whether the new one was guarded. */
+    {
+      const stmts = bf.split('UPDATE leads').slice(1);
+      const identity = stmts.filter((t) => /ps_customer_key = '|LOWER\(email\) = '/.test(t));
+      const general  = stmts.filter((t) => !/ps_customer_key = '|LOWER\(email\) = '/.test(t));
+      ok('backfill: there are both identity-targeted and general statements',
+         identity.length >= 3 && general.length >= 1, `${identity.length} identity, ${general.length} general`);
+      eq('backfill: every identity-targeted statement is cutoff-bounded',
+         identity.filter((t) => t.includes('${CUTOFF}')).length, identity.length);
+      /* The general one is bounded by its own predicate instead. */
+      ok('backfill: the general repair is idempotent by its predicate',
+         general.every((t) => /AND EXISTS \(/.test(t)));
+    }
     /* Honest timestamps rather than NOW(): the release moment for the phantom,
        the submit time for the skip. */
     ok('backfill: the phantom uses the claim-release time, not NOW()',
@@ -1668,6 +1690,101 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     // clicks unknown
     await run(base, [{ partner_key: 'k1', partner_name: 'T', clicks: null, step1: 1 }]);
     ok('PR16 UI: an unknown click count shows a dash, not 0', els['ptbody'].innerHTML.includes('&#8212;'));
+  }
+
+  /* ── PR1.7: keep what the visitor came in saying ──────────────────── */
+
+  /* hear_about_us is one column with three possible authors — the ad prefill,
+     the visitor, and partnerHearAboutUs — and the last one wins, so the first
+     two were DESTROYED rather than hidden. */
+  ok('rawH: the column is declared', /ALTER TABLE leads ADD COLUMN IF NOT EXISTS hear_about_us_raw TEXT/.test(dbjs));
+  ok('rawH: and on the mirror', /ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS hear_about_us_raw TEXT/.test(src));
+  for (const [route, from, to] of [
+    ['/partial', "app.post('/partial'", "app.post('/submit'"],
+    ['/submit',  "app.post('/submit'",  "app.post('/booking-confirmed'"]]) {
+    const seg = src.slice(src.indexOf(from), src.indexOf(to));
+    ok(`rawH: ${route} stores the raw client value`, /hear_about_us_raw/.test(seg));
+    /* EXISTING first — the opposite way round from every other COALESCE here.
+       The first non-empty value must stick and nothing may overwrite it. */
+    ok(`rawH: ${route} keeps the FIRST value, never overwrites`,
+       /hear_about_us_raw     = COALESCE\(leads\.hear_about_us_raw,         EXCLUDED\.hear_about_us_raw\)/.test(seg));
+    ok(`rawH: ${route} binds the RAW value, not the final one`,
+       /elv\?\.checked_at\|\|null,hear_about_us\|\|null,ps\.ps_xid/.test(seg));
+    /* A shifted parameter writes one column's value into another. */
+    {
+      const paren = (x, f) => { const i = x.indexOf('(', f); let d = 0;
+        for (let j = i; j < x.length; j++) { if (x[j] === '(') d++; else if (x[j] === ')') { d--; if (!d) return x.slice(i + 1, j); } } };
+      const split = (t) => { let d = 0, cur = '', out = [];
+        for (const ch of t) { if ('([{'.includes(ch)) d++; if (')]}'.includes(ch)) d--; if (ch === ',' && d === 0) { out.push(cur.trim()); cur = ''; } else cur += ch; }
+        out.push(cur.trim()); return out; };
+      const cols = split(paren(seg, seg.indexOf('INSERT INTO leads')));
+      const vals = split(paren(seg, seg.indexOf('VALUES')));
+      eq(`rawH: ${route} column count still equals value count`, cols.length, vals.length);
+      const dollars = vals.filter((v) => v.startsWith('$')).map((v) => +v.slice(1));
+      ok(`rawH: ${route} placeholders are sequential`, dollars.every((v, i) => v === i + 1));
+      const ai = seg.indexOf('`, [session_id');
+      const params = split(paren('[' + seg.slice(ai).replace('`, [', '('), 0));
+      eq(`rawH: ${route} params match the highest placeholder`, params.length, Math.max(...dollars));
+      /* The one that matters: the raw column must be bound to the raw value. */
+      const k = cols.indexOf('hear_about_us_raw');
+      const pv = params[+vals[k].slice(1) - 1];
+      ok(`rawH: ${route} hear_about_us_raw is bound to the client value`,
+         pv === 'hear_about_us||null', `${vals[k]} -> ${pv}`);
+      const kf = cols.indexOf('hear_about_us');
+      const pvf = params[+vals[kf].slice(1) - 1];
+      ok(`rawH: ${route} hear_about_us still gets the final value`,
+         pvf === 'hearAboutUsFinal||null', `${vals[kf]} -> ${pvf}`);
+    }
+  }
+  ok('rawH: it syncs to the mirror, first-value-wins there too',
+     /hear_about_us_raw       = COALESCE\(gw_form_leads\.hear_about_us_raw,   EXCLUDED\.hear_about_us_raw\)/.test(src));
+  ok('rawH: /monitor/leads returns it', /l\.hear_about_us_raw/.test(src));
+  /* One row is recoverable; the rest are gone from every store. */
+  ok('rawH: the recoverable row is backfilled from Salesforce',
+     /hear_about_us_raw = 'Testing RevenueHero'/.test(dbjs) && /this\.is\.darshil@gmail\.com/.test(dbjs));
+  ok('rawH: the backfill cannot fire twice', /AND hear_about_us_raw IS NULL/.test(dbjs));
+
+  /* RENDERED, not merely present — the fifth-instance rule. */
+  {
+    const i = src.indexOf("'function psPanel(l){");
+    const j = src.indexOf('  /* Loaded on its OWN cadence');
+    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const P = (new Function('esc', 'et', 'wlabel', client + '; return {psPanel};'))(
+      (x) => String(x == null ? '' : x), (x) => String(x == null ? '' : x), (x) => String(x));
+    ok('rawH UI: the panel renders it', P.psPanel({ ps_partner_key: 'k', hear_about_us_raw: 'Facebook (Paid)' }).includes('Facebook (Paid)'));
+    ok('rawH UI: it falls back to hear_about_us when that is not the partner value',
+       P.psPanel({ ps_partner_key: 'k', hear_about_us: 'linkedin' }).includes('linkedin'));
+    /* Falling back to "Partner - X" would show the partner twice and claim it
+       was what they said. */
+    ok('rawH UI: it never falls back to the partner value',
+       !P.psPanel({ ps_partner_key: 'k', hear_about_us: 'Partner - X' }).includes('Partner - X'));
+    ok('rawH UI: nothing recorded says so', P.psPanel({ ps_partner_key: 'k' }).includes('nothing recorded'));
+  }
+  {
+    const i = src.indexOf('function buildJourneyBlocks'), j = src.indexOf('function slackPartial');
+    const B = (new Function('bDivider', 'bSection', 'bContext', 'bFields', 'etStamp',
+      src.slice(i, j) + '; return buildJourneyBlocks;'))(() => ({ d: 1 }), (t) => ({ s: t }), (t) => ({ c: t }), () => null, (x) => String(x));
+    const b = []; B(b, { ps_partner_key: 'k1', ps_partner_name: 'T', hear_about_us_raw: 'Facebook (Paid)' });
+    ok('rawH Slack: the journey block shows what they came in saying',
+       JSON.stringify(b).includes('Came in saying') && JSON.stringify(b).includes('Facebook (Paid)'));
+    const b2 = []; B(b2, { ps_partner_key: 'k1', ps_partner_name: 'T' });
+    ok('rawH Slack: no line when there is nothing to show', !JSON.stringify(b2).includes('Came in saying'));
+  }
+  ok('rawH Slack: /submit passes it', /hear_about_us_raw:hear_about_us/.test(src));
+
+  /* The alert has to be actionable from Slack alone. */
+  {
+    const fn = src.slice(src.indexOf('async function recordPartnerStackFailure'),
+                         src.indexOf('async function clearPartnerStackFailure'));
+    ok('alertH: it names the partner', /'Partner': partner \?/.test(fn));
+    ok('alertH: it names the lead email', /'Lead':    email/.test(fn));
+    ok('alertH: it names the domain and reason', /'Domain':/.test(fn) && /'Reason':/.test(fn));
+    ok('alertH: an unresolved partner says so rather than being blank', /\(unresolved\)/.test(fn));
+    /* Looking the partner up must never stop the alert going out. */
+    ok('alertH: the lookup cannot suppress the alert',
+       /catch \{ \/\* identity is a nicety; never let it stop the alert \*\/ \}/.test(fn));
+    ok('alertH: the caller passes the partner key so no query is needed',
+       /partner_key: ps\.ps_partner_key/.test(src));
   }
 
   /* Step 8. */

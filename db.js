@@ -423,6 +423,13 @@ async function initDB() {
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_fail_reason TEXT`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_qualify_failed_at TIMESTAMPTZ`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_qualify_fail_reason TEXT`,
+      /* What the visitor actually came in saying, before the partner overwrite.
+         hear_about_us is a single column with three possible authors — the ad
+         prefill, the visitor, and partnerHearAboutUs — and the last one wins,
+         so the first two were being DESTROYED, not hidden. A partner-referred
+         lead who arrived on a paid ad is two real facts and we kept one.
+         Written once and never overwritten: the first non-empty value sticks. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS hear_about_us_raw TEXT`,
       /* The lifecycle ladder groups by domain and filters on the failure
          stamps; both are read on every dashboard load. */
       `CREATE INDEX IF NOT EXISTS leads_ps_failed_idx
@@ -597,6 +604,22 @@ async function initDB() {
                              THEN encode(decode(e->>'pk','base64'),'base64') = e->>'pk'
                               AND convert_from(decode(e->>'pk','base64'),'UTF8') ~ '^[A-Za-z0-9._-]{6,120}$'
                              ELSE false END)`);
+      /* One row is recoverable. The partner overwrite destroyed hear_about_us
+         on all four test leads, and it is gone from Railway, the AWS mirror and
+         form_sessions (which has no such column). test.com is the exception:
+         its Salesforce Lead still reads "Testing RevenueHero" because that
+         record was written before the partner logic shipped.
+
+         Guarded to that one address and only while the column is empty, so it
+         cannot fire twice or touch a real lead. */
+      const rawBf = await client.query(`
+        UPDATE leads
+           SET hear_about_us_raw = 'Testing RevenueHero'
+         WHERE LOWER(email) = 'this.is.darshil@gmail.com'
+           AND ps_xid IS NOT NULL
+           AND hear_about_us_raw IS NULL
+           AND created_at < ${CUTOFF}`);
+      if (rawBf.rowCount) console.log(`[DB] PartnerStack backfill: ${rawBf.rowCount} hear_about_us_raw recovered from Salesforce`);
       if (phantom.rowCount || skipped.rowCount || clicks.rowCount) {
         console.log(`[DB] PartnerStack backfill: ${phantom.rowCount} phantom, ${skipped.rowCount} skipped, ${clicks.rowCount} click-history normalised`);
       }
