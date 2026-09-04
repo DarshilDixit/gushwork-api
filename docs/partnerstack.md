@@ -319,7 +319,7 @@ came from the lead's website.
 
 ---
 
-## The funnel is CUMULATIVE, and that is a deliberate trade
+## The funnel shows TWO numbers per stage, and both are load-bearing
 
 Nine stages: Clicks, Reached step 1, Completed, Conversion sent, Conversion
 verified, Booked, Opportunity created, Qualified Demo ticked, the payment
@@ -327,18 +327,53 @@ fired. Defined once in `PS_FUNNEL_STAGE_SQL` and interpolated into both the
 programme-wide and per-partner queries, so a partner column and the headline
 are computed by the same expressions and cannot disagree.
 
-**Every stage repeats all prior conditions**, so each is a strict subset of the
-one before and the funnel nests by construction. Filtering each stage
-independently does NOT nest — a dry run against real data showed "Opportunity
-created" at 2 sitting after "Booked" at 0, because Salesforce Opportunities
-exist for companies that never booked through our form.
+Each stage carries **two counts**:
 
-**The trade-off, stated:** a domain that reaches a later stage without passing
-an earlier one drops out of the funnel entirely. That is right for a funnel
-measuring the path to the money — without a conversion the payment cannot fire
-whatever else is true — but **the funnel is not a census of Salesforce**. The
-per-domain table is. If a number here looks lower than the Salesforce column,
-that is the reason.
+- the **cumulative** one repeats all prior conditions, so each is a strict
+  subset of the one before and the funnel nests by construction. Filtering
+  each stage independently does NOT nest — a dry run against real data showed
+  "Opportunity created" at 2 sitting after "Booked" at 0, because Salesforce
+  Opportunities exist for companies that never booked through our form.
+- the **absolute** twin (`abs_*`) asks only "did this happen for this domain",
+  with none of the prior conditions.
+
+**The absolute is the headline; the cumulative is named underneath as "on the
+funnel path", and only when the two differ.** In the healthy case a row looks
+exactly as it did before.
+
+**Why both, and not just the cumulative one.** On 5 Sept the funnel read
+`The $50 fired: 0` while the summary card read 1, the per-domain row read
+"ticked, $50 fired", and the commission was sitting in PartnerStack.
+`hello.com` had a hand-made Salesforce Opportunity and never booked through our
+form, so the cumulative chain dropped it at BOOKED and it could not appear in
+any stage after that. The cumulative rule was not the fault — it is still the
+only column that nests, and it stays. The fault was that **it was the only
+number on screen**, which is this integration's recurring bug once more: we
+held the evidence the answer was incomplete and rendered it as fact.
+
+This is not a test-only shape. A company that books directly with an AE, or an
+Opportunity an SDR raises by hand, reaches the payment stage without a form
+booking and with real money attached.
+
+**The twins are deliberately the same expressions the summary cards use**, so a
+funnel-vs-card contradiction is structurally impossible rather than fixed once.
+Change one and you must change the other; `tests/test-partnerstack.js` asserts
+they match, that no twin carries an earlier stage's condition, and that the
+rendered headline never reads 0 for a stage that happened.
+
+**Rates still run stage to stage down the cumulative path.** A rate between two
+absolutes is not a step-to-step rate and is not bounded by 100%.
+
+**The funnel is still not a census of Salesforce**; the per-domain table is. But
+a number here can no longer read *lower than the thing that happened* — it
+reads the true count and says how many of them skipped a stage.
+
+The per-partner table gets the same treatment, because it had the identical bug
+one level down: `Qualified 0` for the partner whose $50 had already fired. Its
+stage cells show the absolute count and carry a dagger with both numbers in the
+tooltip where some of it skipped. `psVal` is the single function behind both the
+cell and the sort comparator — a column that sorts on a number it is not
+showing is the same class of bug as one computed and never rendered.
 
 The programme row is **its own ungrouped query, not a sum of the per-partner
 rows**: a domain can carry leads from two partners, and summing would count it

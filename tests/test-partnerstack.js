@@ -1960,6 +1960,252 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        els['pfn-note'].innerHTML.includes('only PartnerStack has those'));
   }
 
+  /* ── The funnel may not read 0 about something that happened ────────
+     5 Sept: the funnel said "The $50 fired: 0" while the summary card said 1,
+     the per-domain row said "ticked, $50 fired", and the commission was
+     sitting in PartnerStack. hello.com had a hand-made Opportunity and never
+     booked through our form, so the cumulative chain dropped it at BOOKED and
+     it could not appear in any stage after that.
+
+     The cumulative rule stays — it is the only column that nests. What was
+     wrong is that it was the only number on screen. */
+  {
+    const frag = src.slice(src.indexOf('const PS_FUNNEL_STAGE_SQL = `'), src.indexOf('const PS_FUNNEL_FROM'));
+    const stages = (new Function(lift(src, 'const PS_FUNNEL_STAGES = [') + '\n return PS_FUNNEL_STAGES;'))();
+    const expr = (name) => {
+      const i = frag.indexOf('AS ' + name);
+      return i < 0 ? null : frag.slice(frag.lastIndexOf('COUNT(DISTINCT', i), i);
+    };
+
+    /* Every stage that a domain can skip into carries an unchained twin. */
+    for (const k of ['conversions', 'verified', 'booked', 'opportunity', 'ticked', 'qualified']) {
+      const st = stages.find((x) => x.key === k);
+      ok(`abs: stage ${k} declares its unchained twin`, st && st.abs === 'abs_' + k);
+      ok(`abs: ${'abs_' + k} exists in the shared SQL`, !!expr('abs_' + k));
+    }
+    /* step 1 cannot be skipped into, and completed already filters the full
+       base on one condition, so a twin there would be a duplicate column. */
+    ok('abs: step1 and completed have no twin, because they cannot differ',
+       !stages.find((x) => x.key === 'step1').abs &&
+       !stages.find((x) => x.key === 'completed').abs &&
+       !expr('abs_step1') && !expr('abs_completed'));
+    ok('abs: clicks has no twin — a different unit, not a stage',
+       !stages.find((x) => x.key === 'clicks').abs);
+
+    /* UNCHAINED is the whole point. A twin carrying a prior stage's condition
+       would reproduce the bug with extra steps: it would still be capable of
+       reading 0 for a domain that skipped. One condition each, no more. */
+    const chain = {
+      abs_conversions: 'ps_signup_sent_at IS NOT NULL',
+      abs_verified:    'ps_signup_verified_at IS NOT NULL',
+      abs_booked:      'booking_uid IS NOT NULL',
+      abs_opportunity: "sf_state IN ('exists_unticked','ticked')",
+      abs_ticked:      "sf_state = 'ticked'",
+      abs_qualified:   'ps_qualified_sent_at IS NOT NULL',
+    };
+    for (const [col, cond] of Object.entries(chain)) {
+      const e = expr(col);
+      ok(`abs: ${col} filters on exactly its own condition`, e.includes(cond), e);
+      ok(`abs: ${col} carries no earlier stage's condition`,
+         !/\bAND\b/.test(e.slice(e.indexOf('WHERE'))), e);
+    }
+    /* Every twin still counts DOMAINS. A people count here would put two
+       units in one funnel column, which is what the per-domain rework
+       removed. */
+    for (const col of Object.keys(chain))
+      ok(`abs: ${col} counts DISTINCT DOMAINS`,
+         /^COUNT\(DISTINCT l\.ps_customer_key\)/.test(expr(col).trim()));
+
+    /* The structural half of the fix: the twins are the SAME expressions the
+       summary cards use, so funnel-vs-card cannot drift apart again. Asserted
+       against the totals query, not against a copy. */
+    const fn = src.slice(src.indexOf('async function partnerOverview'), src.indexOf('/* ── ACKNOWLEDGING A FAILURE'));
+    const qTotals = fn.slice(fn.indexOf('pool.query('), fn.indexOf('pool.query(', fn.indexOf('pool.query(') + 5));
+    for (const [col, card] of [['abs_conversions', 'conversions'], ['abs_qualified', 'qualified'], ['abs_booked', 'booked']]) {
+      const cond = chain[col];
+      ok(`abs: ${col} matches the "${card}" card's condition, so the two cannot disagree`,
+         new RegExp('FILTER \\([\\s\\S]{0,120}?' + cond.replace(/[()]/g, '\\$&') +
+                    '[\\s\\S]{0,80}?AS ' + card + '\\b').test(qTotals), card);
+    }
+  }
+
+  /* RENDERED, with hello.com's real shape. */
+  {
+    const i = src.indexOf("'var partnerRows=[],pSort=");
+    const j = src.indexOf("'function debounce()");
+    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const els = {};
+    const mk = () => ({ textContent: '', innerHTML: '', style: {}, className: '', querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
+    const doc = { getElementById: (id) => (els[id] = els[id] || mk()), createElement: () => ({ value: '', textContent: '' }) };
+    const stages = (new Function(lift(src, 'const PS_FUNNEL_STAGES = [') + '\n return PS_FUNNEL_STAGES;'))();
+    const losses = (new Function(lift(src, 'const PS_FUNNEL_LOSSES = {') + '\n return PS_FUNNEL_LOSSES;'))();
+    /* The night of the bug: four domains, one qualified, none booked through
+       the form. Small on purpose — docs/partnerstack.md, "small datasets catch
+       bugs that large ones hide". */
+    const prog = { clicks: 5, step1: 4, completed: 4,
+      conversions: 3, verified: 3, booked: 0, opportunity: 0, ticked: 0, qualified: 0,
+      abs_conversions: 3, abs_verified: 3, abs_booked: 0,
+      abs_opportunity: 1, abs_ticked: 1, abs_qualified: 1,
+      lost_conversion: 0, lost_skipped: 1, lost_no_opp: 0, lost_sfopp: 0, lost_qualification: 0 };
+    await (new Function('API','TP','esc','et','set','fetch','AbortSignal','document','showTab','loadFilterOptions','loadLeads','Array','prompt','alert',
+      client + '; return {loadPartners};'))('', '', (x) => String(x == null ? '' : x), (x) => String(x == null ? '' : x),
+      (id, v) => { doc.getElementById(id).textContent = String(v); },
+      async () => ({ ok: true, json: async () => ({ totals: {}, partners: [],
+        funnel: { stages, losses, rateMin: 10, programme: prog },
+        lifecycle: { byState: {}, totalDomains: 0, needsAttention: 0, failedStates: [], bySfState: {}, domains: [] } }) }),
+      { timeout: () => null }, doc, () => {}, async () => {}, () => {}, Array, () => '', () => {}).loadPartners();
+    const h = els['pfn'].innerHTML;
+
+    /* Parse the rendered cards rather than grepping the string: a substring
+       match cannot tell which stage a number belongs to, and this whole bug
+       was one stage showing another stage's answer. */
+    const cards = h.split("class='pfs'").slice(1).map((c) => ({
+      label: (/class='pfsl'>([^<]*)</.exec(c) || [])[1],
+      value: (/class='pfsv'>([^<]*)</.exec(c) || [])[1],
+      off:   (/class='pfso'[^>]*>([\s\S]*?)<\/div>/.exec(c) || [])[1] || '',
+      rate:  (/class='pfsr'>([^<]*)</.exec(c) || [])[1] || '',
+    }));
+    const card = (label) => cards.find((c) => c.label === label);
+
+    /* THE REGRESSION. This read 0 on the night and the money was real. */
+    eq('absUI: the $50 stage shows the payment that actually fired', card('The $50 fired').value, '1');
+    eq('absUI: Qualified Demo ticked shows the tick that happened', card('Qualified Demo ticked').value, '1');
+    eq('absUI: Opportunity created shows the Opportunity that exists', card('Opportunity created').value, '1');
+    /* The general form of it, so a future stage cannot regress the same way. */
+    for (const st of stages) {
+      if (!st.abs) continue;
+      const a = Number(prog[st.abs]);
+      if (!a) continue;
+      ok(`absUI: ${st.label} does not read 0 when it happened ${a} time(s)`,
+         card(st.label).value !== '0' && Number(card(st.label).value) === a, card(st.label).value);
+    }
+
+    /* Both numbers, and the smaller one named. Never left as the gap between
+       two cards, which is arithmetic the reader should not have to do. */
+    ok('absUI: the skipped stage is named on the row, not inferred',
+       /0 on the funnel path/.test(card('The $50 fired').off) &&
+       /1 skipped an earlier stage/.test(card('The $50 fired').off));
+    /* The funnel path is still there, and still nests. */
+    eq('absUI: Booked still reports the form path honestly', card('Booked').value, '0');
+
+    /* No noise where nothing skipped: those rows must look exactly as before. */
+    eq('absUI: a stage where the two agree gets no off-path line', card('Conversion sent').off, '');
+    eq('absUI: and neither does one with no twin at all', card('Reached step 1').off, '');
+
+    /* Rates come off the CUMULATIVE counts. A rate between two absolutes is
+       not a step-to-step rate and is not bounded by 100%. */
+    ok('absUI: rates still run down the funnel path', h.includes('too few to rate (n=3)'));
+    ok('absUI: no rate exceeds 100%', !/\b[1-9]\d\d(\.\d)?% of previous/.test(h));
+
+    /* Whatever the funnel says about the $50, the card must say the same. */
+    eq('absUI: the funnel and the summary card now agree by construction',
+       card('The $50 fired').value, String(prog.abs_qualified));
+
+    ok('absUI: the note explains the two numbers',
+       /skipped an earlier stage/.test(els['pfn-note'].innerHTML) &&
+       /does nest/.test(els['pfn-note'].innerHTML));
+  }
+
+  /* Rates must keep running down the FUNNEL PATH, not between two absolutes.
+     A separate render with a base over PS_RATE_MIN, because hello.com's four
+     domains suppress every rate and a suppressed rate cannot tell the two
+     apart. This is the case that survived the first mutation pass. */
+  {
+    const i = src.indexOf("'var partnerRows=[],pSort=");
+    const j = src.indexOf("'function debounce()");
+    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const els = {};
+    const mk = () => ({ textContent: '', innerHTML: '', style: {}, className: '', querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
+    const doc = { getElementById: (id) => (els[id] = els[id] || mk()), createElement: () => ({ value: '', textContent: '' }) };
+    const stages = (new Function(lift(src, 'const PS_FUNNEL_STAGES = [') + '\n return PS_FUNNEL_STAGES;'))();
+    const prog = { clicks: 300, step1: 200, completed: 150,
+      conversions: 120, verified: 100, booked: 40, opportunity: 20, ticked: 12, qualified: 10,
+      abs_conversions: 120, abs_verified: 100, abs_booked: 45,
+      abs_opportunity: 120, abs_ticked: 60, abs_qualified: 50 };
+    await (new Function('API','TP','esc','et','set','fetch','AbortSignal','document','showTab','loadFilterOptions','loadLeads','Array','prompt','alert',
+      client + '; return {loadPartners};'))('', '', (x) => String(x == null ? '' : x), (x) => String(x == null ? '' : x),
+      (id, v) => { doc.getElementById(id).textContent = String(v); },
+      async () => ({ ok: true, json: async () => ({ totals: {}, partners: [],
+        funnel: { stages, losses: {}, rateMin: 10, programme: prog },
+        lifecycle: { byState: {}, totalDomains: 0, needsAttention: 0, failedStates: [], bySfState: {}, domains: [] } }) }),
+      { timeout: () => null }, doc, () => {}, async () => {}, () => {}, Array, () => '', () => {}).loadPartners();
+    const h = els['pfn'].innerHTML;
+    const cards = h.split("class='pfs'").slice(1).map((c) => ({
+      label: (/class='pfsl'>([^<]*)</.exec(c) || [])[1],
+      value: (/class='pfsv'>([^<]*)</.exec(c) || [])[1],
+      rate:  (/class='pfsr'>([^<]*)</.exec(c) || [])[1] || '',
+    }));
+    const card = (label) => cards.find((c) => c.label === label);
+
+    /* booked cumulative is 40, so Opportunity's rate is 20/40. Reading the
+       absolute booked count (45) instead gives 44.4% — close enough to look
+       plausible on screen, which is exactly why it is asserted exactly. */
+    eq('rateUI: Opportunity rates against the cumulative Booked, not the absolute',
+       card('Opportunity created').rate, '50% of previous');
+    eq('rateUI: Qualified Demo ticked rates against cumulative Opportunity',
+       card('Qualified Demo ticked').rate, '60% of previous');
+    eq('rateUI: the $50 stage rates against cumulative Ticked',
+       card('The $50 fired').rate, '83.3% of previous');
+    /* And the headline is still the absolute, at this scale too. */
+    eq('rateUI: the headline is the absolute even where the rate is not',
+       card('The $50 fired').value, '50');
+    /* A rate between two absolutes is not a step-to-step rate and is not
+       bounded by 100. If one ever appears, the base is wrong. */
+    ok('rateUI: no rate exceeds 100%', !/\b(?:[1-9]\d\d|100\.\d)(?:\.\d)?% of previous/.test(h), h);
+  }
+
+  /* The per-partner row had the identical bug one level down: "Qualified 0"
+     for the partner whose $50 had fired. */
+  {
+    const i = src.indexOf("'var partnerRows=[],pSort=");
+    const j = src.indexOf("'function debounce()");
+    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const els = {};
+    const mk = () => ({ textContent: '', innerHTML: '', style: {}, className: '', querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
+    const doc = { getElementById: (id) => (els[id] = els[id] || mk()), createElement: () => ({ value: '', textContent: '' }) };
+    const stages = (new Function(lift(src, 'const PS_FUNNEL_STAGES = [') + '\n return PS_FUNNEL_STAGES;'))();
+    const partners = [
+      { partner_key: 'k1', partner_name: 'Test Account', clicks: 5, step1: 4, completed: 4,
+        conversions: 3, verified: 3, booked: 0, opportunity: 0, ticked: 0, qualified: 0,
+        abs_conversions: 3, abs_verified: 3, abs_booked: 0, abs_opportunity: 1, abs_ticked: 1, abs_qualified: 1 },
+      { partner_key: 'k2', partner_name: 'Other', clicks: 2, step1: 2, completed: 1,
+        conversions: 1, verified: 1, booked: 1, opportunity: 1, ticked: 0, qualified: 0,
+        abs_conversions: 1, abs_verified: 1, abs_booked: 1, abs_opportunity: 1, abs_ticked: 0, abs_qualified: 0 },
+    ];
+    const api = (new Function('API','TP','esc','et','set','fetch','AbortSignal','document','showTab','loadFilterOptions','loadLeads','Array','prompt','alert',
+      client + '; return {loadPartners,sortPartners};'))('', '', (x) => String(x == null ? '' : x), (x) => String(x == null ? '' : x),
+      (id, v) => { doc.getElementById(id).textContent = String(v); },
+      async () => ({ ok: true, json: async () => ({ totals: {}, partners,
+        funnel: { stages, losses: {}, rateMin: 10, programme: {} },
+        lifecycle: { byState: {}, totalDomains: 0, needsAttention: 0, failedStates: [], bySfState: {}, domains: [] } }) }),
+      { timeout: () => null }, doc, () => {}, async () => {}, () => {}, Array, () => '', () => {});
+    await api.loadPartners();
+    const row = (n) => els['ptbody'].innerHTML.split('<tr').filter((r) => r.includes('Test Account'))[0] || '';
+    const cells = (r) => r.split('</td>').map((c) => c.replace(/[\s\S]*>/, '').trim());
+    /* Columns: name, email, key, clicks, step1, completed, conversions,
+       verified, booked, opportunity, ticked, qualified, last click. */
+    const c = cells(row());
+    eq('absRow: the Qualified cell shows the $50 that fired', c[11], '1 &#8224;');
+    eq('absRow: Ticked likewise', c[10], '1 &#8224;');
+    eq('absRow: Booked still reports the form path', c[8], '0');
+    /* An untouched cell keeps its bare number — the marker has to mean
+       something or it becomes decoration. */
+    eq('absRow: a cell where the two agree carries no marker', c[6], '3');
+    ok('absRow: the marked cell explains itself on hover',
+       /title='0 on the funnel path, 1 skipped an earlier stage/.test(row()));
+
+    /* A column that sorts on a number it is not showing is the same class of
+       bug as a number computed and never rendered. */
+    /* Both partners have a CUMULATIVE qualified of 0, so a sort reading that
+       column cannot reorder them and a stable sort leaves them alone. Only a
+       sort reading the displayed value can put Other first ascending. */
+    api.sortPartners('qualified');   // desc
+    api.sortPartners('qualified');   // asc
+    const first = els['ptbody'].innerHTML.split('<tr')[1] || '';
+    ok('absRow: sorting a stage column orders by the value on screen',
+       first.includes('Other') && !first.includes('Test Account'), first.slice(0, 160));
+  }
+
   /* The per-partner table renders all NINE stages. PR2 computed verified,
      opportunity and ticked and rendered none of them — the same
      computed-but-not-rendered trap, caught in review. */
