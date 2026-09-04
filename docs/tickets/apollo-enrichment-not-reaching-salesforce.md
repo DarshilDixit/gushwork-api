@@ -86,7 +86,38 @@ calls failed. Look for the evidence of the failures first:
 4. Only then read the push path.
 
 `backfill-sf.js` re-syncs leads to Salesforce after exactly this kind of loss.
-It is deliberately not mounted; mount it, run it for these six, unmount it.
+It is deliberately not mounted.
+
+### DECISION 5 Sept 2026: the six were deliberately NOT backfilled
+
+Not an oversight, and not a pending task — a call made with the numbers in
+hand. Once the six were looked at properly, the case collapsed:
+
+- `hari@pickyourtrail.com` and `shikhar.verma@gushwork.ai` **already exist as
+  Contacts** with Accounts (created 26 Mar and 9 Jul), so they are not invisible
+  to an AE. The missing record is a Lead, not the person.
+- `shikhar.verma@gushwork.ai` is our own address, and `backfill-sf.js` skips
+  `gushwork.ai` by design anyway.
+- That leaves **one** genuinely absent-from-the-CRM booked prospect,
+  `analytics@uprawmedia.com` — and its row carries
+  `first_name = 'test', last_name = 'test'`, so a created Lead would read
+  "test test" to whoever opened it.
+
+Against that: five Salesforce writes, a temporary `/admin/backfill-sf` route, a
+production deploy to mount it and a second to remove it. The cost is higher
+than the value of one record of dubious quality.
+
+**If the rate moves, revisit.** The counter on the System Health tab
+("No Salesforce Lead") now makes that visible without anyone re-running this
+investigation.
+
+**What was done instead**, because it outlives the decision: `backfill-sf.js`
+gained an `emails` allow-list and its selector was corrected from
+`completed = true` to `submitted_at IS NOT NULL`. So the next person who
+reaches for it can target named rows instead of replaying a whole window —
+which for a mid-June start would have been ~2,180 people — and it no longer
+replays booking-webhook rows as if they were form submissions. See
+`completed-is-not-submitted-a-form.md`.
 
 ## Why nobody noticed
 

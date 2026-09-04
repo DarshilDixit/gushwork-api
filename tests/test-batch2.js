@@ -206,6 +206,161 @@ const R = (new Function(ruleSrc + `
     ok('lookup: never calls ELV on the critical path',
        !/fetch\(|elvRecheckStatusOnly/.test(lookupBody));
 
+    /* ============================================================
+       backfill-sf.js — the selector, and the allow-list
+       ------------------------------------------------------------
+       5 Sept 2026. This tool writes to Salesforce and is reached for during
+       a recovery, i.e. under time pressure, which is the worst moment to
+       discover it replays a whole window. Two fixes, both asserted here.
+
+       The real runBackfill is lifted and driven with stubs — the module-level
+       require of ./salesforce would otherwise put a live Salesforce call in a
+       dependency-free suite.
+       ============================================================ */
+    {
+      const bfRaw = fs.readFileSync(path.join(__dirname, '..', 'backfill-sf.js'), 'utf8');
+      const bfSrc = bfRaw
+        .replace(/const \{[^}]*\} = require\('\.\/salesforce'\);/, '')
+        .replace(/module\.exports = \{[^}]*\};/, '');
+      const noC = (t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+      const bfCode = noC(bfRaw);
+
+      /* ── The selector ──
+         completed does not mean "submitted the form": the Cal and RevenueHero
+         safety-net branches set it for someone who booked without touching the
+         form, and pushToSalesforce runs from /submit. Selecting on completed
+         creates Salesforce Leads for people who filled nothing in. */
+      ok('backfill: selects on submitted_at, not completed',
+         /WHERE submitted_at IS NOT NULL/.test(bfCode));
+      ok('backfill: the old completed = true selector is gone',
+         !/WHERE completed = true/.test(bfCode), bfCode.match(/WHERE completed[^\n]*/g));
+      /* Equals-true also drops NULL rows entirely — its own open ticket. */
+      ok('backfill: no equals-true flag test survives anywhere in the query',
+         !/completed = true/.test(bfCode));
+      /* An address list from a query string must never be interpolated. */
+      ok('backfill: the allow-list is parameterised, not interpolated',
+         /= ANY\(\$\$\{params\.length\}::text\[\]\)/.test(bfCode) ||
+         /ANY\(\$\$\{params\.length\}/.test(bfCode), bfCode.match(/emailClause[^\n]*/g));
+
+      /* ── parseEmails ── */
+      const B = (new Function('pushToSalesforce', 'getSalesforceToken', 'fetch', 'setTimeout',
+        bfSrc + '\n return { runBackfill, parseEmails };'))(
+        async () => ({ success: true, leadId: 'L1' }),
+        async () => ({ accessToken: 't', instanceUrl: 'https://sf' }),
+        async () => ({ ok: true, json: async () => ({ records: [] }) }),
+        (f) => f()
+      );
+      eq('backfill: parseEmails takes a comma string',
+         B.parseEmails('A@x.com, b@y.com'), ['a@x.com', 'b@y.com']);
+      eq('backfill: and whitespace', B.parseEmails('a@x.com b@y.com'), ['a@x.com', 'b@y.com']);
+      eq('backfill: and an array', B.parseEmails(['A@x.com']), ['a@x.com']);
+      eq('backfill: dedupes case variants', B.parseEmails('a@x.com,A@X.COM'), ['a@x.com']);
+      eq('backfill: empty means no allow-list, not an empty one', B.parseEmails(''), null);
+      eq('backfill: undefined likewise', B.parseEmails(undefined), null);
+
+      /* ── DRIVEN ── */
+      const mkPool = (rows) => {
+        const seen = [];
+        return {
+          seen,
+          query: async (sql, params) => {
+            seen.push({ sql, params });
+            if (/information_schema/.test(sql))
+              return { rows: [{ column_name: 'email' }, { column_name: 'completed' },
+                              { column_name: 'submitted_at' }, { column_name: 'booking_uid' },
+                              { column_name: 'created_at' }, { column_name: 'updated_at' }] };
+            return { rows };
+          },
+        };
+      };
+      const row = (email, extra) => Object.assign(
+        { email, completed: true, submitted_at: '2026-06-15T00:00:00Z', booking_uid: null,
+          created_at: '2026-06-15T00:00:00Z', updated_at: '2026-06-15T00:00:00Z' }, extra || {});
+
+      /* An allow-list must widen the window. The default start is the July
+         incident, and two of the six rows this was written for predate it —
+         naming a June row and getting "found: 0" reads as "nothing to do". */
+      {
+        const pool = mkPool([]);
+        const out = await B.runBackfill(pool, { emails: 'x@y.com', dry: true });
+        ok('backfill: an allow-list opens the window past the July default',
+           new Date(out.window.from) < new Date('2026-07-08T12:20:00Z'), out.window.from);
+        const q = pool.seen.find((c) => /FROM leads/.test(c.sql));
+        ok('backfill: the addresses travel as a bound parameter',
+           Array.isArray(q.params[q.params.length - 1]) &&
+           q.params[q.params.length - 1].includes('x@y.com'), JSON.stringify(q.params));
+        /* Built is not applied. Deleting the interpolation while still
+           building the clause and binding the parameter left every other
+           assertion here green and quietly replayed the whole window — the
+           computed-but-not-rendered bug, one layer down. So assert the clause
+           reached the SQL that was actually EXECUTED. */
+        ok('backfill: the clause reaches the executed SQL, not just the variable',
+           /LOWER\(email\) = ANY\(\$\d+::text\[\]\)/.test(q.sql), q.sql);
+        /* And that a run WITHOUT an allow-list carries no such clause, so the
+           assertion above cannot pass by accident. */
+        const bare = mkPool([]);
+        await B.runBackfill(bare, { dry: true });
+        const bq = bare.seen.find((c) => /FROM leads/.test(c.sql));
+        ok('backfill: and is absent when no allow-list was given',
+           !/= ANY\(/.test(bq.sql), bq.sql);
+        /* Asked for and not found is REPORTED, never left as the gap between
+           two counts: a typo, a row outside the window and a row that never
+           submitted otherwise look identical from the summary. */
+        eq('backfill: an address asked for and not matched is named',
+           out.requestedNotFound, ['x@y.com']);
+        eq('backfill: and counted', out.summary.notFound, 1);
+        eq('backfill: the request size is reported too', out.summary.requested, 1);
+      }
+      /* No allow-list keeps the historical default, so an existing caller is
+         unaffected. */
+      {
+        const out = await B.runBackfill(mkPool([]), { dry: true });
+        eq('backfill: with no allow-list the default window is unchanged',
+           out.window.from, '2026-07-08T12:20:00Z');
+        eq('backfill: and nothing is reported as requested', out.summary.requested, null);
+      }
+      /* A dry run must not write, and must say which way each row would go. */
+      {
+        const pushes = [];
+        const B2 = (new Function('pushToSalesforce', 'getSalesforceToken', 'fetch', 'setTimeout',
+          bfSrc + '\n return { runBackfill };'))(
+          async (p) => { pushes.push(p.email); return { success: true, leadId: 'L1' }; },
+          async () => ({ accessToken: 't', instanceUrl: 'https://sf' }),
+          async () => ({ ok: true, json: async () => ({ records: [] }) }),
+          (f) => f()
+        );
+        const out = await B2.runBackfill(mkPool([
+          row('real@customer.com'),
+          row('someone@gushwork.ai'),
+        ]), { emails: 'real@customer.com,someone@gushwork.ai', dry: true });
+        eq('backfill: a dry run pushes nothing', pushes.length, 0);
+        const byEmail = Object.fromEntries(out.results.map((r) => [r.email, r.action]));
+        ok('backfill: a dry run says it WOULD create',
+           /WOULD CREATE/.test(byEmail['real@customer.com'] || ''), JSON.stringify(byEmail));
+        /* Internal addresses are skipped by design, so a gushwork.ai row is
+           not a backfill candidate however it was asked for. */
+        ok('backfill: an internal address is skipped even when named explicitly',
+           /skipped \(test\/internal\)/.test(byEmail['someone@gushwork.ai'] || ''),
+           JSON.stringify(byEmail));
+      }
+      /* The hard guard: a converted Lead is never touched. */
+      {
+        const pushes = [];
+        const B3 = (new Function('pushToSalesforce', 'getSalesforceToken', 'fetch', 'setTimeout',
+          bfSrc + '\n return { runBackfill };'))(
+          async (p) => { pushes.push(p.email); return { success: true, leadId: 'L1' }; },
+          async () => ({ accessToken: 't', instanceUrl: 'https://sf' }),
+          async () => ({ ok: true, json: async () => ({ records: [{ Id: '00Q', IsConverted: true }] }) }),
+          (f) => f()
+        );
+        const out = await B3.runBackfill(mkPool([row('converted@customer.com')]),
+                                         { emails: 'converted@customer.com' });
+        eq('backfill: a CONVERTED lead is never pushed', pushes.length, 0);
+        ok('backfill: and says why',
+           /CONVERTED/.test(out.results[0].action), JSON.stringify(out.results[0]));
+      }
+    }
+
     finish();
   })();
 }

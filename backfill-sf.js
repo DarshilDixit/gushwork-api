@@ -7,7 +7,14 @@
 // Exposed via a temporary admin route in index.js:
 //   GET /admin/backfill-sf?key=KEY&dry=1     ← preview
 //   GET /admin/backfill-sf?key=KEY           ← real run
-//   optional: &from=ISO&to=ISO to change the window
+//   optional: &from=ISO&to=ISO      to change the window
+//   optional: &emails=a@b.com,c@d.com  to target NAMED rows only
+//
+// PREFER &emails. Without it this replays a whole WINDOW: every submitted
+// lead in it, re-pushed through pushToSalesforce, which UPDATES the existing
+// Salesforce Lead with current DB values. Measured 5 Sept 2026: a mid-June
+// start meant ~2,180 people and ~19 minutes of Salesforce writes to fix six
+// rows. An allow-list makes the blast radius the thing you actually asked for.
 // ============================================================
 
 const { pushToSalesforce, getSalesforceToken } = require('./salesforce');
@@ -53,14 +60,32 @@ function rowToPayload(row, cols) {
   return payload;
 }
 
+/* Normalises an allow-list from either an array or a comma/space separated
+   query-string value. Lowercased to match the LOWER(email) comparison. */
+function parseEmails(v) {
+  if (!v) return null;
+  const arr = Array.isArray(v) ? v : String(v).split(/[,\s]+/);
+  const out = Array.from(new Set(arr.map((e) => String(e || '').trim().toLowerCase()).filter(Boolean)));
+  return out.length ? out : null;
+}
+
 /**
  * Run the backfill.
- * @param {object} pool  — the pg Pool index.js already has
- * @param {object} opts  — { from, to, dry }
- * @returns {object}     — { window, dry, results[], summary }
+ * @param {object} pool   — the pg Pool index.js already has
+ * @param {object} opts   — { from, to, dry, emails }
+ *   emails — array or comma-separated string. When given, ONLY these addresses
+ *   are considered, and the window is widened to cover them so a caller cannot
+ *   name a row and silently miss it because the default window starts later.
+ * @returns {object}      — { window, dry, results[], summary }
  */
 async function runBackfill(pool, opts = {}) {
-  const from = opts.from || '2026-07-08T12:20:00Z'; // incident start (UTC)
+  const emails = parseEmails(opts.emails);
+  /* The default window is the July 2026 incident start. With an explicit
+     allow-list that default is a trap rather than a safeguard: naming a row
+     from June returns "found: 0" and reads as "nothing to do". Measured — two
+     of the six leads this option was written for predate it. So an allow-list
+     opens the window unless the caller set one deliberately. */
+  const from = opts.from || (emails ? '2026-01-01T00:00:00Z' : '2026-07-08T12:20:00Z');
   const to = opts.to || new Date().toISOString();
   const dry = !!opts.dry;
 
@@ -76,12 +101,36 @@ async function runBackfill(pool, opts = {}) {
   const tsCol = ['updated_at', 'last_updated', 'created_at'].find((c) => cols.has(c));
   if (!tsCol) throw new Error('No timestamp column (updated_at/created_at) on leads');
 
+  /* submitted_at IS NOT NULL, NOT completed = true. Two reasons, and the
+     first one has teeth:
+
+     1. completed does not mean "submitted the form". The Cal and RevenueHero
+        safety-net branches set it for someone who booked without ever touching
+        the form — aasnj@meta.com on 18 Aug 2026 has completed = true and
+        submitted_at = NULL on both Railway and the mirror. This tool exists to
+        replay FORM SUBMISSIONS into Salesforce, and pushToSalesforce runs from
+        /submit, so selecting on completed would create Leads for people who
+        never filled anything in. That may sometimes be wanted; it should be a
+        decision, not a side effect of reading the nearest available column.
+     2. IS NOT NULL rather than = true also sidesteps the equals-true trap that
+        has its own open ticket: a NULL flag satisfies neither = true nor
+        = false and vanishes from the query entirely.
+
+     See docs/tickets/completed-is-not-submitted-a-form.md. */
+  const params = [from, to];
+  let emailClause = '';
+  if (emails && emails.length) {
+    /* Parameterised, never interpolated — this takes a query string. */
+    params.push(emails);
+    emailClause = `AND LOWER(email) = ANY($${params.length}::text[])`;
+  }
   const { rows } = await pool.query(
     `SELECT * FROM leads
-      WHERE completed = true
+      WHERE submitted_at IS NOT NULL
         AND ${tsCol} >= $1 AND ${tsCol} <= $2
+        ${emailClause}
       ORDER BY ${tsCol} ASC`,
-    [from, to]
+    params
   );
 
   let pushed = 0, skipped = 0, failed = 0;
@@ -134,12 +183,26 @@ async function runBackfill(pool, opts = {}) {
     await new Promise((r) => setTimeout(r, 500));
   }
 
+  /* An address that was asked for and did not match is REPORTED, never left
+     as the difference between two counts. "I named six and it pushed four" has
+     to say which two and why — otherwise a typo, a row outside the window and
+     a row that never submitted all look identical from the summary. */
+  const requestedNotFound = emails
+    ? emails.filter((e) => !rows.some((r) => (r.email || '').toLowerCase() === e))
+    : [];
+
   return {
     window: { from, to, timeColumn: tsCol },
     dry,
+    emails: emails || null,
+    requestedNotFound,
     results: log,
-    summary: { found: rows.length, pushed, skipped, failed },
+    summary: {
+      requested: emails ? emails.length : null,
+      found: rows.length, pushed, skipped, failed,
+      notFound: requestedNotFound.length,
+    },
   };
 }
 
-module.exports = { runBackfill };
+module.exports = { runBackfill, parseEmails };
