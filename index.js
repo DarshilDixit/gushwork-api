@@ -2932,10 +2932,13 @@ app.get('/monitor', (req, res) => {
   '<th class="sortable" onclick="sortPartners(\'step1\')" title="Companies that reached step 1. Every column in this funnel counts COMPANIES, so they nest: step 1 &#8805; completed &#8805; converted &#8805; booked &#8805; qualified.">Step 1 <span id="psar-step1"></span></th>' +
   '<th class="sortable" onclick="sortPartners(\'completed\')">Completed <span id="psar-completed"></span></th>' +
   '<th class="sortable" onclick="sortPartners(\'conversions\')">Converted <span id="psar-conversions"></span></th>' +
+  '<th class="sortable" onclick="sortPartners(\'verified\')" title="Conversion read back from PartnerStack. Sent only means a 200 from an empty-bodied endpoint.">Verified <span id="psar-verified"></span></th>' +
   '<th class="sortable" onclick="sortPartners(\'booked\')">Booked <span id="psar-booked"></span></th>' +
+  '<th class="sortable" onclick="sortPartners(\'opportunity\')" title="Booked companies with a Salesforce Opportunity.">Opportunity <span id="psar-opportunity"></span></th>' +
+  '<th class="sortable" onclick="sortPartners(\'ticked\')" title="An AE has ticked Qualified_Demo__c.">Ticked <span id="psar-ticked"></span></th>' +
   '<th class="sortable" onclick="sortPartners(\'qualified\')">Qualified <span id="psar-qualified"></span></th>' +
   '<th class="sortable" onclick="sortPartners(\'last_click\')">Last click <span id="psar-last_click"></span></th>' +
-  '</tr></thead><tbody id="ptbody"><tr><td colspan="10" class="nd">Loading...</td></tr></tbody></table></div></div>' +
+  '</tr></thead><tbody id="ptbody"><tr><td colspan="13" class="nd">Loading...</td></tr></tbody></table></div></div>' +
   '</div>' +
   '<div class="tp" id="tp-sdr">' +
   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
@@ -3406,7 +3409,7 @@ app.get('/monitor', (req, res) => {
   'else if(pSort==="last_click"){x=x?new Date(x).getTime():0;y=y?new Date(y).getTime():0;}' +
   'else{x=Number(x)||0;y=Number(y)||0;}' +
   'if(x<y)return pDir==="asc"?-1:1;if(x>y)return pDir==="asc"?1:-1;return 0;});' +
-  '["partner_name","clicks","step1","completed","conversions","booked","qualified","last_click"].forEach(function(c){var el=document.getElementById("psar-"+c);if(el)el.textContent=(pSort===c)?(pDir==="asc"?"▲":"▼"):"";});' +
+  '["partner_name","clicks","step1","completed","conversions","verified","booked","opportunity","ticked","qualified","last_click"].forEach(function(c){var el=document.getElementById("psar-"+c);if(el)el.textContent=(pSort===c)?(pDir==="asc"?"▲":"▼"):"";});' +
   /* name -> email -> key, the same chain as Slack and the detail panel. */
   /* Event delegation rather than an inline onclick: the key would otherwise
      need quotes nested three deep (HTML attribute inside a client JS string
@@ -3421,7 +3424,10 @@ app.get('/monitor', (req, res) => {
   '+"<td>"+(p.step1||0)+"</td>"' +
   '+"<td>"+(p.completed||0)+"</td>"' +
   '+"<td>"+(p.conversions||0)+"</td>"' +
+  '+"<td>"+(p.verified||0)+"</td>"' +
   '+"<td>"+(p.booked||0)+"</td>"' +
+  '+"<td>"+(p.opportunity||0)+"</td>"' +
+  '+"<td>"+(p.ticked||0)+"</td>"' +
   '+"<td>"+(p.qualified||0)+"</td>"' +
   '+"<td style=\'color:#999;white-space:nowrap\'>"+(p.last_click?esc(et(p.last_click)):"—")+"</td></tr>";}).join("");' +
   'Array.prototype.forEach.call(tb.querySelectorAll(".prow"),function(tr){tr.onclick=function(){partnerDrill(tr.getAttribute("data-pk"));};});}' +

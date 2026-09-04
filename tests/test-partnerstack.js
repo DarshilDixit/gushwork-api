@@ -1960,6 +1960,38 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        els['pfn-note'].innerHTML.includes('only PartnerStack has those'));
   }
 
+  /* The per-partner table renders all NINE stages. PR2 computed verified,
+     opportunity and ticked and rendered none of them — the same
+     computed-but-not-rendered trap, caught in review. */
+  for (const c of ['clicks', 'step1', 'completed', 'conversions', 'verified', 'booked', 'opportunity', 'ticked', 'qualified']) {
+    ok(`perPartner: ${c} has a sortable header`, new RegExp('id="psar-' + c + '"').test(src));
+    ok(`perPartner: ${c} is in the sortable column list`,
+       new RegExp('"' + c + '"').test(/\["partner_name","clicks"[^\]]*\]/.exec(src)[0]));
+  }
+  {
+    const i = src.indexOf("'var partnerRows=[],pSort=");
+    const j = src.indexOf("'function debounce()");
+    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const els = {};
+    const mk = () => ({ textContent: '', innerHTML: '', style: {}, className: '', querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
+    const doc = { getElementById: (id) => (els[id] = els[id] || mk()), createElement: () => ({ value: '', textContent: '' }) };
+    await (new Function('API','TP','esc','et','set','fetch','AbortSignal','document','showTab','loadFilterOptions','loadLeads','Array','prompt','alert',
+      client + '; return {loadPartners};'))('', '', (x) => String(x == null ? '' : x), (x) => String(x == null ? '' : x),
+      (id, v) => { doc.getElementById(id).textContent = String(v); },
+      async () => ({ ok: true, json: async () => ({ totals: {},
+        funnel: { stages: [], losses: {}, rateMin: 10, programme: {} },
+        partners: [{ partner_key: 'k1', partner_name: 'T', clicks: 40, step1: 30, completed: 24,
+          conversions: 20, verified: 19, booked: 12, opportunity: 9, ticked: 6, qualified: 5 }],
+        lifecycle: { byState: {}, totalDomains: 0, needsAttention: 0, failedStates: [], bySfState: {}, domains: [] } }) }),
+      { timeout: () => null }, doc, () => {}, async () => {}, () => {}, Array, () => '', () => {}).loadPartners();
+    const cells = els['ptbody'].innerHTML.split('</td>').slice(0, -1).map((c) => c.replace(/.*>/, ''));
+    const stages = cells.slice(4).map(Number).filter((n) => !isNaN(n));
+    eq('perPartner UI: all nine stage cells render', cells.slice(3).filter((c) => /^\d+$/.test(c)).length, 9);
+    /* Left to right must read as a funnel or the row is unreadable. */
+    ok('perPartner UI: the row nests left to right',
+       stages.every((v, i) => i === 0 || v <= stages[i - 1]), stages.join(' >= '));
+  }
+
   /* The SDR Source column — rendered, not merely selected. */
   ok('sdrCol: the query selects it', /l\.hear_about_us_raw,\s*\n\s*l\.ps_partner_name,/.test(src));
   ok('sdrCol: there is a Source header', /<th title="How they said they found us/.test(src));

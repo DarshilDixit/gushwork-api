@@ -689,6 +689,25 @@ Verified end to end against live production data (4 Sept 2026):
 
 Do not mark any of these done on the strength of the code existing.
 
+## Next up — not built
+
+**The two Salesforce writes.** Both fields exist and were verified with a live
+round-trip on 4 Sept:
+
+| Object | Field | Write from |
+|---|---|---|
+| Lead | `hear_about_us_raw__c` | `pushToSalesforce`, at submit — one entry in `CUSTOM_FIELD_MAP` |
+| Opportunity | `Partner_Source__c` | `refreshPartnerDomainSfState`, which already holds the Opportunity id, the partner name and the domain in one loop |
+
+Writing `Partner_Source__c` from the poller happens strictly **after** sfopp has
+created the Opportunity, so there is no race and no lead-conversion field
+mapping to configure. It also covers Opportunities created any way, not only by
+conversion — which a Lead field cannot.
+
+**Make a permission failure LOUD.** Everything the service does on Opportunity
+today is read-only, so a write rejection has never been exercised. A silent
+failure here would look exactly like a partner with no Opportunity.
+
 ## Related open tickets
 
 - **`docs/tickets/apollo-enrichment-not-reaching-salesforce.md`** — Apollo
