@@ -388,6 +388,15 @@ so the queue would fill with correct non-payments and hide the real failures.
 When Salesforce cannot be reached, the card shows `N+?` and the panel says the
 result is not clean. "We could not check" is never "we checked and it is fine".
 
+**The whole partner view is now ONE point of failure.** The gap card used to
+run its own query and would survive `partnerLifecycle()` breaking. It no longer
+does: check A reads the ladder, so if `partnerLifecycle()` throws,
+`/monitor/partner-gaps` 500s as well as `/monitor/partners`. That was a
+deliberate trade — two independent queries told two different stories about the
+same domains, and one classification is worth more than independent failure
+modes — but it means a single bad ladder query takes out both surfaces at once.
+If you are changing `PS_LADDER_SQL`, you are changing both.
+
 **Partners tab** — the operational view. Cards for partner leads (total and last
 24h), conversions sent, qualified demos fired, partner bookings, and lead→booking
 rate. A per-partner table, sortable, where clicking a row drills into All Leads
