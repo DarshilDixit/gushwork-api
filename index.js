@@ -2810,6 +2810,14 @@ app.get('/monitor', (req, res) => {
   '.pslost{color:#aaa}' +
   '.pswon{font-weight:600}' +
   '.psna{color:#999}' +
+  '.pfn{display:flex;gap:6px;overflow-x:auto;padding:4px 0}' +
+  '.pfs{flex:1 0 130px;background:#fff;border:1px solid #eee;border-radius:6px;padding:8px 10px}' +
+  '.pfsl{font-size:10px;font-weight:600;color:#aaa;text-transform:uppercase;letter-spacing:.05em}' +
+  '.pfsv{font-size:20px;font-weight:600;margin:2px 0}' +
+  '.pfsr{font-size:11px;color:#888}' +
+  '.pfsu{font-size:10px;color:#b45309;background:#fef3c7;border-radius:3px;padding:1px 4px;display:inline-block}' +
+  '.pfl{font-size:10px;margin-top:4px;color:#666}' +
+  '.pfl.bad{color:#b91c1c;font-weight:600}' +
   '.pschip{display:inline-block;font-size:10px;font-weight:600;padding:2px 7px;border-radius:4px;background:#eef;color:#334;margin:2px 4px 2px 0;white-space:nowrap}' +
   '.pschip.bad{background:#fee2e2;color:#b91c1c}' +
   '.psattn{color:#b91c1c}' +
@@ -2910,6 +2918,8 @@ app.get('/monitor', (req, res) => {
   '<div class="mc" title="Distinct customer DOMAINS with a conversion sent. Per domain, not per person &#8212; PartnerStack counts one conversion per customer key, ever."><div class="ml">Conversions sent</div><div class="mv" id="p-conv">&#8212;</div><div class="ms">domains, one per customer</div></div>' +
   '<div class="mc" title="Distinct customer DOMAINS with a qualified_demo action sent. This is the event that pays the affiliate."><div class="ml">Qualified demos fired</div><div class="mv" id="p-qual">&#8212;</div><div class="ms">domains, one per customer</div></div>' +
   '</div>' +
+  '<div class="card"><div class="ml" style="margin-bottom:4px">Funnel <span class="psna" style="font-weight:400;font-size:11px">&#8212; companies, cumulative. Each stage counts domains that passed every stage before it.</span></div>' +
+  '<div class="psm" id="pfn-note"></div><div class="pfn" id="pfn"></div></div>' +
   '<div class="card"><div class="ml" style="margin-bottom:8px">Per domain <span class="psna" style="font-weight:400;font-size:11px">&#8212; one row, one lifecycle state. The states above are counts of this column.</span></div>' +
   '<div style="overflow-x:auto"><table class="lt"><thead><tr><th>Domain</th><th>State</th><th>Partner</th><th>Salesforce</th><th>Detail</th><th></th><th>Last seen</th></tr></thead>' +
   '<tbody id="pdtbody"><tr><td colspan="7" class="nd">Loading...</td></tr></tbody></table></div></div>' +
@@ -2936,8 +2946,8 @@ app.get('/monitor', (req, res) => {
   '<button class="btn" onclick="exportSDR()" style="background:#1a1a1a;color:#fff;border-color:#1a1a1a">&#8595; Export CSV</button>' +
   '</div></div>' +
   '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
-  '<th style="width:30px"></th><th>Email</th><th>Name</th><th>Company</th><th>Title</th><th>Industry</th><th>Company Size</th><th>Stage</th><th>LinkedIn</th><th>Date (ET)</th>' +
-  '</tr></thead><tbody id="sdr-tbody"><tr><td colspan="10" class="nd">Loading...</td></tr></tbody></table></div></div>' +
+  '<th style="width:30px"></th><th>Email</th><th>Name</th><th>Company</th><th title="How they said they found us, and the partner who referred them if any. On a partner lead the AE-facing field reads &quot;Partner - X&quot;, so this is the only place the visitor\'s own answer appears.">Source</th><th>Title</th><th>Industry</th><th>Company Size</th><th>Stage</th><th>LinkedIn</th><th>Date (ET)</th>' +
+  '</tr></thead><tbody id="sdr-tbody"><tr><td colspan="11" class="nd">Loading...</td></tr></tbody></table></div></div>' +
   '</div>' +
   '<div class="tp" id="tp-dupes">' +
   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
@@ -3333,6 +3343,31 @@ app.get('/monitor', (req, res) => {
   'else sfc+="<span class=\'pschip\'>checked "+ageMin+" min ago</span>";}' +
     'if(lc.domainsCapped)sfc+="<span class=\'pschip bad\' title=\'More partner domains exist than this view returns. The states above are a page, not the population.\'>capped at "+lc.domainsLimit+" domains</span>";' +
   'var sfe=document.getElementById("p-sfstates");if(sfe)sfe.innerHTML=sfc||"not checked yet";' +
+  /* THE FUNNEL. Counts, drop-off rates and the losses that explain them —
+     the loss sits beside the stage where the money leaks, so nobody has to
+     subtract two numbers to find out where it went. */
+  'var fn=d.funnel||{},pr=fn.programme||{},rmin=fn.rateMin||10;' +
+  'var stages=fn.stages||[],losses=fn.losses||{};' +
+  'var fnEl=document.getElementById("pfn");' +
+  'if(fnEl){var prev=null,html="";' +
+  'stages.forEach(function(st){' +
+  'var v=pr[st.key];v=(v===null||v===undefined)?null:Number(v);' +
+  /* A rate over a tiny base is noise: 1 of 2 is "50%" and means nothing. */
+  'var rate="";' +
+  'if(prev!==null&&v!==null&&!st.unit){' +
+  'rate=(prev>=rmin)?(Math.round((v/prev)*1000)/10+"% of previous"):("too few to rate (n="+prev+")");}' +
+  'var loss=(losses[st.key]||[]).map(function(L){var n=Number(pr[L.key]||0);' +
+  'return n?("<div class=\'pfl"+(L.bad?" bad":"")+"\'>"+n+" "+L.label+"</div>"):"";}).join("");' +
+  'html+="<div class=\'pfs\'><div class=\'pfsl\'>"+esc(st.label)+"</div>"' +
+  '+"<div class=\'pfsv\'>"+(v===null?"&#8212;":v)+"</div>"' +
+  /* Clicks are per click, everything else per company — say so rather than
+     letting the row imply one unit. */
+  '+(st.unit?"<div class=\'pfsu\'>clicks, not companies</div>":"<div class=\'pfsr\'>"+esc(rate)+"</div>")'  +
+  '+loss+"</div>";' +
+  'if(!st.unit)prev=v;});' +
+  'fnEl.innerHTML=html;' +
+  'var note=document.getElementById("pfn-note");' +
+  'if(note)note.innerHTML="Clicks that never reached the form are NOT in our data at all &#8212; only PartnerStack has those, and their API exposes no click endpoint we can reach. Rates are suppressed below "+rmin+" so a tiny base cannot read as a percentage.";}' +
   'partnerRows=d.partners||[];renderPartners();' +
   /* The per-domain table. Same source as the chips above, so a domain cannot
      appear in one and not the other. */
@@ -3638,7 +3673,11 @@ app.get('/monitor', (req, res) => {
   'var name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\\u2014";' +
   'var stage=l.completed?"<span class=\\"badge bb\\">Completed</span>":"<span class=\\"badge ba\\">Step 1</span>";' +
   'var li=l.enriched_linkedin?"<a href=\\""+esc(l.enriched_linkedin)+"\\" target=\\"_blank\\" style=\\"color:#2563eb;text-decoration:none\\">View</a>":"\\u2014";' +
-  'return"<tr><td class=\\"xbtn\\" id=\\"sdr-xbtn-"+i+"\\" onclick=\\"toggleSDRRow("+i+")\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td style=\\"color:#555\\">"+esc(l.enriched_title||"\\u2014")+"</td><td>"+esc(l.enriched_industry||"\\u2014")+"</td><td>"+esc(l.enriched_company_size||"\\u2014")+"</td><td>"+stage+"</td><td>"+li+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td></tr>"' +
+  /* The partner and what they came in saying, together. hear_about_us reads
+     "Partner - X" on these leads, so without this an SDR has no idea how the
+     person said they found us — which is what you open the call with. */
+  'var src2=[l.ps_partner_name?("\\uD83E\\uDD1D "+esc(l.ps_partner_name)):null,l.hear_about_us_raw?esc(l.hear_about_us_raw):null].filter(Boolean).join("<br>")||"\\u2014";' +
+  'return"<tr><td class=\\"xbtn\\" id=\\"sdr-xbtn-"+i+"\\" onclick=\\"toggleSDRRow("+i+")\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td style=\\"font-size:11px\\">"+src2+"</td><td style=\\"color:#555\\">"+esc(l.enriched_title||"\\u2014")+"</td><td>"+esc(l.enriched_industry||"\\u2014")+"</td><td>"+esc(l.enriched_company_size||"\\u2014")+"</td><td>"+stage+"</td><td>"+li+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td></tr>"' +
   '+"<tr class=\\"erow\\" id=\\"sdr-er-"+i+"\\" style=\\"display:none\\"><td></td><td colspan=\\"9\\">"+sdrPanel(l)+"</td></tr>";' +
   '}).join("");' +
   'document.getElementById("sdr-tbody").innerHTML=html;}' +
@@ -6729,8 +6768,113 @@ async function partnerLifecycle() {
   };
 }
 
+/* ── THE FUNNEL ──────────────────────────────────────────────────────
+   Nine stages, defined ONCE as a shared SQL fragment and interpolated into
+   both the programme-wide query and the per-partner one, so a partner column
+   and the headline are computed by the same expressions and cannot disagree.
+
+   CUMULATIVE: every stage repeats all prior conditions, so each is a strict
+   subset of the one before and the funnel nests by construction. Filtering
+   each stage independently does NOT nest — a dry run against real data showed
+   "Opportunity created" at 2 sitting after "Booked" at 0, because Salesforce
+   Opportunities exist for companies that never booked through our form.
+
+   The trade-off, stated plainly: a domain that reaches a later stage without
+   passing an earlier one drops out of the funnel entirely. That is right for a
+   funnel measuring the path to the money — without a conversion the payment
+   cannot fire whatever else is true — but it means the funnel is not a census
+   of Salesforce. The per-domain table is.
+
+   Every stage counts DISTINCT DOMAINS. Clicks are the one exception, counted
+   per click, and are labelled as a different unit wherever they appear.
+   ------------------------------------------------------------------ */
+const PS_FUNNEL_STAGE_SQL = `
+  COUNT(DISTINCT l.ps_customer_key)                                     AS step1,
+  COUNT(DISTINCT l.ps_customer_key) FILTER (
+    WHERE l.completed IS TRUE)                                          AS completed,
+  COUNT(DISTINCT l.ps_customer_key) FILTER (
+    WHERE l.completed IS TRUE
+      AND l.ps_signup_sent_at IS NOT NULL)                              AS conversions,
+  COUNT(DISTINCT l.ps_customer_key) FILTER (
+    WHERE l.completed IS TRUE
+      AND l.ps_signup_sent_at IS NOT NULL
+      AND l.ps_signup_verified_at IS NOT NULL)                          AS verified,
+  COUNT(DISTINCT l.ps_customer_key) FILTER (
+    WHERE l.completed IS TRUE
+      AND l.ps_signup_verified_at IS NOT NULL
+      AND l.booking_uid IS NOT NULL)                                    AS booked,
+  COUNT(DISTINCT l.ps_customer_key) FILTER (
+    WHERE l.completed IS TRUE
+      AND l.ps_signup_verified_at IS NOT NULL
+      AND l.booking_uid IS NOT NULL
+      AND s.sf_state IN ('exists_unticked','ticked'))                   AS opportunity,
+  COUNT(DISTINCT l.ps_customer_key) FILTER (
+    WHERE l.completed IS TRUE
+      AND l.ps_signup_verified_at IS NOT NULL
+      AND l.booking_uid IS NOT NULL
+      AND s.sf_state = 'ticked')                                        AS ticked,
+  COUNT(DISTINCT l.ps_customer_key) FILTER (
+    WHERE l.completed IS TRUE
+      AND l.ps_signup_verified_at IS NOT NULL
+      AND l.booking_uid IS NOT NULL
+      AND s.sf_state = 'ticked'
+      AND l.ps_qualified_sent_at IS NOT NULL)                           AS qualified,
+  COUNT(DISTINCT l.ps_customer_key) FILTER (
+    WHERE l.ps_signup_failed_at IS NOT NULL
+      AND l.ps_signup_sent_at IS NULL)                                  AS lost_conversion,
+  COUNT(DISTINCT l.ps_customer_key) FILTER (
+    WHERE l.ps_signup_skipped_reason IS NOT NULL
+      AND l.ps_signup_sent_at IS NULL)                                  AS lost_skipped,
+  COUNT(DISTINCT l.ps_customer_key) FILTER (
+    WHERE l.booking_uid IS NOT NULL
+      AND s.sf_state = 'no_opportunity')                                AS lost_no_opp,
+  COUNT(DISTINCT l.ps_customer_key) FILTER (
+    WHERE s.sf_state = 'create_errored')                                AS lost_sfopp,
+  COUNT(DISTINCT l.ps_customer_key) FILTER (
+    WHERE l.ps_qualify_failed_at IS NOT NULL
+      AND l.ps_qualified_sent_at IS NULL)                               AS lost_qualification`;
+
+const PS_FUNNEL_FROM = `
+    FROM leads l
+    LEFT JOIN partner_domain_sf_state s ON s.customer_key = l.ps_customer_key
+   WHERE l.ps_partner_key IS NOT NULL AND l.ps_customer_key IS NOT NULL`;
+
+const PS_CLICKS_SQL = `
+  (SELECT COUNT(DISTINCT e->>'xid')
+     FROM leads c, LATERAL jsonb_array_elements(c.ps_click_history) AS e
+    WHERE c.ps_partner_key IS NOT NULL
+      AND jsonb_typeof(c.ps_click_history) = 'array'
+      AND e->>'xid' IS NOT NULL)                                        AS clicks`;
+
+/* Stage order and labels, shared by the renderer. */
+const PS_FUNNEL_STAGES = [
+  { key: 'clicks',      label: 'Clicks',              unit: true },
+  { key: 'step1',       label: 'Reached step 1' },
+  { key: 'completed',   label: 'Completed the form' },
+  { key: 'conversions', label: 'Conversion sent' },
+  { key: 'verified',    label: 'Conversion verified' },
+  { key: 'booked',      label: 'Booked' },
+  { key: 'opportunity', label: 'Opportunity created' },
+  { key: 'ticked',      label: 'Qualified Demo ticked' },
+  { key: 'qualified',   label: 'The $50 fired' },
+];
+
+/* Losses attached to the stage where the money leaks — never left as the gap
+   between two numbers, which is arithmetic the reader should not have to do
+   and which hides which of several causes it was. */
+const PS_FUNNEL_LOSSES = {
+  conversions: [{ key: 'lost_conversion', label: 'conversion failed', bad: true },
+                { key: 'lost_skipped',    label: 'skipped' }],
+  opportunity: [{ key: 'lost_no_opp', label: 'booked, no Opportunity', bad: true },
+                { key: 'lost_sfopp',  label: 'sfopp errored', bad: true }],
+  qualified:   [{ key: 'lost_qualification', label: 'qualification failed', bad: true }],
+};
+
+/* Below this a rate is noise: 1 of 2 is "50%" and means nothing. */
+const PS_RATE_MIN = 10;
+
 async function partnerOverview() {
-  const [totals, clicksRow, rows] = await Promise.all([
+  const [totals, clicksRow, rows, programme] = await Promise.all([
     pool.query(`
       /* DOMAINS throughout, matching the funnel and the ladder. These counted
          people while the funnel counted companies, which put two units on one
@@ -6770,30 +6914,25 @@ async function partnerOverview() {
          — a domain count sitting next to a people count looks like a funnel
          and is not one. Companies is also the truthful unit here, since
          PartnerStack pays per customer. */
-      SELECT ps_partner_key                                                 AS partner_key,
-             MAX(ps_partner_name)                                           AS partner_name,
-             MAX(ps_partner_email)                                          AS partner_email,
-             COUNT(DISTINCT ps_customer_key)                                AS step1,
-             COUNT(DISTINCT ps_customer_key) FILTER (
-               WHERE completed IS TRUE)                                     AS completed,
-             COUNT(DISTINCT ps_customer_key) FILTER (
-               WHERE ps_signup_sent_at IS NOT NULL)                         AS conversions,
-             COUNT(DISTINCT ps_customer_key) FILTER (
-               WHERE booking_uid IS NOT NULL)                               AS booked,
-             COUNT(DISTINCT ps_customer_key) FILTER (
-               WHERE ps_qualified_sent_at IS NOT NULL)                      AS qualified,
-             MAX(ps_click_at)                                               AS last_click,
+      SELECT l.ps_partner_key                                               AS partner_key,
+             MAX(l.ps_partner_name)                                         AS partner_name,
+             MAX(l.ps_partner_email)                                        AS partner_email,
+             ${PS_FUNNEL_STAGE_SQL},
+             MAX(l.ps_click_at)                                             AS last_click,
              (SELECT COUNT(DISTINCT e->>'xid')
                 FROM leads c, LATERAL jsonb_array_elements(c.ps_click_history) AS e
                WHERE c.ps_partner_key = l.ps_partner_key
                  AND jsonb_typeof(c.ps_click_history) = 'array'
-                 AND e->>'xid' IS NOT NULL)                                   AS clicks
-        FROM leads l
-       WHERE ps_partner_key IS NOT NULL AND ps_customer_key IS NOT NULL
-       GROUP BY ps_partner_key
-       ORDER BY COUNT(DISTINCT ps_customer_key) DESC, MAX(ps_click_at) DESC NULLS LAST
+                 AND e->>'xid' IS NOT NULL)                                 AS clicks
+      ${PS_FUNNEL_FROM}
+       GROUP BY l.ps_partner_key
+       ORDER BY COUNT(DISTINCT l.ps_customer_key) DESC, MAX(l.ps_click_at) DESC NULLS LAST
        LIMIT 200
     `),
+    /* The same stage expressions, ungrouped. NOT a sum of the per-partner rows:
+       a domain can carry leads from two partners and summing would count it
+       twice. */
+    pool.query(`SELECT ${PS_FUNNEL_STAGE_SQL}, ${PS_CLICKS_SQL} ${PS_FUNNEL_FROM}`),
   ]);
   const t = totals.rows[0] || {};
   const leads = Number(t.leads) || 0;
@@ -6809,8 +6948,12 @@ async function partnerOverview() {
       /* null, not 0, when the query could not run — "not measured" and "none"
          are different answers. */
       clicks: clicksRow.rows[0].clicks === null ? null : Number(clicksRow.rows[0].clicks),
-      // Guarded: a partner programme with no leads yet must show a dash, not NaN.
-      bookingRate: leads ? Math.round((booked / leads) * 1000) / 10 : null,
+    },
+    funnel: {
+      stages: PS_FUNNEL_STAGES,
+      losses: PS_FUNNEL_LOSSES,
+      rateMin: PS_RATE_MIN,
+      programme: programme.rows[0] || {},
     },
     partners: rows.rows,
   };
