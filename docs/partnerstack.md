@@ -502,6 +502,13 @@ fact**:
 **The rule now: any completeness or confidence signal must reach the UI or fail
 loudly. It may never be silently dropped.**
 
+6. **A rate whose denominator was a `LIMIT`** rather than a population, in
+   an org where 99.5% of the sampled table is a different kind of record.
+   Reported as "enrichment reaches 0% of Salesforce" for what was actually
+   46.5%. See the analysis note under the `LIMIT` rule below — the first
+   instance of this class found in *analysis* rather than in shipped code, and
+   it cost an evening on a bug that did not exist.
+
 **And its corollary, learned the hard way five times: anything computed
 server-side must be VERIFIED AS RENDERED, not merely confirmed present in the
 payload.** "It is in the response" is not evidence anyone can see it. Check the
@@ -525,6 +532,35 @@ Concretely —
 totalSize` is satisfied by a truncated result. The completeness check passed on
 2,000 of 5,898. The SOQL now carries no `LIMIT` at all; pagination plus
 `SF_MAX_PAGES` is the bound.
+
+**And it has now bitten us in ANALYSIS as well as in code.** On 4 Sept the
+Apollo enrichment ticket recorded "Salesforce Leads, last 7 days: 200 leads, 0
+with enrichment (0%)" and read it as a months-long silent outage. It was a
+measurement error of exactly this shape: the denominator was whatever a
+`LIMIT 200` returned over the whole `Lead` object, with **no `LeadSource`
+filter**. This org's `Lead` table is ~99.5% outbound list imports — `SG01P`,
+`NG01P`, `E004P` and about eighty other campaign codes, over 100,000 rows a
+month — which never touched Apollo and correctly hold no enrichment. Our form's
+leads are `LeadSource = 'Website'`, roughly 200 a week. Reproduced on 5 Sept: a
+`LIMIT 200` over the last 7 days returns 169 `E004P` and **6** `Website`.
+Measured properly, the same 7 days were 215 `Website` Leads with 100 enriched —
+46.5%, matching the ~49% we hold. Nothing was broken and nothing had been for
+the five months the field had existed.
+
+**The rule: a denominator is a POPULATION, not whatever a `LIMIT` returned.**
+Before believing a rate, say out loud what the denominator is a population
+*of*, and check that the filter defining it is actually in the query. A sample
+drawn from a mixed table measures the mixture, not the thing you asked about.
+The tell here was available for free and nobody looked: 200 leads in 7 days is
+not our form's volume, and the `enriched_title__c` count for the whole year was
+one query away — it showed 2 in March rising to 393 in August, which is a
+five-month ramp, not an outage.
+
+The counter that would have made this unmissable now exists — see
+`enrichmentCoverage()` and `GET /monitor/enrichment-coverage` in `index.js`,
+rendered on the System Health tab. It compares what we hold against what
+Salesforce received, over a population rather than a sample, and reports
+UNAVAILABLE rather than zero when Salesforce cannot be read.
 
 ## Small datasets catch bugs that large ones hide
 
@@ -745,10 +781,11 @@ failure here would look exactly like a partner with no Opportunity.
 
 ## Related open tickets
 
-- **`docs/tickets/apollo-enrichment-not-reaching-salesforce.md`** — Apollo
-  enrichment reaches 0% of Salesforce Leads while we hold it for 49% of leads.
-  Found while investigating the partner list view. Not a PartnerStack bug, but
-  the same shape as the four below.
+- **`docs/tickets/apollo-enrichment-not-reaching-salesforce.md`** — the
+  enrichment regression **does not exist**; investigated 5 Sept and closed.
+  The "0 of 200" was a `LIMIT` with no `LeadSource` filter. The ticket has been
+  re-pointed at what the investigation did find: form submissions with no
+  Salesforce Lead at all, 6 people in 90 days, 3 of them booked.
 - **`disqualified` read inconsistently** across six sites — see gap 3.
 - **`docs/tickets/health-alert-state-is-in-memory.md`** — a red health row
   re-alerts on every deploy, because the cooldown and the last-reported state

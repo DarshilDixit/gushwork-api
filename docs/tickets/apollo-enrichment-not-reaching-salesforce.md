@@ -1,72 +1,178 @@
-# Apollo enrichment is not reaching Salesforce
+# Form submissions with no Salesforce Lead
 
-**Status:** open, not investigated
-**Found:** 4 Sept 2026, while checking whether custom Lead fields survive
-conversion for the PartnerStack partner list view.
-**Severity:** data loss, silent, long-running. Not urgent — nothing is broken
-that was previously working *today* — but AEs have never seen this data.
+**Status:** open, sized, not fixed
+**Was:** "Apollo enrichment is not reaching Salesforce" — **that regression does
+not exist.** See "The false alarm" below; it is kept in full because the way it
+was measured is the reusable lesson, not a footnote.
+**Found:** 4 Sept 2026 (as the false alarm), investigated and re-pointed
+5 Sept 2026.
+**Severity:** low volume, real consequence. 6 people in 90 days reached step 2
+and have no Salesforce Lead; 3 of them booked a call, so an AE met someone the
+CRM has no record of.
+**Filename kept deliberately** even though the title changed — `partnerstack.md`
+and the git history both point here, and a rename would break those links to
+save nothing.
 
-## What was observed
+---
+
+## The real finding
+
+Joined the AWS mirror to Salesforce by email, deduped to people, over 90 days:
+
+```
+people in the mirror                                3229
+reached /submit (a Salesforce Lead is owed)         2361   73.12%
+  in Salesforce                                     2355   99.75%
+  NOT in Salesforce  <-- the gap                       6    0.25%
+never reached /submit (none owed)                    868   26.88%
+  in Salesforce anyway (booking webhooks)             17    1.96%
+
+enrichment, among people who reached /submit AND are in Salesforce (2355)
+  we held it at submit, Salesforce has it           1452   61.66%
+  we held it at submit, Salesforce has NOT            11    0.47%
+  we held nothing (Apollo genuinely missed)          892   37.88%
+  Salesforce has it, we do not                         0    0.00%
+```
+
+**The six with no Lead at all**, of which three booked:
+
+```
+pratyush@maino.ai              booked=false  2026-06-23
+hari@pickyourtrail.com         booked=TRUE   2026-06-15
+shikhar.verma@gushwork.ai      booked=TRUE   2026-07-08   <- our own address
+kaavian@gtmguy.xyz             booked=false  2026-07-15
+analytics@uprawmedia.com       booked=TRUE   2026-08-04
+abhisheklokapur@gmail.com      booked=false  2026-07-13
+```
+
+So five real people and one of our own test addresses. Two booked calls sit
+outside Salesforce entirely.
+
+**The eleven where enrichment did not travel** (0.47%) are a second, smaller
+thread; two of those are also `gushwork.ai` addresses. Worth a look only after
+the six above.
+
+### What is NOT the bug
+
+- **Not a missing-Lead-for-drop-offs problem.** 868 people never reached
+  `/submit`, and `pushToSalesforce` runs from `/submit`, so no Lead is owed for
+  them. That is correct behaviour and it is 27% of everyone — big enough to
+  swamp the real signal if you measure carelessly, which is exactly what the
+  first pass of this join did.
+- **`completed IS TRUE` is the wrong test for "a Lead is owed."** The Cal and
+  RevenueHero safety-net branches set `completed = true` for someone who booked
+  without touching the form. Using it put `aasnj@meta.com` — a booking-webhook
+  row with `submitted_at = null` — in the gap column and called it a lost form
+  submission. Use `submitted_at IS NOT NULL`. This is in CLAUDE.md's
+  Definitions section and it caught me anyway.
+
+## START HERE — do not begin with a cold read of pushToSalesforce
+
+The rate is 0.25%, so this is not a broken path — it is a path that fails
+occasionally and silently. A code read will not tell you why six specific
+calls failed. Look for the evidence of the failures first:
+
+1. **Railway logs for those six sessions.** `pushToSalesforce` failures are
+   caught and logged, not thrown. Search the six addresses. If they logged an
+   error, that names the cause in one step.
+2. **Is it retried?** Check whether a failed push has any retry at all. If it
+   does not, that is the fix: a lead lost to one HTTP blip is lost forever, and
+   `backfill-sf.js` exists precisely because this has happened before at
+   scale — see CLAUDE.md.
+3. **The three booked ones are worth checking by hand.** Booking arrives by
+   three routes (`/booking-confirmed`, and the Cal and RevenueHero webhooks) and
+   all three call `pushToSalesforce`. If the booked failures cluster on one
+   route, that is the bug and it is a third of the paths.
+4. Only then read the push path.
+
+`backfill-sf.js` re-syncs leads to Salesforce after exactly this kind of loss.
+It is deliberately not mounted; mount it, run it for these six, unmount it.
+
+## Why nobody noticed
+
+Nothing compares what we hold against what we sent. A lead absent from
+Salesforce looks identical to a lead that never submitted, and 27% of people
+genuinely never submit.
+
+**That counter now exists.** `enrichmentCoverage()` in `index.js`, served by
+`GET /monitor/enrichment-coverage` and rendered on the System Health tab as
+"Enrichment reaching Salesforce". Four numbers: what we hold, what arrived,
+held-but-never-arrived, and **no Salesforce Lead at all** — which is this
+ticket's population, now on a screen. Its denominator is every person who
+reached step 2 in the window, not a sample, and when Salesforce cannot be read
+it shows `?` rather than 0.
+
+---
+
+## The false alarm, and why it is worth keeping
+
+The original ticket said:
 
 ```
 our mirror (gw_form_leads), last 7 days : 301 leads, 148 with enrichment (49%)
 Salesforce Leads,           last 7 days : 200 leads,   0 with enrichment (0%)
 ```
 
-Zero of 200. Checked `enriched_title__c`, `enriched_company_size__c`,
-`enriched_industry__c`, `enriched_seniority__c`.
+Zero of 200, read as a months-long silent data loss that AEs had never seen.
 
-We hold the data. These leads have a populated `enriched_title` in our database
-and nothing in Salesforce:
+**It was a measurement error.** Enrichment has reached Salesforce continuously
+since the field shipped:
 
-- `laura.hart@nexusw2v.com` — "Director of Organic Logistics"
-- `audra@audrainteriors.com` — "CEO / Interior Designer"
-- `rbowers@icihomes.com` — "Content Marketing Specialist"
-
-The fields **exist** on the Lead object — `enriched_title__c` queries fine and
-returns null, rather than erroring. So this is not a missing-field problem.
-
-It is also **not** a conversion problem. The values are absent on the Lead
-itself, before any conversion happens. (Separately confirmed: none of our 29
-custom Lead fields exist on the Opportunity object at all, so conversion drops
-everything regardless — but that is a different issue.)
-
-## START HERE — do not begin with a cold read of pushToSalesforce
-
-**First query: `enriched_title__c` on Leads by created month, going back a
-year.** The 7-day window above cannot distinguish "never worked" from "broke on
-some date", and there is reason to believe Salesforce leads used to carry
-enrichment.
-
-```sql
--- SOQL
-SELECT CALENDAR_YEAR(CreatedDate), CALENDAR_MONTH(CreatedDate), COUNT(Id)
-FROM Lead
-WHERE enriched_title__c != null AND CreatedDate = LAST_N_DAYS:365
-GROUP BY CALENDAR_YEAR(CreatedDate), CALENDAR_MONTH(CreatedDate)
+```
+LeadSource = Website (our form). Salesforce Leads.
+month      leads    title      size      industry   seniority
+2026-03       3      2  67%     3 100%     3 100%     2  67%
+2026-04     237    125  53%   164  69%   160  68%   125  53%
+2026-05     576    316  55%   361  63%   345  60%   316  55%
+2026-06     666    334  50%   384  58%   367  55%   334  50%
+2026-07     889    390  44%   426  48%   413  46%   390  44%
+2026-08     755    393  52%   460  61%   440  58%   393  52%
+2026-09      95     40  42%    49  52%    49  52%    40  42%
 ```
 
-If there is a cutover month, that dates the regression and points at whatever
-changed then — far faster than reading the push path cold. If it has been zero
-for the whole year, then read the code.
+42–55% on title every month, against the ~49% we hold. No cutover, no
+regression, five months of it working.
 
-## Then, if a code read is needed
+**The cause of the wrong number: the denominator was a `LIMIT`, with no
+`LeadSource` filter.** This org's `Lead` object is ~99.5% outbound list imports
+— `SG01P`, `NG01P`, `E004P` and about eighty other campaign codes, over 100,000
+rows a month — which never touched Apollo and correctly hold nothing. Our form's
+leads are `LeadSource = 'Website'`, about 200 a week. Reproduced on 5 Sept:
 
-- `/submit` reads `enrichment_data` by `session_id` and passes `enrich.*` into
-  `pushToSalesforce`.
-- `CUSTOM_FIELD_MAP` in `salesforce.js` maps `enriched_title` ->
-  `enriched_title__c` and 12 similar fields.
-- Worth checking: whether `enrichment_data` is populated at the moment
-  `/submit` runs (Apollo fires on email blur, so usually but not always), and
-  whether the booking webhooks — which also call `pushToSalesforce` — pass
-  enrichment at all.
+```
+SELECT Id, LeadSource, enriched_title__c FROM Lead
+WHERE CreatedDate = LAST_N_DAYS:7 LIMIT 200
+  -> 200 sampled, 169 of them E004P, 6 Website, 3 enriched
+```
 
-## Why nobody noticed
+The same 7 days filtered properly: **215 Website Leads, 100 enriched, 46.5%.**
 
-The field exists and reads empty rather than missing. An empty field looks like
-a lead Apollo could not enrich, which is a normal and expected outcome roughly
-half the time. There is no counter anywhere comparing what we hold against what
-we sent.
+The two tells were both free and neither was taken. 200 Leads in 7 days is not
+our form's volume — it is a page size. And the year-by-month count was one
+query away.
 
-This is the same shape as the four PartnerStack bugs in `../partnerstack.md`:
-we had the evidence the answer was incomplete and rendered it as fact.
+**The three named examples were also wrong.** Two of the three have all four
+fields populated in Salesforce, last modified *before* the ticket was written:
+
+```
+laura.hart@nexusw2v.com  title="Director of Organic Logistics"  size=10   industry="renewables & environment"  seniority=director
+rbowers@icihomes.com     title="Content Marketing Specialist"   size=400  industry="real estate"               seniority=entry
+```
+
+The third, `audra@audrainteriors.com`, is genuinely absent from Salesforce —
+and correctly so: `completed = false`, `submitted_at = null`. She reached
+step 1 and dropped, so `/submit` never ran and no Lead was owed. She is not
+evidence of the enrichment bug and not evidence of the real one either.
+
+**The lesson, and it is now in `../partnerstack.md` beside the others:** a
+denominator is a POPULATION, not whatever a `LIMIT` returned. This is the same
+shape as the SOQL pagination bug in that doc — where `LIMIT 2000` made
+`records.length === totalSize` true on 2,000 of 5,898 rows and the completeness
+check passed on a truncated read. It has now cost us once in shipped code and
+once in analysis.
+
+## Still open, separately
+
+Conversion drops everything regardless: none of our 29 custom Lead fields exist
+on the Opportunity object, so nothing survives Lead conversion. Confirmed 4 Sept,
+unrelated to the above, and not covered by this ticket.

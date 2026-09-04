@@ -421,4 +421,96 @@ async function findOpportunityDomains({ sinceDays = 180 } = {}) {
   }
 }
 
-module.exports = { pushToSalesforce, findSFLeadByEmail, updateSFLead, getSalesforceToken, findQualifiedDemoOpportunities, findOpportunityDomains };
+/* ── Which of these emails has enrichment on its Lead? ──────────────
+   Answers the held-vs-sent question: we hold Apollo enrichment for roughly
+   half our leads and nothing anywhere compared that against what Salesforce
+   actually received. On 4 Sept that gap was reported as 0 of 200 Leads
+   enriched, i.e. a total outage, and it was a measurement error — the
+   denominator was a LIMIT over the whole Lead object, which in this org is
+   ~99.5% outbound list imports that never touched Apollo. The real figure
+   was 46.5%.
+
+   So this exists to make the comparison cheap and permanent rather than
+   something someone reconstructs by hand under time pressure and gets wrong.
+
+   Batched because SOQL takes an IN list, not a join, and paginated per batch
+   for the same reason findOpportunityDomains is: Salesforce pages at ~1,250
+   records whatever you ask for.
+
+   Returns ok:false and NO records on any incomplete read. A partial join
+   reads as "Salesforce is missing these leads" when the truth is "we did not
+   finish asking", which is the exact failure this whole area keeps producing. */
+const SF_EMAIL_BATCH = 200;
+
+async function findEnrichmentByEmails(emails) {
+  const deduped = Array.from(new Set((emails || [])
+    .map((e) => String(e || '').trim().toLowerCase())
+    .filter(Boolean)));
+  /* A quote would break out of the IN list. Dropped rather than escaped, and
+     counted SEPARATELY from the dedupe: skipped is rendered as "unquotable",
+     and folding case-duplicates into it made that label a lie the first time
+     this ran against real addresses. */
+  const list = deduped.filter((e) => !/['\\]/.test(e));
+  const skipped = deduped.length - list.length;
+  if (!list.length) return { ok: true, found: new Map(), skipped, batches: 0 };
+
+  try {
+    const { accessToken, instanceUrl } = await getSalesforceToken();
+    const found = new Map();
+    let batches = 0;
+
+    for (let i = 0; i < list.length; i += SF_EMAIL_BATCH) {
+      const chunk = list.slice(i, i + SF_EMAIL_BATCH);
+      const soql =
+        `SELECT Id, Email, enriched_title__c, enriched_industry__c, enriched_company_size__c ` +
+        `FROM Lead WHERE Email IN (${chunk.map((e) => `'${e}'`).join(',')})`;
+      /* No LIMIT, for the reason spelled out in findOpportunityDomains: a
+         LIMIT caps totalSize as well as the rows, so the completeness check
+         below would be satisfied by a truncated answer. */
+      let url = `${instanceUrl}/services/data/v60.0/query/?q=${encodeURIComponent(soql)}`;
+      let records = [];
+      let totalSize = null;
+      let pages = 0;
+      while (url && pages < SF_MAX_PAGES) {
+        const res = await fetch(url, { method: 'GET', headers: { Authorization: `Bearer ${accessToken}` } });
+        if (!res.ok) {
+          const err = await res.text();
+          console.warn('[SF] Enrichment-by-email query failed:', err.slice(0, 300));
+          return { ok: false, reason: `http_${res.status}`, found: new Map() };
+        }
+        const data = await res.json();
+        if (totalSize === null) totalSize = data.totalSize;
+        records = records.concat(data.records || []);
+        pages++;
+        url = data.done === false && data.nextRecordsUrl ? instanceUrl + data.nextRecordsUrl : null;
+      }
+      if (url) {
+        console.warn(`[SF] Enrichment-by-email hit the page cap (${SF_MAX_PAGES}) on batch ${batches + 1}`);
+        return { ok: false, reason: 'pagination_incomplete', found: new Map() };
+      }
+      if (totalSize !== null && records.length < totalSize) {
+        console.warn(`[SF] Enrichment-by-email read ${records.length} of ${totalSize} — refusing to return a partial set`);
+        return { ok: false, reason: 'incomplete', found: new Map() };
+      }
+      for (const r of records) {
+        const k = String(r.Email || '').toLowerCase();
+        if (!k || found.has(k)) continue;
+        found.set(k, {
+          id: r.Id,
+          /* ANY of the three counts as arrived. Apollo can return a company
+             size with no title, so keying on title alone would report a
+             partially enriched Lead as an empty one. */
+          enriched: !!(r.enriched_title__c || r.enriched_industry__c || r.enriched_company_size__c),
+        });
+      }
+      batches++;
+    }
+    console.log(`[SF] Enrichment-by-email: ${found.size} Lead(s) matched from ${list.length} address(es) over ${batches} batch(es)`);
+    return { ok: true, found, skipped, batches };
+  } catch (err) {
+    console.warn('[SF] Enrichment-by-email error:', err.message);
+    return { ok: false, reason: 'error', error: err.message, found: new Map() };
+  }
+}
+
+module.exports = { pushToSalesforce, findSFLeadByEmail, updateSFLead, getSalesforceToken, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails, SF_EMAIL_BATCH };

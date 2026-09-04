@@ -1167,6 +1167,204 @@ function liftClientJs(startMarker, endMarker) {
          verbs.length > 0 && verbs.every((v) => v === 'SELECT'), verbs.join(','));
     }
 
+    /* ============================================================
+       HELD vs SENT — the counter whose absence let "0 of 200" stand
+       ------------------------------------------------------------
+       4 Sept: enrichment was reported as reaching 0% of Salesforce Leads
+       while we held it for 49% of ours. It was a measurement error — the
+       denominator was whatever a LIMIT returned over the whole Lead object,
+       which in this org is ~99.5% outbound list imports that never touched
+       Apollo. Measured against form leads the figure was 46.5%.
+       ============================================================ */
+    {
+      const covSrc = between(src, '/* ── HELD vs SENT', "app.get('/monitor/partner-gaps'");
+      /* Negative assertions have to read CODE, not prose. Both of the ones
+         below first failed against this block's own comments, which name the
+         very things they forbid — the house style is comments that name the
+         incident, so a bare regex over the source is not evidence. */
+      const noC = (t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+      const covCode = noC(covSrc);
+
+      /* ── The denominator is a POPULATION, not a sample ── */
+      ok('cov: the cap is a named constant, not a bare number in the query',
+         /const ENRICH_COVERAGE_LIMIT = \d+/.test(src) &&
+         /LIMIT \$\{ENRICH_COVERAGE_LIMIT \+ 1\}/.test(covSrc), covSrc.slice(0, 200));
+      /* +1 and an overflow test, so hitting the cap is DETECTED. Selecting
+         exactly the cap makes a full page indistinguishable from a complete
+         population — the LIMIT defeating its own guard, one more time. */
+      ok('cov: hitting the cap is detected by overflow, not assumed',
+         /const capped = rows\.rows\.length > ENRICH_COVERAGE_LIMIT/.test(covSrc));
+      ok('cov: and the cap reaches the response', /capped,/.test(covSrc));
+
+      /* ── "A Lead is owed" is submitted_at, never completed ──
+         The Cal and RevenueHero safety-net branches set completed for someone
+         who booked without touching the form, and pushToSalesforce runs from
+         /submit. Using completed put a webhook row in the gap column on the
+         first run of this join and called it a lost form submission. */
+      ok('cov: the population is people who reached /submit',
+         /l\.submitted_at IS NOT NULL/.test(covSrc));
+      ok('cov: NOT people who merely completed',
+         !/completed IS TRUE/.test(covCode), covCode.match(/completed[^\n]*/g));
+      /* Enrichment attached to a later drop-off session was never sent
+         anywhere and is not a Salesforce miss. */
+      ok('cov: held means held ON the submitted row',
+         /BOOL_OR\(l\.submitted_at IS NOT NULL AND \(/.test(covSrc));
+      /* Salesforce upserts the Lead by email; comparing rows would count a
+         dedupe as a loss. */
+      ok('cov: deduped by lower(email), so it counts people',
+         /GROUP BY LOWER\(l\.email\)/.test(covSrc));
+      ok('cov: read-only',
+         !/\b(INSERT|UPDATE|DELETE|ALTER|DROP)\b/.test(covCode), covCode.match(/\b(INSERT|UPDATE|DELETE)\b/g));
+      ok('cov: the route is token-gated like every other monitor route',
+         /MONITOR_TOKEN/.test(covSrc) && /Unauthorized/.test(covSrc));
+
+      /* ── Off the alerting heartbeat, deliberately ──
+         It makes a WAN Salesforce call; runHealthChecks runs every 30 minutes
+         and pages people. Same reasoning that keeps /monitor/partner-gaps out. */
+      {
+        const rhc = between(src, 'async function runHealthChecks()', 'Alerting on state transitions');
+        ok('cov: runHealthChecks does not call the coverage counter',
+           !/enrichmentCoverage/.test(rhc), rhc);
+        const hb = between(src, 'function startHeartbeat()', 'PHASE 3: startup configuration audit');
+        ok('cov: and neither does the heartbeat', !/enrichmentCoverage/.test(hb));
+      }
+
+      /* ── The Salesforce reader refuses partial answers ── */
+      {
+        const sfSrc = fs.readFileSync(path.join(__dirname, '..', 'salesforce.js'), 'utf8');
+        const fnSrc = between(sfSrc, 'async function findEnrichmentByEmails', 'module.exports =');
+        /* A LIMIT caps totalSize as well as the rows, so records.length ===
+           totalSize is satisfied by a truncated result. */
+        const fnCode = noC(fnSrc);
+        ok('cov/sf: the SOQL carries no LIMIT', !/LIMIT/.test(fnCode), fnCode.match(/LIMIT[^\n]*/g));
+        ok('cov/sf: it paginates', /nextRecordsUrl/.test(fnSrc));
+        ok('cov/sf: an incomplete read returns ok:false and NO records',
+           /records\.length < totalSize[\s\S]{0,220}?ok: false[\s\S]{0,80}?found: new Map\(\)/.test(fnSrc));
+        ok('cov/sf: hitting the page cap also refuses',
+           /pagination_incomplete[\s\S]{0,60}?found: new Map\(\)/.test(fnSrc));
+        /* Apollo can return a company size with no title; keying on title
+           alone reports a partly enriched Lead as an empty one. */
+        ok('cov/sf: any of the three fields counts as arrived',
+           /enriched_title__c \|\| r\.enriched_industry__c \|\| r\.enriched_company_size__c/.test(fnSrc));
+      }
+
+      /* ── DRIVEN: Salesforce unreachable is UNKNOWN, never zero ── */
+      {
+        const mk = (sfResult, rows) => {
+          const F = (new Function('pool', 'findEnrichmentByEmails', 'app', 'console',
+            covSrc + '\n return { enrichmentCoverage, ENRICH_COVERAGE_LIMIT };'))(
+            { query: async () => ({ rows }) },
+            async () => sfResult,
+            { get: () => {} },
+            { error: () => {}, warn: () => {}, log: () => {} }
+          );
+          return F;
+        };
+        const people = [
+          { email: 'a@x.com', held: true },
+          { email: 'b@x.com', held: true },
+          { email: 'c@x.com', held: false },
+        ];
+
+        const bad = await mk({ ok: false, reason: 'http_503', found: new Map() }, people).enrichmentCoverage();
+        eq('cov/run: a failed Salesforce read is not ok', bad.ok, false);
+        /* THE RULE. "We could not check" is not "we checked and it is fine",
+           and it is not "we checked and it is broken" either. */
+        eq('cov/run: arrived is NULL, not 0',        bad.heldAndArrived, null);
+        eq('cov/run: the gap is NULL, not 0',        bad.heldNotArrived, null);
+        eq('cov/run: no-Lead is NULL, not 0',        bad.notInSalesforce, null);
+        eq('cov/run: what WE hold is still reported', bad.held, 2);
+        eq('cov/run: and the reason travels',        bad.reason, 'http_503');
+
+        const found = new Map([
+          ['a@x.com', { id: '1', enriched: true }],
+          ['b@x.com', { id: '2', enriched: false }],
+        ]);
+        const good = await mk({ ok: true, found, skipped: 0 }, people).enrichmentCoverage();
+        eq('cov/run: held counts only what we hold at submit', good.held, 2);
+        eq('cov/run: arrived counts the held ones Salesforce has', good.heldAndArrived, 1);
+        eq('cov/run: the gap is the held ones it has not', good.heldNotArrived, 1);
+        /* c@x.com held nothing, so it is not a miss — but it IS absent from
+           Salesforce, which is a different and separately reported bug. */
+        eq('cov/run: absent-from-Salesforce is its own count', good.notInSalesforce, 1);
+        eq('cov/run: Apollo missing is never counted as a Salesforce miss',
+           good.heldNotArrived + good.heldAndArrived, good.held);
+
+        /* Overflow: cap+1 rows in, cap reported and the extra row dropped. */
+        const many = [];
+        const F = mk({ ok: true, found: new Map(), skipped: 0 }, many);
+        for (let i = 0; i <= F.ENRICH_COVERAGE_LIMIT; i++) many.push({ email: `p${i}@x.com`, held: false });
+        const cap = await mk({ ok: true, found: new Map(), skipped: 0 }, many).enrichmentCoverage();
+        eq('cov/run: the cap is reported when the population exceeds it', cap.capped, true);
+        eq('cov/run: and the denominator is the cap, not the overflow',
+           cap.submitted, F.ENRICH_COVERAGE_LIMIT);
+      }
+
+      /* ── RENDERED. Computed server-side is not the same as on screen —
+         five for five in docs/partnerstack.md, and this is the sixth chance
+         to make it six for six. */
+      {
+        const clientSrc = liftClientJs("'async function loadEnrichCoverage(){'", "'function renderAlerts(d){");
+        const els = {};
+        const cdoc = { getElementById: (id) => (els[id] = els[id] || { textContent: '', innerHTML: '', style: {} }) };
+        const setv = {};
+        const drive = async (payload, throws) => {
+          Object.keys(setv).forEach((k) => delete setv[k]);
+          const C = (new Function('document', 'fetch', 'API', 'TP', 'AbortSignal', 'set', 'esc',
+            clientSrc + '\n return { loadEnrichCoverage };'))(
+            cdoc,
+            async () => { if (throws) throw new Error('NetworkError'); return { ok: true, json: async () => payload }; },
+            'http://x', '', { timeout: () => null },
+            (id, v) => { setv[id] = String(v); els[id] = els[id] || { style: {} }; },
+            (x) => String(x == null ? '' : x)
+          );
+          await C.loadEnrichCoverage();
+        };
+
+        await drive({ ok: true, days: 30, submitted: 100, held: 60, inSalesforce: 99,
+                      heldAndArrived: 58, heldNotArrived: 2, notInSalesforce: 1, capped: false, skipped: 0 });
+        eq('cov/ui: what we hold renders',      setv['h-ec-held'], '60');
+        eq('cov/ui: what arrived renders',      setv['h-ec-ok'], '58');
+        eq('cov/ui: the gap renders',           setv['h-ec-gap'], '2');
+        eq('cov/ui: absent-from-Salesforce renders', setv['h-ec-nolead'], '1');
+        ok('cov/ui: the rate names its base', /96\.7% of what we hold/.test(setv['h-ec-okpct']), setv['h-ec-okpct']);
+        ok('cov/ui: the note says the denominator is a population, not a sample',
+           /population, not a sample/.test(setv['h-ec-note']), setv['h-ec-note']);
+        ok('cov/ui: and states the Apollo caveat, so a miss is not read as a bug',
+           /not a miss here/.test(setv['h-ec-note']));
+        eq('cov/ui: a real gap paints red', els['h-ec-gap'].style.color, '#b91c1c');
+
+        /* THE REGRESSION THIS COUNTER EXISTS FOR. Salesforce unreachable must
+           never render as zero — a 0 here reads as a total outage, which is
+           exactly the false alarm of 4 Sept. */
+        await drive({ ok: false, reason: 'http_503', days: 30, submitted: 100, held: 60,
+                      heldAndArrived: null, heldNotArrived: null, notInSalesforce: null, capped: false });
+        eq('cov/ui: an unreadable Salesforce shows ? for arrived, not 0', setv['h-ec-ok'], '?');
+        eq('cov/ui: ? for the gap, not 0',      setv['h-ec-gap'], '?');
+        eq('cov/ui: ? for no-Lead, not 0',      setv['h-ec-nolead'], '?');
+        eq('cov/ui: what WE hold is still shown', setv['h-ec-held'], '60');
+        ok('cov/ui: the note says UNKNOWN, not zero, and names the reason',
+           /UNKNOWN, not zero/.test(setv['h-ec-note']) && /http_503/.test(setv['h-ec-note']), setv['h-ec-note']);
+
+        /* A cap is a completeness signal, so it reaches the UI or it does not
+           exist. */
+        await drive({ ok: true, days: 30, submitted: 1500, held: 900, inSalesforce: 1490,
+                      heldAndArrived: 890, heldNotArrived: 10, notInSalesforce: 10, capped: true, limit: 1500, skipped: 3 });
+        ok('cov/ui: hitting the cap is rendered, so a page cannot read as the population',
+           /Capped at 1500 people/.test(setv['h-ec-note']), setv['h-ec-note']);
+        ok('cov/ui: skipped addresses are rendered too',
+           /3 address\(es\) skipped/.test(setv['h-ec-note']));
+
+        /* The fetch itself failing is not a quiet night either. */
+        await drive(null, true);
+        ok('cov/ui: an unreachable route shows ? everywhere, never 0',
+           ['h-ec-held','h-ec-ok','h-ec-gap','h-ec-nolead'].every((k) => setv[k] === '?'),
+           JSON.stringify(setv));
+        ok('cov/ui: and says the numbers are unknown',
+           /UNKNOWN, not zero/.test(setv['h-ec-note']), setv['h-ec-note']);
+      }
+    }
+
     /* ============================================================ */
     console.log('');
     if (failures.length) {
