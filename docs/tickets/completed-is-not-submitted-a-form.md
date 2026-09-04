@@ -1,6 +1,9 @@
 # `completed` is not "submitted a form", and the mirror disagrees about it
 
-**Status:** open, audited, two small fixes identified
+**Status:** the live half is CLOSED — the 14 mirror rows were re-synced on
+5 Sept 2026 and the two code defects behind them are fixed. What remains is
+documentation-grade: correcting CLAUDE.md's safety-net caveat, and a decision
+nobody needs to make today about renaming `gw_form_leads.submitted_at`.
 **Found:** 5 Sept 2026, while sizing the missing-Salesforce-Lead gap. The
 investigator (Claude) used `completed IS TRUE` as the test for "a Salesforce
 Lead is owed", got one false positive, and only caught it by inspecting the row.
@@ -208,10 +211,26 @@ reading the wrong clock. Railway's `leads.submitted_at` is the real one.
 
 ### Recommended, not done
 
-- **Backfill the 14 rows** — a targeted `UPDATE gw_form_leads SET completed =
-  true` for those session_ids, which is safe precisely because the flag is
-  monotonic. Deliberately left undone pending a decision: it is a write to the
-  mirror the dialer reads.
+- **DONE 5 Sept 2026 — the 14 rows were re-synced.** Approved explicitly
+  before running. `UPDATE gw_form_leads SET completed = true, updated_at =
+  NOW()` over the 14 known `session_id`s, parameterised as
+  `= ANY($1::text[])`, doubly guarded by `submitted_at IS NOT NULL AND
+  completed IS NOT TRUE` so it was idempotent and could not touch a row
+  outside the drift state even if an id had been wrong.
+
+  Verified per row before running: 14 of 14 were `completed = true` on
+  Railway, checked individually rather than inferred from a sample. Dry run
+  matched exactly 14 rows, and 0 rows outside the id list.
+
+  Result: `UPDATE 14`, mirror-wide drift predicate went 14 → 0, and an
+  immediate re-run returned `UPDATE 0`, proving idempotence rather than
+  asserting it. Nothing but `completed` moved — `submitted_at` intact on all
+  14, `disqualified` still 4, `booking_uid` still 5. The 6 rows with
+  `completed = true AND submitted_at IS NULL` are the safety-net webhook rows
+  and are correct; they were untouched.
+
+  Safe to repeat if it ever recurs, though it cannot: the cause was fixed on
+  18 July 2026 and `loops_sent`, its last remaining sibling, on 5 Sept.
 - **DONE 5 Sept** — `loops_sent` changed to the same OR form, so the latent
   version cannot wake up. `tests/test-batch2.js` now derives the never-NULL
   column list from the bind site and asserts structurally that none of them is
