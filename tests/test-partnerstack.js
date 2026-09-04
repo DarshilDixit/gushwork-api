@@ -1044,6 +1044,15 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     const fn = src.slice(src.indexOf('async function partnerLifecycle'), src.indexOf('async function partnerOverview'));
     ok('ladderA: keyed by DOMAIN', /GROUP BY ps_customer_key/.test(fn));
     ok('ladderA: only partner-sourced leads', /ps_xid IS NOT NULL AND ps_customer_key IS NOT NULL/.test(fn));
+    /* Bounded so it does not scan every partner lead ever — but the bound must
+       never hide a failure, or a domain that failed months ago and was never
+       fixed drops out of "Needs attention", the one number that has to be
+       complete. */
+    ok('ladderA: the query is date-bounded', /INTERVAL '\$\{PS_LADDER_WINDOW_D\} days'/.test(fn));
+    ok('ladderA: an unresolved failure is included regardless of age',
+       /OR ps_signup_failed_at IS NOT NULL\s*\n\s*OR ps_qualify_failed_at IS NOT NULL\)/.test(fn));
+    ok('ladderA: the window matches the Salesforce lookback',
+       /const PS_LADDER_WINDOW_D = 180;/.test(src));
     /* The unit seam: leads with no domain cannot be keyed by one, so they are
        counted as LEADS in their own field rather than folded into a domain
        count. */
@@ -1066,6 +1075,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
       } };
       const L = (new Function('pool', 'console',
         liftLine(src, 'const PS_LADDER_FAILED =') + '\n' +
+        liftLine(src, 'const PS_LADDER_WINDOW_D =') + '\n' +
         liftTemplate(src, 'const PS_LADDER_SQL =') + '\n' +
         lift(src, 'async function partnerLifecycle(') +
         '\n return partnerLifecycle;'))(fakePool, { warn() {}, log() {} });
@@ -1087,6 +1097,38 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
      /partnerOverview\(\), partnerLifecycle\(\)/.test(src));
   ok('ladderA: the unit seam is stated in the UI, not just in comments',
      /no customer key \(leads, not companies\)/.test(src));
+
+  /* The one-off backfill. Two historical rows would otherwise render in the
+     WRONG state on day one — test.com grey when its conversion really was a
+     phantom, which is the exact bug this batch fixes. */
+  {
+    const bf = dbjs.slice(dbjs.indexOf('ONE-OFF BACKFILL'), dbjs.indexOf('console.log(\'[DB] Tables ready\')'));
+    ok('backfill: test.com is marked as a phantom conversion failure',
+       /ps_customer_key = 'test\.com'[\s\S]{0,300}?ps_signup_fail_reason = 'phantom_200'/.test(bf) ||
+       /ps_signup_fail_reason = 'phantom_200'[\s\S]{0,300}?ps_customer_key = 'test\.com'/.test(bf));
+    ok('backfill: gushwork.ai is marked as a test-address skip',
+       /ps_signup_skipped_reason = 'test_email'[\s\S]{0,300}?ps_customer_key = 'gushwork\.ai'/.test(bf));
+    /* Idempotent by construction, not by a ledger: it can only touch rows
+       where the target is still NULL, nothing has since been sent, and the row
+       predates the cutoff. So a genuine later lead from either domain is
+       untouched and a reboot cannot re-fire it. */
+    ok('backfill: only fires where the target column is still NULL',
+       /ps_signup_failed_at IS NULL/.test(bf) && /ps_signup_skipped_reason IS NULL/.test(bf));
+    ok('backfill: never overwrites a domain that has since converted',
+       (bf.match(/ps_signup_sent_at IS NULL/g) || []).length === 2);
+    ok('backfill: bounded to rows predating the cutoff',
+       (bf.match(/created_at < \$\{CUTOFF\}/g) || []).length === 2);
+    /* Honest timestamps rather than NOW(): the release moment for the phantom,
+       the submit time for the skip. */
+    ok('backfill: the phantom uses the claim-release time, not NOW()',
+       /ps_signup_failed_at   = updated_at/.test(bf) && !/ps_signup_failed_at\s*=\s*NOW\(\)/.test(bf));
+    ok('backfill: the skip uses the submit time, not NOW()',
+       /ps_signup_skipped_at     = created_at/.test(bf));
+    /* initDB throwing exits the process; a cosmetic backfill must not be able
+       to take the service down. */
+    ok('backfill: wrapped so it cannot kill boot',
+       /catch \(err\)[\s\S]{0,120}?backfill failed \(non-fatal\)/.test(bf));
+  }
 
   /* Alerting — the reason today's 400 was invisible is that nobody was
      watching, so the state alone is half a fix. */

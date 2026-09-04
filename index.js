@@ -6354,6 +6354,16 @@ const PS_LADDER_SQL = `
    only figure on the tab that means someone has to do something today. */
 const PS_LADDER_FAILED = ['conversion_failed', 'qualification_failed'];
 
+/* The ladder groups every partner-sourced lead ever seen, so it needs a bound
+   before that is hundreds of domains. 180 days matches PS_GAP_SF_LOOKBACK_D.
+
+   BUT the bound must never hide a failure. An unresolved conversion or
+   qualification failure is included regardless of age — otherwise a domain
+   that failed 200 days ago and was never fixed would silently drop out of
+   "Needs attention", which is the one number on the tab that has to be
+   complete. leads_ps_failed_idx covers that arm of the OR. */
+const PS_LADDER_WINDOW_D = 180;
+
 async function partnerLifecycle() {
   const [domains, noKey] = await Promise.all([
     pool.query(`
@@ -6370,6 +6380,9 @@ async function partnerLifecycle() {
              MAX(created_at)                    AS last_seen
         FROM leads
        WHERE ps_xid IS NOT NULL AND ps_customer_key IS NOT NULL
+         AND (created_at >= NOW() - INTERVAL '${PS_LADDER_WINDOW_D} days'
+              OR ps_signup_failed_at IS NOT NULL
+              OR ps_qualify_failed_at IS NOT NULL)
        GROUP BY ps_customer_key
        ORDER BY MAX(created_at) DESC
        LIMIT 500`),
@@ -6378,7 +6391,8 @@ async function partnerLifecycle() {
     pool.query(`
       SELECT COUNT(*) AS leads
         FROM leads
-       WHERE ps_xid IS NOT NULL AND ps_customer_key IS NULL`),
+       WHERE ps_xid IS NOT NULL AND ps_customer_key IS NULL
+         AND created_at >= NOW() - INTERVAL '${PS_LADDER_WINDOW_D} days'`),
   ]);
 
   const byState = {};

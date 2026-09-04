@@ -207,6 +207,11 @@ in their own field, and the UI says "leads, not companies" on that chip. Folding
 them into a domain count would reintroduce the mixed-unit arithmetic that made
 the old counters irreconcilable.
 
+The query is bounded to `PS_LADDER_WINDOW_D` (180 days, matching the Salesforce
+lookback) **except for unresolved failures, which are included regardless of
+age** — otherwise a domain that failed months ago and was never fixed would
+silently drop out of "Needs attention", the one number that has to be complete.
+
 **conversion_failed and qualification_failed are the two red states** and are
 summed into "Needs attention" — the only number on the tab that means someone
 has to act today. Both also fire a Slack alert at the moment of failure, via
