@@ -231,4 +231,53 @@ async function sendAction({ customer_key, type, value }) {
   }
 }
 
-module.exports = { sendConversion, fetchPartnership, sendAction, CONVERSION_URL, V2_BASE };
+/* --------------------------------------------------------
+   fetchCustomer — did the conversion actually create anything?
+
+   /conversion/xid answers 200 with an EMPTY body, so there is nothing in the
+   response to check. A 200 that creates no customer would still stamp
+   ps_signup_sent_at, and the once-per-domain rule would then burn that domain
+   permanently with nothing surfacing anywhere. The only real proof is reading
+   the customer back.
+
+   Three outcomes, and the difference between the last two matters more than
+   anything else here:
+     { ok: true,  exists: true  }  the record is there
+     { ok: true,  exists: false }  a definitive 404 — it was NOT created
+     { ok: false, ... }           we could not tell (5xx, network, timeout)
+
+   "We could not tell" must never be treated as "it is missing". Releasing a
+   claim on a PartnerStack outage would un-stamp every pending conversion and
+   fire them all again on the next submit.
+-------------------------------------------------------- */
+async function fetchCustomer(customerKey) {
+  const auth = v2AuthHeader();
+  if (!auth) return { ok: false, reason: 'no_credentials' };
+  if (!customerKey) return { ok: false, reason: 'no_customer_key' };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(`${V2_BASE}/customers/${encodeURIComponent(customerKey)}`,
+      { method: 'GET', headers: { Authorization: auth, Accept: 'application/json' }, signal: controller.signal });
+    if (res.status === 404) {
+      logCall('<- 404 customer NOT found', { customer_key: customerKey });
+      return { ok: true, exists: false, status: 404 };
+    }
+    const text = await res.text().catch(() => '');
+    if (!res.ok) {
+      logCall(`<- ${res.status} customer read failed`, { customer_key: customerKey, body: text.slice(0, 300) });
+      return { ok: false, status: res.status, reason: `http_${res.status}` };
+    }
+    let test = null;
+    try { const d = (JSON.parse(text).data) || {}; test = d.test; } catch { /* shape change: still exists */ }
+    return { ok: true, exists: true, status: res.status, test };
+  } catch (err) {
+    const reason = err && err.name === 'AbortError' ? 'timeout' : 'network_error';
+    return { ok: false, reason, error: err && err.message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+module.exports = { sendConversion, fetchPartnership, sendAction, fetchCustomer, CONVERSION_URL, V2_BASE };
