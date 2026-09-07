@@ -1354,12 +1354,22 @@ Verified end to end against live production data (4 Sept 2026):
   `syncToAWS` for that session again. The columns were dead in that statement.
   Fixed in PR 23 with targeted writes — see "The three stamps reach the mirror"
   below.
-- **The Slack alert on `conversion_failed` / `qualification_failed`.** Built in
-  batch A and never fired. It goes through `recordPartnerStackFailure`, which
-  calls `alertOps` directly, so it *can* fire and always could — unlike the 21
-  `recordFailure('PartnerStack', …)` sites, which could not until the
-  failure-monitor entry was added. See "TWO alert paths" above. Still needs a
-  genuine failure to confirm the Slack round trip end to end.
+- ~~**The Slack alert on `conversion_failed` / `qualification_failed`.**~~
+  **The alerting PLUMBING is now VERIFIED — fired deliberately, 7 Sept 2026.**
+  `tools/fire-alert.js` lifts the real `alertOps` out of `index.js` and fired
+  two of the three payloads for real against a throwaway domain:
+
+  | Alert | Slack | Email |
+  |---|---|---|
+  | Conversion retries exhausted | `status: 200` | `messageId <2e1a7e67…@gushwork.ai>` |
+  | Salesforce refused the Opportunity write | `status: 200` | `messageId <41e68a69…@gushwork.ai>` |
+
+  So `alertOps` → `sendOpsSlack` → the alerts channel works, and a `critical`
+  also emails `ALERT_EMAIL_TO`. **What is still unverified is the TRIGGER, not
+  the transport**: no genuine exhaustion or permission rejection has occurred,
+  so nothing has proved that the real code path reaches these calls with real
+  values. That distinction is the whole lesson above — do not read this row as
+  "the exhaustion alert works end to end".
 - **`Partner_Source__c` actually reaching Salesforce, and its permission
   failure.** Both PATCH paths are executed against a stubbed `fetch` in
   `tests/test-sf-readers.js`, and neither has run against the real org. The
