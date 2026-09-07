@@ -26,6 +26,8 @@
    Run:  node tests/test-partnerstack.js
    ============================================================ */
 
+require('./crash-reporter')('test-partnerstack');
+
 const fs = require('fs');
 const path = require('path');
 const src  = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');

@@ -14,6 +14,8 @@
    Run:  node tests/test-batch-a.js
    ============================================================ */
 
+require('./crash-reporter')('test-batch-a');
+
 const fs = require('fs');
 const path = require('path');
 const src   = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');

@@ -29,6 +29,8 @@
    Run:  node tests/test-ads-parity.js
    ============================================================ */
 
+require('./crash-reporter')('test-ads-parity');
+
 const fs = require('fs');
 const path = require('path');
 const demo  = fs.readFileSync(path.join(__dirname, '..', 'gushwork-form.js'), 'utf8');

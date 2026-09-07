@@ -60,7 +60,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `package-lock.json` | Locked dependency versions, committed so Railway installs exactly what was tested |
 | `.gitignore` | Keeps `node_modules/`, `.env`, logs, and local Claude settings out of the repo |
 | `README.md` | Repo landing blurb, not living documentation. This file is |
-| `tests/` | The test files described under Deploying |
+| `tests/` | The test files described under Deploying, plus `crash-reporter.js` which every suite requires first |
 | `docs/partnerstack.md` | PartnerStack handover: the two-step model, every ps_ column, env vars, test procedure, known gaps |
 | `CLAUDE.md` | This file |
 
@@ -690,6 +690,20 @@ the production database from a feature branch.
 Tests read the real functions out of `index.js` rather than a copy. A test that
 exercises a duplicate of the source can pass while production is broken. Keep it
 that way.
+
+**All six suites require `tests/crash-reporter.js` first, and it is not
+optional.** A suite that crashes prints a stack trace, zero `✗` lines and exits
+1 — which reads as a clean run to anything counting markers and as a caught
+mutation to anything counting exit codes. Three of the six did exactly that
+before 7 Sept 2026, so every mutation result measured by counting markers may
+have been counting crashes. The reporter turns any escape into a `✗` line plus
+an explicit `SUITE DID NOT COMPLETE` marker, and deliberately prints no totals.
+
+**So when you mutation-test, a mutation is CAUGHT only if the suite completed
+AND failed AND ran its usual number of assertions.** `failed > 0` alone is not
+enough: `test-ads-parity.js` once reported one failure while silently running
+13 of its 159 assertions. Check the pass count against the baseline.
+`docs/partnerstack.md` has the measured per-suite table.
 
 **`test-sf-readers.js` is the one that EXECUTES rather than reads.** The others
 assert on source text, which keeps them pointed at the real code but cannot

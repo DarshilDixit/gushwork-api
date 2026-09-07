@@ -738,6 +738,68 @@ Worked examples already in this repo, for calibration:
 - Eligibility running after `res.json()` and never being awaited — a property of
   call order, asserted directly.
 
+### A crashing suite reports as CAUGHT. The measurement was wrong, not the test
+
+Found 7 Sept 2026 while mutation-testing PR 23, and it is a **measurement** bug
+rather than a test bug, which makes it worse: it silently inflated confidence in
+every earlier mutation run in this project.
+
+Every mutation result here has been measured by counting `✗` lines in a suite's
+output. A suite that **crashes** prints a stack trace, **zero `✗` lines**, and
+exits 1. To a mark-counter that is indistinguishable from a clean run; to an
+exit-code checker it is indistinguishable from a caught mutation. It is
+neither — it is an **unmeasured result**.
+
+It surfaced on three mutations of the new reader suite that looked like
+survivors and were really crashes on `out.records[259].id`, after a broken
+reader returned an empty list.
+
+**Any earlier mutation run in this project that happened to crash was recorded
+as caught.** There is no way to tell retrospectively which ones did, so the
+right reading is that mutation confidence before 7 Sept 2026 is weaker than it
+was reported to be — not wrong, but not evidence either.
+
+#### The exposure across the six suites, measured rather than assumed
+
+Each suite was run against a mutation that breaks a declaration it depends on:
+
+| Suite | Before the fix |
+|---|---|
+| `test-batch1.js` | **crashed**, 0 markers, no summary |
+| `test-batch2.js` | **crashed**, 0 markers, no summary |
+| `test-partnerstack.js` | **crashed**, 0 markers, no summary |
+| `test-ads-parity.js` | reported 1 marker — but its assertion total **collapsed from 159 to 13** |
+| `test-batch-a.js` | not demonstrated; the probe was outside its remit |
+| `test-sf-readers.js` | reports correctly (it has the scenario wrapper) |
+
+So **three of six** had the exposure outright, and `test-ads-parity.js`
+exhibited a *third* mode nobody was looking for: a suite that completes, prints
+a normal summary, counts as caught — and silently ran 8% of itself. Counting
+markers cannot see that either.
+
+#### The three modes, and the rule
+
+1. **Crash** — no summary, no markers. Unmeasured.
+2. **Partial run** — a summary, some markers, far fewer assertions than the
+   baseline. Also unmeasured, and it looks completely normal.
+3. **Reports** — a summary, markers, and the assertion total intact.
+
+**A mutation counts as CAUGHT only when the suite completed AND failed AND ran
+its usual number of assertions.** `failed > 0` on its own is not the test;
+`passed + failed == baseline` is half of it.
+
+#### What was changed
+
+`tests/crash-reporter.js`, required first by all six suites, turns any escape —
+a synchronous throw at module load or an unhandled rejection in an async suite
+— into a `✗` line **and** an explicit `SUITE DID NOT COMPLETE` marker. It
+deliberately prints no `passed:`/`failed:` totals, because a fabricated total
+would be the same class of lie as the one it fixes. Verified by re-running the
+three crashing probes: all three now emit both signals.
+
+The partial-run mode cannot be fixed generically — only measured. Hence the
+rule above.
+
 ### Verified-as-rendered and verified-as-computed are TWO assertions
 
 Added 7 Sept 2026 out of PR 22, and it is the sharp edge of the rule above.

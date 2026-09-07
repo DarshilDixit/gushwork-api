@@ -28,6 +28,8 @@
    Run:  node tests/test-sf-readers.js
    ============================================================ */
 
+require('./crash-reporter')('test-sf-readers');
+
 const path = require('path');
 
 let pass = 0, fail = 0;
@@ -283,14 +285,14 @@ const page = (recs, total, next) => ({
     ok('domains: and it has no LIMIT either', !/LIMIT/.test(q.replace(/\([^)]*\)/g, '')),
        q.replace(/\([^)]*\)/g, ''));
   });
-  {
+  await scenario('findOpportunityDomains — a short read refuses too', async () => {
     const sf = freshSalesforce();
     stubFetch(() => OK(page([rec(1, false)], 9, null)));
     const out = await sf.findOpportunityDomains({});
     eq('domains: a short read refuses, same as the ticked query', out.ok, false);
     eq('domains: with the same reason string', out.reason, 'incomplete');
     eq('domains: and no records', out.records.length, 0);
-  }
+  });
 
   console.log('');
   if (failures.length) {
