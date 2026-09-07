@@ -515,10 +515,30 @@ site can tell you the call did anything; that is the ceiling of a source-level
 assertion, not a flaw in a particular test. Only executing the code or watching
 the real thing arrive gets past it.
 
+**A HAND-RUN API READ IS NOT A BETTER ORACLE THAN THE SWEEP THAT WAITS.**
+This is the most useful thing learned on 7 Sept 2026 and it generalises past
+PartnerStack. A `test.com` conversion was created at 16:38:00. A direct
+`GET /v2/customers/test.com` at 16:49 returned **404** — eleven minutes after
+the record existed. That 404 was read, in the moment, as proof the conversion
+had failed and would keep failing, and it was used to argue for intervening.
+The sweep asked at 17:06, got a clean 200, and verified correctly.
+
+Acting on the manual read would have released a good claim and re-fired a
+conversion that had already landed — **the exact duplicate credit the grace
+period exists to prevent, arrived at by a human being more impatient than the
+code.** PartnerStack cannot undo a double credit.
+
+So: when a checker is deliberately built to wait before believing a negative,
+a quicker manual check of the same thing is **evidence of nothing**. It has
+strictly less information than the check you already wrote. If you find
+yourself about to override a grace period with a fresh `curl`, you are about to
+reintroduce the bug the grace period documents. Wait for the sweep, or read
+what the sweep last concluded — never race it.
+
 **Do not reduce `PS_VERIFY_GRACE_MIN`.** PartnerStack's read-after-write lag
 was measured at **over 11 minutes** on 7 Sept 2026 — a customer created at
 16:38 still 404'd on a direct API read at 16:49. The margin at 15 minutes is
-about four minutes, not the thirteen the old note implied. A manual API read is
+about **four** minutes, not the nine a 2-to-6 minute range implied. A manual API read is
 also not a better oracle than the sweep: that 404 was nearly used as grounds to
 release a claim for a conversion that had in fact landed, which is the exact
 duplicate-credit failure the grace period prevents.

@@ -651,15 +651,26 @@ clean 200, and stamped `ps_signup_verified_at` correctly.
 Two things follow, and the second is the point:
 
 1. **Do not reduce `PS_VERIFY_GRACE_MIN`.** The margin over the worst observed
-   lag is now about four minutes, not thirteen. If anything it wants raising,
+   lag is about **four minutes, not the nine** that a 2-to-6 minute range
+   implied. If anything it wants raising,
    and it wants more measurements before either.
-2. **A human reading the API directly is not a better oracle than the sweep.**
-   That 404 was used in the moment as evidence the conversion had failed and
-   would keep failing. It was the read side lagging. The design got the right
-   answer by waiting; the impatient manual check got the wrong one, and acting
-   on it would have released a good claim and re-fired a conversion that had
-   already landed — the exact duplicate-credit failure the grace period exists
-   to prevent.
+2. **A hand-run API read is not a better oracle than the sweep that waits.**
+   The most useful lesson of the evening, and it generalises past PartnerStack.
+
+   That 404 was read in the moment as proof the conversion had failed and would
+   keep failing, and it was used to argue for intervening. It was the read side
+   lagging. The design got the right answer by waiting; the impatient manual
+   check got the wrong one, and acting on it would have released a good claim
+   and re-fired a conversion that had already landed — the exact duplicate
+   credit the grace period exists to prevent, arrived at by a human being more
+   impatient than the code. PartnerStack cannot undo a double credit.
+
+   **The rule: when a checker is deliberately built to wait before believing a
+   negative, a quicker manual check of the same thing is evidence of nothing.**
+   It has strictly less information than the check already written. Anyone
+   about to override a grace period with a fresh `curl` is about to reintroduce
+   the bug that grace period documents. Wait for the sweep, or read what the
+   sweep last concluded — never race it.
 
 **"Could not tell" is never "missing".** Only a definitive 404 releases a
 claim. Treating a 5xx as missing would un-stamp every pending conversion during
@@ -1381,8 +1392,34 @@ Verified end to end against live production data (4 Sept 2026):
   one payload key; the round-trip on the field itself was verified 4 Sept, but
   no Lead has been written since the code existed. The next partner submit that
   came in on a paid ad proves it.
-- **The Partners tab rendered in a browser.** The SQL runs and the JSON is
-  correct; nobody has looked at the page.
+- ~~**The Partners tab rendered in a browser.**~~ **DONE 7 Sept 2026** — read
+  and reconciled by the owner: Needs attention 0, the state chips sum to 5, the
+  four Salesforce sub-chips partition correctly, `hello.com` reads "unticked in
+  Salesforce — the $50 already fired", and PartnerStack is green on System
+  Health.
+- **THE FUNNEL PATH HAS NEVER BEEN WALKED END TO END, and this is a DATA gap,
+  not a code gap.** Noticed by the owner on 7 Sept 2026: "The $50 fired" reads
+  `2`, and underneath it `0 on the funnel path · 2 skipped an earlier stage`.
+  Every partner lead in the system shows **Booked: No**.
+
+  So **no partner-referred person has ever booked a meeting through the form.**
+  Both paid domains reached their Opportunity another way — a hand-made one for
+  `hello.com`, a Lead conversion for `google.ai` — which is exactly why the
+  cumulative column drops them at BOOKED and why the absolute twins exist at
+  all.
+
+  What that means for reading the tab: **`booked` is the one stage in this
+  funnel whose behaviour rests on zero observations.** Everything downstream of
+  it — the `booked → opportunity → ticked → qualified` chain, the
+  `lost_no_opp` loss, the recovered-booking logic and the SDR-target question —
+  has only ever been exercised with `booking_uid IS NULL` for partner rows.
+  The first real partner lead that books will be the first time `BOOKED` is
+  populated in this flow, and therefore the first time the cumulative column
+  can be non-zero.
+
+  Nothing is known to be wrong. It is simply the largest untested surface left,
+  it cannot be closed by any amount of work in this repo, and it closes itself
+  the moment a partner sends someone who books.
 - ~~**`findQualifiedDemoOpportunities`'s pagination and its `ok: false`
   branch.**~~ **DONE 7 Sept 2026, PR 23** — `tests/test-sf-readers.js` executes
   both against a stubbed `fetch`: 260 records over three pages, the short-read
