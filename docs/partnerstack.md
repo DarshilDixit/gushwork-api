@@ -738,6 +738,36 @@ Worked examples already in this repo, for calibration:
 - Eligibility running after `res.json()` and never being awaited — a property of
   call order, asserted directly.
 
+### Verified-as-rendered and verified-as-computed are TWO assertions
+
+Added 7 Sept 2026 out of PR 22, and it is the sharp edge of the rule above.
+
+The C5 fix needed a third sub-count on the `exists_unticked` chip row. The
+first version of its test drove the real client and asserted the chip appears
+when the server sends a count — a proper rendered test, of the kind the
+corollary below demands. Then a mutation replaced the server's whole
+computation with `const sfUntickedAfterPaid = 0`, and **the entire suite stayed
+green.** In production that chip would have vanished, the sub-counts would have
+stopped summing to the state they partition, and the number and the chips would
+have disagreed again — the exact bug the fix was for.
+
+Because the rendered test proves the *renderer* is wired. It says nothing about
+whether anything upstream produces a value to render. The old corollary catches
+"computed and never shown". This is the mirror of it: **shown, and never
+computed.** Same class, opposite direction, and a suite can be fully green with
+only one of the two assertions present.
+
+So for any number that reaches a screen, assert both ends:
+
+- the **server derives it** — the predicate or expression itself, scoped to the
+  function, not a substring search over the file;
+- the **client renders it** — through the real renderer, reading the cell.
+
+And where several numbers are meant to account for a whole, assert the
+**partition**: that they sum to the thing they split. That is the assertion that
+would have caught C5 from either end, because a bucket falling out of every
+sub-count breaks the sum whichever side the bug is on.
+
 **And its corollary, learned the hard way five times: anything computed
 server-side must be VERIFIED AS RENDERED, not merely confirmed present in the
 payload.** "It is in the response" is not evidence anyone can see it. Check the
