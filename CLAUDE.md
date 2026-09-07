@@ -537,11 +537,29 @@ the other way.
 **Step 10 is a POLLER, not a Salesforce Flow callout.** A Flow that calls out
 fails inside Salesforce where nobody on this team would see it, and it couples an
 AE ticking `Qualified_Demo__c` to our service being up at that instant. Polling
-every 15 minutes means a missed window is just a later window. The join between
+means a missed window is just a later window. The join between
 the two systems is the DOMAIN — `Account.Website` first, the primary contact's
-email domain as fallback, both through `partnerStackCustomerKey`. Only domains
-that already converted (`ps_signup_sent_at IS NOT NULL`) can be qualified: an
-action for a `customer_key` PartnerStack has never seen is a no-op at best.
+email domain as fallback, both through `partnerStackCustomerKey`.
+
+**It polls every 2 minutes, and there are three separate intervals here that
+must NOT be collapsed onto each other.** This one is cheap — it reads only the
+ticked Opportunities, one page. `PS_SF_REFRESH_INTERVAL_MS` (15 min) scans every
+Opportunity in 180 days across six growing pages and is right to be slow.
+`PS_VERIFY_GRACE_MIN` (15) is not an interval at all but the read-back grace,
+and it is load-bearing: PartnerStack's own indexing lags a conversion by 2–6
+minutes, so shortening it releases good claims and re-fires conversions. Also
+do not "consolidate" the poller onto `partner_domain_sf_state` — a 2-minute
+poll over a table that changes every 15 minutes sees the same rows seven times.
+`docs/partnerstack.md` has the full reasoning.
+
+**Only domains whose conversion is VERIFIED (`ps_signup_verified_at IS NOT
+NULL`) can be qualified** — not merely sent. `ps_signup_sent_at` only means
+PartnerStack answered 200, and `/conversion/xid` answers 200 with an empty body.
+Qualifying on the weaker stamp and then having the read-back sweep 404 releases
+the conversion claim and leaves the qualification claim stamped forever, so the
+domain re-converts and can never be qualified again: $50 gone with no error
+anywhere. Fixed 7 Sept 2026. And beyond that, an action for a `customer_key`
+PartnerStack has never seen is a no-op at best.
 
 **The automated eligibility check is BUILT AND OFF for the MVP.** Rejections are
 decided by hand at payout approval. Everything below is dormant behind

@@ -277,6 +277,12 @@ async function updateSFLead(leadId, fields) {
   }
 }
 
+/* Shared by all three paginated readers below. Salesforce pages at ~1,250
+   records whatever you ask for, so 25 pages is ~31k Opportunities before we
+   refuse to answer. Declared here because it is used by the first of them —
+   it sat below its first use, which was legal and read as a mistake. */
+const SF_MAX_PAGES = 25;
+
 /* --------------------------------------------------------
    findQualifiedDemoOpportunities — the step 10 poller's read side.
 
@@ -291,28 +297,55 @@ async function updateSFLead(leadId, fields) {
    OpportunityContactRole — a lead that reached an Opportunity almost always
    has a contact on it, and their work email is the same company.
 
-   Returns [] on any failure rather than throwing. The poller runs on a timer
-   with nothing waiting on it, and a Salesforce blip must not become an
-   unhandled rejection in the process.
+   THIS USED TO BE `LIMIT 200` WITH NO PAGINATION AND NO COMPLETENESS CHECK,
+   and it is the third time that exact shape has been found in this repo.
+   Nobody unticks Qualified_Demo__c, so the ticked set only ever grows: past
+   200 across the whole org, Salesforce would return an arbitrary 200 in an
+   undefined order and a newly ticked partner Opportunity could sit outside
+   them. The affiliate is never paid and nothing anywhere says so. The trigger
+   was not hypothetical — it is the direct consequence of telling AEs the
+   checkbox exists, which is the point of the field.
+
+   So: no LIMIT, paginated, and the count is checked against totalSize. A
+   LIMIT caps totalSize as well as the rows, which is how `records.length ===
+   totalSize` once passed on 2,000 of 5,898 records in findOpportunityDomains
+   below — the LIMIT defeats the very guard meant to catch it. Pagination plus
+   SF_MAX_PAGES is the bound.
+
+   RETURNS { ok, records }, NOT a bare array. It returned `[]` on every
+   failure, so "no AE has ticked anything" and "Salesforce did not answer"
+   were the same value to the caller — the same conflation findOpportunityDomains
+   was rewritten to remove. Those are opposite conclusions: one is a quiet
+   Tuesday, the other is money not moving.
+
+   KEPT SEPARATE from findOpportunityDomains on purpose, and it is worth saying
+   why because folding the two together looks like an obvious win. That one
+   scans every Opportunity in the window (5,898 today, 6 pages) because it has
+   to tell "no Opportunity exists" from "exists but unticked". This one reads
+   only the ticked ones — 1 page for years — and it is the query the money
+   waits on, so it runs every couple of minutes. Driving the poller off the
+   other query's results would put the cheap, latency-sensitive question on the
+   expensive question's 15-minute schedule.
+
+   NO DATE BOUND, deliberately, and this is the one place the two queries
+   differ in a way that matters. findOpportunityDomains bounds to 180 days
+   (PS_GAP_SF_LOOKBACK_D) because it is sizing a population. Here a bound would
+   mean an Opportunity created before the window and ticked today is invisible
+   forever, which is a silently unpaid affiliate. The ticked set is small enough
+   that reading all of it costs nothing, so it reads all of it.
 -------------------------------------------------------- */
-async function findQualifiedDemoOpportunities(limit = 200) {
+async function findQualifiedDemoOpportunities() {
   try {
     const { accessToken, instanceUrl } = await getSalesforceToken();
     const soql =
       `SELECT Id, Name, Account.Website, Account.Name, ` +
       `(SELECT Contact.Email FROM OpportunityContactRoles ORDER BY IsPrimary DESC LIMIT 1) ` +
-      `FROM Opportunity WHERE Qualified_Demo__c = true LIMIT ${parseInt(limit, 10) || 200}`;
-    const res = await fetch(
-      `${instanceUrl}/services/data/v60.0/query/?q=${encodeURIComponent(soql)}`,
-      { method: 'GET', headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-    if (!res.ok) {
-      const err = await res.text();
-      console.warn('[SF] Qualified-demo query failed:', err.slice(0, 400));
-      return [];
-    }
-    const data = await res.json();
-    const out = (data.records || []).map((r) => {
+      `FROM Opportunity WHERE Qualified_Demo__c = true`;
+    /* The LIMIT inside the subquery is a different thing and is correct: it
+       picks the ONE primary contact per Opportunity, and it does not bound the
+       outer result set at all. */
+
+    const map = (data) => (data.records || []).map((r) => {
       const roles = r.OpportunityContactRoles && r.OpportunityContactRoles.records;
       const contactEmail = roles && roles[0] && roles[0].Contact && roles[0].Contact.Email;
       return {
@@ -323,11 +356,42 @@ async function findQualifiedDemoOpportunities(limit = 200) {
         contactEmail: contactEmail || null,
       };
     });
-    console.log(`[SF] Qualified demos found: ${out.length}`);
-    return out;
+
+    let url = `${instanceUrl}/services/data/v60.0/query/?q=${encodeURIComponent(soql)}`;
+    let records = [];
+    let totalSize = null;
+    let pages = 0;
+    while (url && pages < SF_MAX_PAGES) {
+      const res = await fetch(url, { method: 'GET', headers: { Authorization: `Bearer ${accessToken}` } });
+      if (!res.ok) {
+        const err = await res.text();
+        console.warn('[SF] Qualified-demo query failed:', err.slice(0, 400));
+        return { ok: false, reason: `http_${res.status}`, records: [] };
+      }
+      const data = await res.json();
+      if (totalSize === null) totalSize = data.totalSize;
+      records = records.concat(map(data));
+      pages++;
+      url = data.done === false && data.nextRecordsUrl ? instanceUrl + data.nextRecordsUrl : null;
+    }
+
+    /* FAIL LOUDLY rather than hand back a partial set. A short read here is
+       indistinguishable from "those AEs have not ticked yet", and the caller
+       would skip exactly the domains it could not see. */
+    if (url) {
+      console.warn(`[SF] Qualified-demo pagination hit the page cap (${SF_MAX_PAGES}) with ${records.length} of ${totalSize} — refusing to return a partial set`);
+      return { ok: false, reason: 'pagination_incomplete', records: [], totalSize, fetched: records.length };
+    }
+    if (totalSize !== null && records.length < totalSize) {
+      console.warn(`[SF] Qualified-demo query returned ${records.length} of ${totalSize} — refusing to return a partial set`);
+      return { ok: false, reason: 'incomplete', records: [], totalSize, fetched: records.length };
+    }
+
+    console.log(`[SF] Qualified demos found: ${records.length} over ${pages} page(s)`);
+    return { ok: true, records, pages, totalSize };
   } catch (err) {
     console.warn('[SF] Qualified-demo query error:', err.message);
-    return [];
+    return { ok: false, reason: 'error', error: err.message, records: [] };
   }
 }
 
@@ -345,7 +409,6 @@ async function findQualifiedDemoOpportunities(limit = 200) {
    are opposite conclusions and collapsing them would report a broken
    integration as a clean bill of health.
 -------------------------------------------------------- */
-const SF_MAX_PAGES = 25;   // 25 x ~1,250 = ~31k Opportunities before we refuse
 
 async function findOpportunityDomains({ sinceDays = 180 } = {}) {
   try {

@@ -6474,7 +6474,23 @@ function startPartnerStackConversionVerify() {
    on the same account, would otherwise pay the affiliate twice for one
    qualification. leads_ps_qualified_once_idx makes that impossible; the claim
    is released if the send fails so the next run retries. */
-const PS_QUALIFY_INTERVAL_MS = 15 * 60 * 1000;
+/* TWO MINUTES, down from fifteen on 7 Sept 2026. This is the query the money
+   waits on, and it is cheap: one small page of ticked Opportunities, ~720
+   Salesforce calls a day, which is nothing against the org's limit. The
+   fifteen-minute figure was never chosen for cost — it was the interval the
+   other partner jobs happened to use.
+
+   DO NOT drag PS_SF_REFRESH_INTERVAL_MS down with it. That one scans every
+   Opportunity in 180 days across six growing pages; it answers a different
+   question and it is right to be slow. The reason this poller reads Salesforce
+   itself rather than the state table that refresh writes is exactly this: the
+   cheap, latency-sensitive question must not be put on the expensive
+   question's schedule. See findQualifiedDemoOpportunities.
+
+   This does NOT touch PS_VERIFY_GRACE_MIN, which is a different sweep and is
+   load-bearing at 15 minutes — PartnerStack's own indexing lags a conversion
+   by 2 to 6 minutes and checking sooner releases good claims. */
+const PS_QUALIFY_INTERVAL_MS = 2 * 60 * 1000;
 const PS_QUALIFY_ACTION_TYPE = 'qualified_demo';
 let _psQualifyRunning = false;
 
@@ -6487,7 +6503,21 @@ async function runPartnerStackQualificationPoll() {
   }
   _psQualifyRunning = true;
   try {
-    const opps = await findQualifiedDemoOpportunities();
+    /* { ok, records }, not a bare array. It used to return [] on every
+       failure, so "no AE has ticked anything" and "Salesforce did not answer"
+       arrived here as the same value and the poll returned quietly either way.
+       Those are opposite conclusions: one is a quiet Tuesday, the other is
+       money not moving. A failed read is recorded so it reaches the health row
+       and, on a streak, Slack — recordFailure's cooldown is an hour, so a
+       two-minute tick during an outage still cannot flood. */
+    const sf = await findQualifiedDemoOpportunities();
+    if (!sf.ok) {
+      console.warn(`[PartnerStack] Qualification poll could not read Salesforce (${sf.reason}) — NOT concluding that nothing is ticked`);
+      recordFailure('PartnerStack', 'qualified-demo read', sf.reason +
+        (sf.totalSize ? ` (${sf.fetched} of ${sf.totalSize})` : ''));
+      return;
+    }
+    const opps = sf.records;
     if (!opps.length) return;
 
     /* Collapse to distinct domains first. Several Opportunities can point at
@@ -6505,18 +6535,76 @@ async function runPartnerStackQualificationPoll() {
 
     /* Only domains we actually told PartnerStack about at signup can be
        qualified: an action for a customer_key it has never seen is a no-op at
-       best. ps_signup_sent_at IS NOT NULL is that filter. */
+       best.
+
+       VERIFIED, not merely sent, and that is a fix from 7 Sept 2026 for a
+       silent permanent loss nobody had spotted. ps_signup_sent_at only means
+       PartnerStack answered 200, and /conversion/xid answers 200 with an empty
+       body — a conversion that created nothing looks identical here. If we
+       qualify on that stamp and the read-back sweep later gets a definitive
+       404, it releases ps_signup_sent_at and leaves ps_qualified_sent_at
+       stamped. The domain then converts again on the next lead and can NEVER
+       be qualified: leads_ps_qualified_once_idx is once per domain forever, the
+       poller filters on ps_qualified_sent_at IS NULL, and nothing releases a
+       qualification claim that succeeded. $50 gone, no error, no red chip.
+
+       It costs nothing in practice. The grace period is 15 minutes and no demo
+       happens within 15 minutes of the form submit, so a real qualification is
+       never waiting on this. */
+    /* BOOL_OR per DOMAIN, not a per-row AND, because the domain is the unit
+       PartnerStack pays on and it is the unit the ladder already uses. The
+       stamps do all land on one row today — the qualification claim targets
+       the same earliest-conversion row the signup claim took — so this is the
+       same answer, arrived at in the unit the question is asked in.
+
+       Fetching the state rather than the filtered list so the DROPPED domains
+       can say why. An eligibility filter that silently removes a ticked demo
+       is this integration's recurring bug: a domain stuck unverified would
+       never be qualified and nothing would name it. */
     const { rows } = await pool.query(
-      `SELECT DISTINCT ps_customer_key
+      `SELECT ps_customer_key,
+              BOOL_OR(ps_signup_sent_at     IS NOT NULL) AS sent,
+              BOOL_OR(ps_signup_verified_at IS NOT NULL) AS verified,
+              BOOL_OR(ps_qualified_sent_at  IS NOT NULL) AS qualified,
+              MIN(ps_signup_sent_at)                     AS sent_at
          FROM leads
         WHERE ps_customer_key = ANY($1)
-          AND ps_signup_sent_at IS NOT NULL
-          AND ps_qualified_sent_at IS NULL`,
+        GROUP BY ps_customer_key`,
       [Array.from(byKey.keys())]
     );
-    if (!rows.length) return;
 
+    const eligible = rows.filter((r) => r.sent && r.verified && !r.qualified);
+
+    /* The domains we could have paid and did not, and ONLY once they are
+       genuinely stuck rather than merely waiting.
+
+       Two things are being kept apart here. A conversion sent four minutes ago
+       is not yet verified because the read-back sweep has a 15-minute grace and
+       PartnerStack's own indexing lags 2 to 6 minutes — that is the design
+       working, and saying anything about it would be noise. A conversion sent
+       an hour ago and still unverified is money stuck behind a filter.
+
+       Past the threshold this goes through recordFailure as well as the log.
+       At a two-minute tick a bare console.warn would print 720 times a day for
+       one stuck domain and bury everything around it, whereas recordFailure
+       carries the hour-long alert cooldown and reaches the PartnerStack health
+       row — whose stated impact is exactly this, an affiliate not being
+       credited. A domain with no conversion at all is skipped: that is almost
+       always a non-partner Opportunity that happens to have a ticked box. */
+    const stuckAfterMs = PS_VERIFY_GRACE_MIN * 2 * 60 * 1000;
     for (const r of rows) {
+      if (r.qualified || !r.sent || r.verified) continue;
+      const sentAt = r.sent_at ? new Date(r.sent_at).getTime() : null;
+      if (sentAt === null || Date.now() - sentAt < stuckAfterMs) continue;
+      const mins = Math.round((Date.now() - sentAt) / 60000);
+      console.warn(`[PartnerStack] ⛔ Ticked demo CANNOT be qualified — ${r.ps_customer_key}: the conversion was sent ${mins} min ago and is still unverified, so the $50 is held. Check whether the customer exists in PartnerStack.`);
+      recordFailure('PartnerStack', r.ps_customer_key + ' (ticked, conversion unverified)',
+        `Qualified demo is ticked but the conversion has been unverified for ${mins} min, so the qualification is held back`);
+    }
+
+    if (!eligible.length) return;
+
+    for (const r of eligible) {
       await sendQualificationForDomain(r.ps_customer_key);
     }
   } catch (err) {
