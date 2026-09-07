@@ -6502,8 +6502,8 @@ async function runPartnerStackSignup({ session_id, email, website, company, phon
    DO NOT REDUCE IT. This comment said "15 minutes is comfortably past the
    worst lag seen" until 7 Sept 2026, when the lag was measured at OVER 11
    MINUTES: a test.com conversion created at 16:38:00 still returned 404 on a
-   direct API read at 16:49, and verified cleanly at 17:06. The margin is about
-   four minutes, not thirteen.
+   direct API read at 16:49, and verified cleanly at 17:06. The margin over the WORST
+   documented lag is about four minutes, not the nine that 2-to-6 implied.
 
    And note which oracle was right. The manual 404 was taken as proof the
    conversion had failed; the sweep waited and found it had landed. Acting on
