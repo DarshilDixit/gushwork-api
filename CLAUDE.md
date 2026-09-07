@@ -752,6 +752,28 @@ measured can never be recorded as a catch.
 failure while silently running **13 of its 159** assertions, which passes every
 check based on exit code and failure lines.
 
+**An assertion about ORDER is not an assertion about REACHABILITY.** Roughly
+17 assertions in these suites check that X happens before Y by comparing source
+character offsets — including claim-before-send on both PartnerStack payment
+paths. Every one of them survives an early `return` above the guarded
+statement, an `if (false)` around it, or a new wrong guard clause placed above
+it, because none of those move an offset. Measured, not assumed: three of three
+reachability mutations on the money-path guards survived. So pair the ordering
+assertion with a reachability one — assert the enclosing branch is still
+guarded by the condition it should be, or drive the function and assert the
+call happened. See
+`docs/tickets/ordering-assertions-do-not-check-reachability.md`.
+
+**A review card is trusted rather than checked, so a wrong one is worse than a
+missing one.** These cards are the record of what was verified and they get
+believed. Before writing one: re-read what you actually ran, and do not carry a
+claim forward from a previous card without re-checking it. This has already
+gone wrong once — PR 25's card said an earlier fix had been made "in passing"
+when it had not, because a boot run had been added to a *different* sweep and
+the two were conflated. State plainly what was verified, what was asserted only
+structurally, and what has never executed; correct an earlier card in the next
+one rather than leaving it standing.
+
 **And treat the mutation tallies in review cards and commits before 7 Sept 2026
 as UNVERIFIED rather than as evidence.** They were produced with the broken
 measurement — three of the six suites crashed with zero markers, so a crash and
