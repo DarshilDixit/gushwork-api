@@ -784,6 +784,12 @@ markers cannot see that either.
    baseline. Also unmeasured, and it looks completely normal.
 3. **Reports** — a summary, markers, and the assertion total intact.
 
+**And an ordering assertion is not a control-flow assertion.** "X is before Y"
+compared on source offsets survives an early return, an `if (false)`, and a new
+wrong guard above the statement. That was found here in PR 25 and then measured
+across the suites: see
+`docs/tickets/ordering-assertions-do-not-check-reachability.md`.
+
 **A mutation counts as CAUGHT only when the suite completed AND failed AND ran
 its usual number of assertions.** `failed > 0` on its own is not the test;
 `passed + failed == baseline` is half of it.
@@ -1370,6 +1376,11 @@ whose failure has never been seen.
   with Railway about the flag for 14 people. Same class as gap 3. Audited
   5 Sept: nothing outward-facing is wrong today, and `backfill-sf.js` selects
   on the wrong column.
+- **`docs/tickets/ordering-assertions-do-not-check-reachability.md`** — about
+  17 assertions here check "X before Y" by comparing source offsets, which
+  reads as control flow and is not. All three reachability mutations tried
+  against the money-path guards — both payment claims and the phantom release —
+  survived. Open, sized, not fixed.
 - **`docs/tickets/mutation-testing-measurement-was-broken.md`** — every
   mutation tally in this project before 7 Sept 2026 was measured by counting
   `✗` markers, which cannot tell a caught mutation from a suite that never ran.
