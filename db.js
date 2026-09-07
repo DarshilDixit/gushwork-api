@@ -560,6 +560,15 @@ async function initDB() {
         ALTER TABLE partner_domain_sf_state ADD COLUMN IF NOT EXISTS first_ticked_at      TIMESTAMPTZ;
         ALTER TABLE partner_domain_sf_state ADD COLUMN IF NOT EXISTS first_opportunity_at TIMESTAMPTZ;
 
+        /* What we last wrote into Opportunity.Partner_Source__c, and when.
+           Not decoration — it is the idempotence key. Without it the refresh
+           would PATCH every partner Opportunity every 15 minutes, which is
+           2,880 pointless Salesforce writes a day at 30 domains and grows
+           linearly. The write only fires when the value has changed or was
+           never written. */
+        ALTER TABLE partner_domain_sf_state ADD COLUMN IF NOT EXISTS sf_partner_source    TEXT;
+        ALTER TABLE partner_domain_sf_state ADD COLUMN IF NOT EXISTS sf_partner_source_at TIMESTAMPTZ;
+
         /* Same-table, idempotent, and only so a currently-true state is
            stamped now rather than on the next successful refresh — which is
            15 minutes away and can fail. Guarded on IS NULL, so it can never

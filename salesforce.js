@@ -62,6 +62,15 @@ const CUSTOM_FIELD_MAP = {
   // --- Form fields ---
   sell_to: 'sell_to__c',
   hear_about_us: 'hear_about_us__c',
+  /* What the visitor came in SAYING, before partnerHearAboutUs() overwrote it
+     with "Partner - <name>". A partner-referred lead who arrived on a paid ad
+     is two real facts and hear_about_us__c can only hold one — this is the
+     other one, and it is the half an AE actually wants on the call.
+
+     Never overwritten once set, on either side: leads.hear_about_us_raw
+     COALESCEs the STORED value first (the opposite direction from every other
+     column in that upsert) so the first non-empty value sticks. */
+  hear_about_us_raw: 'hear_about_us_raw__c',
   page_url: 'page_url__c',
 
   // --- Meta tracking ---
@@ -282,6 +291,57 @@ async function updateSFLead(leadId, fields) {
    refuse to answer. Declared here because it is used by the first of them —
    it sat below its first use, which was legal and read as a mistake. */
 const SF_MAX_PAGES = 25;
+
+/* --------------------------------------------------------
+   updateOpportunityFields — THE FIRST WRITE THIS SERVICE MAKES TO OPPORTUNITY
+
+   Everything else this module does on Opportunity is read-only, so a write
+   rejection here has never been exercised once. That matters more than it
+   sounds: the integration user is a full System Administrator today (see
+   docs/tickets/salesforce-integration-user-is-a-system-administrator.md), so
+   this will succeed — right up until someone does the right thing and reduces
+   that profile, at which point it starts 403ing.
+
+   And a silent failure would look EXACTLY like a partner with no Opportunity,
+   which is a state the Partners tab already renders for real reasons. So this
+   returns a discriminated result and the caller alerts on it. It never throws:
+   the caller is a 15-minute sweep with nothing awaiting it.
+
+   Note the field-level-security trap recorded in that ticket: creating a custom
+   field through the Tooling API does NOT grant access to it. Both fields
+   created on 4 Sept came back 201 and were then invisible to the user that
+   created them until FieldPermissions rows were added. So a 400
+   INVALID_FIELD_FOR_INSERT_UPDATE here means "no field-level access", not
+   "no such field", and the two read identically from the outside.
+-------------------------------------------------------- */
+async function updateOpportunityFields(opportunityId, fields) {
+  if (!opportunityId) return { ok: false, reason: 'no_opportunity_id' };
+  if (!fields || !Object.keys(fields).length) return { ok: false, reason: 'no_fields' };
+  try {
+    const { accessToken, instanceUrl } = await getSalesforceToken();
+    const res = await fetch(
+      `${instanceUrl}/services/data/v60.0/sobjects/Opportunity/${encodeURIComponent(opportunityId)}`,
+      {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(fields),
+      }
+    );
+    /* A successful PATCH is 204 with no body. */
+    if (res.status === 204) return { ok: true, status: 204 };
+    const text = await res.text().catch(() => '');
+    /* Separated because they need different actions from a human. A permission
+       or field-security problem affects EVERY domain and needs Salesforce
+       setup changed; a per-record failure affects one. */
+    const permission = res.status === 403 || res.status === 401 ||
+      /INSUFFICIENT_ACCESS|INVALID_FIELD_FOR_INSERT_UPDATE|FIELD_INTEGRITY_EXCEPTION/i.test(text);
+    console.warn(`[SF] Opportunity update failed (${res.status})${permission ? ' — PERMISSION or FIELD SECURITY' : ''}: ${text.slice(0, 300)}`);
+    return { ok: false, status: res.status, reason: permission ? 'permission' : `http_${res.status}`, body: text.slice(0, 300) };
+  } catch (err) {
+    console.warn('[SF] Opportunity update error:', err.message);
+    return { ok: false, reason: 'error', error: err.message };
+  }
+}
 
 /* --------------------------------------------------------
    findQualifiedDemoOpportunities — the step 10 poller's read side.
@@ -576,4 +636,4 @@ async function findEnrichmentByEmails(emails) {
   }
 }
 
-module.exports = { pushToSalesforce, findSFLeadByEmail, updateSFLead, getSalesforceToken, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails, SF_EMAIL_BATCH };
+module.exports = { pushToSalesforce, findSFLeadByEmail, updateSFLead, updateOpportunityFields, getSalesforceToken, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails, SF_EMAIL_BATCH };

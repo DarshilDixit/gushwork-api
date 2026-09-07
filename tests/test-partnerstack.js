@@ -1316,9 +1316,16 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     const fn = src.slice(src.indexOf('async function refreshPartnerDomainSfState'),
                          src.indexOf('function startPartnerStackQualificationPoll'));
     eq('sfB: four states', /const PS_SF_STATES = \[([^\]]+)\]/.exec(src)[1].split(',').length, 4);
+    /* The point of the assertion is the ABSENCE of a conversion filter: the row
+       worth acting on daily is "Opportunity exists, checkbox unticked", and a
+       domain that has not converted still needs a state. The table alias moved
+       to `l` in PR 24 when the query gained a LEFT JOIN for the partner
+       identity, so the old literal `FROM leads\n WHERE ps_xid` no longer
+       matched — asserted on the predicates rather than the layout now. */
     ok('sfB: refreshed for ALL partner domains, not just qualify candidates',
-       /FROM leads\s*\n\s*WHERE ps_xid IS NOT NULL AND ps_customer_key IS NOT NULL/.test(fn) &&
-       !/ps_signup_sent_at IS NOT NULL/.test(fn));
+       /FROM leads l\b/.test(fn)
+       && /WHERE l\.ps_xid IS NOT NULL AND l\.ps_customer_key IS NOT NULL/.test(fn)
+       && !/ps_signup_sent_at IS NOT NULL/.test(fn));
     /* Qualified_Demo__c rides along on the existence query, so ticked vs
        unticked costs no extra Salesforce call. */
     ok('sfB: ticked state comes from the same Opportunity query',
@@ -1696,6 +1703,99 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        must stay counted. */
     ok('C7: it is NOT excluded merely for having once had an Opportunity',
        !/first_opportunity_at/.test(lost), lost.slice(-200));
+  }
+
+  /* ── PR 24: the two Salesforce writes ─────────────────────────────────
+     Both fields existed and were verified with a live round-trip on 4 Sept;
+     the code was never written. */
+  {
+    /* ── hear_about_us_raw__c on Lead ──────────────────────────────
+       A partner-referred lead who arrived on a paid ad is TWO real facts and
+       hear_about_us__c can only hold one. partnerHearAboutUs() used to destroy
+       the other; hear_about_us_raw keeps it, and this puts it in front of the
+       AE rather than only on our dashboard. */
+    ok('sfw: hear_about_us_raw__c is in the Lead field map',
+       /hear_about_us_raw: 'hear_about_us_raw__c'/.test(sfmod));
+    /* One entry in CUSTOM_FIELD_MAP is not enough — the payload has to carry
+       it. This is the computed-vs-plumbed seam: the map is the renderer, the
+       call site is the producer, and asserting only the map would be the same
+       half-assertion as C5's. */
+    ok('sfw: /submit passes the RAW value, not the partner-overwritten one',
+       /hear_about_us:hearAboutUsFinal,hear_about_us_raw:hear_about_us,/.test(src));
+    /* buildLeadFields drops empty strings, so an organic lead with nothing
+       typed sends no field at all rather than a blank. */
+    ok('sfw: an empty value is dropped rather than sent blank',
+       /payload\[srcKey\] !== undefined && payload\[srcKey\] !== null && payload\[srcKey\] !== ''/.test(sfmod));
+
+    /* ── Partner_Source__c on Opportunity ──────────────────────────── */
+    const fn = src.slice(src.indexOf('async function refreshPartnerDomainSfState'),
+                         src.indexOf('/* ITS OWN JOB, not chained'));
+    ok('sfw: Partner_Source__c is written from the SF-state refresh',
+       /updateOpportunityFields\(oppId, \{ Partner_Source__c: source \}\)/.test(fn));
+    /* Written from the poll rather than mapped through Lead conversion,
+       because it runs strictly AFTER sfopp creates the Opportunity — no race,
+       no conversion field mapping — and it covers Opportunities created any
+       way, which a Lead field cannot: none of our 29 custom Lead fields
+       survive conversion. */
+    ok('sfw: it only writes where an Opportunity actually exists',
+       /if \(PS_SF_OPP_WRITE_ENABLED && oppId\)/.test(fn));
+    /* ONE display chain, three surfaces: Slack, the dashboard and
+       hear_about_us. A fourth spelling of a partner name would be a fourth
+       thing an SDR cannot search for. */
+    ok('sfw: the value comes from the shared display chain, not a fresh guess',
+       /partnerDisplayName\(\s*\n?\s*\{ name: d\.partner_name, email: d\.partner_email \}, d\.partner_key\)/.test(fn));
+    ok('sfw: and the identity is selected in the domains query to feed it',
+       /MAX\(l\.ps_partner_name\)\s+AS partner_name/.test(fn)
+       && /MAX\(l\.ps_partner_email\) AS partner_email/.test(fn));
+
+    /* IDEMPOTENT, or every partner Opportunity is PATCHed every 15 minutes
+       forever — 2,880 writes a day at 30 domains, growing linearly. */
+    ok('sfw: the write is idempotent on what was last written',
+       /source !== d\.sf_partner_source/.test(fn));
+    ok('sfw: and what was written is recorded so it can be compared next tick',
+       /SET sf_partner_source = \$2, sf_partner_source_at = NOW\(\)/.test(fn));
+    ok('sfw: the idempotence columns exist',
+       /ADD COLUMN IF NOT EXISTS sf_partner_source\s+TEXT/.test(dbjs)
+       && /ADD COLUMN IF NOT EXISTS sf_partner_source_at TIMESTAMPTZ/.test(dbjs));
+    /* The stamp must NOT be written on failure, or one transient 5xx means the
+       value never reaches Salesforce and nothing ever retries. Safe because
+       the PATCH is idempotent on the Salesforce side too. */
+    {
+      const okAt   = fn.indexOf('if (res.ok) {');
+      const stamp  = fn.indexOf('SET sf_partner_source = $2');
+      const elseAt = fn.indexOf('} else {', okAt);
+      ok('sfw: the stamp is only written on SUCCESS, so a failure retries',
+         okAt !== -1 && stamp > okAt && stamp < elseAt, `ok@${okAt} stamp@${stamp} else@${elseAt}`);
+    }
+
+    /* ── LOUD. This is the requirement the handover doc calls out ──────
+       A silent failure here looks EXACTLY like a partner with no Opportunity,
+       which the tab renders for real reasons. And it is the first write this
+       service has ever made to Opportunity, so the failure has never been
+       exercised. */
+    ok('sfw: a failed Opportunity write is escalated, not just logged',
+       /recordFailure\('PartnerStack',\s*\n?\s*`\$\{d\.customer_key\} \(Partner_Source__c/.test(fn));
+    ok('sfw: a permission failure is called out as affecting EVERY domain',
+       /const perm = res\.reason === 'permission';/.test(fn)
+       && /Every partner domain is affected, not just this one/.test(fn));
+    ok('sfw: and it names the Tooling-API field-security trap',
+       /Creating a field through the Tooling API does NOT grant access/.test(fn));
+    /* One domain's failure must not abort the loop for the others. */
+    ok('sfw: a failure does not throw out of the per-domain loop',
+       !/throw /.test(fn.slice(fn.indexOf('} else {', fn.indexOf('if (res.ok) {')))));
+
+    /* A KILL SWITCH, default ON: the write is the point of the work, but this
+       is a new class of write and it needs stopping from the env without a
+       deploy. */
+    ok('sfw: there is a kill switch, defaulting to ON',
+       /const PS_SF_OPP_WRITE_ENABLED = process\.env\.PS_SF_OPP_WRITE !== 'false';/.test(src));
+
+    /* The read side stays read-only. The qualification poll and the funnel must
+       not have acquired a write as a side effect. */
+    const poll = src.slice(src.indexOf('async function runPartnerStackQualificationPoll'),
+                           src.indexOf('async function sendQualificationForDomain'));
+    ok('sfw: the qualification poll still writes nothing to Salesforce',
+       !/updateOpportunityFields/.test(poll));
   }
 
   ok('sfC: the refresh has its own scheduler', /function startPartnerStackSfStateRefresh/.test(src));

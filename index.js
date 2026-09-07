@@ -8,7 +8,7 @@ const rateLimit = require('express-rate-limit');
 const { Pool }  = require('pg');
 const { pool, initDB } = require('./db');
 const { sendConversion, fetchPartnership, sendAction, fetchCustomer } = require('./partnerstack');
-const { pushToSalesforce, findSFLeadByEmail, updateSFLead, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails } = require('./salesforce');
+const { pushToSalesforce, findSFLeadByEmail, updateSFLead, updateOpportunityFields, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails } = require('./salesforce');
 const { pushFormEventsToMeta, pushStartTrialToMeta } = require('./meta-capi');
 const createLeadMagnetRouter = require('./lead-magnet');
 
@@ -7807,12 +7807,30 @@ let _psSfLastRead = { ok: null, at: null };
 
 const PS_SF_STATES = ['ticked', 'exists_unticked', 'create_errored', 'no_opportunity'];
 
+/* A KILL SWITCH, not a feature flag: default ON, because the write is the
+   point of the work. It exists because this is the first write this service
+   has ever made to Opportunity and the failure has never been exercised, so
+   there needs to be a way to stop it from the Railway env without a deploy.
+   Set PS_SF_OPP_WRITE to the string "false" to turn it off. */
+const PS_SF_OPP_WRITE_ENABLED = process.env.PS_SF_OPP_WRITE !== 'false';
+
 async function refreshPartnerDomainSfState() {
   const { rows: domains } = await pool.query(`
-    SELECT ps_customer_key AS customer_key, ARRAY_AGG(DISTINCT LOWER(email)) AS emails
-      FROM leads
-     WHERE ps_xid IS NOT NULL AND ps_customer_key IS NOT NULL AND email IS NOT NULL
-     GROUP BY ps_customer_key
+    SELECT l.ps_customer_key AS customer_key,
+           ARRAY_AGG(DISTINCT LOWER(l.email)) AS emails,
+           /* For Partner_Source__c. Through the same three-rung display chain
+              Slack and the dashboard use, so one partner cannot read three
+              different ways across three surfaces. */
+           MAX(l.ps_partner_name)  AS partner_name,
+           MAX(l.ps_partner_email) AS partner_email,
+           MAX(l.ps_partner_key)   AS partner_key,
+           /* What we last wrote to Salesforce for this domain — the idempotence
+              key, so the PATCH only fires when the value actually changed. */
+           MAX(s.sf_partner_source) AS sf_partner_source
+      FROM leads l
+      LEFT JOIN partner_domain_sf_state s ON s.customer_key = l.ps_customer_key
+     WHERE l.ps_xid IS NOT NULL AND l.ps_customer_key IS NOT NULL AND l.email IS NOT NULL
+     GROUP BY l.ps_customer_key
      LIMIT 1000`);
   if (!domains.length) {
     console.log('[PartnerStack] SF state refresh: no partner domains yet');
@@ -7896,6 +7914,55 @@ async function refreshPartnerDomainSfState() {
       updated++;
     } catch (err) {
       console.warn(`[PartnerStack] Could not store SF state for ${d.customer_key}:`, err.message);
+    }
+
+    /* ── Opportunity.Partner_Source__c ────────────────────────────────
+       Written from HERE rather than mapped through Lead conversion, and that
+       is the whole reason this lives in the poll: it runs strictly AFTER sfopp
+       has created the Opportunity, so there is no race and no lead-conversion
+       field mapping to configure. It also covers Opportunities created ANY
+       way — by hand, by an SDR, by a direct AE deal — which a Lead field
+       cannot, because none of our 29 custom Lead fields survive conversion.
+
+       Only when there is something to write and somewhere to write it. */
+    if (PS_SF_OPP_WRITE_ENABLED && oppId) {
+      const source = partnerDisplayName(
+        { name: d.partner_name, email: d.partner_email }, d.partner_key);
+      /* IDEMPOTENT. Without this guard every partner Opportunity is PATCHed
+         every 15 minutes forever — 2,880 pointless writes a day at 30 domains.
+         Fires only when the value changed, which in practice means once, plus
+         once more if partnerIdentityNoNetwork later upgrades a raw key to a
+         real name. */
+      if (source && source !== d.sf_partner_source) {
+        const res = await updateOpportunityFields(oppId, { Partner_Source__c: source });
+        if (res.ok) {
+          console.log(`[PartnerStack] ✅ Partner_Source__c set to "${source}" on ${oppId} (${d.customer_key})`);
+          await pool.query(
+            `UPDATE partner_domain_sf_state
+                SET sf_partner_source = $2, sf_partner_source_at = NOW()
+              WHERE customer_key = $1`,
+            [d.customer_key, source]
+          ).catch((err) => console.warn('[PartnerStack] Could not record the Partner_Source write:', err.message));
+        } else {
+          /* LOUD, because a silent failure here looks EXACTLY like a partner
+             with no Opportunity — a state this tab renders for real reasons.
+             The stamp is deliberately NOT written on failure, so the next
+             sweep retries; that is safe because the PATCH is idempotent in
+             Salesforce whatever happens here.
+
+             A permission or field-security failure is separated out: it
+             affects every domain and needs Salesforce setup changed, not a
+             retry. It is also the one this service has never exercised —
+             everything else it does on Opportunity is read-only. */
+          const perm = res.reason === 'permission';
+          console.error(`[PartnerStack] ⛔ Could not write Partner_Source__c on ${oppId} (${d.customer_key}): ${res.reason}`);
+          recordFailure('PartnerStack',
+            `${d.customer_key} (Partner_Source__c${perm ? ' — PERMISSION' : ''})`,
+            perm
+              ? `Salesforce refused the Opportunity write (${res.status || res.reason}). The integration user cannot update Partner_Source__c, or has no field-level access to it. Creating a field through the Tooling API does NOT grant access — see the Salesforce access ticket. Every partner domain is affected, not just this one.`
+              : `Opportunity write failed: ${res.reason}${res.body ? ' — ' + res.body : ''}`);
+        }
+      }
     }
   }
   console.log(`[PartnerStack] SF state refreshed for ${updated} domain(s)`);
@@ -8277,7 +8344,7 @@ app.post('/submit', async (req, res) => {
     if (!alreadyCompleted) {
       slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us:hearAboutUsFinal,ps_partner_key:ps.ps_partner_key,ps_partner_name:(psIdentity||{}).name,ps_partner_email:(psIdentity||{}).email,ps_click_at:ps.ps_click_at,hear_about_us_raw:hear_about_us,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,elv_status:elv?.status||null,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
 
-      pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,hear_about_us:hearAboutUsFinal,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'form completed', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
+      pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,hear_about_us:hearAboutUsFinal,hear_about_us_raw:hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'form completed', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
 
       // Meta CAPI Lead — suppressed when the website check failed (temporary
       // non-blocking mode still lets the lead through, but keeps the Lead
