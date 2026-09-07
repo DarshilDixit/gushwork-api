@@ -60,7 +60,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `package-lock.json` | Locked dependency versions, committed so Railway installs exactly what was tested |
 | `.gitignore` | Keeps `node_modules/`, `.env`, logs, and local Claude settings out of the repo |
 | `README.md` | Repo landing blurb, not living documentation. This file is |
-| `tests/` | The test files described under Deploying, plus `crash-reporter.js` which every suite requires first |
+| `tests/` | The test files described under Deploying, plus `crash-reporter.js` (required first by every suite), `measure.js` (the test bar and the mutation-testing rule) and the committed `.baseline.json` |
 | `docs/partnerstack.md` | PartnerStack handover: the two-step model, every ps_ column, env vars, test procedure, known gaps |
 | `CLAUDE.md` | This file |
 
@@ -696,6 +696,8 @@ node tests/test-batch-a.js      # logic, no dependencies
 node tests/test-ads-parity.js   # the two form files against each other, no dependencies
 node tests/test-partnerstack.js # PartnerStack steps 1-10, no dependencies
 node tests/test-sf-readers.js   # EXECUTES the Salesforce readers against a stubbed fetch
+
+node tests/measure.js --check   # or just this: runs all six and checks the totals
 node tests/test-batch1-db.js    # needs DATABASE_URL
 node tests/test-batch1-e2e.js   # boots the real server, needs DATABASE_URL
 ```
@@ -717,11 +719,37 @@ before 7 Sept 2026, so every mutation result measured by counting markers may
 have been counting crashes. The reporter turns any escape into a `✗` line plus
 an explicit `SUITE DID NOT COMPLETE` marker, and deliberately prints no totals.
 
-**So when you mutation-test, a mutation is CAUGHT only if the suite completed
-AND failed AND ran its usual number of assertions.** `failed > 0` alone is not
-enough: `test-ads-parity.js` once reported one failure while silently running
-13 of its 159 assertions. Check the pass count against the baseline.
-`docs/partnerstack.md` has the measured per-suite table.
+### Mutation testing: use `tests/measure.js`, do not count markers
+
+**Do not measure a mutation by counting `✗` lines or by looking at the exit
+code.** Both were the practice here until 7 Sept 2026 and both are broken:
+
+```bash
+node tests/measure.js --check       # the normal bar: all six suites + totals
+node tests/measure.js --mutation    # after breaking a line, for a verdict
+node tests/measure.js --save        # re-baseline, when a count intentionally moves
+```
+
+**A mutation is CAUGHT only if the suite COMPLETED and FAILED and ran its USUAL
+NUMBER OF ASSERTIONS.** All three, and the third is the one every ad-hoc check
+omits. `--mutation` applies the rule and prints `CAUGHT` / `survived` /
+`UNMEASURED`; it exits non-zero on `UNMEASURED`, so a run that could not be
+measured can never be recorded as a catch.
+
+`failed > 0` alone is not enough: `test-ads-parity.js` once reported one
+failure while silently running **13 of its 159** assertions, which passes every
+check based on exit code and failure lines.
+
+**And treat the mutation tallies in review cards and commits before 7 Sept 2026
+as UNVERIFIED rather than as evidence.** They were produced with the broken
+measurement — three of the six suites crashed with zero markers, so a crash and
+a catch were indistinguishable. The catches were probably real; they were never
+verified, and which runs crashed cannot be reconstructed. The full account,
+including the measured per-suite table, is
+`docs/tickets/mutation-testing-measurement-was-broken.md`.
+
+`tests/.baseline.json` is committed on purpose: a baseline nobody can see is a
+baseline nobody checks.
 
 **`test-sf-readers.js` is the one that EXECUTES rather than reads.** The others
 assert on source text, which keeps them pointed at the real code but cannot

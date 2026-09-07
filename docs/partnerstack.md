@@ -788,6 +788,11 @@ markers cannot see that either.
 its usual number of assertions.** `failed > 0` on its own is not the test;
 `passed + failed == baseline` is half of it.
 
+`tests/measure.js --mutation` applies that rule and exits non-zero on
+`UNMEASURED`, so the conclusion cannot be drawn by hand and got wrong. The full
+account, the per-suite table and the standing correction to earlier tallies are
+in `docs/tickets/mutation-testing-measurement-was-broken.md`.
+
 #### What was changed
 
 `tests/crash-reporter.js`, required first by all six suites, turns any escape —
@@ -1301,6 +1306,12 @@ whose failure has never been seen.
   with Railway about the flag for 14 people. Same class as gap 3. Audited
   5 Sept: nothing outward-facing is wrong today, and `backfill-sf.js` selects
   on the wrong column.
+- **`docs/tickets/mutation-testing-measurement-was-broken.md`** — every
+  mutation tally in this project before 7 Sept 2026 was measured by counting
+  `✗` markers, which cannot tell a caught mutation from a suite that never ran.
+  Three of six suites crashed with zero markers. The instrument is fixed
+  (`tests/measure.js`); the historical numbers are **unverified, not wrong**,
+  and that ticket is the standing correction.
 - **`docs/tickets/health-alert-state-is-in-memory.md`** — a red health row
   re-alerts on every deploy, because the cooldown and the last-reported state
   are in-memory Maps. Affects every check, not just PartnerStack.
