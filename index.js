@@ -6647,6 +6647,26 @@ async function runPartnerStackConversionRetry() {
                 SELECT 1 FROM leads o
                  WHERE o.ps_customer_key = l.ps_customer_key
                    AND o.ps_signup_sent_at IS NOT NULL)
+          /* AN ACKNOWLEDGED FAILURE IS NOT RETRIED.
+             The ack's documented scope was "removes the domain from Needs
+             attention and from the health row" — written when the only thing
+             acting on a failure was an alert. Now a sweep acts on it too, and
+             "stop telling me" without "stop trying" means an ack cannot
+             express the case it was built for.
+
+             That case is test.com: its phantom_200 was a customer DELETED IN
+             PARTNERSTACK BY HAND. Housekeeping, not a lost $50. Retrying it
+             re-creates the very record somebody removed on purpose — verified
+             on 7 Sept 2026, when the first boot run of this sweep did exactly
+             that and PartnerStack answered 200 while creating nothing, so the
+             domain was heading for five attempts and an exhaustion alert over
+             test data.
+
+             An ack is now the way to say "this failure is understood, leave it
+             alone", and it covers all three consumers. It still never clears
+             the failure stamp, so the domain keeps its state, its red chip and
+             its history — see POST /monitor/partner-ack. */
+          AND l.ps_failure_ack_at IS NULL
           AND COALESCE(l.ps_signup_retry_count, 0) < ${PS_RETRY_MAX_ATTEMPTS}
           AND l.ps_signup_failed_at > NOW() - INTERVAL '${PS_RETRY_GIVE_UP_D} days'
           /* Backoff measured from the LAST attempt, whichever it was. */
