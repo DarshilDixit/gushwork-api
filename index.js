@@ -894,6 +894,26 @@ const FAILURE_MONITORS = {
   'AWS sync':  { alertAfter: 3, impact: 'The AWS mirror database is drifting out of sync with Railway.' },
   'Email':     { alertAfter: 3, impact: 'Drop-off follow-up emails are not being delivered. If this is all of them, the Gmail connection is likely broken.' },
   'Loops':     { alertAfter: 3, impact: 'Lead-magnet contacts are not reaching the Loops mailing list.' },
+  /* ADDED 7 Sept 2026, and its absence made 21 call sites SILENT.
+     recordFailure begins `const cfg = FAILURE_MONITORS[source]; if (!cfg)
+     return;` — so every recordFailure('PartnerStack', ...) in this file
+     returned immediately and had never once produced an alert. Proven by
+     execution, not by reading: six calls with this source fired zero alerts
+     where 'Apollo' fired two.
+
+     What that silenced: the conversion-retry exhaustion, the Partner_Source__c
+     permission failure, an unreadable Salesforce during the qualification
+     poll, a ticked demo held back by an unverified conversion, a phantom
+     conversion, a test-flagged record, every stuck claim, the SF-state cap and
+     the batched-write failure. All of them logged to Railway and stopped
+     there — and several were described in review cards as "loud".
+
+     What was NEVER silent, and is worth keeping straight: a conversion or
+     qualification failure goes through recordPartnerStackFailure, which calls
+     alertOps DIRECTLY and bypasses this table entirely. The health row is also
+     independent — it runs its own query against `leads`. So the money path's
+     two headline failures always did alert; everything around them did not. */
+  'PartnerStack': { alertAfter: 3, impact: 'An affiliate is not being credited, or the money path cannot be verified. Claims are released, so most of these retry — but nothing retries a conversion whose attempts are exhausted.' },
 };
 const FAILURE_BUFFER_TTL_MS = 6 * 60 * 60 * 1000; // stale failures expire, so a slow trickle never accumulates
 const _failBuffers = new Map(); // source -> [{ id, error, at }]

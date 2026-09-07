@@ -505,6 +505,16 @@ object passes `disqualified` as false and CLEARS a real disqualification on the
 mirror the dialer reads. `syncBookingToAWS`, `syncPartnerIdentityToAWS` and
 `syncHearAboutUsToAWS` all exist for this reason. A test catches the regression.
 
+**`recordFailure(source, …)` is a SILENT NO-OP for any source with no
+`FAILURE_MONITORS` entry** — it opens with `if (!cfg) return;`. `'PartnerStack'`
+had no entry from the day the integration shipped, so 21 call sites across the
+money path had never produced a single alert, several of which were described
+as "loud". A test in `tests/test-batch2.js` now derives every source used
+anywhere and requires an entry, so this cannot recur for a new source. Keep the
+two paths straight: `recordPartnerStackFailure` calls `alertOps` **directly**
+and always worked; the health rows run their own queries and never touched the
+table.
+
 **An ACK means "this failure is understood, leave it alone" — not just "stop
 alerting me".** Four things act on a partner failure and all four must respect
 `ps_failure_ack_at`: the unbounded Needs-attention count, its page-derived

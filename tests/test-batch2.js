@@ -836,6 +836,61 @@ function finish() {
      /ORDER BY created_at DESC LIMIT 1', \[email\]\)/.test(src));
 }
 
+/* ── EVERY recordFailure SOURCE MUST HAVE A MONITOR ENTRY ─────────────
+   recordFailure opens with `const cfg = FAILURE_MONITORS[source]; if (!cfg)
+   return;`. A source string with no entry in that table is therefore a SILENT
+   NO-OP — it looks like alerting at the call site, reads like alerting in a
+   review card, and does nothing at all.
+
+   That is not hypothetical. 'PartnerStack' had no entry from the day the
+   integration shipped, so 21 call sites across the money path had never once
+   produced an alert: the conversion-retry exhaustion, the Partner_Source__c
+   permission failure, an unreadable Salesforce during the qualification poll,
+   a phantom conversion, every stuck claim, the SF-state cap, the batched-write
+   failure. Several of those were described as "loud" in review cards. Found
+   7 Sept 2026 by executing recordFailure rather than reading it.
+
+   So this asserts the PROPERTY rather than the instance: derive every source
+   string actually passed to recordFailure anywhere in index.js, and require
+   each one to exist in FAILURE_MONITORS. A future source added without an
+   entry fails here instead of silently alerting nobody.
+
+   Note what is NOT affected, so a reader does not over-correct: a conversion
+   or qualification failure goes through recordPartnerStackFailure, which calls
+   alertOps directly and never consults this table, and the health rows run
+   their own queries. Those always worked. */
+{
+  const monBlock = src.slice(src.indexOf('const FAILURE_MONITORS'),
+                             src.indexOf('\n};', src.indexOf('const FAILURE_MONITORS')));
+  const configured = new Set(
+    Array.from(monBlock.matchAll(/^\s*'?([A-Za-z][A-Za-z ]*?)'?\s*:\s*\{\s*alertAfter/gm))
+         .map((m) => m[1]));
+  ok('failmon: the monitor table was parsed at all', configured.size >= 5, [...configured].join(','));
+
+  /* Literal first arguments only. A computed source cannot be checked here and
+     there are none today — asserted, so introducing one is a decision. */
+  const used = new Set(
+    Array.from(src.matchAll(/recordFailure\(\s*'([^']+)'/g)).map((m) => m[1]));
+  ok('failmon: recordFailure call sites were found', used.size >= 4, [...used].join(','));
+  /* Excludes the declaration `function recordFailure(source, id, error)`,
+     which is the only non-literal match and is obviously not a call site. */
+  const callSites = src.replace(/function recordFailure\([^)]*\)/g, '');
+  ok('failmon: every recordFailure source is a literal string',
+     !/recordFailure\(\s*[^'\s)]/.test(callSites), 'a computed source cannot be verified');
+
+  for (const source of [...used].sort()) {
+    ok(`failmon: '${source}' has a FAILURE_MONITORS entry, so it can actually alert`,
+       configured.has(source), `'${source}' is a SILENT no-op — ${(src.match(new RegExp("recordFailure\\(\\s*'" + source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + "'", 'g')) || []).length} call site(s) affected`);
+  }
+  /* Each entry needs the two fields recordFailure and its alerts actually
+     read, or the alert fires with an undefined impact line. */
+  for (const source of [...configured].sort()) {
+    const entry = (new RegExp("'?" + source + "'?\\s*:\\s*\\{([^}]*)\\}").exec(monBlock) || [])[1] || '';
+    ok(`failmon: '${source}' declares alertAfter and impact`,
+       /alertAfter:\s*\d+/.test(entry) && /impact:\s*'/.test(entry), source);
+  }
+}
+
 /* ============================================================ */
 console.log('');
 console.log(`  passed: ${pass}`);

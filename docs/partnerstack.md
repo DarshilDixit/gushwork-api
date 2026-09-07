@@ -1152,6 +1152,55 @@ is silence.** It therefore does the least it can:
 - acknowledging nothing is a 404, never a silent success
 - it is reversible with `acknowledged: false`
 
+## TWO alert paths, and one of them was silent from day one
+
+Found 7 Sept 2026, by executing `recordFailure` rather than reading it.
+
+This integration reports a failure two different ways and they behave nothing
+alike:
+
+| Path | Reaches Slack? |
+|---|---|
+| `recordPartnerStackFailure(kind, {…})` → `alertOps('critical', …)` **directly** | **Always did.** It never consults the failure-monitor table |
+| `recordFailure('PartnerStack', …)` | **Never did.** 21 call sites, every one a silent no-op |
+
+`recordFailure` opens with:
+
+```js
+const cfg = FAILURE_MONITORS[source];
+if (!cfg) return;
+```
+
+and **`FAILURE_MONITORS` had no `'PartnerStack'` key.** So every call returned
+immediately. Proven by execution — six calls with that source fired zero
+alerts where `'Apollo'` fired two.
+
+What that silenced, all of it logging to Railway and stopping there: the
+conversion-retry **exhaustion**, the `Partner_Source__c` **permission
+failure**, an unreadable Salesforce during the qualification poll, a ticked
+demo held back by an unverified conversion, a **phantom conversion**, a
+`test: true` record, every stuck claim, the SF-state cap, and the batched-write
+failure. Several of those were described as "loud" in review cards, including
+the permission failure that the handover doc specifically asked to be loud.
+
+What was never affected, and is worth keeping straight so nobody over-corrects:
+a **conversion or qualification failure** goes through
+`recordPartnerStackFailure` and always alerted, and the **health rows** run
+their own queries against `leads` and never touched this table.
+
+**The fix is one table entry**, which makes all 21 sites live at once. The
+residual limitation is stated rather than hidden: `recordFailure` alerts on a
+streak of 3 or 3-in-6-hours, so a **single** exhaustion or a **single**
+permission failure still will not page immediately — it accumulates. For those
+two, an immediate `alertOps` (the way `recordPartnerStackFailure` does it) is
+the right shape and is **not done**, because adding alert volume is a decision
+for the owner rather than a tidy-up.
+
+**A test now asserts the property, not the instance.** `tests/test-batch2.js`
+derives every source string passed to `recordFailure` anywhere in `index.js`
+and requires each to exist in `FAILURE_MONITORS`, so a future source added
+without an entry fails a test instead of alerting nobody.
+
 ## Monitoring
 
 **Overview → Partner gaps** — the alert. **Derived from the lifecycle ladder,
@@ -1286,14 +1335,11 @@ Verified end to end against live production data (4 Sept 2026):
   Fixed in PR 23 with targeted writes — see "The three stamps reach the mirror"
   below.
 - **The Slack alert on `conversion_failed` / `qualification_failed`.** Built in
-  batch A and never fired. It cannot be triggered without a genuine failure and
-  should not be faked. The first real one is the test. **Owner will fire one
-  deliberately against a throwaway domain on the next deploy** (agreed 7 Sept
-  2026), alongside watching the `[DB] Partner SF-state table ready` line for
-  PR 22's migration. Lifting `alertOps` out of `index.js` to test it in
-  process was considered and rejected: it drags in the cooldown map, the
-  last-reported-state map, `sendSlack` and the block builders, and a brittle
-  lift is worse than the gap it closes.
+  batch A and never fired. It goes through `recordPartnerStackFailure`, which
+  calls `alertOps` directly, so it *can* fire and always could — unlike the 21
+  `recordFailure('PartnerStack', …)` sites, which could not until the
+  failure-monitor entry was added. See "TWO alert paths" above. Still needs a
+  genuine failure to confirm the Slack round trip end to end.
 - **`Partner_Source__c` actually reaching Salesforce, and its permission
   failure.** Both PATCH paths are executed against a stubbed `fetch` in
   `tests/test-sf-readers.js`, and neither has run against the real org. The
