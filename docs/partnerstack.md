@@ -658,6 +658,45 @@ loudly. It may never be silently dropped.**
    answered 200 with an empty body". Found and fixed 7 Sept 2026, never fired.
    Full walk-through under the poller section.
 
+## When a fix rests on a property nothing enforces, assert the PROPERTY
+
+Added 7 Sept 2026, out of the C8 fix, and it is a different rule from the ones
+below it.
+
+Requiring `ps_signup_verified_at` before the $50 can fire only closes the hole
+if **a verified row can never become a phantom afterwards**. That was true, and
+nothing anywhere enforced it — it was true because of two incidental properties
+of the read-back sweep: it only ever *sets* the verification stamp, and it only
+ever reads rows where that stamp is still NULL. Either could have been changed
+by someone tidying that function, with no test failing and no comment saying
+what depended on it. The fix would have gone on looking correct while the loss
+it prevents came back.
+
+So a test now asserts both properties, not just the clause that relies on them.
+
+**The general shape:** when you write a guard, say out loud what has to stay
+true for it to work. If that thing is enforced somewhere — a UNIQUE index, a
+NOT NULL, a type — the guard is safe and you are done. If it is merely *true
+today*, it is a load-bearing accident, and the assertion belongs on the
+property rather than on your guard. A test that pins the guard alone proves the
+line is still there; it proves nothing about whether the line still does
+anything.
+
+Worked examples already in this repo, for calibration:
+
+- `leads_ps_signup_once_idx` and `leads_ps_qualified_once_idx` — once-per-domain
+  is enforced by the DATABASE, so the application code above them is allowed to
+  be simple. That is the good case.
+- The claim-first ordering — nothing enforces it, so
+  `tests/test-partnerstack.js` asserts the claim's character offset is *before*
+  the send's, in both the conversion and the qualification.
+- The never-NULL bind columns in `syncToAWS` — `tests/test-batch2.js` derives
+  the column list from the bind site and asserts structurally that none of them
+  is guarded by a no-op `COALESCE`, rather than pinning the four clauses that
+  exist today.
+- Eligibility running after `res.json()` and never being awaited — a property of
+  call order, asserted directly.
+
 **And its corollary, learned the hard way five times: anything computed
 server-side must be VERIFIED AS RENDERED, not merely confirmed present in the
 payload.** "It is in the response" is not evidence anyone can see it. Check the
@@ -916,6 +955,16 @@ Verified end to end against live production data (4 Sept 2026):
   should not be faked. The first real one is the test.
 - **The Partners tab rendered in a browser.** The SQL runs and the JSON is
   correct; nobody has looked at the page.
+- **`findQualifiedDemoOpportunities`'s pagination, and its `ok: false` branch.**
+  Both shipped in PR 21 (7 Sept 2026) and neither has executed. There are ~3
+  ticked Opportunities, so every real call so far has been a single page with
+  `done: true`, and Salesforce has not failed during a poll. The shape is
+  copied from `findOpportunityDomains`, which *has* paginated for real — but
+  that is an argument by similarity, not evidence. To be exercised in the same
+  deliberate-failure session as the Slack alert above.
+- **The held-back-domain path in the poll** (`⛔ Ticked demo CANNOT be
+  qualified`). Needs a domain that is ticked and converted and stuck unverified
+  for over 30 minutes, which has never happened.
 
 Do not mark any of these done on the strength of the code existing.
 
