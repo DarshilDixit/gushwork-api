@@ -20,7 +20,9 @@ interchangeable:
 
 **The conversion must land first.** An action for a `customer_key` PartnerStack
 has never seen is a no-op at best, so the poller only ever qualifies domains
-where `ps_signup_sent_at` is already set. A missed conversion therefore breaks
+whose conversion is **verified**, not merely sent (`ps_signup_verified_at`, not
+`ps_signup_sent_at` — see the poller section for why that distinction is worth
+$50). A missed conversion therefore breaks
 *both* steps for that domain, silently. That is why "no conversion sent" is the
 first of the two gap checks.
 
@@ -70,10 +72,11 @@ partner link click
        runPartnerStackSignup()    claim the domain, POST the conversion
        runPartnerStackEligibility() DORMANT — see the flag below
 
-  └─ every 15 minutes:
+  └─ every 2 minutes:
        runPartnerStackQualificationPoll()
          Salesforce: Opportunities WHERE Qualified_Demo__c = true
-         join to leads by DOMAIN
+                     (paginated, complete or it refuses to answer)
+         join to leads by DOMAIN, VERIFIED conversions only
          claim, then POST /v2/actions
 ```
 
@@ -277,13 +280,15 @@ system saying so.
 
 ## The Salesforce poller (step 10)
 
-Every 15 minutes, `runPartnerStackQualificationPoll()`:
+Every **2 minutes** (was 15 until 7 Sept 2026),
+`runPartnerStackQualificationPoll()`:
 
 1. `SELECT Id, Name, Account.Website, (contact email) FROM Opportunity WHERE Qualified_Demo__c = true`
+   — **no `LIMIT`, paginated, and it returns `{ ok, records }`.** See below.
 2. Derives a domain per Opportunity — `Account.Website` first, the primary
    contact's email domain as fallback, both through `partnerStackCustomerKey()`
-3. Keeps only domains where `ps_signup_sent_at IS NOT NULL` and
-   `ps_qualified_sent_at IS NULL`
+3. Keeps only domains where the conversion is **verified**
+   (`ps_signup_verified_at IS NOT NULL`) and `ps_qualified_sent_at IS NULL`
 4. Claims, then `POST /v2/actions`:
 
 ```json
@@ -307,6 +312,96 @@ fails inside Salesforce where nobody on this team would see it, and it couples a
 AE ticking a box to our service being up at that instant. A missed window is
 just a later window.
 
+**Two minutes, and the read is cheap enough to justify it.** The interval was 15
+minutes until 7 Sept 2026, and that number was never chosen for cost — it was
+what the other partner jobs happened to use. This query reads only the *ticked*
+Opportunities: 3 records today, one page for years, so ~720 Salesforce calls a
+day, which is nothing against the org's limit.
+
+**Do not put this poller on `partner_domain_sf_state` instead.** It is the
+tempting consolidation — that table already carries `Qualified_Demo__c` for
+every partner domain, so one Salesforce read would serve both. It was
+considered and rejected on 7 Sept: `refreshPartnerDomainSfState` scans **every**
+Opportunity in 180 days (5,898 records, 6 pages) because it has to tell
+`no_opportunity` from `exists_unticked`, and it is right to run every 15
+minutes. Reading the qualification off that table would put the cheap,
+latency-sensitive question on the expensive question's schedule and silently
+undo the 2-minute interval — a poll every 2 minutes over a table that changes
+every 15 sees the same rows seven times. Two queries, two schedules, on purpose.
+
+**Equally: do not shorten `PS_SF_REFRESH_INTERVAL_MS` to match.** Different
+question, six growing pages. And `PS_VERIFY_GRACE_MIN` is a third thing again
+and stays at 15 — PartnerStack's own indexing lags a conversion by 2 to 6
+minutes, so checking sooner releases good claims and re-fires conversions.
+
+### The ticked query had the `LIMIT` bug, for the third time
+
+Fixed 7 Sept 2026. `findQualifiedDemoOpportunities` was
+`WHERE Qualified_Demo__c = true LIMIT 200`, unpaginated, with no completeness
+check and no `ORDER BY`, and it returned `[]` on every failure.
+
+Nobody unticks the box, so the ticked set only ever grows. Past 200 across the
+whole org, Salesforce returns an arbitrary 200 in an undefined order, and a
+newly ticked partner Opportunity can sit outside them: **the affiliate is never
+paid and nothing anywhere says so.** The trigger was not hypothetical — it is
+the direct consequence of telling AEs the checkbox exists, which is the whole
+point of the field.
+
+It is now paginated with no `LIMIT`, checked against `totalSize`, bounded by
+`SF_MAX_PAGES`, and it answers `{ ok, records }` so the poller can tell "no AE
+has ticked anything" from "Salesforce did not answer" — which used to be the
+same value. A failed read logs, calls `recordFailure`, and **returns without
+concluding that nothing is ticked**.
+
+It carries **no date bound**, deliberately, unlike `findOpportunityDomains`
+which bounds to 180 days. A bound here would make an Opportunity created before
+the window and ticked today invisible forever, which is a silently unpaid
+affiliate. The ticked set is small enough that reading all of it costs nothing.
+
+### VERIFIED, not merely sent — the $50 that could never fire
+
+Found and fixed 7 Sept 2026. Nobody had spotted it, and it is the same
+silent-permanent-loss shape as the rest of this file.
+
+The poller used to qualify any domain with `ps_signup_sent_at` set. But that
+stamp only means PartnerStack answered 200, and `/conversion/xid` answers 200
+with an empty body — a conversion that created nothing is indistinguishable
+from a real one until the read-back sweep looks. So:
+
+1. Conversion 200s, creating nothing. `ps_signup_sent_at` is stamped.
+2. An AE ticks the box. The poller qualifies the domain and stamps
+   `ps_qualified_sent_at`. The action lands against a customer that does not
+   exist.
+3. The read-back sweep gets its definitive 404 and releases
+   `ps_signup_sent_at` — correctly, so the domain can convert again.
+4. `ps_qualified_sent_at` is **still stamped**. `leads_ps_qualified_once_idx`
+   is once per domain forever, the poller filters on
+   `ps_qualified_sent_at IS NULL`, and nothing anywhere releases a
+   qualification claim that succeeded.
+
+The domain re-converts on the next lead and can never be qualified again. $50
+gone, no error, no red chip, no line in any log.
+
+The fix is one clause: the poller requires `ps_signup_verified_at IS NOT NULL`.
+**It costs nothing in practice** — the grace period is 15 minutes and no demo
+happens within 15 minutes of the form submit, so a real qualification never
+waits on it.
+
+It is airtight only because a verified row can never become a phantom
+afterwards, and that rests on two properties of the read-back sweep, both now
+asserted by tests: it only ever **sets** `ps_signup_verified_at`, never clears
+it, and it only ever reads rows where that stamp is still NULL.
+
+**The new filter is not allowed to drop a demo silently**, which would be this
+integration's recurring bug pointed at its own fix. A domain that is ticked and
+converted but still unverified **past twice the grace period** logs
+`⛔ Ticked demo CANNOT be qualified` and goes through `recordFailure`, so it
+reaches the PartnerStack health row and, on a streak, Slack. Under that
+threshold nothing is said, because that is the grace period working rather than
+anything being wrong. A domain with no conversion at all is skipped entirely:
+that is almost always a non-partner Opportunity that happens to carry a ticked
+box.
+
 **`Qualified_Demo__c`** is a checkbox on Opportunity, default unchecked, visible
 and editable for AE / SDR / SDR Manager / System Administrator / Minimum Access
 – API Only Integrations. If it is missing or invisible to the API user, the SOQL
@@ -316,6 +411,44 @@ degrades to a no-op rather than breaking anything.
 **The domain is the join.** It is the only identifier both systems share:
 PartnerStack knows the customer by the `customer_key` we sent at signup, which
 came from the lead's website.
+
+### Unticking `Qualified_Demo__c` does NOTHING. The commission stands
+
+Asked and confirmed 7 Sept 2026, after an AE unticked the box on the
+`hello.com` Opportunity. **Nothing in this system reacts to an untick, by
+design and in four independent places**, so a partner who has been paid stays
+paid:
+
+1. The poll only ever looks at rows with `ps_qualified_sent_at IS NULL`. Once
+   that stamp exists the domain is invisible to it, forever.
+2. `sendQualificationForDomain` re-checks with a `NOT EXISTS` on the same
+   column before it claims.
+3. `leads_ps_qualified_once_idx` is a UNIQUE PARTIAL index on
+   `ps_customer_key WHERE ps_qualified_sent_at IS NOT NULL`. Even if 1 and 2
+   were both wrong, the database refuses the second stamp.
+4. There is no reversal call anywhere in this repo. `sendAction` is only ever
+   invoked with `value: 1`; nothing sends a negative, a void or a delete.
+
+So the money is one-shot: **the claim is permanent, PartnerStack keeps the
+commission, and we never ask for it back.** Anyone who wants a commission
+reversed has to do it in the PartnerStack UI — this service cannot.
+
+**Re-ticking it does not fire a second $50 either, and it does not "retry"
+anything.** That matters because it is the first thing an AE will try. Untick,
+re-tick, wait: nothing happens, no log line, no error. It is a silent no-op and
+it is meant to be.
+
+**The one thing an untick DOES move** is
+`partner_domain_sf_state.sf_state`, which flips `ticked` back to
+`exists_unticked` at the next refresh — because that column is a snapshot of
+the current checkbox, not a record of an event. That is the whole reason the
+untick was visible at all, and it is what produced two display bugs on 7 Sept:
+the domain read "waiting on an AE" on the per-domain table when nothing can
+ever fire for it again, and the funnel's "Qualified Demo ticked" went *down*
+while every other stage stayed put. Everything else in this integration keys
+off an immutable stamp; `sf_state` is the exception, and any number built on it
+can move backwards.
+
 
 ---
 
@@ -509,6 +642,22 @@ loudly. It may never be silently dropped.**
    instance of this class found in *analysis* rather than in shipped code, and
    it cost an evening on a bug that did not exist.
 
+7. **`findQualifiedDemoOpportunities` was `LIMIT 200`**, unpaginated, with no
+   completeness check and no `ORDER BY`, and it returned `[]` on every failure
+   so "no AE has ticked anything" and "Salesforce did not answer" were the same
+   value. Found 7 Sept 2026 in a sweep, before it could fire. Past 200 ticked
+   Opportunities org-wide an affiliate is silently never paid — and the trigger
+   is telling AEs the checkbox exists, which is the point of the field. **Third
+   instance of the `LIMIT` shape in shipped code, fourth counting the analysis
+   one.** Fixed the same day.
+
+8. **A qualification could fire against an unverified conversion**, burning the
+   once-per-domain claim forever when the read-back later 404'd. Not a
+   completeness signal dropped but the same family: `ps_signup_sent_at` was
+   treated as proof of a customer when it only ever meant "PartnerStack
+   answered 200 with an empty body". Found and fixed 7 Sept 2026, never fired.
+   Full walk-through under the poller section.
+
 **And its corollary, learned the hard way five times: anything computed
 server-side must be VERIFIED AS RENDERED, not merely confirmed present in the
 payload.** "It is in the response" is not evidence anyone can see it. Check the
@@ -532,6 +681,13 @@ Concretely —
 totalSize` is satisfied by a truncated result. The completeness check passed on
 2,000 of 5,898. The SOQL now carries no `LIMIT` at all; pagination plus
 `SF_MAX_PAGES` is the bound.
+
+**All three paginated Salesforce readers now follow the same shape**, and
+`findQualifiedDemoOpportunities` was the last one to get it (7 Sept 2026): no
+`LIMIT`, follow `nextRecordsUrl`, bound with `SF_MAX_PAGES`, check
+`records.length` against `totalSize`, and return `{ ok, records }` so a caller
+can never read a failed answer as an empty one. If a fourth reader is added, it
+starts from that shape rather than arriving at it after an incident.
 
 **And it has now bitten us in ANALYSIS as well as in code.** On 4 Sept the
 Apollo enrichment ticket recorded "Salesforce Leads, last 7 days: 200 leads, 0
@@ -717,7 +873,10 @@ Run all five dependency-free suites after any change — see CLAUDE.md.
    something is wrong rather than "no traffic".
 4. Check the customer appears in PartnerStack, attributed to the partner.
 5. For the qualification: tick `Qualified_Demo__c` on that Opportunity and wait
-   up to 15 minutes for `[PartnerStack] ✅ Qualification sent: <domain>`.
+   up to **2 minutes** for `[PartnerStack] ✅ Qualification sent: <domain>`.
+   If the conversion itself is less than ~15 minutes old, add the read-back
+   grace to that — the qualification waits for `ps_signup_verified_at`, and
+   nothing before it can fire.
 
 **Re-testing needs a new domain.** Once per domain forever means the second test
 from the same domain is correctly skipped with `already sent`.

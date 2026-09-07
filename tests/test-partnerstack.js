@@ -966,6 +966,24 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        /NO customer exists[\s\S]{0,400}?ps_signup_sent_at = NULL/.test(fn));
     ok('readback: a phantom conversion is escalated, not just logged',
        /recordFailure\('PartnerStack', r\.ps_customer_key \+ ' \(phantom conversion\)'/.test(fn));
+    /* ── The invariant C8 rests on ──────────────────────────────────────
+       Requiring ps_signup_verified_at before the $50 fires is only airtight
+       because a verified row can never become a phantom afterwards. Two
+       properties make that true and both are asserted here rather than left as
+       something a reader has to work out: the sweep only ever SETS the
+       verification stamp, never clears it, and it only ever looks at rows
+       where the stamp is still NULL. Break either and a verified domain could
+       be un-verified while a qualification is in flight, which is the exact
+       permanent loss C8 exists to close. */
+    ok('readback/C8: the sweep only ever SETS ps_signup_verified_at',
+       /SET ps_signup_verified_at = NOW\(\)/.test(fn)
+       && !/ps_signup_verified_at = NULL/.test(fn));
+    ok('readback/C8: and only ever reads rows that are not yet verified',
+       /AND ps_signup_verified_at IS NULL/.test(fn));
+    /* The phantom release must clear the SENT stamp and leave the rest alone —
+       releasing verification too would reopen the hole. */
+    ok('readback/C8: a phantom release clears only ps_signup_sent_at',
+       /SET ps_signup_sent_at = NULL, updated_at = NOW\(\)/.test(fn));
     ok('readback: a verified conversion is stamped',
        /ps_signup_verified_at = NOW\(\)/.test(fn));
     /* A production integration writing test records pays nobody and looks
@@ -2320,8 +2338,54 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
      /Qualified_Demo__c = true/.test(sfmod));
   ok('v10: it reads the account website and a contact email as fallback',
      /Account\.Website/.test(sfmod) && /OpportunityContactRoles/.test(sfmod));
-  ok('v10: a Salesforce failure returns [] rather than throwing',
-     /return \[\];/.test(sfmod));
+  /* ── PR 21: the read side is paginated and answers {ok, records} ──
+     It was `LIMIT 200`, unpaginated, unchecked, and it returned [] on every
+     failure. Nobody unticks Qualified_Demo__c so the ticked set only grows:
+     past 200 org-wide, Salesforce returns an arbitrary 200 in an undefined
+     order and a newly ticked partner Opportunity can sit outside them —
+     affiliate never paid, nothing anywhere saying so. Third instance of this
+     exact shape in the repo. */
+  {
+    const fn = sfmod.slice(sfmod.indexOf('async function findQualifiedDemoOpportunities'),
+                           sfmod.indexOf('async function findOpportunityDomains'));
+    /* The outer query carries NO LIMIT. The one inside the
+       OpportunityContactRoles subquery is correct and must survive — it picks
+       the single primary contact and does not bound the result set — so this
+       asserts on the FROM Opportunity clause rather than the absence of the
+       word. */
+    ok('v21: the ticked query carries no LIMIT on the outer result set',
+       /FROM Opportunity WHERE Qualified_Demo__c = true`/.test(fn));
+    ok('v21: the primary-contact subquery LIMIT 1 is still there',
+       /FROM OpportunityContactRoles ORDER BY IsPrimary DESC LIMIT 1/.test(fn));
+    ok('v21: it paginates on nextRecordsUrl', /data\.nextRecordsUrl/.test(fn));
+    ok('v21: pagination is bounded by SF_MAX_PAGES', /pages < SF_MAX_PAGES/.test(fn));
+    /* A short read is indistinguishable from "those AEs have not ticked yet",
+       and the caller would skip exactly the domains it could not see. */
+    ok('v21: hitting the page cap refuses to return a partial set',
+       /reason: 'pagination_incomplete'/.test(fn));
+    ok('v21: a short read against totalSize refuses too',
+       /records\.length < totalSize/.test(fn) && /reason: 'incomplete'/.test(fn));
+    /* "No AE has ticked anything" and "Salesforce did not answer" are opposite
+       conclusions and used to be the same value. */
+    ok('v21: it answers {ok, records}, never a bare array',
+       /return \{ ok: true, records/.test(fn) && !/return \[\];/.test(fn));
+    ok('v21: every failure path carries ok:false and a reason',
+       (fn.match(/return \{ ok: false/g) || []).length >= 4);
+    /* No date bound here, unlike findOpportunityDomains: an Opportunity created
+       before the window and ticked today would otherwise be invisible forever,
+       which is a silently unpaid affiliate. */
+    ok('v21: the ticked query is NOT bounded to a date window',
+       !/LAST_N_DAYS/.test(fn));
+  }
+  /* Against the whole module, not the function slice: this reasoning lives in
+     the doc comment ABOVE the function, which is outside it. Asserted because
+     folding the two Salesforce reads into one looks like an obvious win and is
+     the mistake that would quietly undo the interval change below. */
+  ok('v21: and it records why it stays separate from the existence scan',
+     /KEPT SEPARATE from findOpportunityDomains/.test(sfmod)
+     && /expensive question's 15-minute schedule/.test(sfmod));
+  ok('v21: SF_MAX_PAGES is declared above its first use',
+     sfmod.indexOf('const SF_MAX_PAGES') < sfmod.indexOf('async function findQualifiedDemoOpportunities'));
   {
     /* Scoped to the POLL function only. Slicing through to
        startPartnerStackQualificationPoll swallowed sendQualificationForDomain
@@ -2329,7 +2393,20 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        in the claim below it — a mutation survived on exactly that. */
     const fn = src.slice(src.indexOf('async function runPartnerStackQualificationPoll'),
                          src.indexOf('async function sendQualificationForDomain'));
-    ok('v10: runs every 15 minutes', /const PS_QUALIFY_INTERVAL_MS = 15 \* 60 \* 1000;/.test(src));
+    /* Two minutes, down from fifteen on 7 Sept 2026. One small page of ticked
+       Opportunities per tick, ~720 Salesforce calls a day. */
+    ok('v21: the qualification poll runs every 2 minutes',
+       /const PS_QUALIFY_INTERVAL_MS = 2 \* 60 \* 1000;/.test(src));
+    /* The two intervals must NOT move together. The state refresh scans every
+       Opportunity in 180 days across six growing pages; dragging it to two
+       minutes is the mistake this comment exists to prevent. */
+    ok('v21: the SF state refresh was NOT shortened with it',
+       /const PS_SF_REFRESH_INTERVAL_MS = 15 \* 60 \* 1000;/.test(src));
+    /* Different sweep, and load-bearing: PartnerStack's own indexing lags a
+       conversion by 2 to 6 minutes, so checking sooner releases good claims
+       and re-fires conversions. */
+    ok('v21: the read-back grace is untouched at 15 minutes',
+       /const PS_VERIFY_GRACE_MIN   = 15;/.test(src));
     ok('v10: the action type is qualified_demo', /const PS_QUALIFY_ACTION_TYPE = 'qualified_demo';/.test(src));
     ok('v10: overlapping runs are prevented',
        /if \(_psQualifyRunning\) \{[\s\S]{0,200}?return;/.test(fn) && /_psQualifyRunning = true;/.test(fn));
@@ -2338,8 +2415,43 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        /partnerStackCustomerKey\(o\.website\) \|\| partnerStackCustomerKey\(o\.contactEmail\)/.test(fn));
     ok('v10: several Opportunities on one account collapse to one action', /byKey/.test(fn));
     /* An action for a customer_key PartnerStack has never seen is a no-op. */
+    /* Still "only domains we already converted", now asked per DOMAIN because
+       that is the unit PartnerStack pays on and the unit the ladder uses. */
     ok('v10: only domains we already converted can be qualified',
-       /AND ps_signup_sent_at IS NOT NULL/.test(fn) && /AND ps_qualified_sent_at IS NULL/.test(fn));
+       /BOOL_OR\(ps_signup_sent_at\s+IS NOT NULL\) AS sent/.test(fn)
+       && /BOOL_OR\(ps_qualified_sent_at\s+IS NOT NULL\) AS qualified/.test(fn));
+    /* ── C8: VERIFIED, not merely sent ──────────────────────────────────
+       ps_signup_sent_at only means PartnerStack answered 200, and
+       /conversion/xid answers 200 with an empty body. Qualifying on that stamp
+       and then having the read-back sweep 404 releases ps_signup_sent_at while
+       leaving ps_qualified_sent_at stamped — the domain re-converts on the next
+       lead and can NEVER be qualified again, because once-per-domain is a
+       UNIQUE PARTIAL index and nothing releases a qualification that
+       succeeded. $50 gone, no error, no red chip. */
+    ok('v21/C8: a conversion must be VERIFIED before the $50 can fire',
+       /BOOL_OR\(ps_signup_verified_at IS NOT NULL\) AS verified/.test(fn));
+    ok('v21/C8: and the filter actually requires all three',
+       /r\.sent && r\.verified && !r\.qualified/.test(fn));
+    /* The filter must not become a silent drop. */
+    ok('v21/C8: a ticked demo held back by the filter is NAMED',
+       /Ticked demo CANNOT be qualified/.test(fn));
+    ok('v21/C8: and escalated through recordFailure, not just logged',
+       /recordFailure\('PartnerStack', r\.ps_customer_key \+ ' \(ticked, conversion unverified\)'/.test(fn));
+    /* Only once genuinely stuck. A conversion sent four minutes ago is not
+       verified because the grace period is working; at a two-minute tick a
+       bare warn would print 720 times a day and bury everything. */
+    ok('v21/C8: the held-back warning waits until it is stuck, not merely waiting',
+       /const stuckAfterMs = PS_VERIFY_GRACE_MIN \* 2 \* 60 \* 1000;/.test(fn)
+       && /Date\.now\(\) - sentAt < stuckAfterMs\) continue;/.test(fn));
+    /* A domain with no conversion at all is almost always a non-partner
+       Opportunity that happens to carry a ticked box. */
+    ok('v21/C8: a domain that never converted is not reported as held back',
+       /if \(r\.qualified \|\| !r\.sent \|\| r\.verified\) continue;/.test(fn));
+    /* A failed read must not read as "nobody ticked anything". */
+    ok('v21: an unreadable Salesforce stops the poll rather than concluding zero',
+       /if \(!sf\.ok\)/.test(fn) && /NOT concluding that nothing is ticked/.test(fn));
+    ok('v21: and that read failure is recorded',
+       /recordFailure\('PartnerStack', 'qualified-demo read'/.test(fn));
     ok('v10: an unmatchable Opportunity is logged, not silently dropped',
        /no usable domain/.test(fn));
 
