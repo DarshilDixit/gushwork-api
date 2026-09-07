@@ -522,6 +522,40 @@ async function initDB() {
           checked_at        TIMESTAMPTZ DEFAULT NOW()
         );
         CREATE INDEX IF NOT EXISTS partner_sf_state_idx ON partner_domain_sf_state (sf_state);
+
+        /* ── SET ONCE, NEVER CLEARED ──────────────────────────────────
+           sf_state is a SNAPSHOT of what Salesforce says right now, and it is
+           the only thing in this integration that is not a record of an event.
+           Everything else keys off an immutable stamp, which is why every
+           other funnel stage is monotonic and this one was not: an AE unticked
+           Qualified_Demo__c on hello.com on 7 Sept 2026 and the funnel's
+           "Qualified Demo ticked" went DOWN to 1 while "The $50 fired" stayed
+           at 2. One stage cannot go backwards while the rest cannot.
+
+           These two make "was this ever ticked" and "did an Opportunity ever
+           exist" answerable as facts. They also make the untick itself
+           observable rather than something you infer from a number moving.
+
+           NOT backfilled from leads.ps_qualified_sent_at, deliberately: these
+           columns mean "we OBSERVED this", and writing an inferred timestamp
+           into an observational column is how a reconstruction ends up being
+           read as a measurement. The funnel ORs the two sources instead — see
+           PS_FUNNEL_STAGE_SQL, where ps_qualified_sent_at is the stronger and
+           older evidence for a domain that was ticked before these columns
+           existed. */
+        ALTER TABLE partner_domain_sf_state ADD COLUMN IF NOT EXISTS first_ticked_at      TIMESTAMPTZ;
+        ALTER TABLE partner_domain_sf_state ADD COLUMN IF NOT EXISTS first_opportunity_at TIMESTAMPTZ;
+
+        /* Same-table, idempotent, and only so a currently-true state is
+           stamped now rather than on the next successful refresh — which is
+           15 minutes away and can fail. Guarded on IS NULL, so it can never
+           overwrite an earlier observation and can never re-fire. */
+        UPDATE partner_domain_sf_state
+           SET first_ticked_at = COALESCE(checked_at, NOW())
+         WHERE first_ticked_at IS NULL AND sf_state = 'ticked';
+        UPDATE partner_domain_sf_state
+           SET first_opportunity_at = COALESCE(checked_at, NOW())
+         WHERE first_opportunity_at IS NULL AND sf_state IN ('exists_unticked', 'ticked');
       `);
       console.log('[DB] Partner SF-state table ready');
     } catch (err) {

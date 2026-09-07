@@ -561,6 +561,31 @@ domain re-converts and can never be qualified again: $50 gone with no error
 anywhere. Fixed 7 Sept 2026. And beyond that, an action for a `customer_key`
 PartnerStack has never seen is a no-op at best.
 
+**`partner_domain_sf_state.sf_state` is the only SNAPSHOT in this integration,
+and it moves in BOTH directions.** Everything else keys off an immutable stamp,
+which is why every other funnel stage is monotonic. An AE unticked
+`Qualified_Demo__c` on 7 Sept 2026 and "Qualified Demo ticked" went *down* to 1
+sitting under "The $50 fired" at 2, while a domain whose commission had already
+landed read "waiting on an AE" — a false action item for something that can
+never fire again.
+
+**Where you want a fact, read `first_ticked_at` / `first_opportunity_at`, never
+`sf_state`.** Those two are stamped once by the refresh and never cleared, and
+the funnel ORs them with `ps_qualified_sent_at`, which is stronger and older
+evidence — a qualification can only ever have fired because the poller saw the
+box ticked. That is also what makes the payment tail nest by construction:
+Opportunity ≥ ticked ≥ $50, always. `sf_state` stays for the one question it
+genuinely answers, which is what Salesforce says right now.
+
+Do **not** backfill those two stamps from `ps_qualified_sent_at`. They mean "we
+observed this", and an inferred timestamp in an observational column is read as
+a measurement by the next person. The OR in the query is the honest form.
+
+**Nothing reacts to an untick, and that is deliberate** — one-shot claim,
+PartnerStack keeps the commission, and re-ticking fires nothing at all. Four
+independent things enforce it; `docs/partnerstack.md` lists them. An AE
+expecting a reversal is a real support question, not a bug.
+
 **The automated eligibility check is BUILT AND OFF for the MVP.** Rejections are
 decided by hand at payout approval. Everything below is dormant behind
 `PS_ELIGIBILITY_ENABLED`, default off — set it to the string `true` in the

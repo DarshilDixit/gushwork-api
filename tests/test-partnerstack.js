@@ -1347,6 +1347,76 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     ok('sfC: nothing is chained after the poll try/finally at all',
        !/await [a-zA-Z]/.test(afterFinally.replace(/\/\*[\s\S]*?\*\//g, '')), afterFinally.slice(0, 120));
   }
+  /* ── PR 22: the events under the snapshot ─────────────────────────────
+     sf_state moves in BOTH directions — correctly, it is what Salesforce says
+     right now. first_ticked_at and first_opportunity_at are the events beneath
+     it and may only ever move one way. Everything that must not go backwards
+     reads those; an untick leaves them alone. */
+  {
+    ok('sfC/C6: the table carries both set-once event columns',
+       /ADD COLUMN IF NOT EXISTS first_ticked_at\s+TIMESTAMPTZ/.test(dbjs)
+       && /ADD COLUMN IF NOT EXISTS first_opportunity_at TIMESTAMPTZ/.test(dbjs));
+    /* The whole point: COALESCE keeps the EARLIEST observation, so a later
+       refresh seeing exists_unticked cannot clear a tick that happened. */
+    const fn = src.slice(src.indexOf('async function refreshPartnerDomainSfState'),
+                         src.indexOf('let _psSfLastRead') >= 0
+                           ? src.indexOf('const PS_SF_REFRESH_INTERVAL_MS')
+                           : src.length);
+    ok('sfC/C6: first_ticked_at is stamped only when the box is actually ticked',
+       /CASE WHEN \$2 = 'ticked' THEN NOW\(\) END/.test(fn));
+    ok('sfC/C6: first_opportunity_at is stamped for either Opportunity state',
+       /CASE WHEN \$2 IN \('ticked','exists_unticked'\) THEN NOW\(\) END/.test(fn));
+    ok('sfC/C6: neither can ever be cleared or moved later',
+       /first_ticked_at\s+= COALESCE\(partner_domain_sf_state\.first_ticked_at,\s+EXCLUDED\.first_ticked_at\)/.test(fn)
+       && /first_opportunity_at = COALESCE\(partner_domain_sf_state\.first_opportunity_at, EXCLUDED\.first_opportunity_at\)/.test(fn));
+    ok('sfC/C6: and neither is ever set to NULL anywhere in the refresh',
+       !/first_ticked_at\s*=\s*NULL/.test(fn) && !/first_opportunity_at\s*=\s*NULL/.test(fn));
+    /* first_ticked_at set implies first_opportunity_at set — the 'ticked' arm
+       of the second CASE is what makes the payment tail of the funnel nest by
+       construction rather than by luck. Asserted because it is exactly the
+       kind of load-bearing property nothing else enforces. */
+    ok('sfC/C6: a ticked domain also stamps first_opportunity_at, so the tail nests',
+       /CASE WHEN \$2 IN \('ticked','exists_unticked'\)/.test(fn));
+    /* The same-table backfill exists only so a currently-true state is stamped
+       now rather than 15 minutes from now, and must be idempotent. */
+    ok('sfC/C6: the backfill only ever touches rows where the stamp is NULL',
+       /first_ticked_at IS NULL AND sf_state = 'ticked'/.test(dbjs));
+    ok('sfC/C6: and the same for the Opportunity stamp',
+       /first_opportunity_at IS NULL AND sf_state IN \('exists_unticked', 'ticked'\)/.test(dbjs));
+    /* NOT backfilled from leads: these columns mean "we observed this", and an
+       inferred timestamp in an observational column gets read as a
+       measurement. The funnel ORs the two sources instead. */
+    ok('sfC/C6: the stamps are NOT backfilled from ps_qualified_sent_at',
+       !/first_ticked_at[\s\S]{0,200}?ps_qualified_sent_at/.test(dbjs));
+    /* The client cannot label an untick-after-payment without them. */
+    /* Scoped to partnerLifecycle: the client cannot label an
+       untick-after-payment if the columns never leave the server. */
+    const life = src.slice(src.indexOf('async function partnerLifecycle'),
+                           src.indexOf('const PS_FUNNEL_STAGE_SQL'));
+    ok('sfC/C6: both are selected out of the table',
+       /first_ticked_at, first_opportunity_at/.test(life));
+    ok('sfC/C6: and both are attached to each domain row',
+       /d\.first_ticked_at = sf \? sf\.first_ticked_at : null;/.test(life)
+       && /d\.first_opportunity_at = sf \? sf\.first_opportunity_at : null;/.test(life));
+  }
+
+  /* ── C7: an already-paid domain is not a revenue loss ── */
+  {
+    const frag = lift(src, 'const PS_FUNNEL_STAGE_SQL = `');
+    /* The EXPRESSION only, back to its own COUNT — slicing a fixed number of
+       characters swept in the comment above it, which names the very column
+       the second assertion checks is absent. */
+    const at   = frag.indexOf('AS lost_no_opp');
+    const lost = frag.slice(frag.lastIndexOf('COUNT(DISTINCT', at), at);
+    ok('C7: booked-with-no-Opportunity excludes a domain that already got paid',
+       /ps_qualified_sent_at IS NULL/.test(lost), lost.slice(-200));
+    /* Deliberately NOT excluded on first_opportunity_at: a domain that had an
+       Opportunity, was never paid, and no longer has one is a genuine leak and
+       must stay counted. */
+    ok('C7: it is NOT excluded merely for having once had an Opportunity',
+       !/first_opportunity_at/.test(lost), lost.slice(-200));
+  }
+
   ok('sfC: the refresh has its own scheduler', /function startPartnerStackSfStateRefresh/.test(src));
   ok('sfC: it runs at BOOT, not only on the interval',
      /const run = \(why\) => refreshPartnerDomainSfState\(\)[\s\S]{0,200}?run\('boot'\);/.test(src));
@@ -1653,6 +1723,33 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        /d\.qualified_sent !== true/.test(fn));
     ok('actionable: the unactionable ones are counted separately, not hidden',
        /sfUnactionable = domains\.rows\.filter\([\s\S]{0,160}?d\.signup_sent !== true/.test(fn));
+    /* ── C5: the third bucket must be COMPUTED, not only rendered ──────
+       The renderer test proves the chip appears when the server sends a count.
+       This proves the server actually derives one. Asserting only the render
+       is the recurring bug pointed the other way round: a server that returned
+       0 here would make the chip vanish and the sub-chips stop summing to
+       bySfState.exists_unticked, with every test still green.
+
+       These three PARTITION exists_unticked — signup_sent false; signup_sent
+       true and not yet qualified; signup_sent true and already qualified — so
+       no shape can fall out of all of them and off the screen, which is what
+       happened to hello.com on 7 Sept 2026. */
+    ok('C5: the untick-after-payment bucket is derived from the domain rows',
+       /sfUntickedAfterPaid = domains\.rows\.filter\(\(d\) =>\s*\n?\s*d\.sf_state === 'exists_unticked' && d\.signup_sent === true && d\.qualified_sent === true\)\.length;/.test(fn), 'not derived');
+    ok('C5: and it is sent to the client rather than computed and dropped',
+       /^\s*sfUntickedAfterPaid,$/m.test(fn));
+    /* The partition, asserted on the predicates themselves: every one of the
+       three tests signup_sent, and the two that agree on it disagree on
+       qualified_sent. */
+    {
+      const preds = ['d.signup_sent !== true',
+                     'd.signup_sent === true && d.qualified_sent !== true',
+                     'd.signup_sent === true && d.qualified_sent === true'];
+      for (const pr of preds)
+        ok(`C5: exists_unticked is split on "${pr}"`, fn.includes(pr), pr);
+    }
+    ok('C5: qualified_sent comes from the query too, like signup_sent',
+       /BOOL_OR\(ps_qualified_sent_at IS NOT NULL\)\s+AS qualified_sent/.test(fn));
     ok('actionable: signup_sent comes from the query', /BOOL_OR\(ps_signup_sent_at IS NOT NULL\)\s+AS signup_sent/.test(fn));
   }
   ok('actionable: the card reads the actionable count, not the raw state count',
@@ -1669,8 +1766,14 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
      a mutation survived on exactly that. */
   ok('fired: the per-domain row label is per-row, not a static map',
      /function sfLabel\(x\)/.test(src) && /st==="ticked"\)return x\.qualified_sent\?"ticked, \$50 fired"/.test(src));
-  ok('fired: the row also flags an unticked domain with no conversion sent',
-     /st==="exists_unticked"\)return x\.signup_sent\?"waiting on an AE"/.test(src));
+  /* THREE branches now, and the order matters: qualified_sent is tested first,
+     because a paid domain that an AE unticked would otherwise fall through to
+     "waiting on an AE" — a false errand for something that can never fire
+     again. That is the bug from 7 Sept 2026 (hello.com). */
+  ok('fired/C4: an untick after payment does NOT read as waiting on an AE',
+     /st==="exists_unticked"\)return x\.qualified_sent\?"unticked in Salesforce \\u2014 the \$50 already fired/.test(src));
+  ok('fired: the row still flags an unticked domain with no conversion sent',
+     /:\(x\.signup_sent\?"waiting on an AE":"unticked \\u2014 no conversion sent, not actionable"\)/.test(src));
   ok('fired: the stale static map no longer carries a ticked label',
      !/var sfl=\{ticked:/.test(src));
   /* The server must SEND the unactionable count, not just compute it. */
@@ -1925,9 +2028,26 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        /ps_signup_sent_at IS NOT NULL/.test(stage('verified')));
     ok('funnel: booked requires verified', /ps_signup_verified_at IS NOT NULL/.test(stage('booked')));
     ok('funnel: opportunity requires booked', /booking_uid IS NOT NULL/.test(stage('opportunity')));
-    ok('funnel: ticked requires an Opportunity', /sf_state = 'ticked'/.test(stage('ticked')));
-    ok('funnel: the payment stage requires ticked',
-       /sf_state = 'ticked'[\s\S]{0,120}?ps_qualified_sent_at IS NOT NULL/.test(stage('qualified')));
+    /* ── EVENTS, NOT THE CHECKBOX ────────────────────────────────────
+       These read sf_state = 'ticked' until 7 Sept 2026, and sf_state is a
+       snapshot that moves in BOTH directions while every other stage keys off
+       an immutable stamp. An AE unticked hello.com and "Qualified Demo ticked"
+       went down to 1 under "The $50 fired" at 2. A stage that can drop below
+       the stage after it is not a funnel. */
+    ok('funnel/C6: ticked reads the EVENT, never the current checkbox',
+       /first_ticked_at IS NOT NULL/.test(stage('ticked'))
+       && !/sf_state = 'ticked'/.test(stage('ticked')));
+    ok('funnel/C6: opportunity reads the event too',
+       /first_opportunity_at IS NOT NULL/.test(stage('opportunity'))
+       && !/sf_state IN/.test(stage('opportunity')));
+    /* ps_qualified_sent_at is the stronger and OLDER evidence — a qualification
+       can only have fired because the poller saw the box ticked — and it covers
+       domains ticked before these columns existed. */
+    ok('funnel/C6: and ORs the older evidence for pre-existing domains',
+       /OR l\.ps_qualified_sent_at IS NOT NULL/.test(stage('ticked'))
+       && /OR l\.ps_qualified_sent_at IS NOT NULL/.test(stage('opportunity')));
+    ok('funnel: the payment stage still requires ticked',
+       /first_ticked_at IS NOT NULL[\s\S]{0,160}?ps_qualified_sent_at IS NOT NULL\)\s*$/.test(stage('qualified').trim()));
     /* Every stage counts domains; clicks are the exception and live elsewhere. */
     ok('funnel: every stage counts DISTINCT DOMAINS',
        !/COUNT\(DISTINCT LOWER\(email\)\)/.test(frag) && !/COUNT\(\*\)/.test(frag));
@@ -2024,8 +2144,10 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
       abs_conversions: 'ps_signup_sent_at IS NOT NULL',
       abs_verified:    'ps_signup_verified_at IS NOT NULL',
       abs_booked:      'booking_uid IS NOT NULL',
-      abs_opportunity: "sf_state IN ('exists_unticked','ticked')",
-      abs_ticked:      "sf_state = 'ticked'",
+      /* The two that were snapshots. Now events, ORed with the older evidence
+         — see funnel/C6 above. */
+      abs_opportunity: 'first_opportunity_at IS NOT NULL\n           OR l.ps_qualified_sent_at IS NOT NULL',
+      abs_ticked:      'first_ticked_at IS NOT NULL\n           OR l.ps_qualified_sent_at IS NOT NULL',
       abs_qualified:   'ps_qualified_sent_at IS NOT NULL',
     };
     for (const [col, cond] of Object.entries(chain)) {
@@ -2129,6 +2251,132 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     ok('absUI: the note explains the two numbers',
        /skipped an earlier stage/.test(els['pfn-note'].innerHTML) &&
        /does nest/.test(els['pfn-note'].innerHTML));
+  }
+
+  /* ── PR 22: RENDERED, with hello.com's shape AFTER the untick ──────
+     7 Sept 2026. google.ai converted from a real Salesforce Lead and its $50
+     fired; then an AE unticked Qualified_Demo__c on the hello.com Opportunity,
+     whose $50 had fired on 4 Sept. Two things broke, both of them the
+     recurring bug rather than anything about Salesforce:
+
+       - the per-domain row said "waiting on an AE" for a domain where
+         ps_qualified_sent_at is stamped, once-per-domain is a UNIQUE PARTIAL
+         index, and nothing can ever fire again. A false errand.
+       - "Qualified Demo ticked" read 1 while "The $50 fired" read 2, because
+         ticked read the current checkbox and everything else reads a
+         historical stamp.
+
+     Rendered, not asserted against the payload: five for five in
+     docs/partnerstack.md says computed server-side is not the same as on
+     screen. */
+  {
+    const i = src.indexOf("'var partnerRows=[],pSort=");
+    const j = src.indexOf("'function debounce()");
+    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const els = {};
+    const mk = () => ({ textContent: '', innerHTML: '', style: {}, className: '', querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
+    const doc = { getElementById: (id) => (els[id] = els[id] || mk()), createElement: () => ({ value: '', textContent: '' }) };
+    const stages = (new Function(lift(src, 'const PS_FUNNEL_STAGES = [') + '\n return PS_FUNNEL_STAGES;'))();
+    const losses = (new Function(lift(src, 'const PS_FUNNEL_LOSSES = {') + '\n return PS_FUNNEL_LOSSES;'))();
+
+    const paid = (key, sf, ticks) => ({ customer_key: key, state: 'qualified',
+      partner_name: 'Test Account', signup_sent: true, signup_verified: true,
+      qualified_sent: true, sf_state: sf, first_ticked_at: ticks,
+      first_opportunity_at: '2026-09-04T05:00:00Z', last_seen: '2026-09-04T00:00:00Z' });
+    /* hello.com: paid, then UNTICKED. google.ai: paid, still ticked.
+       gushwork.ai: an Opportunity exists, unticked, and no conversion was ever
+       sent because it is a test address — the state that produced the FIRST
+       false errand, kept here so the fix for the second cannot undo it. */
+    const domains = [
+      paid('hello.com', 'exists_unticked', '2026-09-04T05:41:00Z'),
+      paid('google.ai', 'ticked', '2026-09-07T05:41:00Z'),
+      { customer_key: 'gushwork.ai', state: 'skipped', skipped_reason: 'test_email',
+        signup_sent: false, qualified_sent: false, sf_state: 'exists_unticked',
+        first_ticked_at: null, first_opportunity_at: '2026-09-04T05:00:00Z',
+        last_seen: '2026-09-04T00:00:00Z' },
+    ];
+    const bySfState = { exists_unticked: 2, ticked: 1 };
+    /* What partnerLifecycle now computes: three buckets PARTITIONING
+       exists_unticked. The third one is new — before it, hello.com fell out of
+       both of the others and rendered no chip at all. */
+    const lifecycle = { byState: { qualified: 2, skipped: 1 }, totalDomains: 3,
+      needsAttention: 0, acknowledged: 0, failedStates: ['conversion_failed', 'qualification_failed'],
+      bySfState, sfActionable: 0, sfUnactionable: 1, sfUntickedAfterPaid: 1,
+      domains, noCustomerKeyLeads: 0,
+      sfNewestCheckedAt: new Date().toISOString(), sfStaleAfterMin: 45,
+      sfLastRead: { ok: true, records: 5898, totalSize: 5898, pages: 6 },
+      domainsCapped: false, domainsLimit: 500 };
+    /* Both $50s fired, so ticked and qualified are both 2 — the point being
+       that ticked may no longer read 1 just because a checkbox moved. */
+    const prog = { clicks: 9, step1: 6, completed: 6,
+      conversions: 4, verified: 4, booked: 1, opportunity: 1, ticked: 1, qualified: 1,
+      abs_conversions: 4, abs_verified: 4, abs_booked: 1,
+      abs_opportunity: 2, abs_ticked: 2, abs_qualified: 2,
+      lost_conversion: 0, lost_skipped: 1, lost_no_opp: 0, lost_sfopp: 0, lost_qualification: 0 };
+
+    await (new Function('API','TP','esc','et','set','fetch','AbortSignal','document','showTab','loadFilterOptions','loadLeads','Array','prompt','alert',
+      client + '; return {loadPartners};'))('', '', (x) => String(x == null ? '' : x), (x) => String(x == null ? '' : x),
+      (id, v) => { doc.getElementById(id).textContent = String(v); },
+      async () => ({ ok: true, json: async () => ({ totals: {}, partners: [],
+        funnel: { stages, losses, rateMin: 10, programme: prog }, lifecycle }) }),
+      { timeout: () => null }, doc, () => {}, async () => {}, () => {}, Array, () => '', () => {}).loadPartners();
+
+    const rows = els['pdtbody'].innerHTML;
+    const chips = els['p-sfstates'].innerHTML;
+    const rowFor = (key) => (rows.split('<tr>').find((r) => r.includes('>' + key + '<')) || '');
+
+    /* ── C4: the false errand ── */
+    ok('untickUI: the paid-then-unticked row does NOT say waiting on an AE',
+       !/waiting on an AE/.test(rowFor('hello.com')), rowFor('hello.com').slice(0, 300));
+    ok('untickUI: it says the $50 already fired and nothing more can',
+       /the \$50 already fired, nothing more can/.test(rowFor('hello.com')));
+    /* The still-ticked one is unaffected. */
+    ok('untickUI: the still-ticked paid domain still reads ticked, $50 fired',
+       /ticked, \$50 fired/.test(rowFor('google.ai')));
+    /* And the FIRST false errand stays fixed — an unticked Opportunity whose
+       conversion was never sent is informational, not an action. */
+    ok('untickUI: the no-conversion-sent row is still not an action item',
+       /not actionable/.test(rowFor('gushwork.ai')));
+    /* sfActionable is 0 here, so the words must appear nowhere on the tab. */
+    ok('untickUI: nothing on the tab claims an AE is being waited on',
+       !/waiting on an AE/.test(rows) && !/waiting on an AE/.test(chips));
+
+    /* ── C5: the domain that rendered no chip at all ── */
+    ok('untickUI: the third bucket renders its own chip',
+       /1 unticked after the \$50 fired/.test(chips), chips.slice(0, 400));
+    /* THE STRUCTURAL GUARD, not just the one case: whatever the sub-chips say
+       must add up to the state count they are splitting. Before the fix these
+       were 0 + 1 against a state count of 2 and the missing one was simply
+       absent from the screen. */
+    {
+      const seg = chips.split('unticked after the $50 fired')[0] + 'unticked after the $50 fired';
+      const nums = (seg.match(/>(\d+) (?:waiting on an AE|unticked)/g) || [])
+        .map((m) => Number(/\d+/.exec(m)[0]));
+      const summed = nums.reduce((a, b) => a + b, 0);
+      eq('untickUI: the exists_unticked chips SUM to the state count they split',
+         summed, bySfState.exists_unticked);
+    }
+
+    /* ── C6: the stage that went backwards ── */
+    const cards = chips && els['pfn'].innerHTML.split("class='pfs'").slice(1).map((c) => ({
+      label: (/class='pfsl'>([^<]*)</.exec(c) || [])[1],
+      value: (/class='pfsv'>([^<]*)</.exec(c) || [])[1],
+    }));
+    const val = (label) => Number(cards.find((c) => c.label === label).value);
+    eq('untickUI: Qualified Demo ticked counts the tick that happened, not the checkbox', val('Qualified Demo ticked'), 2);
+    eq('untickUI: and the $50 stage agrees with it', val('The $50 fired'), 2);
+    /* The tail of the funnel is now guaranteed to nest, and this is the
+       assertion that would have caught the bug: first_ticked_at is set for
+       every domain first_opportunity_at is, and ps_qualified_sent_at implies
+       both, so opportunity >= ticked >= qualified holds by construction.
+
+       ONLY this tail. The earlier absolute stages genuinely do NOT nest — a
+       domain can be booked without ever converting — which is exactly why the
+       cumulative column is kept alongside them. */
+    ok('untickUI: the payment tail nests — Opportunity >= ticked >= $50',
+       val('Opportunity created') >= val('Qualified Demo ticked')
+       && val('Qualified Demo ticked') >= val('The $50 fired'),
+       [val('Opportunity created'), val('Qualified Demo ticked'), val('The $50 fired')].join(' >= '));
   }
 
   /* Rates must keep running down the FUNNEL PATH, not between two absolutes.

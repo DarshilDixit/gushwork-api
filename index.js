@@ -3431,6 +3431,10 @@ app.get('/monitor', (req, res) => {
   'if(k==="exists_unticked"){var out2="";' +
   'if(lc.sfActionable)out2+="<span class=\'pschip\'>"+lc.sfActionable+" waiting on an AE</span>";' +
   'if(lc.sfUnactionable)out2+="<span class=\'pschip\' title=\'An Opportunity exists and is unticked, but no conversion was sent for this domain, so a qualification could not succeed. Not an action item.\'>"+lc.sfUnactionable+" unticked, no conversion sent (not actionable)</span>";' +
+  /* The third of three. Without it a domain in this state rendered NO chip at
+     all while still counting in bySfState.exists_unticked — the number and the
+     chips disagreed and the chips were what anyone read. */
+  'if(lc.sfUntickedAfterPaid)out2+="<span class=\'pschip\' title=\'An AE has unticked Qualified_Demo__c after the commission already fired. Nothing reacts to an untick: the claim is permanent, PartnerStack keeps the commission, and re-ticking fires nothing. Not an action item.\'>"+lc.sfUntickedAfterPaid+" unticked after the $50 fired (not actionable)</span>";' +
   'return out2;}' +
   'return "<span class=\'pschip"+(k==="create_errored"?" bad":"")+"\'>"+sf[k]+" "+sfl[k]+"</span>";}).join("");' +
   'var unchecked=(lc.totalDomains||0)-Object.values(sf).reduce(function(a,b){return a+b;},0);' +
@@ -3501,7 +3505,11 @@ app.get('/monitor', (req, res) => {
      because no conversion was sent. */
   'function sfLabel(x){var st=x.sf_state;' +
   'if(st==="ticked")return x.qualified_sent?"ticked, $50 fired":"ticked, will fire next poll";' +
-  'if(st==="exists_unticked")return x.signup_sent?"waiting on an AE":"unticked \u2014 no conversion sent, not actionable";' +
+  /* An already-paid domain read "waiting on an AE" the moment an AE unticked
+     the box. Nothing can ever fire for it again, so that was a false action
+     item — the same shape as the gushwork.ai one, one branch further in. The
+     server already excluded it from sfActionable; the row did not. */
+  'if(st==="exists_unticked")return x.qualified_sent?"unticked in Salesforce \u2014 the $50 already fired, nothing more can":(x.signup_sent?"waiting on an AE":"unticked \u2014 no conversion sent, not actionable");' +
   'if(st==="create_errored")return "Opportunity never created";' +
   'if(st==="no_opportunity")return "no Opportunity yet";' +
   'return st||"not checked yet";}' +
@@ -6919,7 +6927,8 @@ async function partnerLifecycle() {
          AND created_at >= NOW() - INTERVAL '${PS_LADDER_WINDOW_D} days'`),
     /* Read, never recomputed here: the poller owns this table. Missing rows
        simply mean the poller has not run since that domain appeared. */
-    pool.query(`SELECT customer_key, sf_state, sf_opportunity_id, sf_error, checked_at
+    pool.query(`SELECT customer_key, sf_state, sf_opportunity_id, sf_error, checked_at,
+                       first_ticked_at, first_opportunity_at
                   FROM partner_domain_sf_state`).catch(() => ({ rows: [] })),
   ]);
 
@@ -6929,6 +6938,10 @@ async function partnerLifecycle() {
     d.sf_state = sf ? sf.sf_state : null;
     d.sf_opportunity_id = sf ? sf.sf_opportunity_id : null;
     d.sf_error = sf ? sf.sf_error : null;
+    /* The events under the snapshot, so a row can say "ticked earlier, then
+       unticked" rather than just "unticked". */
+    d.first_ticked_at = sf ? sf.first_ticked_at : null;
+    d.first_opportunity_at = sf ? sf.first_opportunity_at : null;
   }
   const bySfState = {};
   for (const d of domains.rows) if (d.sf_state) bySfState[d.sf_state] = (bySfState[d.sf_state] || 0) + 1;
@@ -6945,6 +6958,23 @@ async function partnerLifecycle() {
     d.sf_state === 'exists_unticked' && d.signup_sent === true && d.qualified_sent !== true).length;
   const sfUnactionable = domains.rows.filter((d) =>
     d.sf_state === 'exists_unticked' && d.signup_sent !== true).length;
+  /* THE THIRD BUCKET, and it existed before this field did — as a domain that
+     fell out of both of the others and therefore off the screen entirely.
+     bySfState.exists_unticked could read 1 with no chip rendered at all,
+     because the renderer only ever drew the two counts above. Computed and
+     dropped, which is this integration's recurring bug: see
+     docs/partnerstack.md.
+
+     It is what an untick after payment looks like. hello.com on 7 Sept 2026:
+     the $50 fired on 4 Sept, an AE unticked the box, sf_state went back to
+     exists_unticked, and the domain read "waiting on an AE" — a false errand
+     for something that can never fire again, since ps_qualified_sent_at is
+     stamped and once-per-domain is a UNIQUE PARTIAL index.
+
+     These three now PARTITION exists_unticked, and a test asserts they sum to
+     it, so a fourth shape cannot go missing the same way. */
+  const sfUntickedAfterPaid = domains.rows.filter((d) =>
+    d.sf_state === 'exists_unticked' && d.signup_sent === true && d.qualified_sent === true).length;
 
   /* Staleness. A refresh that fails leaves checked_at frozen and every row
      looking current — the failure is invisible unless the AGE is shown. */
@@ -6973,6 +7003,7 @@ async function partnerLifecycle() {
     bySfState,
     sfActionable,
     sfUnactionable,
+    sfUntickedAfterPaid,
     sfNewestCheckedAt: newestCheck ? new Date(newestCheck).toISOString() : null,
     sfStaleAfterMin: PS_SF_STALE_MIN,
     sfStates: PS_SF_STATES,
@@ -7033,17 +7064,20 @@ const PS_FUNNEL_STAGE_SQL = `
     WHERE l.completed IS TRUE
       AND l.ps_signup_verified_at IS NOT NULL
       AND l.booking_uid IS NOT NULL
-      AND s.sf_state IN ('exists_unticked','ticked'))                   AS opportunity,
+      AND (s.first_opportunity_at IS NOT NULL
+           OR l.ps_qualified_sent_at IS NOT NULL))                      AS opportunity,
   COUNT(DISTINCT l.ps_customer_key) FILTER (
     WHERE l.completed IS TRUE
       AND l.ps_signup_verified_at IS NOT NULL
       AND l.booking_uid IS NOT NULL
-      AND s.sf_state = 'ticked')                                        AS ticked,
+      AND (s.first_ticked_at IS NOT NULL
+           OR l.ps_qualified_sent_at IS NOT NULL))                      AS ticked,
   COUNT(DISTINCT l.ps_customer_key) FILTER (
     WHERE l.completed IS TRUE
       AND l.ps_signup_verified_at IS NOT NULL
       AND l.booking_uid IS NOT NULL
-      AND s.sf_state = 'ticked'
+      AND (s.first_ticked_at IS NOT NULL
+           OR l.ps_qualified_sent_at IS NOT NULL)
       AND l.ps_qualified_sent_at IS NOT NULL)                           AS qualified,
 
   /* ── The SAME stages, unchained ──────────────────────────────────
@@ -7069,7 +7103,27 @@ const PS_FUNNEL_STAGE_SQL = `
      No abs_step1 or abs_completed: their cumulative form already filters
      the full base on one condition, so an absolute twin would be a
      byte-identical duplicate column. A domain cannot skip its way into
-     step 1. */
+     step 1.
+
+     ── TICKED AND OPPORTUNITY READ EVENTS, NOT THE CHECKBOX ──────────
+     Both used to read sf_state, which is a SNAPSHOT of what Salesforce says
+     right now and the only thing in this integration that moves in both
+     directions. Everything else keys off an immutable stamp. So on 7 Sept 2026
+     an AE unticked Qualified_Demo__c on hello.com and "Qualified Demo ticked"
+     went DOWN to 1 while "The $50 fired" stayed at 2 — one stage going
+     backwards underneath stages that cannot. A funnel where a stage can drop
+     below the stage after it is not a funnel.
+
+     They now read first_ticked_at / first_opportunity_at, which the refresh
+     stamps once and never clears.
+
+     OR ps_qualified_sent_at, because that is the stronger and OLDER evidence.
+     A qualification can only ever have fired because the poller saw the box
+     ticked, and it is stamped for domains that were ticked before these
+     columns existed — hello.com among them. The alternative was backfilling an
+     inferred timestamp into an observational column, which turns a
+     reconstruction into something a later reader takes for a measurement. Two
+     sources, both true, ORed in one place. */
   COUNT(DISTINCT l.ps_customer_key) FILTER (
     WHERE l.ps_signup_sent_at IS NOT NULL)                              AS abs_conversions,
   COUNT(DISTINCT l.ps_customer_key) FILTER (
@@ -7077,9 +7131,11 @@ const PS_FUNNEL_STAGE_SQL = `
   COUNT(DISTINCT l.ps_customer_key) FILTER (
     WHERE l.booking_uid IS NOT NULL)                                    AS abs_booked,
   COUNT(DISTINCT l.ps_customer_key) FILTER (
-    WHERE s.sf_state IN ('exists_unticked','ticked'))                   AS abs_opportunity,
+    WHERE (s.first_opportunity_at IS NOT NULL
+           OR l.ps_qualified_sent_at IS NOT NULL))                      AS abs_opportunity,
   COUNT(DISTINCT l.ps_customer_key) FILTER (
-    WHERE s.sf_state = 'ticked')                                        AS abs_ticked,
+    WHERE (s.first_ticked_at IS NOT NULL
+           OR l.ps_qualified_sent_at IS NOT NULL))                      AS abs_ticked,
   COUNT(DISTINCT l.ps_customer_key) FILTER (
     WHERE l.ps_qualified_sent_at IS NOT NULL)                           AS abs_qualified,
 
@@ -7089,9 +7145,17 @@ const PS_FUNNEL_STAGE_SQL = `
   COUNT(DISTINCT l.ps_customer_key) FILTER (
     WHERE l.ps_signup_skipped_reason IS NOT NULL
       AND l.ps_signup_sent_at IS NULL)                                  AS lost_skipped,
+  /* C7: "booked, no Opportunity" is a red loss meaning nobody can tick the box
+     so the money cannot move. A domain that has ALREADY been paid is not that,
+     whatever sf_state says today — delete the Opportunity in Salesforce, or let
+     it age past PS_GAP_SF_LOOKBACK_D, and sf_state flips to no_opportunity for
+     a domain whose $50 landed weeks ago. Excluded on ps_qualified_sent_at, not
+     on first_opportunity_at: a domain that had an Opportunity, never got paid,
+     and no longer has one IS still a genuine leak and must stay in the count. */
   COUNT(DISTINCT l.ps_customer_key) FILTER (
     WHERE l.booking_uid IS NOT NULL
-      AND s.sf_state = 'no_opportunity')                                AS lost_no_opp,
+      AND s.sf_state = 'no_opportunity'
+      AND l.ps_qualified_sent_at IS NULL)                               AS lost_no_opp,
   COUNT(DISTINCT l.ps_customer_key) FILTER (
     WHERE s.sf_state = 'create_errored')                                AS lost_sfopp,
   COUNT(DISTINCT l.ps_customer_key) FILTER (
@@ -7510,14 +7574,26 @@ async function refreshPartnerDomainSfState() {
       else     { state = 'no_opportunity'; }
     }
     try {
+      /* sf_state is a snapshot and moves in both directions — that is
+         correct, it is what Salesforce says right now. first_ticked_at and
+         first_opportunity_at are the EVENTS underneath it and only ever move
+         one way: COALESCE keeps the earliest observation, so an untick leaves
+         them alone. Everything that must not go backwards reads those two
+         rather than sf_state. See the funnel. */
       await pool.query(`
-        INSERT INTO partner_domain_sf_state (customer_key, sf_state, sf_opportunity_id, sf_error, checked_at)
-        VALUES ($1,$2,$3,$4,NOW())
+        INSERT INTO partner_domain_sf_state
+          (customer_key, sf_state, sf_opportunity_id, sf_error, checked_at,
+           first_ticked_at, first_opportunity_at)
+        VALUES ($1,$2,$3,$4,NOW(),
+                CASE WHEN $2 = 'ticked' THEN NOW() END,
+                CASE WHEN $2 IN ('ticked','exists_unticked') THEN NOW() END)
         ON CONFLICT (customer_key) DO UPDATE SET
           sf_state = EXCLUDED.sf_state,
           sf_opportunity_id = EXCLUDED.sf_opportunity_id,
           sf_error = EXCLUDED.sf_error,
-          checked_at = NOW()`,
+          checked_at = NOW(),
+          first_ticked_at      = COALESCE(partner_domain_sf_state.first_ticked_at,      EXCLUDED.first_ticked_at),
+          first_opportunity_at = COALESCE(partner_domain_sf_state.first_opportunity_at, EXCLUDED.first_opportunity_at)`,
         [d.customer_key, state, oppId, error]);
       updated++;
     } catch (err) {
