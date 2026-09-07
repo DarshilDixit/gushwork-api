@@ -1239,10 +1239,22 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        qual.indexOf('ps_qualified_sent_at = NOW()') < qual.indexOf('await sendAction('));
   }
   /* A domain that failed and later recovered must not sit red forever. */
-  ok('recovery: a successful conversion clears the failure and skip reasons',
-     /Conversion sent[\s\S]{0,160}?clearPartnerStackFailure\('signup', session_id\)/.test(src));
-  ok('recovery: a successful qualification clears its failure',
-     /Qualification sent[\s\S]{0,160}?clearPartnerStackFailure\('qualify', claimedSession\)/.test(src));
+  /* ORDER, not a character budget. These were /X[\s\S]{0,160}?Y/, and a comment
+     added between the log line and the clear pushed them past the window — the
+     assertion failed for a reason that had nothing to do with what it checks.
+     Scoped to the function and compared by position instead. */
+  {
+    const sign = src.slice(src.indexOf('async function runPartnerStackSignup'),
+                           src.indexOf('/* \u2500\u2500 READ-BACK: did the conversion actually create a customer?'));
+    const at = sign.indexOf('Conversion sent:');
+    ok('recovery: a successful conversion clears the failure and skip reasons',
+       at !== -1 && at < sign.indexOf("clearPartnerStackFailure('signup', session_id)"));
+    const qual = src.slice(src.indexOf('async function sendQualificationForDomain'),
+                           src.indexOf('function startPartnerStackQualificationPoll'));
+    const qat = qual.indexOf('Qualification sent:');
+    ok('recovery: a successful qualification clears its failure',
+       qat !== -1 && qat < qual.indexOf("clearPartnerStackFailure('qualify', claimedSession)"));
+  }
   ok('recovery: clearing signup also clears the skip reason',
      /ps_signup_failed_at = NULL, ps_signup_fail_reason = NULL, ps_signup_skipped_reason = NULL/.test(src));
   /* Every skip guard records WHY, or "not sent" stays ambiguous on screen. */
@@ -1347,6 +1359,273 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     ok('sfC: nothing is chained after the poll try/finally at all',
        !/await [a-zA-Z]/.test(afterFinally.replace(/\/\*[\s\S]*?\*\//g, '')), afterFinally.slice(0, 120));
   }
+  /* ── PR 23 / C2: the three stamps reach the MIRROR ────────────────────
+     They were in syncToAWS's column list with COALESCE clauses and were still
+     NULL on gw_form_leads for every row, permanently. Not a missing column —
+     call order. syncToAWS runs from /partial and /submit, and all three stamps
+     are written after res.json() by a deferred job or a sweep, so the bind
+     value was always null. The handover doc said "the next real form submit
+     proves it"; no submit could ever have proved it. */
+  {
+    ok('C2: there is a targeted mirror write for the stamps',
+       /function syncPartnerStackStampToAWS\(session_id, column, value\)/.test(src));
+    /* The column is interpolated into SQL, so the allow-list is what makes
+       that safe — not the fact that today's callers are all internal. */
+    ok('C2: the column name is allow-listed, not interpolated freely',
+       /const PS_AWS_STAMP_COLUMNS = \['ps_signup_sent_at', 'ps_signup_verified_at', 'ps_qualified_sent_at'\];/.test(src));
+    const fn = src.slice(src.indexOf('function syncPartnerStackStampToAWS'),
+                         src.indexOf('function sendSlack'));
+    ok('C2: an unknown column is refused rather than interpolated',
+       /PS_AWS_STAMP_COLUMNS\.includes\(column\)/.test(fn) && /Refusing to mirror unknown/.test(fn));
+    /* A targeted UPDATE, never syncToAWS with a partial object: that upsert
+       sets disqualified = EXCLUDED.disqualified with NO COALESCE, so a partial
+       object passes false and clears a real disqualification on the mirror the
+       dialer reads. */
+    ok('C2: it is a targeted UPDATE on one column',
+       /UPDATE gw_form_leads SET \$\{column\} = \$2, updated_at = NOW\(\) WHERE session_id = \$1/.test(fn));
+    ok('C2: it never calls syncToAWS', !/syncToAWS/.test(fn));
+    /* Two of the six sites RELEASE a claim by writing NULL, so unlike
+       syncPartnerIdentityToAWS this must NOT be COALESCE'd — the mirror has to
+       be able to follow Railway back to null. */
+    ok('C2: it can clear a stamp as well as set one, so a release mirrors',
+       /\[session_id, value \|\| null\]/.test(fn) && !/COALESCE/.test(fn));
+    /* File-wide, so a site added later cannot be unawaited either. Excludes
+       the definition itself and the doc comment above it. */
+    {
+      const after = src.slice(src.indexOf('function sendSlack'));
+      const total   = (after.match(/syncPartnerStackStampToAWS\(/g) || []).length;
+      const awaited = (after.match(/await syncPartnerStackStampToAWS\(/g) || []).length;
+      ok('C2: every mirror call site in the file is awaited',
+         total >= 6 && awaited === total, `${awaited} of ${total} awaited`);
+    }
+    ok('C2: a mirror failure is recorded, not swallowed',
+       /recordFailure\('AWS sync'/.test(fn));
+    ok('C2: and it never rejects, so a caller can await it to order two writes',
+       /\.catch\(\(err\) => \{/.test(fn) && /return Promise\.resolve\(\);/.test(fn));
+
+    /* ── THE PAIRING PROPERTY ──────────────────────────────────────────
+       Every Railway write of a stamp column must be followed by a mirror write
+       of THAT column. This is the invariant C2 actually rests on, and it is
+       asserted here rather than by counting call sites — counting is what the
+       first version of this test did (`mirrored >= railway`, plus a file-wide
+       `total >= 6`) and dropping any ONE of the eight mirror lines still
+       passed. Six line-targeted mutations, six survivors.
+
+       Writing this assertion then found a real defect in the change it was
+       meant to protect: the verify sweep mirrored ps_signup_verified_at
+       WITHOUT ps_signup_sent_at, so a process that died between the claim and
+       the success mirror left gw_form_leads reading "verified but never sent".
+
+       Enumerated from the source, so a ninth write added later has to pair up
+       or fail here.
+
+       THE THREE EXCEPTIONS ARE THE CLAIMS, and they are checked to BE claims
+       rather than merely tolerated. A claim is a Railway-internal lock taken
+       before the HTTP call — not a fact about PartnerStack — and mirroring it
+       would put a WAN write in front of the send. Each is identified by the
+       conditional guard that makes it a claim. */
+    {
+      const STAMPS = ['ps_signup_sent_at', 'ps_signup_verified_at', 'ps_qualified_sent_at'];
+      const re = new RegExp(`(${STAMPS.join('|')})\\s*=\\s*(NOW\\(\\)|NULL|COALESCE\\([^)]*\\))`, 'g');
+      const writes = [];
+      let m;
+      while ((m = re.exec(src)) !== null) {
+        /* Only writes inside an UPDATE leads statement — the funnel and the
+           ladder mention these columns constantly in FILTER clauses. */
+        const back = src.slice(Math.max(0, m.index - 900), m.index);
+        if (!/UPDATE leads/.test(back)) continue;
+        writes.push({ col: m[1], op: m[2], at: m.index, end: m.index + m[0].length,
+                      line: src.slice(0, m.index).split('\n').length });
+      }
+      ok('C2/pairing: the Railway stamp writes were found at all', writes.length >= 9, String(writes.length));
+
+      /* THE WINDOW IS SEMANTIC, NOT A CHARACTER COUNT. A confirmed write is
+         mirrored before anything else happens; a CLAIM's mirror can only come
+         after the HTTP call has returned, because until then there is nothing
+         to vouch for. So the boundary is the next sendConversion/sendAction,
+         and "is it mirrored before the next send?" separates the two kinds
+         exactly — measured on the real source, the three that cross a send are
+         precisely the three claims.
+
+         A fixed character budget cannot do this. The first attempt used 1400
+         chars and found ONE unpaired write instead of three, because a claim's
+         far-away success mirror fell inside the window. It also breaks the
+         moment someone adds a comment, which is how two assertions in this
+         file already failed for reasons unrelated to what they check. */
+      const unpaired = [];
+      for (const w of writes) {
+        const rest = src.slice(w.end, w.end + 4000);
+        const sendAt = rest.search(/await (?:sendConversion|sendAction)\(/);
+        const window = sendAt === -1 ? rest : rest.slice(0, sendAt);
+        const mirrored = new RegExp(`syncPartnerStackStampToAWS\\([^,]+,\\s*'${w.col}'`).test(window);
+        if (!mirrored) unpaired.push(w);
+      }
+
+      /* Exactly three, and each must BE a claim: a conditional UPDATE that
+         only wins while the stamp is still NULL, sitting before a send. */
+      eq('C2/pairing: exactly three Railway stamp writes are unmirrored',
+         unpaired.length, 3);
+      for (const w of unpaired) {
+        const around = src.slice(Math.max(0, w.at - 600), w.end + 600);
+        ok(`C2/pairing: the unmirrored write at line ${w.line} is a CLAIM, not an oversight`,
+           w.op === 'NOW()' && new RegExp(`AND ${w.col} IS NULL`).test(around),
+           `${w.col} = ${w.op}`);
+      }
+      /* Every OTHER write pairs up. Stated as its own assertion so the count
+         above cannot pass by having three different writes unmirrored. */
+      ok('C2/pairing: every non-claim stamp write is mirrored before any send',
+         writes.length - unpaired.length >= 6, `${writes.length - unpaired.length} paired`);
+
+      /* And the confirmation paths must vouch for every column they can. The
+         verify sweep reads the customer back, so BOTH sent and verified are
+         true there and both must reach the mirror — this is the assertion that
+         caught the real defect described above. */
+      const ver = src.slice(src.indexOf('async function runPartnerStackConversionVerify'),
+                            src.indexOf('/* \u2500\u2500 C3: A FAILED CONVERSION IS RETRIED'));
+      const exists = ver.slice(ver.indexOf('if (out.exists) {'));
+      for (const col of ['ps_signup_sent_at', 'ps_signup_verified_at'])
+        ok(`C2/pairing: a verified conversion mirrors ${col}, closing the claim window`,
+           new RegExp(`syncPartnerStackStampToAWS\\([^,]+,\\s*'${col}'`).test(exists.slice(0, 2200)), col);
+    }
+
+    /* ── All SIX Railway write sites must mirror ──────────────────────
+       Derived from the Railway writes rather than listed by hand: a seventh
+       site added later fails this instead of silently not mirroring. */
+    const sites = [
+      ['signup claim',        "async function runPartnerStackSignup",       "/* ── READ-BACK", 'ps_signup_sent_at'],
+      ['verify sweep',        "async function runPartnerStackConversionVerify", "function startPartnerStackConversionVerify", 'ps_signup_verified_at'],
+      ['qualification claim', "async function sendQualificationForDomain",  "function startPartnerStackQualificationPoll", 'ps_qualified_sent_at'],
+    ];
+    for (const [label, from, to, col] of sites) {
+      const body = src.slice(src.indexOf(from), src.indexOf(to));
+      const railway = (body.match(/UPDATE leads[\s\S]{0,140}?ps_(?:signup_sent_at|signup_verified_at|qualified_sent_at)\s*=\s*(?:NOW\(\)|NULL)/g) || []).length;
+      const mirrored = (body.match(/syncPartnerStackStampToAWS\(/g) || []).length;
+      ok(`C2: every Railway stamp write in the ${label} has a mirror write`,
+         mirrored >= railway && railway > 0, `railway=${railway} mirrored=${mirrored}`);
+      ok(`C2: the ${label} mirrors ${col}`,
+         new RegExp("syncPartnerStackStampToAWS\\([^)]*'" + col + "'").test(body));
+      /* EVERY call, not "at least one". The qualify site has two — a set and
+         a release — and dropping the await from one of them left a
+         `/await sync…/` test green while the release could overtake the claim
+         it follows. Both are promises against the same row and only order
+         decides which value the mirror keeps. */
+      const total   = (body.match(/syncPartnerStackStampToAWS\(/g) || []).length;
+      const awaited = (body.match(/await syncPartnerStackStampToAWS\(/g) || []).length;
+      ok(`C2: EVERY mirror write in the ${label} is awaited`,
+         total > 0 && awaited === total, `${awaited} of ${total} awaited`);
+    }
+  }
+
+  /* ── PR 23 / C3: a failed conversion is RETRIED ────────────────────────
+     The release carried the comment "so this domain can be retried rather than
+     silently lost" and nothing retried it. One timeout at submit time was one
+     affiliate permanently unpaid. */
+  {
+    const fn = src.slice(src.indexOf('async function runPartnerStackConversionRetry'),
+                         src.indexOf('function startPartnerStackConversionRetry'));
+    ok('C3: the retry sweep exists', fn.length > 200);
+    ok('C3: overlapping runs are prevented',
+       /if \(_psRetryRunning\) return;/.test(fn) && /_psRetryRunning = true;/.test(fn));
+
+    /* THE WHOLE DESIGN. A conversion that reported failure may still have
+       landed — a timeout after PartnerStack processed it, a 5xx from a proxy in
+       front of a successful write. Re-sending blind credits the affiliate
+       twice and PartnerStack cannot undo a double credit. */
+    const fetchAt = fn.indexOf('await fetchCustomer(');
+    const sendAt  = fn.indexOf('await sendConversion(');
+    ok('C3: it asks whether the customer exists BEFORE considering a re-send',
+       fetchAt !== -1 && sendAt !== -1 && fetchAt < sendAt, `fetch@${fetchAt} send@${sendAt}`);
+    ok('C3: an existing customer is stamped, NOT re-sent',
+       /the original conversion DID land, not re-sending/.test(fn));
+    /* Stamped verified too — the existence check just did the read-back
+       sweep's job for this row. */
+    ok('C3: a recovered conversion is stamped verified as well as sent',
+       /ps_signup_verified_at = COALESCE\(ps_signup_verified_at, NOW\(\)\)/.test(fn));
+    ok('C3: "could not tell" leaves the row completely alone',
+       /if \(!out\.ok\)/.test(fn) && /cannot tell whether the original landed/.test(fn));
+
+    /* The backoff must exceed PartnerStack's indexing lag or the existence
+       check asks about a conversion that landed and is not yet visible, gets a
+       404, and re-sends it — the exact double credit the fetch prevents. */
+    ok('C3: the backoff is DERIVED from the read-back grace, not chosen apart from it',
+       /const PS_RETRY_BACKOFF_MIN\s+= Math\.max\(30, PS_VERIFY_GRACE_MIN \* 2\);/.test(src));
+
+    /* ps_signup_sent_at is once per DOMAIN. Stamping a second row for a domain
+       that already converted violates leads_ps_signup_once_idx — and the
+       affiliate has already been credited, so nothing is owed. */
+    ok('C3: domains where another lead already converted are excluded',
+       /NOT EXISTS \([\s\S]{0,200}?o\.ps_customer_key = l\.ps_customer_key[\s\S]{0,80}?o\.ps_signup_sent_at IS NOT NULL/.test(fn));
+    /* A disqualified lead never fires a conversion. CLAUDE.md: a GUARD, not a
+       flow property, and this is a new path into the same send. */
+    ok('C3: a disqualified lead is never retried',
+       /l\.disqualified IS NOT TRUE/.test(fn));
+
+    /* Bounded, or a permanent 400 retries every quarter hour forever and
+       buries the rows that could still succeed. */
+    ok('C3: attempts are bounded', /ps_signup_retry_count, 0\) < \$\{PS_RETRY_MAX_ATTEMPTS\}/.test(fn));
+    ok('C3: and there is a give-up window as well as a count',
+       /ps_signup_failed_at > NOW\(\) - INTERVAL '\$\{PS_RETRY_GIVE_UP_D\} days'/.test(fn));
+    /* The count must survive a crash mid-attempt, or the bound never binds. */
+    const countAt = fn.indexOf('ps_signup_retry_count = COALESCE');
+    ok('C3: the attempt is counted BEFORE it is made, so a crash cannot loop forever',
+       countAt !== -1 && countAt < fetchAt, `count@${countAt} fetch@${fetchAt}`);
+
+    /* Claim-first on the re-send, exactly like the first attempt. */
+    const claimAt = fn.indexOf('SET ps_signup_sent_at = NOW()');
+    ok('C3: the re-send claims the domain BEFORE sending', claimAt !== -1 && claimAt < sendAt);
+    ok('C3: a concurrent claim is read as already-sent', /err\.code === '23505'/.test(fn));
+    const relAt = fn.lastIndexOf('ps_signup_sent_at = NULL');
+    ok('C3: a failed re-send releases the claim again', relAt !== -1 && relAt > sendAt);
+
+    /* Exhaustion is its own event: the per-attempt failures are noise once the
+       bound is reached, and this is the line that means a human must send the
+       conversion by hand. */
+    /* The recordFailure CALL, not just the message text. Replacing
+       recordFailure( with void ( left the string in place and this assertion
+       green — the alert was gone and the test could not tell. */
+    ok('C3: exhausting the retries raises its own distinct alert',
+       /recordFailure\('PartnerStack', r\.ps_customer_key \+ ' \(conversion retries exhausted\)'/.test(fn)
+       && /GIVING UP on/.test(fn));
+    ok('C3: exhaustion is gated on the attempt count reaching the bound',
+       /const exhausted = attemptsNow >= PS_RETRY_MAX_ATTEMPTS;/.test(fn)
+       && /if \(exhausted\) \{/.test(fn));
+    ok('C3: and it says the affiliate is still owed',
+       /the affiliate is still owed and nothing else will retry/.test(fn));
+
+    /* ── Each of the retry's THREE outcomes mirrors ────────────────────
+       These are asserted per-outcome because the pairing property above cannot
+       see them: they all mirror the ONE Railway write the re-claim made, so
+       from the pairing rule's point of view they are a claim's deferred mirror
+       and it stops looking after the first. Dropping the re-send success
+       mirror survived every other assertion in this file. */
+    {
+      const recovered = fn.slice(fn.indexOf('if (out.exists) {'), fn.indexOf('/* A definitive 404'));
+      for (const col of ['ps_signup_sent_at', 'ps_signup_verified_at'])
+        ok(`C3: a recovered conversion mirrors ${col}`,
+           new RegExp(`syncPartnerStackStampToAWS\\([^,]+,\\s*'${col}'`).test(recovered), col);
+
+      const success = fn.slice(fn.indexOf('Conversion RETRY sent'));
+      const successBlock = success.slice(0, success.indexOf('continue;'));
+      ok('C3: a successful re-send mirrors ps_signup_sent_at',
+         /syncPartnerStackStampToAWS\([^,]+,\s*'ps_signup_sent_at', new Date\(\)\)/.test(successBlock),
+         successBlock.slice(0, 200));
+
+      const release = fn.slice(fn.lastIndexOf('ps_signup_sent_at = NULL'));
+      ok('C3: a released re-claim mirrors the release',
+         /syncPartnerStackStampToAWS\([^,]+,\s*'ps_signup_sent_at', null\)/.test(release));
+    }
+
+    /* Boot-then-interval: a sweep that only runs on an interval loses its
+       first window to every deploy. */
+    ok('C3: it runs at boot as well as on the interval',
+       /run\('boot'\);/.test(src.slice(src.indexOf('function startPartnerStackConversionRetry'),
+                                       src.indexOf('function startPartnerStackConversionVerify'))));
+    ok('C3: it is started from start()', /startPartnerStackConversionRetry\(\);/.test(src));
+    ok('C3: the retry columns and a partial index exist',
+       /ps_signup_retry_count INTEGER DEFAULT 0/.test(dbjs)
+       && /leads_ps_signup_retryable_idx/.test(dbjs));
+  }
+
   /* ── PR 22: the events under the snapshot ─────────────────────────────
      sf_state moves in BOTH directions — correctly, it is what Salesforce says
      right now. first_ticked_at and first_opportunity_at are the events beneath

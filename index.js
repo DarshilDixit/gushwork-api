@@ -475,6 +475,56 @@ function syncHearAboutUsToAWS(session_id, hear_about_us) {
   ).catch(err => console.warn('[AWS] ⚠ hear_about_us sync failed:', err.message));
 }
 
+/* ── THE THREE PARTNERSTACK STAMPS, MIRRORED ─────────────────────────
+   ps_signup_sent_at, ps_signup_verified_at and ps_qualified_sent_at exist on
+   gw_form_leads and are in syncToAWS's column list with COALESCE clauses — and
+   they were still NULL for every row on the mirror, permanently.
+
+   The reason is call order, not a missing column. syncToAWS runs from /partial
+   and /submit, and every one of these three stamps is written AFTER res.json()
+   by a deferred job or a later sweep. Nothing calls syncToAWS for that session
+   again, so the bind value was always null. The handover doc recorded this as
+   "the next real form submit proves it"; no submit could ever have proved it.
+
+   So they get targeted writes, like the booking, the partner identity and
+   hear_about_us before them. NEVER syncToAWS with a partial object: that
+   upsert sets disqualified = EXCLUDED.disqualified with no COALESCE, so a
+   partial object passes false and clears a real disqualification on the mirror
+   the dialer reads.
+
+   NOT COALESCE'd, unlike syncPartnerIdentityToAWS, and that is deliberate:
+   two of the three sites RELEASE a claim by writing NULL, and the mirror has
+   to be able to follow. It mirrors Railway's value, whatever it is.
+
+   ALLOW-LISTED column name. The column is chosen by this module and never by a
+   request, but it is interpolated into SQL, so the list is the thing that
+   makes that safe rather than the fact that today's callers are all internal.
+
+   Returns a promise that NEVER rejects, so a caller can await it to order two
+   writes without needing a try/catch. Await it where a release follows a
+   claim: both are fire-and-forget promises against the same row, and the
+   release must not land first. */
+const PS_AWS_STAMP_COLUMNS = ['ps_signup_sent_at', 'ps_signup_verified_at', 'ps_qualified_sent_at'];
+
+function syncPartnerStackStampToAWS(session_id, column, value) {
+  if (!awsPool || !session_id) return Promise.resolve();
+  if (!PS_AWS_STAMP_COLUMNS.includes(column)) {
+    console.warn(`[AWS] ⚠ Refusing to mirror unknown PartnerStack stamp "${column}"`);
+    return Promise.resolve();
+  }
+  return awsPool.query(
+    `UPDATE gw_form_leads SET ${column} = $2, updated_at = NOW() WHERE session_id = $1`,
+    [session_id, value || null]
+  ).then(() => {
+    console.log(`[AWS] ✅ ${column} ${value ? 'set' : 'cleared'} on the mirror for ${session_id}`);
+  }).catch((err) => {
+    /* recordFailure, not silence: the dialer and anything else reading
+       gw_form_leads cannot otherwise tell a partner conversion happened. */
+    console.warn(`[AWS] ⚠ Could not mirror ${column} for ${session_id}:`, err.message);
+    recordFailure('AWS sync', `${column} (${session_id})`, err.message);
+  });
+}
+
 function sendSlack(blocks, fallbackText) {
   const webhookUrl = process.env.SLACK_WEBHOOK_URL;
   if (!webhookUrl) { console.warn('[Slack] SLACK_WEBHOOK_URL not set — skipping'); alertSlackBroken('SLACK_WEBHOOK_URL is not configured'); return; }
@@ -6334,6 +6384,10 @@ async function runPartnerStackSignup({ session_id, email, website, company, phon
 
   if (result.ok) {
     console.log(`[PartnerStack] ✅ Conversion sent: ${ps.ps_customer_key} | xid=${ps.ps_xid} | ${email}`);
+    /* The mirror could not answer "did this convert?" at all before this —
+       see syncPartnerStackStampToAWS. Awaited, so a later release can never
+       overtake it against the same row. */
+    await syncPartnerStackStampToAWS(session_id, 'ps_signup_sent_at', new Date());
     await clearPartnerStackFailure('signup', session_id);
     return;
   }
@@ -6344,6 +6398,7 @@ async function runPartnerStackSignup({ session_id, email, website, company, phon
       `UPDATE leads SET ps_signup_sent_at = NULL, updated_at = NOW() WHERE session_id = $1`,
       [session_id]
     );
+    await syncPartnerStackStampToAWS(session_id, 'ps_signup_sent_at', null);
   } catch (err) {
     console.error('[PartnerStack] ⚠ Conversion failed AND the claim could not be released:', err.message);
     recordFailure('PartnerStack', ps.ps_customer_key + ' (stuck claim)', err.message);
@@ -6420,6 +6475,22 @@ async function runPartnerStackConversionVerify() {
           `UPDATE leads SET ps_signup_verified_at = NOW(), updated_at = NOW() WHERE session_id = $1`,
           [r.session_id]
         ).catch(err => console.warn('[PartnerStack] Could not stamp verification:', err.message));
+        /* BOTH columns, not only the one this sweep wrote. The three CLAIM
+           writes are deliberately not mirrored: a claim is a Railway-internal
+           lock taken before the HTTP call, not a fact about PartnerStack, and
+           mirroring it would put a WAN write in front of the send. That leaves
+           a window — if the process dies between the claim and the success
+           mirror, Railway has ps_signup_sent_at and the mirror does not.
+
+           This sweep is where that window closes, because reaching here means
+           the customer has been read back and BOTH facts are true. Mirroring
+           ps_signup_verified_at alone would leave gw_form_leads reading
+           "verified but never sent", which is incoherent and reads to the
+           dialer as no conversion at all. Found by mutation-testing this very
+           change: dropping either mirror line went uncaught, and writing the
+           assertion that caught it showed the pair was wrong to begin with. */
+        await syncPartnerStackStampToAWS(r.session_id, 'ps_signup_sent_at', r.ps_signup_sent_at || new Date());
+        await syncPartnerStackStampToAWS(r.session_id, 'ps_signup_verified_at', new Date());
         console.log(`[PartnerStack] ✅ Conversion verified: ${r.ps_customer_key}` +
           (out.test === true ? ' ⚠ record is flagged test=true' : ''));
         /* A production integration writing test records would pay nobody and
@@ -6440,6 +6511,7 @@ async function runPartnerStackConversionVerify() {
         `UPDATE leads SET ps_signup_sent_at = NULL, updated_at = NOW() WHERE session_id = $1`,
         [r.session_id]
       ).catch(err => console.error('[PartnerStack] ⚠ Could not release the claim:', err.message));
+      await syncPartnerStackStampToAWS(r.session_id, 'ps_signup_sent_at', null);
       recordFailure('PartnerStack', r.ps_customer_key + ' (phantom conversion)',
         'PartnerStack returned 200 but no customer was created. Claim released so it can retry.');
       await recordPartnerStackFailure('signup', {
@@ -6453,6 +6525,230 @@ async function runPartnerStackConversionVerify() {
   } finally {
     _psVerifyRunning = false;
   }
+}
+
+/* ── C3: A FAILED CONVERSION IS RETRIED ──────────────────────────────
+   The claim release on a failed conversion carries the comment "so this domain
+   can be retried rather than silently lost" — and nothing retried it. The
+   conversion only ever fired from /submit, so the only thing that would try
+   again was another lead from the same domain, which may never come. One
+   timeout or one 429 at submit time was one affiliate permanently unpaid,
+   visible as a red chip somebody had to notice.
+
+   FETCH FIRST, AND THIS IS THE WHOLE DESIGN. A conversion that reported
+   failure may still have landed: the request can time out after PartnerStack
+   processed it, or a 5xx can come back from a proxy in front of a write that
+   succeeded. Re-sending blind would credit the affiliate twice, and
+   PartnerStack cannot undo a double credit — it is the one failure in this
+   repo that costs real money in the wrong direction. So every retry asks
+   "does this customer exist?" before it considers sending:
+
+     exists            -> it DID land. Stamp sent + verified, clear the
+                          failure, and never send. The original attempt was
+                          right and only its response was lost.
+     definitive 404    -> it genuinely did not land. Re-claim and re-send.
+     anything else     -> we could not tell. Leave the row alone entirely.
+
+   The BACKOFF is derived from the read-back grace, not chosen separately.
+   PartnerStack's indexing lags a conversion by 2 to 6 minutes, so a retry
+   sooner than that could ask "does it exist?" about a conversion that landed
+   and is not yet visible, get a 404, and re-send it — which is precisely the
+   double credit the fetch is there to prevent. Tying the two together means
+   shortening one cannot silently break the other.
+
+   BOUNDED. Not every failure reason is transient: a 400 on a bad payload will
+   fail identically forever, and retrying it every quarter hour would bury the
+   rows that could still succeed. After PS_RETRY_MAX_ATTEMPTS the row stops and
+   stays red for a human, which is the right end state — the affiliate is still
+   owed, and the red chip and the acknowledge flow are how someone picks it up.
+
+   A SWEEP, not a setTimeout after the failure, for the same reason as the
+   read-back: a timer dies with the process and a deploy in the wrong ten
+   minutes would lose it silently. */
+const PS_RETRY_INTERVAL_MS   = 15 * 60 * 1000;
+const PS_RETRY_MAX_ATTEMPTS  = 5;
+/* Never sooner than the read-back grace — see above. Derived so the two
+   cannot drift apart. */
+const PS_RETRY_BACKOFF_MIN   = Math.max(30, PS_VERIFY_GRACE_MIN * 2);
+const PS_RETRY_GIVE_UP_D     = 7;
+const PS_RETRY_BATCH         = 10;
+let _psRetryRunning = false;
+
+async function runPartnerStackConversionRetry() {
+  if (_psRetryRunning) return;
+  _psRetryRunning = true;
+  try {
+    const { rows } = await pool.query(
+      `SELECT l.session_id, l.email, l.ps_xid, l.ps_customer_key, l.ps_partner_key,
+              l.first_name, l.last_name, l.company, l.website, l.phone,
+              COALESCE(l.ps_signup_retry_count, 0) AS attempts,
+              l.ps_signup_fail_reason
+         FROM leads l
+        WHERE l.ps_signup_failed_at IS NOT NULL
+          AND l.ps_signup_sent_at IS NULL
+          AND l.ps_xid IS NOT NULL
+          AND l.ps_customer_key IS NOT NULL
+          /* A disqualified lead never fires a conversion. This is a GUARD, not
+             a flow property — CLAUDE.md is explicit that the cost of getting
+             it wrong here is paying an affiliate $50 for a B2C waitlist
+             signup, and this is a new path into the same send. */
+          AND l.disqualified IS NOT TRUE
+          /* THE COLLISION GUARD. ps_signup_sent_at is once per DOMAIN, enforced
+             by leads_ps_signup_once_idx. If any other lead on this domain has
+             already converted, stamping this row would violate that index —
+             and the affiliate has already been credited anyway, so there is
+             nothing owed. The lifecycle ladder already excludes such a domain
+             from conversion_failed for the same reason. */
+          AND NOT EXISTS (
+                SELECT 1 FROM leads o
+                 WHERE o.ps_customer_key = l.ps_customer_key
+                   AND o.ps_signup_sent_at IS NOT NULL)
+          AND COALESCE(l.ps_signup_retry_count, 0) < ${PS_RETRY_MAX_ATTEMPTS}
+          AND l.ps_signup_failed_at > NOW() - INTERVAL '${PS_RETRY_GIVE_UP_D} days'
+          /* Backoff measured from the LAST attempt, whichever it was. */
+          AND COALESCE(l.ps_signup_retry_at, l.ps_signup_failed_at)
+              < NOW() - INTERVAL '${PS_RETRY_BACKOFF_MIN} minutes'
+        ORDER BY l.ps_signup_failed_at
+        LIMIT ${PS_RETRY_BATCH}`
+    );
+    if (!rows.length) return;
+    console.log(`[PartnerStack] Retrying ${rows.length} failed conversion(s)`);
+
+    for (const r of rows) {
+      /* Count the attempt BEFORE making it. Counting after means a crash or a
+         deploy mid-attempt leaves the count untouched and the row retries
+         forever — the bound has to survive the thing it is bounding. */
+      await pool.query(
+        `UPDATE leads
+            SET ps_signup_retry_count = COALESCE(ps_signup_retry_count, 0) + 1,
+                ps_signup_retry_at = NOW(), updated_at = NOW()
+          WHERE session_id = $1`,
+        [r.session_id]
+      ).catch((err) => console.warn('[PartnerStack] Could not count the retry attempt:', err.message));
+
+      const out = await fetchCustomer(r.ps_customer_key);
+
+      if (!out.ok) {
+        console.warn(`[PartnerStack] Retry deferred for ${r.ps_customer_key} (${out.reason}) — cannot tell whether the original landed`);
+        continue;
+      }
+
+      if (out.exists) {
+        /* It landed. The first attempt worked and only its RESPONSE was lost —
+           re-sending would credit the affiliate twice. Stamped as verified as
+           well as sent, because the existence check just did the read-back
+           sweep's job for this row. */
+        console.log(`[PartnerStack] ✅ Retry found the customer already exists: ${r.ps_customer_key} — the original conversion DID land, not re-sending`);
+        try {
+          await pool.query(
+            `UPDATE leads
+                SET ps_signup_sent_at = COALESCE(ps_signup_sent_at, NOW()),
+                    ps_signup_verified_at = COALESCE(ps_signup_verified_at, NOW()),
+                    updated_at = NOW()
+              WHERE session_id = $1 AND ps_signup_sent_at IS NULL`,
+            [r.session_id]
+          );
+          await syncPartnerStackStampToAWS(r.session_id, 'ps_signup_sent_at', new Date());
+          await syncPartnerStackStampToAWS(r.session_id, 'ps_signup_verified_at', new Date());
+          await clearPartnerStackFailure('signup', r.session_id);
+        } catch (err) {
+          /* A concurrent claim on the same domain. Nothing owed either way. */
+          if (err && err.code === '23505') continue;
+          console.warn(`[PartnerStack] Could not stamp the recovered conversion for ${r.ps_customer_key}:`, err.message);
+        }
+        continue;
+      }
+
+      /* A definitive 404: it really did not land. Re-claim exactly the way the
+         first attempt did — claim-first, conditional, and only the winner
+         sends. */
+      let claimed = false;
+      try {
+        const claim = await pool.query(
+          `UPDATE leads SET ps_signup_sent_at = NOW(), updated_at = NOW()
+            WHERE session_id = $1
+              AND ps_signup_sent_at IS NULL
+              AND NOT EXISTS (
+                    SELECT 1 FROM leads o
+                     WHERE o.ps_customer_key = $2 AND o.ps_signup_sent_at IS NOT NULL)
+            RETURNING session_id`,
+          [r.session_id, r.ps_customer_key]
+        );
+        claimed = claim.rowCount > 0;
+      } catch (err) {
+        if (err && err.code === '23505') continue;   // concurrent claim won
+        console.warn(`[PartnerStack] Could not re-claim ${r.ps_customer_key}:`, err.message);
+        continue;
+      }
+      if (!claimed) continue;
+
+      const result = await sendConversion({
+        xid: r.ps_xid,
+        customer_key: r.ps_customer_key,
+        email: r.email,
+        name: [r.first_name, r.last_name].filter(Boolean).join(' ') || null,
+        meta: {
+          [PS_META_COMPANY]: r.company,
+          [PS_META_WEBSITE]: r.website,
+          [PS_META_PHONE]:   r.phone,
+        },
+      });
+
+      if (result.ok) {
+        console.log(`[PartnerStack] ✅ Conversion RETRY sent: ${r.ps_customer_key} (attempt ${r.attempts + 1})`);
+        await syncPartnerStackStampToAWS(r.session_id, 'ps_signup_sent_at', new Date());
+        await clearPartnerStackFailure('signup', r.session_id);
+        continue;
+      }
+
+      /* Release again, so the next sweep can try, exactly as the first attempt
+         does. A stamp on a conversion that never arrived is silent, permanent
+         and costs the affiliate a real payout. */
+      await pool.query(
+        `UPDATE leads SET ps_signup_sent_at = NULL, updated_at = NOW() WHERE session_id = $1`,
+        [r.session_id]
+      ).catch((err) => {
+        console.error(`[PartnerStack] ⚠ Retry failed AND the claim could not be released for ${r.ps_customer_key}:`, err.message);
+        recordFailure('PartnerStack', r.ps_customer_key + ' (stuck retry claim)', err.message);
+      });
+      await syncPartnerStackStampToAWS(r.session_id, 'ps_signup_sent_at', null);
+
+      const attemptsNow = r.attempts + 1;
+      const exhausted = attemptsNow >= PS_RETRY_MAX_ATTEMPTS;
+      console.warn(`[PartnerStack] ⛔ Conversion retry ${attemptsNow}/${PS_RETRY_MAX_ATTEMPTS} failed (${result.reason}): ${r.ps_customer_key}`);
+      await recordPartnerStackFailure('signup', {
+        session_id: r.session_id, customer_key: r.ps_customer_key, email: r.email,
+        partner_key: r.ps_partner_key,
+        reason: result.reason, detail: result.body,
+      });
+      /* Exhaustion is its own event and gets its own alert. The per-attempt
+         failures are noise once the bound is reached; this line is the one
+         that means a human has to send the conversion by hand. */
+      if (exhausted) {
+        console.error(`[PartnerStack] ⛔⛔ GIVING UP on ${r.ps_customer_key} after ${attemptsNow} attempts — the affiliate is still owed and nothing else will retry`);
+        recordFailure('PartnerStack', r.ps_customer_key + ' (conversion retries exhausted)',
+          `${attemptsNow} attempts all failed, last reason ${result.reason}. Send this conversion by hand — nothing will retry it now.`);
+      }
+    }
+  } catch (err) {
+    console.warn('[PartnerStack] Conversion retry sweep failed (non-blocking):', err.message);
+    recordFailure('PartnerStack', 'conversion retry sweep', err.message);
+  } finally {
+    _psRetryRunning = false;
+  }
+}
+
+/* Boot-then-interval, matching startPartnerStackCacheWarm and
+   startPartnerStackSfStateRefresh. A sweep that only ever runs on an interval
+   loses its first window to every deploy. */
+function startPartnerStackConversionRetry() {
+  const run = (why) => runPartnerStackConversionRetry()
+    .catch((err) => console.warn(`[PartnerStack] Conversion retry failed (${why}, non-blocking):`, err.message));
+  run('boot');
+  const t = setInterval(() => run('scheduled'), PS_RETRY_INTERVAL_MS);
+  if (t.unref) t.unref();
+  console.log(`[PartnerStack] Conversion retry started (boot + every ${PS_RETRY_INTERVAL_MS / 60000} min, ` +
+    `${PS_RETRY_BACKOFF_MIN} min backoff, max ${PS_RETRY_MAX_ATTEMPTS} attempts)`);
 }
 
 function startPartnerStackConversionVerify() {
@@ -6658,6 +6954,7 @@ async function sendQualificationForDomain(customerKey) {
 
   if (result.ok) {
     console.log(`[PartnerStack] ✅ Qualification sent: ${customerKey}`);
+    await syncPartnerStackStampToAWS(claimedSession, 'ps_qualified_sent_at', new Date());
     await clearPartnerStackFailure('qualify', claimedSession);
     return;
   }
@@ -6667,6 +6964,7 @@ async function sendQualificationForDomain(customerKey) {
       `UPDATE leads SET ps_qualified_sent_at = NULL, updated_at = NOW() WHERE session_id = $1`,
       [claimedSession]
     );
+    await syncPartnerStackStampToAWS(claimedSession, 'ps_qualified_sent_at', null);
   } catch (err) {
     console.error(`[PartnerStack] ⚠ Qualification failed AND the claim could not be released for ${customerKey}:`, err.message);
     recordFailure('PartnerStack', customerKey + ' (stuck qualify claim)', err.message);
@@ -8479,6 +8777,7 @@ async function start() {
       startPartnerStackCacheWarm();
       startPartnerStackQualificationPoll();
       startPartnerStackConversionVerify();
+      startPartnerStackConversionRetry();
       startPartnerStackSfStateRefresh();
     });
   } catch (err) { console.error('[GW API] Failed to start:', err); process.exit(1); }
