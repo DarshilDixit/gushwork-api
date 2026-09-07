@@ -505,6 +505,22 @@ object passes `disqualified` as false and CLEARS a real disqualification on the
 mirror the dialer reads. `syncBookingToAWS`, `syncPartnerIdentityToAWS` and
 `syncHearAboutUsToAWS` all exist for this reason. A test catches the regression.
 
+**Every alert path gets FIRED ONCE ON PURPOSE before launch.** "We asserted it
+alerts" and "we watched it alert" are different claims, and the gap between
+them hid 21 dead alert call sites in this repo — all of them tested, all of the
+tests passing, none of them ever producing an alert. No assertion about a call
+site can tell you the call did anything; that is the ceiling of a source-level
+assertion, not a flaw in a particular test. Only executing the code or watching
+the real thing arrive gets past it.
+
+**Do not reduce `PS_VERIFY_GRACE_MIN`.** PartnerStack's read-after-write lag
+was measured at **over 11 minutes** on 7 Sept 2026 — a customer created at
+16:38 still 404'd on a direct API read at 16:49. The margin at 15 minutes is
+about four minutes, not the thirteen the old note implied. A manual API read is
+also not a better oracle than the sweep: that 404 was nearly used as grounds to
+release a claim for a conversion that had in fact landed, which is the exact
+duplicate-credit failure the grace period prevents.
+
 **`recordFailure(source, …)` is a SILENT NO-OP for any source with no
 `FAILURE_MONITORS` entry** — it opens with `if (!cfg) return;`. `'PartnerStack'`
 had no entry from the day the integration shipped, so 21 call sites across the

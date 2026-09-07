@@ -639,7 +639,27 @@ sent but not yet verified:
 behind a conversion — measured at under 2 minutes for one record and about 6
 for another on 4 Sept 2026. Checking immediately would report healthy
 conversions as missing and release good claims, causing duplicate conversions
-on the retry. `PS_VERIFY_GRACE_MIN` is 15, comfortably past the worst lag seen.
+on the retry. `PS_VERIFY_GRACE_MIN` is 15.
+
+**CORRECTED 7 Sept 2026: the lag reached OVER 11 MINUTES, so 15 is tight
+rather than "comfortably past the worst lag seen" as this line used to claim.**
+A conversion for `test.com` was created at 16:38:00 — confirmed by the
+customer's own `created_at` — and a direct `GET /v2/customers/test.com` at
+16:49, eleven minutes later, returned **404**. The sweep asked at 17:06, got a
+clean 200, and stamped `ps_signup_verified_at` correctly.
+
+Two things follow, and the second is the point:
+
+1. **Do not reduce `PS_VERIFY_GRACE_MIN`.** The margin over the worst observed
+   lag is now about four minutes, not thirteen. If anything it wants raising,
+   and it wants more measurements before either.
+2. **A human reading the API directly is not a better oracle than the sweep.**
+   That 404 was used in the moment as evidence the conversion had failed and
+   would keep failing. It was the read side lagging. The design got the right
+   answer by waiting; the impatient manual check got the wrong one, and acting
+   on it would have released a good claim and re-fired a conversion that had
+   already landed — the exact duplicate-credit failure the grace period exists
+   to prevent.
 
 **"Could not tell" is never "missing".** Only a definitive 404 releases a
 claim. Treating a 5xx as missing would un-stamp every pending conversion during

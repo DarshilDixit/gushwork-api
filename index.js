@@ -6497,7 +6497,19 @@ async function runPartnerStackSignup({ session_id, email, website, company, phon
    behind a conversion — measured at under 2 minutes for one record and about 6
    for another on 4 Sept 2026. Checking immediately would report healthy
    conversions as missing and release claims that were fine, causing duplicate
-   conversions on the retry. 15 minutes is comfortably past the worst lag seen.
+   conversions on the retry.
+
+   DO NOT REDUCE IT. This comment said "15 minutes is comfortably past the
+   worst lag seen" until 7 Sept 2026, when the lag was measured at OVER 11
+   MINUTES: a test.com conversion created at 16:38:00 still returned 404 on a
+   direct API read at 16:49, and verified cleanly at 17:06. The margin is about
+   four minutes, not thirteen.
+
+   And note which oracle was right. The manual 404 was taken as proof the
+   conversion had failed; the sweep waited and found it had landed. Acting on
+   the impatient read would have released a good claim and re-fired a
+   conversion that already existed — the duplicate credit this grace period
+   exists to prevent. See docs/partnerstack.md.
 
    Only a definitive 404 releases a claim. A 5xx, a timeout or a network error
    means WE COULD NOT TELL, and the row is left alone for the next sweep —
@@ -6810,8 +6822,30 @@ async function runPartnerStackConversionRetry() {
          that means a human has to send the conversion by hand. */
       if (exhausted) {
         console.error(`[PartnerStack] ⛔⛔ GIVING UP on ${r.ps_customer_key} after ${attemptsNow} attempts — the affiliate is still owed and nothing else will retry`);
-        recordFailure('PartnerStack', r.ps_customer_key + ' (conversion retries exhausted)',
-          `${attemptsNow} attempts all failed, last reason ${result.reason}. Send this conversion by hand — nothing will retry it now.`);
+        /* IMMEDIATE, not through recordFailure, and that is the whole point of
+           this line. recordFailure alerts on a streak of three or three within
+           six hours — so waiting for it means waiting for THREE exhausted
+           domains, which is three lost commissions before anyone is told about
+           the first. Exhaustion is terminal by definition: nothing retries
+           after this, so there is no later signal to accumulate towards.
+
+           CRITICAL, and not a new severity class — recordPartnerStackFailure
+           has used alertOps('critical', 'PartnerStack', …) since batch A for
+           the same kind of loss. HEALTH_SEVERITY is untouched; this is not a
+           fourth critical health ROW.
+
+           The cooldown key is severity:source:title, so this has its own 3h
+           window independent of every other PartnerStack alert, and a second
+           domain suppressed inside it is reported as a suppressed count on the
+           next one rather than dropped. */
+        alertOps('critical', 'PartnerStack', 'Conversion retries exhausted — affiliate NOT credited', {
+          'Domain': r.ps_customer_key,
+          'Attempts': `${attemptsNow} of ${PS_RETRY_MAX_ATTEMPTS}, all failed`,
+          'Last reason': result.reason + (result.body ? ' — ' + String(result.body).slice(0, 200) : ''),
+          'Lead': r.email || '(unknown)',
+          'Impact': 'This conversion will NEVER be sent again. PartnerStack does not know this customer exists, so the affiliate gets nothing and the qualified-demo action can never fire for them either.',
+          'What to do': 'Send the conversion by hand, or acknowledge the domain on the Partners tab if the failure is understood — an acknowledged failure is no longer retried.',
+        });
       }
     }
   } catch (err) {
@@ -8167,11 +8201,32 @@ async function refreshPartnerDomainSfState() {
            does on Opportunity is read-only. */
         const perm = res.reason === 'permission';
         console.error(`[PartnerStack] ⛔ Could not write Partner_Source__c on ${oppId} (${d.customer_key}): ${res.reason}`);
-        recordFailure('PartnerStack',
-          `${d.customer_key} (Partner_Source__c${perm ? ' — PERMISSION' : ''})`,
-          perm
-            ? `Salesforce refused the Opportunity write (${res.status || res.reason}). The integration user cannot update Partner_Source__c, or has no field-level access to it. Creating a field through the Tooling API does NOT grant access — see the Salesforce access ticket. Every partner domain is affected, not just this one.`
-            : `Opportunity write failed: ${res.reason}${res.body ? ' — ' + res.body : ''}`);
+        if (perm) {
+          /* IMMEDIATE, for the same reason as exhaustion above: a permission or
+             field-security rejection is not a per-domain blip, it is the write
+             being broken for EVERY partner domain. Waiting for a streak of
+             three means waiting for it to fail on three domains before saying
+             so, when the first one already tells you everything.
+
+             It is also the one failure this service has never exercised —
+             every other thing it does on Opportunity is read-only — so it is
+             exactly the failure most likely to be misread. */
+          alertOps('critical', 'PartnerStack', 'Salesforce refused the Opportunity write', {
+            'Field': 'Partner_Source__c',
+            'Opportunity': oppId,
+            'Domain': d.customer_key,
+            'Status': String(res.status || res.reason),
+            'Detail': String(res.body || '').slice(0, 300) || '(no body)',
+            'Impact': 'EVERY partner domain is affected, not just this one. Partner attribution is not reaching the Opportunity an AE looks at.',
+            'What to do': 'Check that the integration user can update Partner_Source__c AND has field-level access to it. Creating a field through the Tooling API does NOT grant access — see docs/tickets/salesforce-integration-user-is-a-system-administrator.md. PS_SF_OPP_WRITE=false stops the write from the Railway env without a deploy.',
+          });
+        } else {
+          /* A per-record failure — a deleted Opportunity, a transient 5xx.
+             Affects one domain and may fix itself on the next sweep, so this
+             one does accumulate rather than paging. */
+          recordFailure('PartnerStack', `${d.customer_key} (Partner_Source__c)`,
+            `Opportunity write failed: ${res.reason}${res.body ? ' — ' + res.body : ''}`);
+        }
       }
     }
   }

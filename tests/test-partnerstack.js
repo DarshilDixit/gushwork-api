@@ -1637,12 +1637,27 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     /* Exhaustion is its own event: the per-attempt failures are noise once the
        bound is reached, and this is the line that means a human must send the
        conversion by hand. */
-    /* The recordFailure CALL, not just the message text. Replacing
-       recordFailure( with void ( left the string in place and this assertion
-       green — the alert was gone and the test could not tell. */
-    ok('C3: exhausting the retries raises its own distinct alert',
-       /recordFailure\('PartnerStack', r\.ps_customer_key \+ ' \(conversion retries exhausted\)'/.test(fn)
+    /* ── IMMEDIATE, not through recordFailure ──────────────────────────
+       It went through recordFailure until 7 Sept 2026, which turned out to be
+       silent for this source entirely — and even once fixed, recordFailure
+       alerts on a streak of three, so waiting for it means waiting for THREE
+       exhausted domains before anyone hears about the first. Exhaustion is
+       terminal: nothing retries after it, so there is no later signal to
+       accumulate towards.
+
+       The alertOps CALL, not just the message text — a previous version of
+       this assertion matched only the string and stayed green when
+       recordFailure( was replaced with void (. */
+    ok('C3: exhausting the retries alerts IMMEDIATELY, not on a streak',
+       /alertOps\('critical', 'PartnerStack', 'Conversion retries exhausted — affiliate NOT credited', \{/.test(fn)
        && /GIVING UP on/.test(fn));
+    ok('C3: and it no longer routes exhaustion through the streak path',
+       !/recordFailure\([^)]*conversion retries exhausted/.test(fn));
+    /* The alert has to say what a human must actually do — an alert nobody can
+       act on gets ignored, which is this file's other recurring lesson. */
+    ok('C3: the exhaustion alert names the consequence and the action',
+       /'Impact': 'This conversion will NEVER be sent again/.test(fn)
+       && /'What to do': 'Send the conversion by hand/.test(fn));
     ok('C3: exhaustion is gated on the attempt count reaching the bound',
        /const exhausted = attemptsNow >= PS_RETRY_MAX_ATTEMPTS;/.test(fn)
        && /if \(exhausted\) \{/.test(fn));
@@ -1826,9 +1841,28 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        exercised. */
     ok('sfw: a failed Opportunity write is escalated, not just logged',
        /recordFailure\('PartnerStack',\s*\n?\s*`\$\{d\.customer_key\} \(Partner_Source__c/.test(fn));
+    /* A permission or field-security rejection is not a per-domain blip — it
+       is the write being broken for every partner domain, so it pages
+       immediately rather than accumulating. A per-record failure (a deleted
+       Opportunity, a transient 5xx) still goes through recordFailure. */
     ok('sfw: a permission failure is called out as affecting EVERY domain',
        /const perm = res\.reason === 'permission';/.test(fn)
-       && /Every partner domain is affected, not just this one/.test(fn));
+       && /EVERY partner domain is affected, not just this one/.test(fn));
+    ok('sfw: a permission failure alerts IMMEDIATELY, not on a streak',
+       /alertOps\('critical', 'PartnerStack', 'Salesforce refused the Opportunity write', \{/.test(fn));
+    /* POSITION IS NOT REACHABILITY — and this one was caught by mutation
+       testing an hour after that lesson was written into a ticket. Changing
+       `if (perm)` to `if (false)` leaves the alertOps call exactly where it is
+       and never reaches it, so every assertion above stayed green. The branch
+       has to be asserted GUARDED, not merely present.
+       See docs/tickets/ordering-assertions-do-not-check-reachability.md. */
+    ok('sfw: and that alert is actually reachable — guarded by perm, not dead code',
+       /if \(perm\) \{/.test(fn));
+    ok('sfw: a per-record failure still accumulates rather than paging',
+       /\} else \{[\s\S]{0,400}?recordFailure\('PartnerStack', `\$\{d\.customer_key\} \(Partner_Source__c\)`/.test(fn));
+    ok('sfw: and the permission alert names the Tooling-API grant trap',
+       /Creating a field through the Tooling API does NOT grant access/.test(fn)
+       && /PS_SF_OPP_WRITE=false/.test(fn));
     ok('sfw: and it names the Tooling-API field-security trap',
        /Creating a field through the Tooling API does NOT grant access/.test(fn));
     /* One domain's failure must not abort the loop for the others. */
