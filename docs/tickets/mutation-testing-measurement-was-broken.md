@@ -124,6 +124,25 @@ than the tests.
 **The partial-run mode cannot be fixed generically — only measured.** Hence the
 rule rather than a code change.
 
+## A known limitation of the rule: data-driven assertion loops
+
+Condition 3 compares `passed + failed` against the baseline, which makes the
+rule **conservative** — it never reports a false CAUGHT — but it *can* report a
+false UNMEASURED. That happens when the assertions are DERIVED from the thing
+being mutated.
+
+Example, 7 Sept 2026: `tests/test-batch2.js` loops over every source string
+passed to `recordFailure` and every `FAILURE_MONITORS` entry, asserting one per
+item. Removing an entry changes how many assertions run, so
+`--mutation` reported UNMEASURED even though the mutation was cleanly caught
+with a precise message.
+
+**When a mutation legitimately changes the assertion count, verify it by hand
+and say so.** Run the suite directly and read the `✗` line. Do not "fix" it by
+loosening condition 3 — the partial-run mode it catches is real and silent,
+and a false UNMEASURED costs one manual check while a false CAUGHT costs
+confidence in everything.
+
 ## Not done, deliberately
 
 **The three crashing suites were not restructured.** Wrapping
