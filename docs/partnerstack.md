@@ -988,6 +988,70 @@ a failure of the sweep.
   The cost of getting it wrong is paying an affiliate $50 for a B2C waitlist
   signup.
 
+## At 50 partners and 500 domains — the scale items (PR 25)
+
+Five things that worked at four domains and would not at five hundred. None was
+a bug yet; all five were shapes that fail quietly rather than loudly.
+
+**"Needs attention" was a page, not a population.** The ladder query
+deliberately includes an unresolved failure *regardless of age*, so a domain
+that failed months ago and was never fixed cannot drop out of the one number
+that means somebody must act today — and then `ORDER BY MAX(created_at) DESC
+LIMIT 500` undid that one line later. Past 500 domains a failure older than the
+newest 500 would silently fall off the headline.
+
+It now has its own **unbounded** query over the same ladder expression, with
+the table left as a page. The same seam as the funnel's absolute-versus-
+cumulative twins: one number to act on, one to read, both labelled. When that
+query cannot run, the count falls back to the page and
+`needsAttentionComplete: false` reaches the screen as *"AT LEAST this many —
+the full count could not be read"*. A floor is never rendered as a total.
+
+**The refresh's own cap was invisible.** The ladder renders `capped at 500
+domains`; the SF-state refresh had a bare `LIMIT 1000` with no signal at all,
+so past a thousand partner domains a domain would never get a state row and
+render as "not checked yet" — honest by accident, and indistinguishable from a
+domain the poller genuinely had not reached. It is a named constant now and
+hitting it logs and alerts.
+
+**A frozen state refresh now turns the health row RED.** The tab already
+rendered a STALE chip off the same clock, but nothing alerted, so a refresh
+that had stopped was visible only to somebody looking at the tab. That matters
+because when this column freezes, "waiting on an AE", "no Opportunity" and the
+funnel's Opportunity and ticked stages all keep rendering their last values *as
+if they were current*. A number that is wrong and confident is worse than one
+that is missing. Checked after the failure states (a real failure is more
+urgent) but **before** green, because a green badge means "verified working,
+just now" and a frozen refresh cannot support that. Zero rows is not stale — it
+is a programme with no partner domains.
+
+**The state write is one batched upsert, not one per domain.** It was a
+sequential `INSERT … ON CONFLICT` inside the loop: 500 domains meant 500 round
+trips every 15 minutes. `UNNEST` of four parallel arrays, so four bind
+parameters whatever the row count and no statement-length ceiling.
+
+**The ordering trap that batching would have introduced, and nearly did.** The
+`Partner_Source__c` pass records its idempotence stamp with an `UPDATE` on
+`partner_domain_sf_state`. On a domain's first refresh there is no row yet — so
+if the batched write simply moved to the end of the function, that `UPDATE`
+would match nothing, the stamp would be lost, and the PATCH would re-fire on
+every tick forever. Two passes, state written first, and a test asserts the
+order by position.
+
+**The read-back sweep was interval-only** — and the comment above the SF-state
+scheduler asserted that it "already does boot-then-interval". It did not, and
+that claim was false from the moment it was written. Every deploy restarted the
+timer, so a conversion sent just before a restart waited a further 15 minutes
+past its grace, and a run of deploys could defer it repeatedly. Nothing was
+lost (the sweep is idempotent) but a phantom conversion stayed undetected
+longer than the design intends, and a phantom is money not being paid. All four
+partner background jobs now share one shape, asserted as a set so a fifth
+cannot be added interval-only.
+
+The false comment is **corrected in place rather than quietly edited**, because
+a confident wrong statement about neighbouring code is exactly what that
+comment block is warning about.
+
 ## Small datasets catch bugs that large ones hide
 
 This was found because **`hello.com` contradicted itself at n=4**: the tab said

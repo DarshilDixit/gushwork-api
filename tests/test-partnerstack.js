@@ -955,8 +955,14 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
 
     /* A SWEEP, not a setTimeout: a timer dies with the process and a deploy in
        the wrong ten minutes loses the verification silently. */
+    /* The scheduler gained a boot run in PR 25, so the interval is now
+       registered through a local helper rather than by bare function
+       reference. The substance of this assertion is the second half: the
+       verification must be a SWEEP, never a setTimeout after the send. A timer
+       dies with the process and a deploy in the wrong ten minutes would lose
+       it silently — the same class of failure the read-back exists to catch. */
     ok('readback: it is a sweep on an interval, not a post-send timer',
-       /setInterval\(runPartnerStackConversionVerify/.test(src) &&
+       /setInterval\(\(\) => run\('scheduled'\), PS_VERIFY_INTERVAL_MS\)/.test(src) &&
        !/setTimeout\([\s\S]{0,80}?fetchCustomer/.test(src));
     ok('readback: it is started at boot', /startPartnerStackConversionVerify\(\);/.test(src));
 
@@ -1113,6 +1119,18 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
       const fakePool = { query: async (q) => {
         calls.push(q);
         if (q.includes('partner_domain_sf_state')) return { rows: [{ customer_key: 'a.com', sf_state: 'ticked' }] };
+        /* R2: the UNBOUNDED failure count. "Needs attention" is the one number
+           on the tab that means somebody must act today, and the domain query
+           beside it is ordered by recency and capped — so past the cap a
+           failure would silently drop off the headline. It gets its own query
+           over the whole population, and this fake answers it. */
+        /* 5 and 1, NOT 2 and 0. The four domain rows below contain exactly
+           two red states and zero acknowledged, so a fixture returning 2 here
+           cannot distinguish "read the unbounded query" from "counted the
+           capped page" — both give 2, and reverting to the page count survived
+           the mutation. Deliberately different numbers, so only one source can
+           produce them. */
+        if (q.includes('AS needs_attention')) return { rows: [{ needs_attention: '5', acknowledged: '1' }] };
         return q.includes('ps_customer_key IS NULL')
           ? { rows: [{ leads: '7' }] }
           : { rows: [
@@ -1133,7 +1151,12 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
         '\n return partnerLifecycle;'))(fakePool, { warn() {}, log() {} });
       const out = await L();
       eq('ladderA: no-key leads reach the response with their real count', out.noCustomerKeyLeads, 7);
-      eq('ladderA: needsAttention counts exactly the two red states', out.needsAttention, 2);
+      /* 5, which ONLY the unbounded query can produce — the page holds two
+         red states. Reverting to the page count gives 2 and fails here. */
+      eq('ladderA/R2: needsAttention comes from the UNBOUNDED query, not the page',
+         out.needsAttention, 5);
+      eq('ladderA/R2: acknowledged comes from the unbounded query too', out.acknowledged, 1);
+      eq('ladderA/R2: and the count is flagged COMPLETE', out.needsAttentionComplete, true);
       eq('ladderA: totalDomains counts domains, not leads', out.totalDomains, 4);
       eq('ladderA: the state counts sum to the domain total',
          Object.values(out.byState).reduce((a, b) => a + b, 0), out.totalDomains);
@@ -1650,10 +1673,12 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
                          src.indexOf('let _psSfLastRead') >= 0
                            ? src.indexOf('const PS_SF_REFRESH_INTERVAL_MS')
                            : src.length);
+    /* The CASEs read the UNNEST alias since PR 25 batched the write; they were
+       on $2 when it was one statement per domain. */
     ok('sfC/C6: first_ticked_at is stamped only when the box is actually ticked',
-       /CASE WHEN \$2 = 'ticked' THEN NOW\(\) END/.test(fn));
+       /CASE WHEN st = 'ticked' THEN NOW\(\) END/.test(fn));
     ok('sfC/C6: first_opportunity_at is stamped for either Opportunity state',
-       /CASE WHEN \$2 IN \('ticked','exists_unticked'\) THEN NOW\(\) END/.test(fn));
+       /CASE WHEN st IN \('ticked','exists_unticked'\) THEN NOW\(\) END/.test(fn));
     ok('sfC/C6: neither can ever be cleared or moved later',
        /first_ticked_at\s+= COALESCE\(partner_domain_sf_state\.first_ticked_at,\s+EXCLUDED\.first_ticked_at\)/.test(fn)
        && /first_opportunity_at = COALESCE\(partner_domain_sf_state\.first_opportunity_at, EXCLUDED\.first_opportunity_at\)/.test(fn));
@@ -1664,7 +1689,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        construction rather than by luck. Asserted because it is exactly the
        kind of load-bearing property nothing else enforces. */
     ok('sfC/C6: a ticked domain also stamps first_opportunity_at, so the tail nests',
-       /CASE WHEN \$2 IN \('ticked','exists_unticked'\)/.test(fn));
+       /CASE WHEN st IN \('ticked','exists_unticked'\)/.test(fn));
     /* The same-table backfill exists only so a currently-true state is stamped
        now rather than 15 minutes from now, and must be idempotent. */
     ok('sfC/C6: the backfill only ever touches rows where the stamp is NULL',
@@ -1738,7 +1763,8 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        way, which a Lead field cannot: none of our 29 custom Lead fields
        survive conversion. */
     ok('sfw: it only writes where an Opportunity actually exists',
-       /if \(PS_SF_OPP_WRITE_ENABLED && oppId\)/.test(fn));
+       /if \(PS_SF_OPP_WRITE_ENABLED\) \{/.test(fn)
+       && /const oppId = oppIdByKey\.get\(d\.customer_key\);\s*\n\s*if \(!oppId\) continue;/.test(fn));
     /* ONE display chain, three surfaces: Slack, the dashboard and
        hear_about_us. A fourth spelling of a partner name would be a fourth
        thing an SDR cannot search for. */
@@ -1751,7 +1777,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     /* IDEMPOTENT, or every partner Opportunity is PATCHed every 15 minutes
        forever — 2,880 writes a day at 30 domains, growing linearly. */
     ok('sfw: the write is idempotent on what was last written',
-       /source !== d\.sf_partner_source/.test(fn));
+       /if \(!source \|\| source === d\.sf_partner_source\) continue;/.test(fn));
     ok('sfw: and what was written is recorded so it can be compared next tick',
        /SET sf_partner_source = \$2, sf_partner_source_at = NOW\(\)/.test(fn));
     ok('sfw: the idempotence columns exist',
@@ -1796,6 +1822,105 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
                            src.indexOf('async function sendQualificationForDomain'));
     ok('sfw: the qualification poll still writes nothing to Salesforce',
        !/updateOpportunityFields/.test(poll));
+  }
+
+  /* ── PR 25: the scale items ────────────────────────────────────────── */
+  {
+    /* R1: a frozen state refresh must ALERT, not only render a chip. When this
+       column freezes, "waiting on an AE", "no Opportunity" and the funnel's
+       Opportunity and ticked stages all keep rendering their last values as if
+       they were current. Health checks fail LOUD — that is the house rule. */
+    const hfn = src.slice(src.indexOf('async function checkPartnerStackHealth'),
+                          src.indexOf('const HEALTH_SEVERITY'));
+    ok('R1: the health check reads the state table for staleness',
+       /MAX\(checked_at\) AS newest/.test(hfn) && /FROM partner_domain_sf_state/.test(hfn));
+    ok('R1: a stale refresh turns the row RED, not green',
+       /hc\('partnerstack', 'red',\s*\n?\s*`Salesforce state has not refreshed/.test(hfn));
+    ok('R1: the tolerance is the shared constant, not a second number',
+       /age >= PS_SF_STALE_MIN/.test(hfn));
+    /* Order matters: a real failure is more urgent than staleness, but
+       staleness must be checked BEFORE green, or a frozen refresh reports
+       "verified working, just now". */
+    {
+      const fail = hfn.indexOf("failed in the last ${win}");
+      const st   = hfn.indexOf('Salesforce state has not refreshed');
+      const grn  = hfn.indexOf("hc('partnerstack', 'green'");
+      ok('R1: staleness is checked after failures and BEFORE green',
+         fail !== -1 && st > fail && grn > st, `fail@${fail} stale@${st} green@${grn}`);
+      /* POSITION IS NOT REACHABILITY. Making the green branch unconditional
+         (`if (true) return ... 'green'`) leaves every offset above unchanged
+         and skips the staleness check entirely — it survived exactly that.
+         So the green return must also be asserted to be GUARDED. */
+      ok('R1: green is still conditional on there being activity to verify',
+         /if \(conv \|\| qual \|\| lds\) return hc\('partnerstack', 'green'/.test(hfn));
+    }
+    /* Zero rows is not stale — it is a programme with no partner domains, and
+       the counts already report that as insufficient_data. */
+    ok('R1: an empty state table is not reported as stale',
+       /Number\(stale\.rows\[0\]\.domains\) > 0/.test(hfn));
+    /* Its own query, so a table that does not exist yet cannot take the whole
+       health row down with it. */
+    ok('R1: the staleness query cannot break the rest of the check',
+       /FROM partner_domain_sf_state`\)\.catch\(\(\) => null\)/.test(hfn));
+
+    const rfn = src.slice(src.indexOf('async function refreshPartnerDomainSfState'),
+                          src.indexOf('/* ITS OWN JOB, not chained'));
+    /* R3: the ladder's cap renders "capped at 500 domains"; this one was a
+       bare LIMIT 1000 with no signal, so a domain past it rendered as "not
+       checked yet" — honest by accident, and indistinguishable from a domain
+       the poller had simply not reached. */
+    ok('R3: the refresh cap is a named constant, not a bare LIMIT',
+       /LIMIT \$\{PS_SF_REFRESH_DOMAIN_LIMIT\}/.test(rfn)
+       && /const PS_SF_REFRESH_DOMAIN_LIMIT = \d+;/.test(src));
+    ok('R3: hitting the cap is reported, not silent',
+       /domains\.length >= PS_SF_REFRESH_DOMAIN_LIMIT/.test(rfn)
+       && /recordFailure\('PartnerStack', 'sf state refresh capped'/.test(rfn));
+
+    /* R4: one batched upsert instead of one round trip per domain. */
+    ok('R4: the state write is a single batched statement',
+       /FROM UNNEST\(\$1::text\[\], \$2::text\[\], \$3::text\[\], \$4::text\[\]\) AS t\(k, st, oid, err\)/.test(rfn));
+    ok('R4: there is no per-domain INSERT left in the loop',
+       (rfn.match(/INSERT INTO partner_domain_sf_state/g) || []).length === 1);
+    ok('R4: a failed batch write is reported and stops the refresh',
+       /recordFailure\('PartnerStack', 'sf state batch write'/.test(rfn)
+       && /return \{ ok: false, reason: 'write_failed' \}/.test(rfn));
+    /* THE ORDERING TRAP batching would have introduced. The Partner_Source__c
+       pass records its idempotence stamp with an UPDATE on
+       partner_domain_sf_state, so on a domain's first refresh there is no row
+       yet — the UPDATE would match nothing, the stamp would be lost, and the
+       PATCH would re-fire every tick forever. The batch must land FIRST. */
+    {
+      const batchAt = rfn.indexOf('INSERT INTO partner_domain_sf_state');
+      const patchAt = rfn.indexOf('updateOpportunityFields(oppId');
+      ok('R4: the state rows are written BEFORE the Partner_Source pass',
+         batchAt !== -1 && patchAt !== -1 && batchAt < patchAt, `batch@${batchAt} patch@${patchAt}`);
+    }
+    /* The HTTP call stays per domain — it is third-party and already bounded
+       by its own idempotence check. */
+    ok('R4: the Opportunity PATCH is deliberately NOT batched',
+       /Still per domain, not batched/.test(rfn));
+
+    /* The verify sweep was interval-only, and the comment above the SF-state
+       scheduler claimed otherwise. Every deploy restarted its timer, so a
+       phantom conversion stayed undetected longer than the design intends. */
+    const vfn = src.slice(src.indexOf('function startPartnerStackConversionVerify'),
+                          src.indexOf('/* \u2500\u2500 STEP 10: the qualification action'));
+    ok('R7: the read-back sweep runs at BOOT as well as on the interval',
+       /run\('boot'\);/.test(vfn) && /setInterval\(\(\) => run\('scheduled'\), PS_VERIFY_INTERVAL_MS\)/.test(vfn));
+    ok('R7: and its boot run cannot throw out of start()',
+       /\.catch\(\(err\) =>/.test(vfn));
+    /* All four partner background jobs now share one shape. Asserted as a set
+       so a fifth cannot be added interval-only. */
+    for (const fn of ['startPartnerStackCacheWarm', 'startPartnerStackSfStateRefresh',
+                      'startPartnerStackConversionRetry', 'startPartnerStackConversionVerify']) {
+      const body = src.slice(src.indexOf('function ' + fn), src.indexOf('function ' + fn) + 900);
+      /* Matches the ARGUMENT, not a particular wrapper name: cacheWarm calls
+         refreshPartnerStackCustomerCache('boot') directly while the other
+         three go through a local `run` helper. Both are boot-then-interval;
+         pinning the helper name would fail on a correct implementation. */
+      ok(`R7: ${fn} does boot-then-interval`,
+         /\('boot'\)/.test(body) && /setInterval\(/.test(body), fn);
+    }
   }
 
   ok('sfC: the refresh has its own scheduler', /function startPartnerStackSfStateRefresh/.test(src));
@@ -2340,11 +2465,22 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     ok('ackH: it is reversible', /acknowledged = req\.body\.acknowledged !== false/.test(fn));
     ok('ackH: every ack is logged', /Acknowledged' : 'Un-acknowledged'/.test(fn));
   }
-  /* Both consumers must respect it, or the alert still fires. */
-  ok('ackH: Needs attention excludes acknowledged failures',
+  /* Both consumers must respect it, or the alert still fires. Since PR 25 the
+     headline comes from the unbounded query, so the exclusion lives in SQL —
+     and the page-derived version survives as the fallback for when that query
+     cannot run. Both are asserted, because either one alone leaving the ack
+     out would let an acknowledged failure keep demanding action. */
+  ok('ackH: Needs attention excludes acknowledged failures (unbounded query)',
+     /COUNT\(\*\) FILTER \(WHERE NOT acknowledged\) AS needs_attention/.test(src));
+  ok('ackH: and the page fallback excludes them too',
      /PS_LADDER_FAILED\.includes\(d\.state\) && d\.acknowledged !== true/.test(src));
+  /* Counted separately rather than hidden — an acknowledged failure keeps its
+     state and its red chip, it just stops demanding action. Since PR 25 the
+     primary count is a FILTER in the unbounded query and the page-derived
+     filter is the fallback; both must keep the two apart. */
   ok('ackH: acknowledged failures are counted separately, not hidden',
-     /const acknowledged = domains\.rows\.filter\(/.test(src));
+     /COUNT\(\*\) FILTER \(WHERE acknowledged\)\s+AS acknowledged/.test(src)
+     && /d\.acknowledged === true\)\.length/.test(src));
   eq('ackH: the health row ignores acknowledged failures on BOTH kinds',
      (src.match(/AND ps_failure_ack_at IS NULL\)/g) || []).length, 2);
 
@@ -2721,6 +2857,33 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     /* sfActionable is 0 here, so the words must appear nowhere on the tab. */
     ok('untickUI: nothing on the tab claims an AE is being waited on',
        !/waiting on an AE/.test(rows) && !/waiting on an AE/.test(chips));
+
+    /* ── R2: an incomplete headline must SAY SO on screen ──────────
+       needsAttentionComplete === false means the count is the capped page's,
+       not the population's. A floor rendered as a total is this integration's
+       recurring bug, and per the two-assertions rule the server deriving the
+       flag is only half of it — the client has to render it. Dropping the
+       render survived every server-side assertion. */
+    {
+      const els2 = {};
+      const doc2 = { getElementById: (id) => (els2[id] = els2[id] || mk()), createElement: () => ({ value: '', textContent: '' }) };
+      await (new Function('API','TP','esc','et','set','fetch','AbortSignal','document','showTab','loadFilterOptions','loadLeads','Array','prompt','alert',
+        client + '; return {loadPartners};'))('', '', (x) => String(x == null ? '' : x), (x) => String(x == null ? '' : x),
+        (id, v) => { doc2.getElementById(id).textContent = String(v); },
+        async () => ({ ok: true, json: async () => ({ totals: {}, partners: [],
+          funnel: { stages, losses, rateMin: 10, programme: prog },
+          lifecycle: Object.assign({}, lifecycle, { needsAttention: 3, needsAttentionComplete: false }) }) }),
+        { timeout: () => null }, doc2, () => {}, async () => {}, () => {}, Array, () => '', () => {}).loadPartners();
+      ok('untickUI/R2: an incomplete Needs-attention count says it is a floor',
+         /AT LEAST this many/.test(els2['p-attn-sub'].textContent), els2['p-attn-sub'].textContent);
+      ok('untickUI/R2: and it does NOT read as an actionable total',
+         !/^act on these today$/.test(els2['p-attn-sub'].textContent));
+      /* The healthy case must be unchanged — this adds no noise until it
+         means something, same rule as the funnel's off-path line. */
+      ok('untickUI/R2: a complete count still reads normally',
+         els['p-attn-sub'].textContent === 'nothing failing'
+         || !/AT LEAST/.test(els['p-attn-sub'].textContent), els['p-attn-sub'].textContent);
+    }
 
     /* ── C5: the domain that rendered no chip at all ── */
     ok('untickUI: the third bucket renders its own chip',

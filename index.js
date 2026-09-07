@@ -1556,6 +1556,32 @@ async function checkPartnerStackHealth(db) {
             AND created_at >= NOW() - INTERVAL '${HEALTH_PARTNERSTACK_WINDOW_H} hours')           AS partner_leads
         FROM leads
     `);
+    /* ── R1: is the Salesforce state refresh still running? ──────────
+       The Partners tab already renders a STALE chip off the same clock, but
+       nothing ALERTED, so a refresh that had silently stopped was only visible
+       to somebody looking at the tab. That matters more than it sounds: when
+       this column freezes, "waiting on an AE", "no Opportunity" and the
+       funnel's Opportunity and ticked stages all keep rendering their last
+       values as if they were current. A number that is wrong and confident is
+       worse than one that is missing.
+
+       Its own query, deliberately not folded into the counts above: those come
+       from `leads`, this comes from partner_domain_sf_state, and a table that
+       does not exist yet must not take the whole health row down.
+
+       Zero rows is NOT stale — it is a programme with no partner domains yet,
+       which the counts below already report as insufficient_data. */
+    /* PS_SF_STALE_MIN and PS_SF_REFRESH_INTERVAL_MS are declared far BELOW
+       this function. That is legal and safe because a module-level const is
+       initialised when the module body runs and this function is only ever
+       called after that — proven, not assumed. It would break only if
+       something called it during module evaluation. */
+    const stale = await db.query(`
+      SELECT COUNT(*) AS domains,
+             MAX(checked_at) AS newest,
+             ROUND(EXTRACT(EPOCH FROM (NOW() - MAX(checked_at))) / 60) AS age_min
+        FROM partner_domain_sf_state`).catch(() => null);
+
     const q    = r.rows[0];
     const conv = parseInt(q.conversions)      || 0;
     const qual = parseInt(q.qualifications)   || 0;
@@ -1572,6 +1598,21 @@ async function checkPartnerStackHealth(db) {
       if (f2) parts.push(`${f2} qualification${f2 > 1 ? 's' : ''}`);
       return hc('partnerstack', 'red', `${parts.join(' and ')} failed in the last ${win}`,
         summary + '. A failed conversion means the affiliate is not credited; a failed qualification means the $50 did not fire. Claims are released, so these retry.');
+    }
+
+    /* Checked AFTER the failure states, because a real failure is the more
+       urgent thing to put on the row — but before green, because a green badge
+       here means "verified working, just now" and a frozen refresh cannot
+       support that claim. Health checks fail LOUD; that is the rule. */
+    if (stale && Number(stale.rows[0].domains) > 0) {
+      const age = Number(stale.rows[0].age_min);
+      if (!Number.isFinite(age) || age >= PS_SF_STALE_MIN) {
+        return hc('partnerstack', 'red',
+          `Salesforce state has not refreshed for ${Number.isFinite(age) ? age + ' min' : 'an unknown time'}`,
+          `The per-domain Salesforce state should refresh every ${PS_SF_REFRESH_INTERVAL_MS / 60000} minutes and is older than the ${PS_SF_STALE_MIN} minute tolerance. ` +
+          'Until it does, "waiting on an AE", "no Opportunity" and the funnel Opportunity and ticked stages are all showing stale values as if they were current. ' +
+          summary);
+      }
     }
     if (conv || qual || lds) return hc('partnerstack', 'green', summary, `${lds} partner lead${lds === 1 ? '' : 's'} in the same window, no failures`);
     return hc('partnerstack', 'insufficient_data', `No partner activity in the last ${win}`,
@@ -3450,7 +3491,10 @@ app.get('/monitor', (req, res) => {
   'var lc=d.lifecycle||{};var bs=lc.byState||{};var failed=lc.failedStates||[];' +
   'var attn=document.getElementById("p-attn");' +
   'if(attn){attn.textContent=String(lc.needsAttention||0);attn.className="mv"+((lc.needsAttention||0)>0?" psattn":"");}' +
-  'set("p-attn-sub",(lc.needsAttention||0)>0?"act on these today":((lc.acknowledged||0)>0?(lc.acknowledged+" acknowledged, not counted"):"nothing failing"));' +
+  /* needsAttentionComplete === false means the count came from the capped
+     page rather than the population, and that has to reach the screen — a
+     floor rendered as a total is the recurring bug in this integration. */
+  'set("p-attn-sub",lc.needsAttentionComplete===false?"AT LEAST this many \u2014 the full count could not be read":((lc.needsAttention||0)>0?"act on these today":((lc.acknowledged||0)>0?(lc.acknowledged+" acknowledged, not counted"):"nothing failing")));' +
   'set("p-domains",lc.totalDomains||0);' +
   'var order=["qualified","qualification_failed","conversion_failed","demo_done_not_qualified","awaiting_demo","converted","skipped","conversion_pending"];' +
   'var lbl={qualified:"qualified",qualification_failed:"qualification failed",conversion_failed:"conversion failed",demo_done_not_qualified:"demo done, not qualified",awaiting_demo:"awaiting demo",converted:"converted",skipped:"skipped",conversion_pending:"pending"};' +
@@ -6751,10 +6795,28 @@ function startPartnerStackConversionRetry() {
     `${PS_RETRY_BACKOFF_MIN} min backoff, max ${PS_RETRY_MAX_ATTEMPTS} attempts)`);
 }
 
+/* BOOT-THEN-INTERVAL, matching startPartnerStackCacheWarm,
+   startPartnerStackSfStateRefresh and startPartnerStackConversionRetry.
+
+   It was interval-only, and the comment above startPartnerStackSfStateRefresh
+   asserted that this function "already does boot-then-interval" — it did not.
+   The comment was wrong from the moment it was written and nothing checked it,
+   which is its own small lesson: a claim about neighbouring code is as
+   load-bearing as a claim about your own and nothing enforces either.
+
+   The cost of interval-only here was real but bounded. Every deploy restarted
+   the timer, so a conversion sent just before a restart waited a further 15
+   minutes past its grace to be verified, and a run of deploys could defer it
+   repeatedly. Nothing was lost — the sweep is idempotent and picks up anything
+   still unverified — but a phantom conversion stayed undetected longer than
+   the design intends, and a phantom is money not being paid. */
 function startPartnerStackConversionVerify() {
-  const t = setInterval(runPartnerStackConversionVerify, PS_VERIFY_INTERVAL_MS);
+  const run = (why) => runPartnerStackConversionVerify()
+    .catch((err) => console.warn(`[PartnerStack] Conversion read-back failed (${why}, non-blocking):`, err.message));
+  run('boot');
+  const t = setInterval(() => run('scheduled'), PS_VERIFY_INTERVAL_MS);
   if (t.unref) t.unref();
-  console.log(`[PartnerStack] Conversion read-back started (every ${PS_VERIFY_INTERVAL_MS / 60000} min, ${PS_VERIFY_GRACE_MIN} min grace)`);
+  console.log(`[PartnerStack] Conversion read-back started (boot + every ${PS_VERIFY_INTERVAL_MS / 60000} min, ${PS_VERIFY_GRACE_MIN} min grace)`);
 }
 
 /* ── STEP 10: the qualification action ───────────────────────────────
@@ -7189,7 +7251,7 @@ const PS_LADDER_LIMIT    = 500;
 const PS_SF_STALE_MIN    = 45;
 
 async function partnerLifecycle() {
-  const [domains, noKey, sfState] = await Promise.all([
+  const [domains, noKey, sfState, failedTotals] = await Promise.all([
     pool.query(`
       SELECT ps_customer_key                    AS customer_key,
              ${PS_LADDER_SQL}                   AS state,
@@ -7228,6 +7290,34 @@ async function partnerLifecycle() {
     pool.query(`SELECT customer_key, sf_state, sf_opportunity_id, sf_error, checked_at,
                        first_ticked_at, first_opportunity_at
                   FROM partner_domain_sf_state`).catch(() => ({ rows: [] })),
+    /* ── R2: "Needs attention" MUST NOT be a page ─────────────────────
+       The domain query above is ordered by recency and capped at
+       PS_LADDER_LIMIT. The cap is right for a table — nobody reads 500 rows —
+       but "Needs attention" is the one number on the tab that means somebody
+       has to act today, and a floor is not that. Past 500 domains a failure
+       older than the newest 500 would drop off it silently, which is exactly
+       what the ladder's unbounded-failure OR clause was written to prevent and
+       what the LIMIT then undid one line later.
+
+       So the headline is counted by its own UNBOUNDED query over the same
+       ladder expression, and the table stays a page. This is the same
+       arithmetic seam as the funnel's absolute-versus-cumulative twins: one
+       number to act on, one number to read, both labelled.
+
+       No date window at all, matching the ladder's own rule that an unresolved
+       failure is included regardless of age. leads_ps_failed_idx covers it. */
+    pool.query(`
+      SELECT COUNT(*) FILTER (WHERE NOT acknowledged) AS needs_attention,
+             COUNT(*) FILTER (WHERE acknowledged)     AS acknowledged
+        FROM (
+          SELECT ${PS_LADDER_SQL} AS state,
+                 BOOL_OR(ps_failure_ack_at IS NOT NULL) AS acknowledged
+            FROM leads
+           WHERE ps_xid IS NOT NULL AND ps_customer_key IS NOT NULL
+             AND (ps_signup_failed_at IS NOT NULL OR ps_qualify_failed_at IS NOT NULL)
+           GROUP BY ps_customer_key
+        ) d
+       WHERE d.state = ANY($1)`, [PS_LADDER_FAILED]).catch(() => ({ rows: [null] })),
   ]);
 
   const sfByDomain = new Map(sfState.rows.map((r) => [r.customer_key, r]));
@@ -7284,10 +7374,19 @@ async function partnerLifecycle() {
   /* Acknowledged failures keep their state and their red chip — the history is
      the point — but they stop demanding action. An alert that was wrong the
      first time it fired gets ignored, and this one was. */
-  const needsAttention = domains.rows.filter(
-    (d) => PS_LADDER_FAILED.includes(d.state) && d.acknowledged !== true).length;
-  const acknowledged = domains.rows.filter(
-    (d) => PS_LADDER_FAILED.includes(d.state) && d.acknowledged === true).length;
+  /* From the unbounded query, so the headline is a population and not
+     whatever the LIMIT returned — the denominator rule from
+     docs/partnerstack.md pointed at a numerator. The page-derived count is
+     kept only as the fallback for when that query could not run, and says so
+     rather than silently reporting a floor as a total. */
+  const ft = failedTotals.rows[0];
+  const needsAttentionComplete = !!ft;
+  const needsAttention = ft
+    ? Number(ft.needs_attention) || 0
+    : domains.rows.filter((d) => PS_LADDER_FAILED.includes(d.state) && d.acknowledged !== true).length;
+  const acknowledged = ft
+    ? Number(ft.acknowledged) || 0
+    : domains.rows.filter((d) => PS_LADDER_FAILED.includes(d.state) && d.acknowledged === true).length;
 
   return {
     domains: domains.rows,
@@ -7295,6 +7394,9 @@ async function partnerLifecycle() {
     totalDomains: domains.rows.length,
     needsAttention,
     acknowledged,
+    /* False means the number above is the capped page's count, not the
+       population. "We could not check" is never rendered as a total. */
+    needsAttentionComplete,
     /* Deliberately its own field and its own unit. */
     noCustomerKeyLeads: Number(noKey.rows[0].leads) || 0,
     failedStates: PS_LADDER_FAILED,
@@ -7814,6 +7916,11 @@ const PS_SF_STATES = ['ticked', 'exists_unticked', 'create_errored', 'no_opportu
    Set PS_SF_OPP_WRITE to the string "false" to turn it off. */
 const PS_SF_OPP_WRITE_ENABLED = process.env.PS_SF_OPP_WRITE !== 'false';
 
+/* A named constant rather than a bare LIMIT, so hitting it can be reported.
+   An unnamed cap cannot be rendered, and a cap nobody can see turns a page
+   into something that reads as the population. */
+const PS_SF_REFRESH_DOMAIN_LIMIT = 1000;
+
 async function refreshPartnerDomainSfState() {
   const { rows: domains } = await pool.query(`
     SELECT l.ps_customer_key AS customer_key,
@@ -7831,7 +7938,18 @@ async function refreshPartnerDomainSfState() {
       LEFT JOIN partner_domain_sf_state s ON s.customer_key = l.ps_customer_key
      WHERE l.ps_xid IS NOT NULL AND l.ps_customer_key IS NOT NULL AND l.email IS NOT NULL
      GROUP BY l.ps_customer_key
-     LIMIT 1000`);
+     LIMIT ${PS_SF_REFRESH_DOMAIN_LIMIT}`);
+  /* ── R3: the cap must be VISIBLE ──────────────────────────────────
+     The ladder's 500-row cap renders "capped at 500 domains". This one was a
+     bare LIMIT 1000 with no signal at all, so past a thousand partner domains
+     a domain would simply never get a state row and render as "not checked
+     yet" — honest by accident rather than by design, and indistinguishable
+     from a domain the poller had genuinely not reached yet. */
+  if (domains.length >= PS_SF_REFRESH_DOMAIN_LIMIT) {
+    console.warn(`[PartnerStack] SF state refresh is CAPPED at ${PS_SF_REFRESH_DOMAIN_LIMIT} domains — domains beyond the cap have no state row and render as "not checked yet"`);
+    recordFailure('PartnerStack', 'sf state refresh capped',
+      `More than ${PS_SF_REFRESH_DOMAIN_LIMIT} partner domains exist. The ones past the cap never get a Salesforce state, so "waiting on an AE" and "no Opportunity" are incomplete. Raise PS_SF_REFRESH_DOMAIN_LIMIT or page the refresh.`);
+  }
   if (!domains.length) {
     console.log('[PartnerStack] SF state refresh: no partner domains yet');
     return { ok: true, updated: 0 };
@@ -7877,7 +7995,40 @@ async function refreshPartnerDomainSfState() {
     }
   }
 
-  let updated = 0;
+  /* ── R4: ONE batched upsert, not one per domain ───────────────────
+     This was a sequential INSERT ... ON CONFLICT inside the loop: 500 domains
+     meant 500 round trips every 15 minutes. It worked, and it is the shape
+     that turns a slow database into a poll overrunning its own interval —
+     at which point _psSfRefreshRunning-style guards start skipping ticks and
+     the column goes stale, which is now a red health row.
+
+     UNNEST of four parallel arrays rather than a built VALUES list: no
+     interpolation, four bind parameters whatever the row count, and no
+     statement-length ceiling to run into at scale.
+
+     The state is still computed per domain in the loop below — only the WRITE
+     is batched. The Opportunity PATCH stays per domain because it is a
+     third-party HTTP call and is already guarded by its own idempotence. */
+  /* ── R4: ONE batched upsert, not one per domain ───────────────────
+     This was a sequential INSERT ... ON CONFLICT inside the loop: 500 domains
+     meant 500 round trips every 15 minutes. It worked, and it is the shape
+     that turns a slow database into a poll overrunning its own interval — at
+     which point ticks get skipped, the column goes stale, and that is now a
+     red health row.
+
+     UNNEST of four parallel arrays rather than a built VALUES list: no
+     interpolation, four bind parameters whatever the row count, and no
+     statement-length ceiling to run into at scale.
+
+     TWO PASSES, and the order matters. The state rows must be written BEFORE
+     the Partner_Source__c pass, because that pass records its idempotence
+     stamp with an UPDATE on partner_domain_sf_state — and on the very first
+     refresh for a domain there is no row yet, so the UPDATE would match
+     nothing, the stamp would be lost, and the PATCH would re-fire on every
+     tick forever. That is the bug batching would have introduced if the write
+     had simply been moved to the end. */
+  const batch = { keys: [], states: [], oppIds: [], errors: [] };
+  const oppIdByKey = new Map();
   for (const d of domains) {
     const opp = byDomain.get(d.customer_key);
     let state, oppId = null, error = null;
@@ -7889,43 +8040,63 @@ async function refreshPartnerDomainSfState() {
       if (hit) { state = 'create_errored'; error = String(hit).slice(0, 300); }
       else     { state = 'no_opportunity'; }
     }
-    try {
-      /* sf_state is a snapshot and moves in both directions — that is
-         correct, it is what Salesforce says right now. first_ticked_at and
-         first_opportunity_at are the EVENTS underneath it and only ever move
-         one way: COALESCE keeps the earliest observation, so an untick leaves
-         them alone. Everything that must not go backwards reads those two
-         rather than sf_state. See the funnel. */
-      await pool.query(`
-        INSERT INTO partner_domain_sf_state
-          (customer_key, sf_state, sf_opportunity_id, sf_error, checked_at,
-           first_ticked_at, first_opportunity_at)
-        VALUES ($1,$2,$3,$4,NOW(),
-                CASE WHEN $2 = 'ticked' THEN NOW() END,
-                CASE WHEN $2 IN ('ticked','exists_unticked') THEN NOW() END)
-        ON CONFLICT (customer_key) DO UPDATE SET
-          sf_state = EXCLUDED.sf_state,
-          sf_opportunity_id = EXCLUDED.sf_opportunity_id,
-          sf_error = EXCLUDED.sf_error,
-          checked_at = NOW(),
-          first_ticked_at      = COALESCE(partner_domain_sf_state.first_ticked_at,      EXCLUDED.first_ticked_at),
-          first_opportunity_at = COALESCE(partner_domain_sf_state.first_opportunity_at, EXCLUDED.first_opportunity_at)`,
-        [d.customer_key, state, oppId, error]);
-      updated++;
-    } catch (err) {
-      console.warn(`[PartnerStack] Could not store SF state for ${d.customer_key}:`, err.message);
-    }
+    batch.keys.push(d.customer_key);
+    batch.states.push(state);
+    batch.oppIds.push(oppId);
+    batch.errors.push(error);
+    if (oppId) oppIdByKey.set(d.customer_key, oppId);
+  }
 
-    /* ── Opportunity.Partner_Source__c ────────────────────────────────
-       Written from HERE rather than mapped through Lead conversion, and that
-       is the whole reason this lives in the poll: it runs strictly AFTER sfopp
-       has created the Opportunity, so there is no race and no lead-conversion
-       field mapping to configure. It also covers Opportunities created ANY
-       way — by hand, by an SDR, by a direct AE deal — which a Lead field
-       cannot, because none of our 29 custom Lead fields survive conversion.
+  let updated = 0;
+  try {
+    /* sf_state is a snapshot and moves in both directions — that is correct,
+       it is what Salesforce says right now. first_ticked_at and
+       first_opportunity_at are the EVENTS underneath it and only ever move one
+       way: COALESCE keeps the earliest observation, so an untick leaves them
+       alone. Everything that must not go backwards reads those two rather than
+       sf_state. See the funnel. */
+    const res = await pool.query(`
+      INSERT INTO partner_domain_sf_state
+        (customer_key, sf_state, sf_opportunity_id, sf_error, checked_at,
+         first_ticked_at, first_opportunity_at)
+      SELECT k, st, oid, err, NOW(),
+             CASE WHEN st = 'ticked' THEN NOW() END,
+             CASE WHEN st IN ('ticked','exists_unticked') THEN NOW() END
+        FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[]) AS t(k, st, oid, err)
+      ON CONFLICT (customer_key) DO UPDATE SET
+        sf_state = EXCLUDED.sf_state,
+        sf_opportunity_id = EXCLUDED.sf_opportunity_id,
+        sf_error = EXCLUDED.sf_error,
+        checked_at = NOW(),
+        first_ticked_at      = COALESCE(partner_domain_sf_state.first_ticked_at,      EXCLUDED.first_ticked_at),
+        first_opportunity_at = COALESCE(partner_domain_sf_state.first_opportunity_at, EXCLUDED.first_opportunity_at)`,
+      [batch.keys, batch.states, batch.oppIds, batch.errors]);
+    updated = res.rowCount || 0;
+  } catch (err) {
+    /* All or nothing now, where it used to be per domain. That is the right
+       trade: a partial write leaves the table half stale with nothing saying
+       which half, and the staleness health row catches a total failure within
+       PS_SF_STALE_MIN. */
+    console.warn(`[PartnerStack] Could not store SF state for ${batch.keys.length} domain(s):`, err.message);
+    recordFailure('PartnerStack', 'sf state batch write', err.message);
+    return { ok: false, reason: 'write_failed' };
+  }
 
-       Only when there is something to write and somewhere to write it. */
-    if (PS_SF_OPP_WRITE_ENABLED && oppId) {
+  /* ── Opportunity.Partner_Source__c ────────────────────────────────
+     Written from HERE rather than mapped through Lead conversion, and that is
+     the whole reason it lives in the poll: it runs strictly AFTER sfopp has
+     created the Opportunity, so there is no race and no lead-conversion field
+     mapping to configure. It also covers Opportunities created ANY way — by
+     hand, by an SDR, by a direct AE deal — which a Lead field cannot, because
+     none of our 29 custom Lead fields survive conversion.
+
+     Still per domain, not batched: it is a third-party HTTP call, and it is
+     already bounded by its own idempotence check so in the steady state it
+     makes no calls at all. */
+  if (PS_SF_OPP_WRITE_ENABLED) {
+    for (const d of domains) {
+      const oppId = oppIdByKey.get(d.customer_key);
+      if (!oppId) continue;
       const source = partnerDisplayName(
         { name: d.partner_name, email: d.partner_email }, d.partner_key);
       /* IDEMPOTENT. Without this guard every partner Opportunity is PATCHed
@@ -7933,35 +8104,34 @@ async function refreshPartnerDomainSfState() {
          Fires only when the value changed, which in practice means once, plus
          once more if partnerIdentityNoNetwork later upgrades a raw key to a
          real name. */
-      if (source && source !== d.sf_partner_source) {
-        const res = await updateOpportunityFields(oppId, { Partner_Source__c: source });
-        if (res.ok) {
-          console.log(`[PartnerStack] ✅ Partner_Source__c set to "${source}" on ${oppId} (${d.customer_key})`);
-          await pool.query(
-            `UPDATE partner_domain_sf_state
-                SET sf_partner_source = $2, sf_partner_source_at = NOW()
-              WHERE customer_key = $1`,
-            [d.customer_key, source]
-          ).catch((err) => console.warn('[PartnerStack] Could not record the Partner_Source write:', err.message));
-        } else {
-          /* LOUD, because a silent failure here looks EXACTLY like a partner
-             with no Opportunity — a state this tab renders for real reasons.
-             The stamp is deliberately NOT written on failure, so the next
-             sweep retries; that is safe because the PATCH is idempotent in
-             Salesforce whatever happens here.
+      if (!source || source === d.sf_partner_source) continue;
+      const res = await updateOpportunityFields(oppId, { Partner_Source__c: source });
+      if (res.ok) {
+        console.log(`[PartnerStack] ✅ Partner_Source__c set to "${source}" on ${oppId} (${d.customer_key})`);
+        await pool.query(
+          `UPDATE partner_domain_sf_state
+              SET sf_partner_source = $2, sf_partner_source_at = NOW()
+            WHERE customer_key = $1`,
+          [d.customer_key, source]
+        ).catch((err) => console.warn('[PartnerStack] Could not record the Partner_Source write:', err.message));
+      } else {
+        /* LOUD, because a silent failure here looks EXACTLY like a partner
+           with no Opportunity — a state this tab renders for real reasons. The
+           stamp is deliberately NOT written on failure, so the next sweep
+           retries; that is safe because the PATCH is idempotent in Salesforce
+           whatever happens here.
 
-             A permission or field-security failure is separated out: it
-             affects every domain and needs Salesforce setup changed, not a
-             retry. It is also the one this service has never exercised —
-             everything else it does on Opportunity is read-only. */
-          const perm = res.reason === 'permission';
-          console.error(`[PartnerStack] ⛔ Could not write Partner_Source__c on ${oppId} (${d.customer_key}): ${res.reason}`);
-          recordFailure('PartnerStack',
-            `${d.customer_key} (Partner_Source__c${perm ? ' — PERMISSION' : ''})`,
-            perm
-              ? `Salesforce refused the Opportunity write (${res.status || res.reason}). The integration user cannot update Partner_Source__c, or has no field-level access to it. Creating a field through the Tooling API does NOT grant access — see the Salesforce access ticket. Every partner domain is affected, not just this one.`
-              : `Opportunity write failed: ${res.reason}${res.body ? ' — ' + res.body : ''}`);
-        }
+           A permission or field-security failure is separated out: it affects
+           every domain and needs Salesforce setup changed, not a retry. It is
+           also the one this service has never exercised — everything else it
+           does on Opportunity is read-only. */
+        const perm = res.reason === 'permission';
+        console.error(`[PartnerStack] ⛔ Could not write Partner_Source__c on ${oppId} (${d.customer_key}): ${res.reason}`);
+        recordFailure('PartnerStack',
+          `${d.customer_key} (Partner_Source__c${perm ? ' — PERMISSION' : ''})`,
+          perm
+            ? `Salesforce refused the Opportunity write (${res.status || res.reason}). The integration user cannot update Partner_Source__c, or has no field-level access to it. Creating a field through the Tooling API does NOT grant access — see the Salesforce access ticket. Every partner domain is affected, not just this one.`
+            : `Opportunity write failed: ${res.reason}${res.body ? ' — ' + res.body : ''}`);
       }
     }
   }
@@ -7983,7 +8153,13 @@ async function refreshPartnerDomainSfState() {
    possible — it would have run once per deploy, populated the column, and
    looked correct. Separate scheduling is the actual fix, and it matches
    startPartnerStackCacheWarm and startPartnerStackConversionVerify, which both
-   already do boot-then-interval. */
+   do boot-then-interval.
+
+   NOTE, 7 Sept 2026: that last sentence was FALSE when it was written.
+   startPartnerStackConversionVerify was interval-only until PR 25 fixed it.
+   The claim is true now; it is left here with this correction rather than
+   quietly edited, because a confident wrong statement about neighbouring code
+   is exactly what this comment block is warning about. */
 const PS_SF_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 
 function startPartnerStackSfStateRefresh() {

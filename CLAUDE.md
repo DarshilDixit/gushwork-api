@@ -505,6 +505,18 @@ object passes `disqualified` as false and CLEARS a real disqualification on the
 mirror the dialer reads. `syncBookingToAWS`, `syncPartnerIdentityToAWS` and
 `syncHearAboutUsToAWS` all exist for this reason. A test catches the regression.
 
+**"Needs attention" is counted by its OWN unbounded query, not from the
+capped domain list beside it.** The ladder includes an unresolved failure
+regardless of age so it cannot drop out of the one number somebody must act on
+— and `LIMIT 500` on the domain list would undo that. When the unbounded query
+cannot run, `needsAttentionComplete: false` reaches the screen as "AT LEAST
+this many". A floor is never rendered as a total.
+
+**A stale `partner_domain_sf_state` is a RED health row.** When that column
+freezes, "waiting on an AE", "no Opportunity" and the funnel's Opportunity and
+ticked stages all keep rendering their last values as if current. Checked after
+the failure states but before green.
+
 **Partner revenue gaps is a WORK QUEUE, not a health check.** `/monitor/partner-gaps`
 finds the two ways a partner referral silently never pays: (A) no conversion was
 ever sent for that domain, and (B) the demo happened and no Opportunity exists
