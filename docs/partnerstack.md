@@ -449,6 +449,38 @@ while every other stage stayed put. Everything else in this integration keys
 off an immutable stamp; `sf_state` is the exception, and any number built on it
 can move backwards.
 
+**Both were fixed in PR 22, and the fix was to stop reading the snapshot where
+a fact was wanted.** `partner_domain_sf_state` now also carries
+`first_ticked_at` and `first_opportunity_at`, stamped once and never cleared:
+
+- **The funnel's `ticked` and `opportunity` stages read those**, ORed with
+  `leads.ps_qualified_sent_at` — which is the stronger and *older* evidence,
+  since a qualification can only ever have fired because the poller saw the box
+  ticked, and it covers domains ticked before the columns existed (hello.com
+  among them). They are deliberately **not** backfilled from
+  `ps_qualified_sent_at`: those columns mean "we observed this", and writing an
+  inferred timestamp into an observational column is how a reconstruction gets
+  read as a measurement later.
+- **The payment tail of the funnel now nests by construction.** A `ticked`
+  stamp implies an `opportunity` stamp (the refresh writes the latter for both
+  Opportunity states) and `ps_qualified_sent_at` implies both, so
+  Opportunity ≥ ticked ≥ $50 always holds. Only that tail — the earlier
+  absolute stages genuinely do not nest, since a domain can book without ever
+  converting, which is why the cumulative column is kept beside them.
+- **The per-domain row says what actually happened**: "unticked in Salesforce
+  — the $50 already fired, nothing more can", instead of "waiting on an AE".
+- **`sf_state` itself still moves in both directions, and should.** It is the
+  answer to "what does Salesforce say right now", which is a real question and
+  the reason the untick was noticed at all.
+
+**A third thing was found while fixing those two.** The `exists_unticked` chip
+row rendered only two sub-counts — waiting-on-an-AE and no-conversion-sent — so
+a domain that was unticked *after* payment fell out of both and rendered **no
+chip at all**, while still counting in `bySfState.exists_unticked`. The number
+and the chips disagreed, and the chips are what anyone reads. There are now
+three sub-counts that **partition** the state, and a test asserts they sum to
+it, so a fourth shape cannot vanish the same way.
+
 
 ---
 
@@ -511,6 +543,15 @@ showing is the same class of bug as one computed and never rendered.
 The programme row is **its own ungrouped query, not a sum of the per-partner
 rows**: a domain can carry leads from two partners, and summing would count it
 twice.
+
+**A loss must not name a domain that already got paid.** "Booked, no
+Opportunity" means nobody can tick the box so the money cannot move — and it
+read `sf_state = 'no_opportunity'` alone, so deleting an Opportunity in
+Salesforce, or letting one age past `PS_GAP_SF_LOOKBACK_D`, turned a domain
+whose $50 landed weeks ago into a red loss. It now excludes
+`ps_qualified_sent_at IS NOT NULL`. Deliberately **not** excluded on
+`first_opportunity_at`: a domain that had an Opportunity, was never paid, and
+no longer has one is a genuine leak and must stay in the count.
 
 **Losses sit beside the stage where the money leaks** — conversion failed and
 skipped at the conversion stage, booked-with-no-Opportunity and sfopp-errored
