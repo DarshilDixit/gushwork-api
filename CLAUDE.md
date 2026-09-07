@@ -54,6 +54,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `partnerstack.js` | PartnerStack API. TWO hosts and TWO auth schemes: `partnerlinks.io` conversion (Bearer tracking token) and `api.partnerstack.com` v2 partnerships + actions (Basic public:secret) |
 | `lead-magnet.js` | `/lm/*` routes. Separate table, deliberately not joined to `leads` |
 | `backfill-sf.js` | Manual recovery tool for re-syncing leads to Salesforce after a broken connection or outage. Not mounted by default — see below |
+| `tools/fire-alert.js` | Fires ONE real alert on purpose, to satisfy the fire-every-alert-path-once rule. Sends for real (Slack + email on a critical). Lifts `alertOps` out of `index.js` rather than reimplementing it, so what arrives is what production sends. Not mounted, not called by anything |
 | `gushwork-form.js` | The `/demo` form frontend. Lives here and is served live by jsDelivr — see below |
 | `gushwork-form-popup.js` | The Google Ads popup/modal form frontend. Lives here and is served live by jsDelivr — see below |
 | `package.json` | Dependencies, scripts, Node engine constraint |
@@ -505,7 +506,8 @@ object passes `disqualified` as false and CLEARS a real disqualification on the
 mirror the dialer reads. `syncBookingToAWS`, `syncPartnerIdentityToAWS` and
 `syncHearAboutUsToAWS` all exist for this reason. A test catches the regression.
 
-**Every alert path gets FIRED ONCE ON PURPOSE before launch.** "We asserted it
+**Every alert path gets FIRED ONCE ON PURPOSE before launch** — `node
+tools/fire-alert.js <name>` does it, and it sends for real.**  "We asserted it
 alerts" and "we watched it alert" are different claims, and the gap between
 them hid 21 dead alert call sites in this repo — all of them tested, all of the
 tests passing, none of them ever producing an alert. No assertion about a call
