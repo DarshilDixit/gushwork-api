@@ -505,6 +505,17 @@ object passes `disqualified` as false and CLEARS a real disqualification on the
 mirror the dialer reads. `syncBookingToAWS`, `syncPartnerIdentityToAWS` and
 `syncHearAboutUsToAWS` all exist for this reason. A test catches the regression.
 
+**An ACK means "this failure is understood, leave it alone" — not just "stop
+alerting me".** Four things act on a partner failure and all four must respect
+`ps_failure_ack_at`: the unbounded Needs-attention count, its page-derived
+fallback, the `partnerstack` health row, and the **conversion retry sweep**.
+The retry was missed when it shipped, because the ack's scope had been written
+back when only an alert acted on a failure — and the sweep then re-created a
+PartnerStack customer that had been deleted by hand. If you add a fifth
+consumer, it respects the ack or an acknowledged failure starts demanding
+action again through it. An ack never clears the failure stamp: the row keeps
+its state, its red chip and its history.
+
 **"Needs attention" is counted by its OWN unbounded query, not from the
 capped domain list beside it.** The ladder includes an unresolved failure
 regardless of age so it cannot drop out of the one number somebody must act on

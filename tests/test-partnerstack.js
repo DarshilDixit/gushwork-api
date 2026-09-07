@@ -1595,6 +1595,31 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     /* Bounded, or a permanent 400 retries every quarter hour forever and
        buries the rows that could still succeed. */
     ok('C3: attempts are bounded', /ps_signup_retry_count, 0\) < \$\{PS_RETRY_MAX_ATTEMPTS\}/.test(fn));
+    /* ── An ACKNOWLEDGED failure is not retried ────────────────────────
+       The ack's scope was written for alerting, before this sweep existed.
+       "Stop telling me" without "stop trying" means an ack cannot express the
+       case it was built for: test.com's phantom_200 was a customer deleted in
+       PartnerStack BY HAND, so retrying re-creates the record somebody removed
+       on purpose. That is not theoretical — the sweep's first boot run on
+       7 Sept 2026 did it, and PartnerStack answered 200 while creating nothing
+       again, so the domain was heading for five attempts and an exhaustion
+       alert over test data. */
+    ok('C3/ack: an acknowledged failure is excluded from the retry sweep',
+       /AND l\.ps_failure_ack_at IS NULL/.test(fn));
+    /* All THREE consumers of the ack, asserted together. If a fourth is added
+       and leaves the ack out, an acknowledged failure starts demanding action
+       again through the new one — which is how this gap appeared in the first
+       place. */
+    {
+      const consumers = [
+        ['the unbounded Needs-attention count', /COUNT\(\*\) FILTER \(WHERE NOT acknowledged\) AS needs_attention/],
+        ['the page-derived fallback count',     /PS_LADDER_FAILED\.includes\(d\.state\) && d\.acknowledged !== true/],
+        ['the health row',                      /AND ps_failure_ack_at IS NULL\)/],
+        ['the conversion retry sweep',          /AND l\.ps_failure_ack_at IS NULL/],
+      ];
+      for (const [label, re] of consumers)
+        ok(`C3/ack: ${label} respects the acknowledgement`, re.test(src), label);
+    }
     ok('C3: and there is a give-up window as well as a count',
        /ps_signup_failed_at > NOW\(\) - INTERVAL '\$\{PS_RETRY_GIVE_UP_D\} days'/.test(fn));
     /* The count must survive a crash mid-attempt, or the bound never binds. */

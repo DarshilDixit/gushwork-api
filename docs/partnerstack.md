@@ -102,7 +102,7 @@ All on `leads`, and all mirrored to `gw_form_leads` on the AWS warehouse.
 | `ps_signup_sent_at` | `runPartnerStackSignup` | Claimed *before* the HTTP call, released if it fails |
 | `ps_signup_verified_at` | The read-back sweep | Proof the customer really exists, not just that PartnerStack said 200 |
 | `hear_about_us_raw` | `/partial`, `/submit` | What the visitor came in saying, before the partner overwrite. First non-empty value wins and is never overwritten |
-| `ps_failure_ack_at` / `_note` | `POST /monitor/partner-ack` | Acknowledges a failure. Never clears the stamp — the row keeps its state and stays red; it only drops out of Needs attention and the health row |
+| `ps_failure_ack_at` / `_note` | `POST /monitor/partner-ack` | "This failure is understood — leave it alone." Never clears the stamp: the row keeps its state, its red chip and its history. It drops out of Needs attention, the health row **and the conversion retry sweep** |
 | `ps_signup_skipped_reason` / `_at` | The skip guards | `test_email`, `disqualified`, `no_customer_key`, `already_sent` |
 | `ps_signup_fail_reason` / `ps_signup_failed_at` | Conversion failure + phantom sweep | Cleared on a later success |
 | `ps_qualify_fail_reason` / `ps_qualify_failed_at` | Qualification failure | Cleared on a later success |
@@ -1110,13 +1110,43 @@ PartnerStack by hand — housekeeping, not a lost $50. The two produce the same
 stamp, and **an alert that is wrong the first time it fires gets ignored**
 (which is also why the `/partial` health row is worth revisiting).
 
-**This route suppresses alerts, so its failure mode is silence.** It therefore
-does the least it can:
+**WHAT AN ACK MEANS, WIDENED 7 Sept 2026.** It was "stop alerting me about
+this". It is now **"this failure is understood — leave it alone"**, and it
+covers every consumer that acts on a failure.
+
+The original scope was written when the only thing acting on a failure was an
+alert. Then the conversion retry sweep shipped (PR 23), and "stop telling me"
+without "stop trying" meant an ack could no longer express the case it was
+built for. `test.com`'s `phantom_200` is a customer **deleted in PartnerStack
+by hand** — housekeeping, not a lost $50 — so retrying it re-creates the record
+somebody removed on purpose.
+
+That is not hypothetical. The sweep's first boot run, on 7 Sept 2026, did
+exactly that: `fetchCustomer` 404'd, the conversion was re-sent,
+`/conversion/xid` answered 200 and created nothing again (confirmed by a direct
+`GET /v2/customers/test.com` — still 404), and the domain was on its way to
+five attempts and an exhaustion alert over test data.
+
+**Four consumers now respect the ack, and a test asserts all four together:**
+
+| Consumer | Effect of an ack |
+|---|---|
+| The unbounded Needs-attention count | not counted |
+| The page-derived fallback count | not counted |
+| The `partnerstack` health row | not red for it |
+| **The conversion retry sweep** | **not retried** |
+
+If a fifth thing ever acts on a failure, it goes in that list or an acknowledged
+failure starts demanding action again through the new one — which is precisely
+how this gap appeared.
+
+**This route suppresses alerts AND now suppresses a retry, so its failure mode
+is silence.** It therefore does the least it can:
 
 - it never clears `ps_signup_failed_at` or the reason — the history stays and
   the domain keeps its red chip
-- it only removes the domain from **Needs attention** and from the **health
-  row**, and both consumers are asserted
+- it only removes the domain from **Needs attention**, from the **health row**
+  and from the **retry sweep**, and all consumers are asserted
 - it refuses to acknowledge a domain with no failure, which would otherwise
   pre-silence a future genuine one
 - acknowledging nothing is a 404, never a silent success
