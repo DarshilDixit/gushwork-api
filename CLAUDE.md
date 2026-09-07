@@ -677,18 +677,31 @@ node tests/test-batch2.js       # logic, no dependencies
 node tests/test-batch-a.js      # logic, no dependencies
 node tests/test-ads-parity.js   # the two form files against each other, no dependencies
 node tests/test-partnerstack.js # PartnerStack steps 1-10, no dependencies
+node tests/test-sf-readers.js   # EXECUTES the Salesforce readers against a stubbed fetch
 node tests/test-batch1-db.js    # needs DATABASE_URL
 node tests/test-batch1-e2e.js   # boots the real server, needs DATABASE_URL
 ```
 
-**The five dependency-free suites are the bar.** They run anywhere in about a
-second each — run all five after any change to `index.js`, `lead-magnet.js`, or
+**The six dependency-free suites are the bar.** They run anywhere in about a
+second each — run all six after any change to `index.js`, `lead-magnet.js`, or
 either form file, always. Do not install Postgres and do not point anything at
 the production database from a feature branch.
 
 Tests read the real functions out of `index.js` rather than a copy. A test that
 exercises a duplicate of the source can pass while production is broken. Keep it
 that way.
+
+**`test-sf-readers.js` is the one that EXECUTES rather than reads.** The others
+assert on source text, which keeps them pointed at the real code but cannot
+tell you whether it works. That suite requires `salesforce.js` — which needs no
+database and no server — and drives it against a stubbed `global.fetch`, so
+pagination, the completeness refusals, the `ok: false` branches and the SOQL
+that actually goes over the wire are all exercised. Three defects it catches
+are invisible to every source-based assertion: a `nextRecordsUrl` resolved
+relative instead of against the instance, `records = map(data)` instead of
+`concat`, and a paged request that drops the bearer header after page one.
+
+When you add a Salesforce reader, it goes in there too.
 
 ---
 

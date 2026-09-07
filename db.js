@@ -421,6 +421,15 @@ async function initDB() {
          showed a 0 that looked identical to "no demo has happened yet". */
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_failed_at TIMESTAMPTZ`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_fail_reason TEXT`,
+      /* How many times the retry sweep has re-attempted this conversion.
+         Bounded, because the failure reasons are not all transient: a 400 on a
+         bad payload will fail identically forever, and retrying it every 15
+         minutes would bury the rows that could still succeed. When the bound
+         is reached the row stops retrying and stays RED for a human, which is
+         the correct end state — the affiliate is still owed and the red chip
+         plus the acknowledge flow is how someone picks it up. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_retry_count INTEGER DEFAULT 0`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_retry_at TIMESTAMPTZ`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_qualify_failed_at TIMESTAMPTZ`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_qualify_fail_reason TEXT`,
       /* What the visitor actually came in saying, before the partner overwrite.
@@ -441,6 +450,11 @@ async function initDB() {
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_failure_ack_note TEXT`,
       /* The lifecycle ladder groups by domain and filters on the failure
          stamps; both are read on every dashboard load. */
+      /* The retry sweep's selector. Partial, so it covers only the handful of
+         rows that are actually retryable rather than the whole table. */
+      `CREATE INDEX IF NOT EXISTS leads_ps_signup_retryable_idx
+         ON leads (ps_signup_failed_at)
+         WHERE ps_signup_failed_at IS NOT NULL AND ps_signup_sent_at IS NULL`,
       `CREATE INDEX IF NOT EXISTS leads_ps_failed_idx
          ON leads (ps_customer_key)
          WHERE ps_signup_failed_at IS NOT NULL OR ps_qualify_failed_at IS NOT NULL`,

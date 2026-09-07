@@ -828,6 +828,99 @@ rendered on the System Health tab. It compares what we hold against what
 Salesforce received, over a population rather than a sample, and reports
 UNAVAILABLE rather than zero when Salesforce cannot be read.
 
+## The three stamps reach the mirror
+
+`ps_signup_sent_at`, `ps_signup_verified_at` and `ps_qualified_sent_at` are in
+`syncToAWS`'s column list with `COALESCE` clauses, and were NULL on
+`gw_form_leads` for every row, permanently. Not a missing column — **call
+order.** `syncToAWS` runs from `/partial` and `/submit`; all three stamps are
+written after `res.json()` by a deferred job or a sweep, and nothing calls
+`syncToAWS` for that session again. The bind value was always NULL.
+
+So they get targeted writes, via `syncPartnerStackStampToAWS`, like the
+booking, the partner identity and `hear_about_us` before them. Never
+`syncToAWS` with a partial object: that upsert sets
+`disqualified = EXCLUDED.disqualified` with no `COALESCE`.
+
+Three things about it are deliberate and easy to get wrong:
+
+- **Not `COALESCE`'d**, unlike `syncPartnerIdentityToAWS`. Two of the sites
+  *release* a claim by writing NULL and the mirror has to be able to follow.
+- **The column name is allow-listed.** It is interpolated into SQL, and the
+  allow-list is what makes that safe — not the fact that today's callers are
+  all internal.
+- **Awaited**, so a release can never overtake the claim it follows. Both are
+  promises against the same row and only order decides what the mirror keeps.
+
+**The three CLAIM writes are deliberately NOT mirrored.** A claim is a
+Railway-internal lock taken *before* the HTTP call, not a fact about
+PartnerStack, and mirroring it would put a WAN write in front of the send. That
+leaves a window — a process dying between the claim and the success mirror —
+and the read-back sweep is where it closes: reaching that branch means the
+customer has been read back, so it mirrors **both** `ps_signup_sent_at` and
+`ps_signup_verified_at`. Mirroring only the latter would leave the mirror
+reading "verified but never sent", which the dialer would read as no
+conversion at all.
+
+That last defect was found by mutation-testing this very change: dropping
+either mirror line went uncaught, and writing the assertion that caught it
+showed the pair was wrong to begin with. A test now enumerates every Railway
+stamp write from the source and requires a mirror of the same column before
+the next send — the three that cross a send must each *be* a claim, checked,
+not merely tolerated.
+
+## A failed conversion is retried
+
+The claim release carried the comment "so this domain can be retried rather
+than silently lost", and **nothing retried it.** The conversion only ever fired
+from `/submit`, so the only thing that would try again was another lead from
+the same domain, which may never come. One timeout or one 429 at submit time
+was one affiliate permanently unpaid, visible only as a red chip somebody had
+to notice.
+
+`runPartnerStackConversionRetry()` sweeps every 15 minutes, boot included.
+
+**It FETCHES BEFORE IT SENDS, and that is the whole design.** A conversion that
+reported failure may still have landed: the request can time out after
+PartnerStack processed it, or a 5xx can come back from a proxy in front of a
+successful write. Re-sending blind credits the affiliate twice, and PartnerStack
+cannot undo a double credit — it is the one failure in this repo that costs real
+money in the wrong direction.
+
+| `fetchCustomer` says | What happens |
+|---|---|
+| **exists** | It DID land. Stamp sent + verified, clear the failure, **never send** |
+| **definitive 404** | It genuinely did not. Re-claim and re-send |
+| **anything else** | We could not tell. Leave the row completely alone |
+
+**The backoff is derived from the read-back grace, not chosen separately.**
+`PS_RETRY_BACKOFF_MIN = Math.max(30, PS_VERIFY_GRACE_MIN * 2)`. PartnerStack's
+indexing lags a conversion by 2–6 minutes, so a retry sooner than that could
+ask "does this exist?" about a conversion that landed and is not yet visible,
+get a 404, and re-send it — precisely the double credit the fetch prevents.
+Tying the two together means shortening one cannot silently break the other.
+
+**Bounded, and the bound survives a crash.** Not every failure reason is
+transient: a 400 on a bad payload fails identically forever. The attempt is
+counted *before* it is made, so a crash mid-attempt cannot leave the count
+untouched and the row retrying forever. After `PS_RETRY_MAX_ATTEMPTS` (5) the
+row stops and stays red for a human, with its own alert saying the affiliate
+is still owed and nothing else will retry — which is the correct end state, not
+a failure of the sweep.
+
+**Two guards on the selector that are not obvious:**
+
+- **Domains where another lead already converted are excluded.**
+  `ps_signup_sent_at` is once per DOMAIN, enforced by
+  `leads_ps_signup_once_idx`, so stamping a second row for a converted domain
+  would violate it — and the affiliate has already been credited, so nothing is
+  owed. The lifecycle ladder excludes such a domain from `conversion_failed`
+  for the same reason.
+- **`disqualified IS NOT TRUE`.** CLAUDE.md is explicit that this is a guard
+  rather than a flow property, and the retry is a new path into the same send.
+  The cost of getting it wrong is paying an affiliate $50 for a B2C waitlist
+  signup.
+
 ## Small datasets catch bugs that large ones hide
 
 This was found because **`hello.com` contradicted itself at n=4**: the tab said
@@ -1016,23 +1109,26 @@ Verified end to end against live production data (4 Sept 2026):
 
 **NOT verified — waiting on real traffic, not on work:**
 
-- **`syncToAWS` writing `ps_signup_sent_at`, `ps_signup_verified_at` and
-  `ps_qualified_sent_at`.** The code shipped in batch C but no lead has been
-  written since. The next real form submit proves it: those columns should stop
-  being NULL for new rows in `gw_form_leads`. Until then the mirror still shows
-  NULL for every existing row, because the backfills only touched Railway.
+- ~~**`syncToAWS` writing the three PartnerStack stamps.**~~ **CORRECTED
+  7 Sept 2026 — this entry was wrong, and wrong in the worst direction: it
+  recorded something as working-pending-proof that could never have happened.**
+  No form submit could have proved it. `syncToAWS` runs from `/partial` and
+  `/submit`, and all three stamps are written *after* `res.json()` by a
+  deferred job or a sweep, so the bind value was always NULL and nothing calls
+  `syncToAWS` for that session again. The columns were dead in that statement.
+  Fixed in PR 23 with targeted writes — see "The three stamps reach the mirror"
+  below.
 - **The Slack alert on `conversion_failed` / `qualification_failed`.** Built in
   batch A and never fired. It cannot be triggered without a genuine failure and
   should not be faked. The first real one is the test.
 - **The Partners tab rendered in a browser.** The SQL runs and the JSON is
   correct; nobody has looked at the page.
-- **`findQualifiedDemoOpportunities`'s pagination, and its `ok: false` branch.**
-  Both shipped in PR 21 (7 Sept 2026) and neither has executed. There are ~3
-  ticked Opportunities, so every real call so far has been a single page with
-  `done: true`, and Salesforce has not failed during a poll. The shape is
-  copied from `findOpportunityDomains`, which *has* paginated for real — but
-  that is an argument by similarity, not evidence. To be exercised in the same
-  deliberate-failure session as the Slack alert above.
+- ~~**`findQualifiedDemoOpportunities`'s pagination and its `ok: false`
+  branch.**~~ **DONE 7 Sept 2026, PR 23** — `tests/test-sf-readers.js` executes
+  both against a stubbed `fetch`: 260 records over three pages, the short-read
+  and page-cap refusals, `http_503`, a thrown `ECONNRESET`, and an empty result
+  that must stay a *success*. Still unexercised against a real org, which needs
+  201 ticked Opportunities and is not worth manufacturing.
 - **The held-back-domain path in the poll** (`⛔ Ticked demo CANNOT be
   qualified`). Needs a domain that is ticked and converted and stuck unverified
   for over 30 minutes, which has never happened.
