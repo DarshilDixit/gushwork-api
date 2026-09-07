@@ -1182,7 +1182,24 @@ Verified end to end against live production data (4 Sept 2026):
   below.
 - **The Slack alert on `conversion_failed` / `qualification_failed`.** Built in
   batch A and never fired. It cannot be triggered without a genuine failure and
-  should not be faked. The first real one is the test.
+  should not be faked. The first real one is the test. **Owner will fire one
+  deliberately against a throwaway domain on the next deploy** (agreed 7 Sept
+  2026), alongside watching the `[DB] Partner SF-state table ready` line for
+  PR 22's migration. Lifting `alertOps` out of `index.js` to test it in
+  process was considered and rejected: it drags in the cooldown map, the
+  last-reported-state map, `sendSlack` and the block builders, and a brittle
+  lift is worse than the gap it closes.
+- **`Partner_Source__c` actually reaching Salesforce, and its permission
+  failure.** Both PATCH paths are executed against a stubbed `fetch` in
+  `tests/test-sf-readers.js`, and neither has run against the real org. The
+  success path will work — the integration user is a System Administrator. The
+  *failure* path cannot be exercised in production without deliberately
+  removing field-level access, which is a thing to do on purpose, once, not to
+  discover by accident later.
+- **`hear_about_us_raw__c` on a real Lead.** One `CUSTOM_FIELD_MAP` entry and
+  one payload key; the round-trip on the field itself was verified 4 Sept, but
+  no Lead has been written since the code existed. The next partner submit that
+  came in on a paid ad proves it.
 - **The Partners tab rendered in a browser.** The SQL runs and the JSON is
   correct; nobody has looked at the page.
 - ~~**`findQualifiedDemoOpportunities`'s pagination and its `ok: false`
@@ -1197,24 +1214,79 @@ Verified end to end against live production data (4 Sept 2026):
 
 Do not mark any of these done on the strength of the code existing.
 
-## Next up — not built
+## The two Salesforce writes — BUILT, PR 24 (7 Sept 2026)
 
-**The two Salesforce writes.** Both fields exist and were verified with a live
-round-trip on 4 Sept:
+Both fields existed and were verified with a live round-trip on 4 Sept; the
+code was the missing half.
 
-| Object | Field | Write from |
+| Object | Field | Written from |
 |---|---|---|
-| Lead | `hear_about_us_raw__c` | `pushToSalesforce`, at submit — one entry in `CUSTOM_FIELD_MAP` |
-| Opportunity | `Partner_Source__c` | `refreshPartnerDomainSfState`, which already holds the Opportunity id, the partner name and the domain in one loop |
+| Lead | `hear_about_us_raw__c` | `pushToSalesforce` at `/submit` — one entry in `CUSTOM_FIELD_MAP` plus the payload key |
+| Opportunity | `Partner_Source__c` | `refreshPartnerDomainSfState`, which already holds the Opportunity id, the partner identity and the domain in one loop |
 
-Writing `Partner_Source__c` from the poller happens strictly **after** sfopp has
-created the Opportunity, so there is no race and no lead-conversion field
-mapping to configure. It also covers Opportunities created any way, not only by
-conversion — which a Lead field cannot.
+**`hear_about_us_raw__c`** puts the visitor's original answer in front of the
+AE, not just on our dashboard. A partner-referred lead who arrived on a paid ad
+is two real facts and `hear_about_us__c` can only hold one. Note that a map
+entry alone is not enough — the payload has to carry the key, and it must carry
+the **raw** value rather than `hearAboutUsFinal`, which is the
+partner-overwritten one. Passing the wrong variable there would destroy the
+exact fact the field exists to keep, and it is the mutation this pair is
+tested against.
 
-**Make a permission failure LOUD.** Everything the service does on Opportunity
-today is read-only, so a write rejection has never been exercised. A silent
-failure here would look exactly like a partner with no Opportunity.
+**`Partner_Source__c` is written from the poll, not mapped through Lead
+conversion**, and that is the whole reason it lives there: the poll runs
+strictly *after* sfopp has created the Opportunity, so there is no race and no
+lead-conversion field mapping to configure. It also covers Opportunities
+created **any** way — by hand, by an SDR, by a direct AE deal — which a Lead
+field cannot, because none of our 29 custom Lead fields survive conversion.
+
+The value comes from `partnerDisplayName()`, the same three-rung chain Slack,
+the dashboard and `hear_about_us` use, so one partner cannot read four
+different ways across four surfaces. When `runPartnerStackIdentity` later
+upgrades a raw hex key to a real name, the next sweep sees a changed value and
+corrects Salesforce too.
+
+**It is idempotent on `sf_partner_source`**, a column added for exactly that.
+Without it every partner Opportunity would be PATCHed every 15 minutes forever
+— 2,880 pointless Salesforce writes a day at 30 domains, growing linearly. The
+stamp is written **only on success**, so a transient failure retries; that is
+safe because the PATCH is idempotent on the Salesforce side too.
+
+### The permission failure is LOUD, and it is the one thing here never exercised
+
+Everything else this service does on Opportunity is read-only, so a write
+rejection has **never happened once**. It will keep succeeding while the
+integration user is a full System Administrator — see
+`docs/tickets/salesforce-integration-user-is-a-system-administrator.md` — and
+start 403ing the day someone does the right thing and reduces that profile.
+
+A silent failure would look **exactly** like a partner with no Opportunity,
+which the Partners tab renders for real reasons. So:
+
+- `updateOpportunityFields` returns a discriminated result, never a boolean,
+  and never throws — its caller is a 15-minute sweep with nothing awaiting it.
+- A 403, a 401, or any of `INSUFFICIENT_ACCESS` /
+  `INVALID_FIELD_FOR_INSERT_UPDATE` / `FIELD_INTEGRITY_EXCEPTION` is classified
+  as `permission` and alerted differently from a per-record failure. A
+  permission problem affects **every** domain and needs Salesforce setup
+  changed; a 404 affects one and may fix itself.
+- The alert names the field-security trap: **creating a custom field through
+  the Tooling API does not grant access to it.** Both fields created on 4 Sept
+  came back `201` and were then invisible to the very user that created them
+  until `FieldPermissions` rows were added. So a `400
+  INVALID_FIELD_FOR_INSERT_UPDATE` means "no field-level access", not "no such
+  field", and the two are indistinguishable from outside.
+- A failure on one domain does not abort the loop for the others.
+
+All of those paths are **executed** in `tests/test-sf-readers.js` against a
+stubbed `fetch`, because they cannot be executed in production without
+deliberately breaking permissions. That includes the 204-with-no-body success,
+which a naive implementation reads as a failure.
+
+**There is a kill switch, defaulting ON:** `PS_SF_OPP_WRITE=false` in the
+Railway env stops the write without a deploy. Default ON because the write is
+the point of the work; the switch exists because this is a new class of write
+whose failure has never been seen.
 
 ## Related open tickets
 

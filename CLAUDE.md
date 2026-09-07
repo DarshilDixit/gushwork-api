@@ -586,6 +586,24 @@ PartnerStack keeps the commission, and re-ticking fires nothing at all. Four
 independent things enforce it; `docs/partnerstack.md` lists them. An AE
 expecting a reversal is a real support question, not a bug.
 
+**`Partner_Source__c` is the FIRST write this service makes to Opportunity,
+and a permission failure looks exactly like a partner with no Opportunity.**
+Everything else on that object is read-only, so a rejection has never been
+exercised — it succeeds today only because the integration user is a full
+System Administrator, which is an open ticket. `updateOpportunityFields`
+returns a discriminated result, classifies 403/401 and the field-security error
+codes as `permission` (affects every domain, needs Salesforce setup changed)
+apart from a per-record failure, and never throws. `PS_SF_OPP_WRITE=false`
+stops it from the env without a deploy. It writes only when the value changed,
+because otherwise every partner Opportunity is PATCHed every 15 minutes
+forever.
+
+**Creating a Salesforce custom field through the Tooling API does NOT grant
+access to it.** Both fields created on 4 Sept came back 201 and were invisible
+to the user that created them until `FieldPermissions` rows were added. So a
+`400 INVALID_FIELD_FOR_INSERT_UPDATE` means "no field-level access", not "no
+such field". Create, then grant, then verify with a real round-trip.
+
 **The automated eligibility check is BUILT AND OFF for the MVP.** Rejections are
 decided by hand at payout approval. Everything below is dormant behind
 `PS_ELIGIBILITY_ENABLED`, default off — set it to the string `true` in the

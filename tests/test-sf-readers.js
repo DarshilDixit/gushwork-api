@@ -294,6 +294,89 @@ const page = (recs, total, next) => ({
     eq('domains: and no records', out.records.length, 0);
   });
 
+  /* ── 10. updateOpportunityFields — THE FIRST WRITE TO OPPORTUNITY ────
+     Everything else this module does on Opportunity is read-only, so a write
+     rejection has never been exercised once in production. It will keep
+     succeeding while the integration user is a System Administrator, and
+     start 403ing the day someone reduces that profile — which is an open
+     ticket. So the failure paths are exercised HERE, because they cannot be
+     exercised there.
+
+     A silent failure would look exactly like a partner with no Opportunity,
+     which the Partners tab renders for real reasons. That is why this returns
+     a discriminated result rather than a boolean. */
+  await scenario('updateOpportunityFields — the first write to Opportunity', async () => {
+    const sf = freshSalesforce();
+
+    /* A successful PATCH is 204 with NO body. Treating "no body" as a failure
+       would make every successful write look broken. */
+    let calls = stubFetch(() => ({ status: 204, ok: true, text: async () => '', json: async () => ({}) }));
+    let out = await sf.updateOpportunityFields('006ABC', { Partner_Source__c: 'Acme Partners' });
+    eq('oppWrite: a 204 with no body is a SUCCESS', out.ok, true);
+    const req = calls.find((c) => c.url.includes('/sobjects/Opportunity/'));
+    ok('oppWrite: it PATCHes the Opportunity by id', req && req.opts.method === 'PATCH', req && req.url);
+    ok('oppWrite: the id is in the path', req.url.endsWith('/sobjects/Opportunity/006ABC'));
+    eq('oppWrite: the field is in the body', JSON.parse(req.opts.body), { Partner_Source__c: 'Acme Partners' });
+    eq('oppWrite: authorised with the bearer token', req.opts.headers.Authorization, 'Bearer tok');
+
+    /* ── The failure that has never happened in production ──────────
+       403, and the two Salesforce error codes that mean "no field-level
+       access". Creating a field through the Tooling API does not grant access
+       to it — both fields created on 4 Sept came back 201 and were invisible
+       to the user that created them. A 400 INVALID_FIELD_FOR_INSERT_UPDATE
+       therefore means a permission problem, not a missing field, and the two
+       read identically from outside. */
+    for (const [status, body, label] of [
+      [403, 'INSUFFICIENT_ACCESS_OR_READONLY', 'a 403'],
+      [400, '[{"errorCode":"INVALID_FIELD_FOR_INSERT_UPDATE","message":"Unable to create/update fields: Partner_Source__c"}]', 'a 400 with no field access'],
+      [401, 'Session expired or invalid', 'a 401'],
+    ]) {
+      freshSalesforce();
+      const s2 = freshSalesforce();
+      stubFetch(() => ({ status, ok: false, text: async () => body, json: async () => ({}) }));
+      const r = await s2.updateOpportunityFields('006ABC', { Partner_Source__c: 'X' });
+      eq(`oppWrite: ${label} is ok:false`, r.ok, false);
+      eq(`oppWrite: ${label} is classified as a PERMISSION problem`, r.reason, 'permission');
+      ok(`oppWrite: ${label} carries the body for the alert`, !!r.body);
+    }
+
+    /* An ordinary per-record failure must NOT be classified as permission —
+       it affects one domain and a retry may fix it, whereas a permission
+       failure affects every domain and needs Salesforce setup changed. */
+    {
+      const s3 = freshSalesforce();
+      stubFetch(() => ({ status: 404, ok: false, text: async () => 'NOT_FOUND', json: async () => ({}) }));
+      const r = await s3.updateOpportunityFields('006GONE', { Partner_Source__c: 'X' });
+      eq('oppWrite: a 404 is NOT a permission problem', r.reason, 'http_404');
+    }
+
+    /* Never throws: the caller is a 15-minute sweep with nothing awaiting it,
+       so an unhandled rejection would be an unhandled rejection in the
+       process. */
+    {
+      const s4 = freshSalesforce();
+      global.fetch = async () => { throw new Error('ETIMEDOUT'); };
+      let threw = false, r;
+      try { r = await s4.updateOpportunityFields('006ABC', { Partner_Source__c: 'X' }); } catch { threw = true; }
+      ok('oppWrite: a network error does not throw', threw === false);
+      /* (r || {}) because if it DOES throw, r is undefined and reading .reason
+         aborts the rest of this scenario — taking the guard assertions below
+         down with it and turning a caught mutation into an unmeasured one.
+         Same discipline as the `at()` helper above. */
+      eq('oppWrite: and is reported as an error', (r || {}).reason, 'error');
+    }
+
+    /* Guards, so a missing id or an empty object cannot become a PATCH to
+       /sobjects/Opportunity/undefined. */
+    {
+      const s5 = freshSalesforce();
+      const seen = stubFetch(() => ({ status: 204, ok: true, text: async () => '', json: async () => ({}) }));
+      eq('oppWrite: no id is refused', (await s5.updateOpportunityFields(null, { a: 1 })).reason, 'no_opportunity_id');
+      eq('oppWrite: no fields is refused', (await s5.updateOpportunityFields('006ABC', {})).reason, 'no_fields');
+      eq('oppWrite: and neither reached Salesforce', seen.filter((c) => c.url.includes('/sobjects/')).length, 0);
+    }
+  });
+
   console.log('');
   if (failures.length) {
     console.log('  FAILURES:');
