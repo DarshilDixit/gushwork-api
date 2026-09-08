@@ -8625,7 +8625,10 @@ app.post('/submit', async (req, res) => {
         ps_customer_key       = COALESCE(EXCLUDED.ps_customer_key,       leads.ps_customer_key),
         ps_click_at           = COALESCE(EXCLUDED.ps_click_at,           leads.ps_click_at),
         ps_click_history      = COALESCE(EXCLUDED.ps_click_history,      leads.ps_click_history),
-        // COALESCE for the same reason as /partial.
+        /* COALESCE for the same reason as /partial. And a BLOCK comment,
+           not //, because this is SQL: Postgres has no // comment and the
+           whole statement fails with a 42601 syntax error. This line shipped
+           as // and took every /submit down with it. */
         product               = COALESCE(EXCLUDED.product,               leads.product)
     `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product]);
 
