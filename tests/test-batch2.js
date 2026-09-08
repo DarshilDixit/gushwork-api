@@ -1314,6 +1314,144 @@ function finish() {
      threwCount === 0, threwCount + ' throw(s), first: ' + threwFirst);
 }
 
+/* ============================================================
+   11. The product column — one slug, both write paths
+
+   leads.product on Railway and gw_form_leads.product on the AWS mirror.
+   The nightly jobs in the other repo read the mirror, so a product they
+   cannot see is a product they cannot report on.
+
+   The stored value is the slug resolveProduct returns — the SAME function
+   that decides the Meta content_ids — so the column and the event cannot
+   disagree about which product a lead came in for. Never req.body, so no
+   page can write an arbitrary value into the column.
+
+   Most of this section is placeholder arithmetic, which sounds dull and
+   is the thing that actually breaks: an off-by-one in a 39-parameter
+   INSERT does not fail loudly, it binds the wrong value into the wrong
+   column on a live lead.
+   ============================================================ */
+{
+  /* Balanced-paren slice, because VALUES contains NOW() and a naive
+     [^)]* stops inside it — which silently truncates the list and makes
+     every count below agree with itself while being wrong. */
+  const parens = (s, from) => {
+    const start = s.indexOf('(', from);
+    let d = 0;
+    for (let i = start; i < s.length; i++) {
+      if (s[i] === '(') d++;
+      else if (s[i] === ')') { d--; if (!d) return s.slice(start + 1, i); }
+    }
+    throw new Error('unbalanced parens');
+  };
+  const topSplit = (s) => {
+    let d = 0, cur = '', out = [];
+    for (const ch of s) {
+      if ('([{'.includes(ch)) d++;
+      if (')]}'.includes(ch)) d--;
+      if (ch === ',' && d === 0) { out.push(cur.trim()); cur = ''; } else cur += ch;
+    }
+    if (cur.trim()) out.push(cur.trim());
+    return out.filter(Boolean);
+  };
+  const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+  const checkInsert = (label, table, routeMarker, endMarker) => {
+    const i = src.indexOf(routeMarker);
+    ok(label + ': the route is still here', i >= 0);
+    if (i < 0) return;
+    const insAt = src.indexOf('INSERT INTO ' + table, i);
+    const cols  = topSplit(strip(parens(src, insAt)));
+    const vi    = src.indexOf('VALUES', insAt);
+    const vals  = topSplit(parens(src, vi));
+    const bs    = src.indexOf('`, [', vi);
+    const binds = topSplit(strip(src.slice(bs + 4, src.indexOf(endMarker, bs))
+                                   .replace(/\]\);?\s*$/, '')));
+    const nums  = vals.filter((v) => /^\$\d+$/.test(v)).map((v) => +v.slice(1));
+    const maxN  = Math.max(...nums);
+
+    ok(label + ': columns == VALUES items', cols.length === vals.length,
+       cols.length + ' cols vs ' + vals.length + ' values');
+    ok(label + ': $n run 1..' + maxN + ' with no gaps or repeats',
+       new Set(nums).size === nums.length && maxN === nums.length &&
+       nums.slice().sort((a, b) => a - b).every((v, k) => v === k + 1));
+    ok(label + ': placeholders == binds', maxN === binds.length,
+       maxN + ' placeholders vs ' + binds.length + ' binds');
+    ok(label + ': product is in the column list', cols.includes('product'));
+    ok(label + ': product sits at the highest placeholder',
+       vals[cols.indexOf('product')] === '$' + maxN,
+       'got ' + vals[cols.indexOf('product')]);
+    /* Anything in VALUES that is not a $n must be a literal. A stray bare
+       identifier there means the placeholder run has been shifted. */
+    ok(label + ': every non-placeholder VALUES item is a literal',
+       vals.filter((v) => !/^\$\d+$/.test(v))
+           .every((v) => /^(false|true|\d+|NOW\(\)|'[^']*')$/.test(v)),
+       vals.filter((v) => !/^\$\d+$/.test(v)).join(' | '));
+    return { cols, vals, binds, maxN };
+  };
+
+  const p = checkInsert('product /partial', 'leads', "app.post('/partial'", '\n\n');
+  ok('product /partial: product is the last bind', p && p.binds[p.binds.length - 1] === 'product',
+     p && p.binds[p.binds.length - 1]);
+  const s2 = checkInsert('product /submit', 'leads', "app.post('/submit'", '\n\n');
+  ok('product /submit: product is the last bind', s2 && s2.binds[s2.binds.length - 1] === 'product',
+     s2 && s2.binds[s2.binds.length - 1]);
+
+  // ── syncToAWS, the mirror the other repo reads
+  {
+    const insAt = src.indexOf('INSERT INTO gw_form_leads');
+    const cols  = topSplit(strip(parens(src, insAt)));
+    const vi    = src.indexOf('VALUES', insAt);
+    const vals  = topSplit(parens(src, vi));
+    const bs    = src.indexOf('`, [', vi);
+    const binds = topSplit(strip(src.slice(bs + 4, src.indexOf('  ]).then', bs))));
+    const nums  = vals.filter((v) => /^\$\d+$/.test(v)).map((v) => +v.slice(1));
+    const maxN  = Math.max(...nums);
+
+    ok('product syncToAWS: columns == VALUES items', cols.length === vals.length,
+       cols.length + ' vs ' + vals.length);
+    ok('product syncToAWS: $n run 1..' + maxN + ' with no gaps',
+       new Set(nums).size === nums.length && maxN === nums.length);
+    ok('product syncToAWS: placeholders == binds', maxN === binds.length,
+       maxN + ' vs ' + binds.length);
+    ok('product syncToAWS: updated_at is still last and bound to NOW()',
+       cols[cols.length - 1] === 'updated_at' && vals[vals.length - 1] === 'NOW()');
+    ok('product syncToAWS: product sits at $' + maxN,
+       vals[cols.indexOf('product')] === '$' + maxN);
+    ok('product syncToAWS: product is the final bind',
+       /^data\.product\s*\|\|\s*null$/.test(binds[binds.length - 1]), binds[binds.length - 1]);
+    ok('product syncToAWS: the conflict clause COALESCEs product',
+       /product\s*=\s*COALESCE\(EXCLUDED\.product,\s*gw_form_leads\.product\)/
+         .test(src.slice(insAt, src.indexOf('  ]).then', insAt))));
+  }
+
+  /* COALESCE, never a bare overwrite. /partial fires repeatedly through
+     step 1; a later call must not blank a slug an earlier one resolved.
+     Exactly the reason the ps_ columns are COALESCEd. */
+  ok('product: both Railway conflict clauses COALESCE it',
+     (src.match(/product\s+=\s+COALESCE\(EXCLUDED\.product,\s+leads\.product\)/g) || []).length === 2);
+  ok('product: it is never overwritten unconditionally',
+     !/product\s*=\s*EXCLUDED\.product\s*[,\n]/.test(src));
+
+  // ── migrations, both instances
+  ok('product: db.js adds leads.product',
+     /ALTER TABLE leads ADD COLUMN IF NOT EXISTS product TEXT/.test(dbsrc));
+  ok('product: initAWSTable adds gw_form_leads.product',
+     /ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS product TEXT/.test(src));
+
+  /* One resolver. A second copy in index.js is how the column and the Meta
+     event end up disagreeing about the same lead. */
+  ok('product: index.js imports resolveProduct from meta-capi',
+     /const \{ pushFormEventsToMeta, pushStartTrialToMeta, resolveProduct \} = require\('\.\/meta-capi'\);/.test(src));
+  ok('product: index.js defines no catalogue of its own',
+     !/const PRODUCTS\s*=/.test(src) && !/predicted_ltv/.test(src));
+  ok('product: both routes resolve from page_url and nothing else',
+     (src.match(/resolveProduct\(\{ page_url \}\)/g) || []).length === 2);
+  /* The column holds a slug this code resolved, never a string a page sent.
+     A hidden field would let any page write anything into the column. */
+  ok('product: nothing reads req.body.product', !/req\.body\.product/.test(src));
+}
+
 /* ============================================================ */
 console.log('');
 console.log(`  passed: ${pass}`);

@@ -432,6 +432,18 @@ async function initDB() {
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_retry_at TIMESTAMPTZ`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_qualify_failed_at TIMESTAMPTZ`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_qualify_fail_reason TEXT`,
+      /* Which product this lead came in for: the slug resolved from the form
+         page, aeo (/demo) or crm (/ai-demo). Resolved server-side by
+         resolveProduct in meta-capi.js — the SAME function that decides the
+         Meta content_ids — so the column and the event can never disagree.
+         Never the raw page and never a value a page author typed.
+
+         NULL means the form page was not one we recognise. Rows predating
+         this column were backfilled to aeo by hand, once: there was only one
+         product then. Deliberately NOT backfilled here — a boot migration
+         runs on every deploy, and after this column exists a NULL means
+         "unrecognised page", which must not quietly become aeo. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS product TEXT`,
       /* What the visitor actually came in saying, before the partner overwrite.
          hear_about_us is a single column with three possible authors — the ad
          prefill, the visitor, and partnerHearAboutUs — and the last one wins,
