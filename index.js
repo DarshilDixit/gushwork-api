@@ -9266,8 +9266,26 @@ app.post('/booking-confirmed-webhook-rh', async (req, res) => {
       console.log('[/rh-webhook] ⏭ No meeting payload or email — skipping');
       return res.json({ ok: true, skipped: true });
     }
-if (payload.router_name && payload.router_name !== 'Inbound Router - Website') {
-  console.log(`[/rh-webhook] ⏭ Skipping — router: ${payload.router_name} (not inbound website router)`);
+/* Routers whose bookings belong to this service. A LIST, because there is
+   now more than one product: AEO books through the original inbound router
+   and CRM through its own. A single-value check silently dropped every CRM
+   booking webhook on 8 Sept — the browser path had already recorded the
+   booking, so nothing looked wrong, but the webhook is the SAFETY NET for
+   when the browser never calls back, and it was not covering CRM at all.
+
+   Matched case-insensitively and trimmed: RevenueHero sends the router name
+   as configured in their UI, and a stray space or a capital letter is not a
+   reason to drop a booking.
+
+   A payload with NO router_name is still accepted, unchanged — that is how
+   the original router identified itself before this field existed. */
+const RH_ALLOWED_ROUTERS = [
+  'Inbound Router - Website',
+  'New Product Router - Website',
+];
+const rhRouter = (payload.router_name || '').toString().trim().toLowerCase();
+if (rhRouter && !RH_ALLOWED_ROUTERS.some((r) => r.toLowerCase() === rhRouter)) {
+  console.log(`[/rh-webhook] ⏭ Skipping — router: ${payload.router_name} (not an allowed router). Allowed: ${RH_ALLOWED_ROUTERS.join(', ')}`);
   return res.json({ ok: true, skipped: true, reason: 'non_website_router' });
 }
 

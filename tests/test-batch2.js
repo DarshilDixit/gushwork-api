@@ -1932,6 +1932,55 @@ function finish() {
 }
 
 /* ============================================================
+   18. The RevenueHero router allowlist
+
+   /rh-webhook is the SAFETY NET for a booking the browser never reports.
+   It compared router_name against a single hardcoded string, so when CRM
+   got its own router every CRM booking webhook was dropped. Nothing looked
+   wrong on 8 Sept because the browser path had already recorded the
+   booking — which is exactly the condition under which a safety net is
+   never exercised and never missed.
+
+   Executed against the payload shapes RevenueHero actually sends, rather
+   than asserted from source, because the question is which bookings get
+   through.
+   ============================================================ */
+{
+  const listSrc = src.slice(src.indexOf('const RH_ALLOWED_ROUTERS = ['),
+                            src.indexOf('];', src.indexOf('const RH_ALLOWED_ROUTERS = [')) + 2);
+  ok('rhrouter: the allowlist exists', listSrc.length > 20);
+  /* true = the webhook is SKIPPED */
+  const skips = new Function('payload', listSrc + `
+    const rhRouter = (payload.router_name || '').toString().trim().toLowerCase();
+    return !!(rhRouter && !RH_ALLOWED_ROUTERS.some((r) => r.toLowerCase() === rhRouter));
+  `);
+
+  for (const [name, shouldSkip, why] of [
+    ['Inbound Router - Website',        false, 'the original AEO router'],
+    ['New Product Router - Website',    false, 'the CRM router'],
+    [undefined,                         false, 'no router_name (pre-field payloads)'],
+    ['',                                false, 'empty router_name'],
+    ['  New Product Router - Website ', false, 'stray whitespace'],
+    ['new product router - website',    false, 'different casing'],
+    ['Outbound Router - SDR',           true,  'a genuinely different router'],
+    ['Partner Router',                  true,  'another unrelated router'],
+  ]) ok('rhrouter: ' + (shouldSkip ? 'skips  ' : 'accepts') + ' ' + JSON.stringify(name) + ' — ' + why,
+        skips({ router_name: name }) === shouldSkip);
+
+  /* The regression, pinned: the old single-value check dropped CRM. */
+  const oldCheck = (p) => !!(p.router_name && p.router_name !== 'Inbound Router - Website');
+  ok('rhrouter: (control) the old single-value check DID drop the CRM router',
+     oldCheck({ router_name: 'New Product Router - Website' }) === true);
+  ok('rhrouter: index.js no longer contains that single-value check',
+     !/router_name !== 'Inbound Router - Website'/.test(src));
+  ok('rhrouter: the skip log names the allowed routers, so a mismatch is diagnosable',
+     /Allowed: \$\{RH_ALLOWED_ROUTERS\.join/.test(src));
+  /* Adding a product means adding a router; keep them visible together. */
+  ok('rhrouter: both routers are listed', /'Inbound Router - Website',/.test(listSrc) &&
+     /'New Product Router - Website',/.test(listSrc));
+}
+
+/* ============================================================
    12. A Meta failure must reach recordFailure
 
    Every push function ended in Promise.allSettled, which never rejects.
