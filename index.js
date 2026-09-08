@@ -2650,6 +2650,10 @@ app.get('/monitor/leads', async (req, res) => {
   const websiteCheck = req.query.websiteCheck || 'all';
   const repeatAttempts = req.query.repeatAttempts || 'all';
   const partner      = req.query.partner      || null;
+  /* 'all' means no filter. '__none' is its own option because an untagged
+     lead is a real state — a page_url resolveProduct could not read — and
+     folding it into "all" would make it unfindable. */
+  const product      = req.query.product      || 'all';
   const format     = req.query.format     || 'json';
 
   const sortMap = {
@@ -2691,6 +2695,8 @@ app.get('/monitor/leads', async (req, res) => {
     // any lead that flipped B2C/Mixed -> B2B at the disqualified step
     conditions.push(`l.sell_to LIKE 'B2B (clarified from%'`);
   } else if (sellTo) { params.push(sellTo);    conditions.push(`l.sell_to = $${params.length}`); }
+  if (product === '__none') conditions.push(`l.product IS NULL`);
+  else if (product && product !== 'all') { params.push(product); conditions.push(`l.product = $${params.length}`); }
   if (utmSource) { params.push(utmSource); conditions.push(`l.utm_source = $${params.length}`); }
   if (hearAbout) { params.push(`%${hearAbout.toLowerCase()}%`); conditions.push(`LOWER(COALESCE(l.hear_about_us,'')) LIKE $${params.length}`); }
 
@@ -2747,6 +2753,7 @@ app.get('/monitor/leads', async (req, res) => {
     SELECT
       l.session_id, l.email, l.first_name, l.last_name, l.phone,
       l.company, l.website, l.sell_to, l.hear_about_us,
+      l.product, l.about_business,
       l.completed, l.booking_uid, l.booked_at, l.start_time, l.end_time,
       l.disqualified, l.disqualified_reason, l.step_reached,
       l.loops_sent, l.created_at, l.submitted_at, l.page_url,
@@ -2791,7 +2798,7 @@ app.get('/monitor/leads', async (req, res) => {
     if (format === 'csv') {
       const allRows = await pool.query(baseSelect + ` ${orderBy}`, params);
       const cols = [
-        'email','first_name','last_name','company','website','phone','sell_to','hear_about_us','hear_about_us_raw',
+        'email','first_name','last_name','company','website','phone','sell_to','product','about_business','hear_about_us','hear_about_us_raw',
         'completed','booking_uid','disqualified','step_reached','created_at','submitted_at','booked_at',
         'utm_source','utm_medium','utm_campaign','utm_term','referrer','prefill_source',
         'landing_page','previous_page','page_url','website_check_failed','website_check_reason','prior_attempts','prior_disqualified',
@@ -3124,6 +3131,7 @@ app.get('/monitor', (req, res) => {
   '<input type="text" id="fsearch" placeholder="Search email, company..." oninput="debounce()">' +
   '<select id="fstage" onchange="loadLeads(1)"><option value="all">All stages</option><option value="booked">Booked</option><option value="completed">Completed (not booked, not disqualified)</option><option value="step1">Step 1 only</option><option value="disqualified">Disqualified (not booked)</option></select>' +
   '<select id="fsellto" onchange="loadLeads(1)"><option value="all">All sell-to</option><option value="B2B">B2B</option><option value="B2B (clarified from B2C)">B2B (clarified from B2C)</option><option value="B2B (clarified from Mixed)">B2B (clarified from Mixed)</option><option value="B2C">B2C</option><option value="Mixed">Mixed</option><option value="__clarified">Clarified (any)</option></select>' +
+  '<select id="fproduct" onchange="loadLeads(1)"><option value="all">All products</option><option value="aeo">AEO</option><option value="crm">CRM</option><option value="__none">Untagged</option></select>' +
   '<select id="fsource" onchange="loadLeads(1)"><option value="all">All sources</option></select>' +
   '<select id="fenrich" onchange="loadLeads(1)"><option value="all">Enrichment: all</option><option value="yes">Enriched</option><option value="no">Not enriched</option></select>' +
   '<select id="fpartner" onchange="loadLeads(1)"><option value="all">Partner: all</option><option value="__any">Any partner</option><option value="__none">No partner</option></select>' +
@@ -3144,11 +3152,12 @@ app.get('/monitor', (req, res) => {
   '<th class="sortable" onclick="sortBy(\'name\')">Name <span class="sar" id="sar-name"></span></th>' +
   '<th class="sortable" onclick="sortBy(\'company\')">Company <span class="sar" id="sar-company"></span></th>' +
   '<th class="sortable" onclick="sortBy(\'sell_to\')">Sells to <span class="sar" id="sar-sell_to"></span></th>' +
+  '<th>Product</th>' +
   '<th>Stage</th><th>Booked</th><th>Enrichment</th>' +
   '<th class="sortable" onclick="sortBy(\'created_at\')">Created (ET) <span class="sar" id="sar-created_at"></span></th>' +
   '<th>Source</th>' +
   '<div id="psgapbox" style="display:none"></div>' +
-  '</tr></thead><tbody id="ltbody"><tr><td colspan="10" class="nd">Loading leads...</td></tr></tbody></table></div></div>' +
+  '</tr></thead><tbody id="ltbody"><tr><td colspan="11" class="nd">Loading leads...</td></tr></tbody></table></div></div>' +
   '<div class="pg" id="lpag"></div>' +
   '</div>' +
   '<div class="tp" id="tp-partners">' +
@@ -3506,6 +3515,10 @@ app.get('/monitor', (req, res) => {
   '{g:1,lb:"Email check",v:l.elv_status},' +
   '{g:1,lb:"\\uD83D\\uDD01 Attempts",v:(Number(l.prior_attempts)>0)?("Attempt "+(Number(l.prior_attempts)+1)+" \\u2014 "+l.prior_attempts+" prior"+(Number(l.prior_disqualified)>0?", "+l.prior_disqualified+" disqualified":"")):null},' +
   '{g:1,lb:"Hear about us",v:l.hear_about_us},' +
+  '{g:1,lb:"Product",v:l.product},' +
+  /* Free text, so it lives in the expanded panel rather than the table:
+     a paragraph in a table cell wrecks every other column's width. */
+  '{g:1,lb:"About their business",v:l.about_business},' +
   '{g:2,lb:"UTM source",v:l.utm_source},' +
   '{g:2,lb:"UTM medium",v:l.utm_medium},' +
   '{g:2,lb:"UTM campaign",v:l.utm_campaign},' +
@@ -3786,25 +3799,25 @@ app.get('/monitor', (req, res) => {
   'if(!has){var o=document.createElement("option");o.value=key;o.textContent="Partner: "+key;sel.appendChild(o);}' +
   'sel.value=key;}loadLeads(1);}' +
   'function debounce(){clearTimeout(stimer);stimer=setTimeout(function(){loadLeads(1);},400);}' +
-  'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("fsellto").value="all";document.getElementById("fsource").value="all";document.getElementById("fenrich").value="all";document.getElementById("fwebsitecheck").value="all";document.getElementById("frepeat").value="all";document.getElementById("fpartner").value="all";document.getElementById("fhear").value="";document.getElementById("fpreset").value="";document.getElementById("ffrom").value="";document.getElementById("fto").value="";curSort="created_at";curDir="desc";renderSortArrows();loadLeads(1);}' +
+  'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("fsellto").value="all";document.getElementById("fproduct").value="all";document.getElementById("fsource").value="all";document.getElementById("fenrich").value="all";document.getElementById("fwebsitecheck").value="all";document.getElementById("frepeat").value="all";document.getElementById("fpartner").value="all";document.getElementById("fhear").value="";document.getElementById("fpreset").value="";document.getElementById("ffrom").value="";document.getElementById("fto").value="";curSort="created_at";curDir="desc";renderSortArrows();loadLeads(1);}' +
   'function renderSortArrows(){["email","name","company","sell_to","created_at"].forEach(function(c){var el=document.getElementById("sar-"+c);if(el)el.textContent=(curSort===c)?(curDir==="asc"?"\\u25B2":"\\u25BC"):"";});}' +
   'function sortBy(c){if(curSort===c){curDir=(curDir==="asc")?"desc":"asc";}else{curSort=c;curDir=(c==="created_at")?"desc":"asc";}renderSortArrows();loadLeads(1);}' +
   'function datePreset(v){var ff=document.getElementById("ffrom"),ft=document.getElementById("fto");if(!v){loadLeads(1);return;}var to=etDayShift(0),from=to;if(v==="7d")from=etDayShift(-6);else if(v==="30d")from=etDayShift(-29);ff.value=from;ft.value=to;loadLeads(1);}' +
   'function dateManual(){var p=document.getElementById("fpreset");if(p)p.value="";loadLeads(1);}' +
-  'function exportLeads(){var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"format=csv&stage="+stage+"&sort="+curSort+"&dir="+curDir;if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;window.location.href=url;}' +
+  'function exportLeads(){var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,product=document.getElementById("fproduct").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"format=csv&stage="+stage+"&sort="+curSort+"&dir="+curDir;if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(product&&product!=="all")url+="&product="+encodeURIComponent(product);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;window.location.href=url;}' +
   'async function loadFilterOptions(){if(filterOptsLoaded)return;try{var r=await fetch(API+"/monitor/filter-options"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(10000)});if(!r.ok)return;var d=await r.json();var sel=document.getElementById("fsource");if(sel&&d.utmSource){d.utmSource.forEach(function(v){var o=document.createElement("option");o.value=v;o.textContent=v;sel.appendChild(o);});}var ps=document.getElementById("fpartner");if(ps&&d.partners){d.partners.forEach(function(p){var o=document.createElement("option");o.value=p.key;o.textContent="Partner: "+(p.name||p.key)+(p.email?" <"+p.email+">":"");ps.appendChild(o);});}var dl=document.getElementById("hearlist");if(dl&&d.hearAbout){dl.innerHTML=d.hearAbout.map(function(v){return"<option value=\\""+esc(v)+"\\"></option>";}).join("");}filterOptsLoaded=true;}catch(e){}}' +
   'function toggleRow(sid){var row=document.getElementById("er-"+sid);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=row.previousElementSibling&&row.previousElementSibling.querySelector(".xbtn");if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";}' +
-  'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
+  'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,product=document.getElementById("fproduct").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
   'var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"page="+curPage+"&stage="+stage+"&sort="+curSort+"&dir="+curDir;' +
-  'if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;' +
-  'document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\">Loading...</td></tr>";' +
+  'if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(product&&product!=="all")url+="&product="+encodeURIComponent(product);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;' +
+  'document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\">Loading...</td></tr>";' +
   'try{var r=await fetch(url,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
   'set("lcount",d.total+" lead"+(d.total!==1?"s":"")+" found");' +
-  'if(!d.leads.length){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\">No leads match your filters.</td></tr>";document.getElementById("lpag").innerHTML="";return;}' +
+  'if(!d.leads.length){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\">No leads match your filters.</td></tr>";document.getElementById("lpag").innerHTML="";return;}' +
   'var html=d.leads.map(function(l){var sid=esc(l.session_id),name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\\u2014",src=l.utm_source?esc(l.utm_source)+(l.utm_medium?" / "+esc(l.utm_medium):""):(l.referrer?"referral":"\\u2014");' +
-  'return"<tr><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
-  '"<tr class=\\"erow\\" id=\\"er-"+sid+"\\" style=\\"display:none\\"><td></td><td colspan=\\"9\\">"+enrichPanel(l)+"</td></tr>";}).join("");' +
-  'document.getElementById("ltbody").innerHTML=html;renderPag(d.page,d.pages);}catch(e){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"10\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
+  'return"<tr><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+esc(l.product||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
+  '"<tr class=\\"erow\\" id=\\"er-"+sid+"\\" style=\\"display:none\\"><td></td><td colspan=\\"10\\">"+enrichPanel(l)+"</td></tr>";}).join("");' +
+  'document.getElementById("ltbody").innerHTML=html;renderPag(d.page,d.pages);}catch(e){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function renderPag(pg,pages){if(pages<=1){document.getElementById("lpag").innerHTML="";return;}var h="";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg-1)+")\\""+(pg<=1?" disabled":"")+">&larr;</button>";var s=Math.max(1,pg-2),e=Math.min(pages,pg+2);if(s>1)h+="<button class=\\"pb\\" onclick=\\"loadLeads(1)\\">1</button>"+(s>2?"<span class=\\"pi\\">&#8230;</span>":"");for(var i=s;i<=e;i++)h+="<button class=\\"pb"+(i===pg?" act":"")+ "\\" onclick=\\"loadLeads("+i+")\\" >"+i+"</button>";if(e<pages)h+=(e<pages-1?"<span class=\\"pi\\">&#8230;</span>":"")+"<button class=\\"pb\\" onclick=\\"loadLeads("+pages+")\\" >"+pages+"</button>";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg+1)+")\\"" +(pg>=pages?" disabled":"")+">&rarr;</button><span class=\\"pi\\">Page "+pg+" of "+pages+"</span>";document.getElementById("lpag").innerHTML=h;}' +
   'var lmLeads=[],lmChart=null,lmFilter="all";' +
   'var lmPillDefs=[["all","All"],["awaiting","Awaiting send"],["sent","Sent"],["abandoned","Abandoned"],["internal","Internal tests"]];' +
