@@ -262,10 +262,28 @@ async function sendEvent(eventName, payload, options = {}) {
 
   const url = `https://graph.facebook.com/v21.0/${pixelId}/events?access_token=${accessToken}`;
 
+  /* test_event_code is a TOP-LEVEL field on the request, a sibling of data —
+     not a property of the event. Putting it inside the event object is the
+     usual mistake and Meta ignores it silently there.
+
+     Off unless META_TEST_EVENT_CODE is set, and the body is byte-identical
+     when it is unset: the key is added, never assigned undefined, because
+     JSON.stringify drops an undefined value but the object identity check in
+     the tests would not notice a subtler change.
+
+     An event carrying this code is routed to the Test Events tab and is NOT
+     used for optimisation or attribution, so it cannot pollute the pixel.
+     Leaving the variable set in production would therefore send every real
+     conversion to the test tab instead of to the ad algorithm — set it for a
+     verification run and unset it afterwards. */
+  const body = { data: [eventData] };
+  const testEventCode = process.env.META_TEST_EVENT_CODE;
+  if (testEventCode) body.test_event_code = testEventCode;
+
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ data: [eventData] }),
+    body: JSON.stringify(body),
   });
 
   const result = await res.json();
