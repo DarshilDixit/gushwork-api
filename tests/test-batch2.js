@@ -21,6 +21,7 @@ const src   = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
 const dbsrc = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
 
 let pass = 0, fail = 0;
+let results16 = async () => [];   // section 16 is async; invoked by the tail AFTER section 12
 const failures = [];
 function ok(name, cond, extra) {
   if (cond) { pass++; }
@@ -1720,6 +1721,125 @@ function finish() {
 }
 
 /* ============================================================
+   16. Salesforce — product, the free-text answer, and NOT losing the lead
+
+   Salesforce rejects the ENTIRE record when it does not recognise one
+   field. Not the field, the record. So a Product__c that is missing,
+   renamed, or invisible to the integration user does not cost a column,
+   it costs the whole lead.
+
+   Both fields exist today: created 8 Sept 2026 via the Tooling API, with
+   FieldPermissions granted and a real write/read round-trip — creating a
+   field does not grant access to it, which is the 4 Sept lesson. This
+   guard is for the day that stops being true.
+
+   Driven against a stubbed fetch, because "does the lead survive" is a
+   question about behaviour. test-sf-readers.js is the other suite that
+   executes salesforce.js; this lives here with the rest of the product
+   work.
+   ============================================================ */
+{
+  const sfsrc = fs.readFileSync(path.join(__dirname, '..', 'salesforce.js'), 'utf8');
+  ok('sf: product maps to Product__c',            /product: 'Product__c',/.test(sfsrc));
+  ok('sf: about_business maps to About_Business__c', /about_business: 'About_Business__c',/.test(sfsrc));
+  ok('sf: /submit passes both',
+     /pushToSalesforce\(\{first_name,last_name,email,phone,company,website,sell_to,product,about_business,/.test(src));
+  /* Narrow on purpose: a blanket strip-anything-and-retry would quietly
+     post half a lead forever. */
+  ok('sf: only the two unknown-field codes trigger the retry',
+     /const SF_UNKNOWN_FIELD_CODES = \['INVALID_FIELD_FOR_INSERT_UPDATE', 'INVALID_FIELD'\]/.test(sfsrc));
+  ok('sf: the offender is read from fields[] AND from the message text',
+     /for \(const f of e\.fields \|\| \[\]\) named\.add\(f\);/.test(sfsrc) &&
+     /matchAll\(\/'\(\[A-Za-z0-9_\]\+__c\)'\/g\)/.test(sfsrc));
+
+  /* EXECUTED: the real function, a stubbed Salesforce. */
+  const sf = require('../salesforce.js');
+  const realFetch = global.fetch;
+  /* ALWAYS restores the console, even on a throw. Without the finally, a
+     throw between muting and restoring leaves the suite silent — it prints
+     no totals at all and the run reads as UNMEASURED rather than as a
+     failure. Measured: breaking the guard came back UNMEASURED until this
+     existed, for exactly that reason. */
+  const silenced = async (fn) => {
+    const l = console.log, w = console.warn, e = console.error;
+    console.log = console.warn = console.error = () => {};
+    try { return await fn(); }
+    finally { console.log = l; console.warn = w; console.error = e; }
+  };
+  const PAYLOAD = { first_name: 'A', last_name: 'B', email: 'a@b.com', company: 'Acme',
+    product: 'crm', about_business: 'We move pallets.', sell_to: 'B2B' };
+  const harness = (behaviour) => {
+    const posts = [];
+    global.fetch = async (url, opts) => {
+      if (String(url).includes('/oauth2/token'))
+        return { ok: true, json: async () => ({ access_token: 't', instance_url: 'https://sf.invalid' }) };
+      if (String(url).includes('/query')) return { ok: true, json: async () => ({ totalSize: 0, records: [] }) };
+      posts.push(JSON.parse(opts.body));
+      return behaviour(JSON.parse(opts.body), posts.length);
+    };
+    return posts;
+  };
+  const reject = (fields) => (body) => {
+    const bad = fields.filter((f) => f in body);
+    if (bad.length) return { ok: false, json: async () => ([{ errorCode: 'INVALID_FIELD_FOR_INSERT_UPDATE',
+      message: "No such column '" + bad[0] + "' on sobject of type Lead", fields: bad }]) };
+    return { ok: true, json: async () => ({ id: '00Qok', success: true }) };
+  };
+
+  /* The catch is attached HERE, not at the drain site: a rejection with no
+     handler in the same tick fires unhandledRejection, and crash-reporter
+     turns that into a crashed suite — UNMEASURED, which reads as neither a
+     pass nor a catch. Measured: without this, breaking the guard came back
+     UNMEASURED instead of failing. */
+  /* A FUNCTION, not a started promise. Section 12 also stubs global.fetch,
+     and an IIFE here begins executing immediately — the two then race for
+     the same global and section 12's stub throws into section 16's calls.
+     The tail invokes this only after section 12 has finished. */
+  results16 = async () => {
+    const out = [];
+    let posts = harness(() => ({ ok: true, json: async () => ({ id: '00Q1', success: true }) }));
+    let r = await silenced(() => sf.pushToSalesforce(PAYLOAD));
+    out.push(['sf: happy path creates the lead with both fields',
+      r.success === true && posts[0].Product__c === 'crm' && posts[0].About_Business__c === 'We move pallets.', JSON.stringify(r)]);
+    out.push(['sf: and needs only one POST', posts.length === 1, String(posts.length)]);
+
+    posts = harness(reject(['Product__c']));
+    r = await silenced(() => sf.pushToSalesforce(PAYLOAD));
+    out.push(['sf: a rejected Product__c does NOT lose the lead', r.success === true, JSON.stringify(r)]);
+    out.push(['sf: it retries exactly once', posts.length === 2, String(posts.length)]);
+    /* posts[1] does not exist when no retry happened. Reading through it
+       THROWS, which loses every assertion after it and turns a broken guard
+       into an UNMEASURED run instead of a failure — measured, twice. */
+    const retryBody = posts[1] || {};
+    out.push(['sf: the retry drops only the named field',
+      !!posts[1] && !('Product__c' in retryBody) && retryBody.About_Business__c === 'We move pallets.']);
+    out.push(['sf: every other field survives the retry',
+      !!posts[1] && retryBody.Email === 'a@b.com' && retryBody.Company === 'Acme' && retryBody.sell_to__c === 'B2B']);
+    out.push(['sf: the caller is told what was dropped', JSON.stringify(r.droppedFields) === '["Product__c"]', JSON.stringify(r.droppedFields)]);
+
+    posts = harness((body) => ('Product__c' in body)
+      ? { ok: false, json: async () => ([{ errorCode: 'INVALID_FIELD', message: "No such column 'Product__c' on sobject of type Lead" }]) }
+      : { ok: true, json: async () => ({ id: '00Q4', success: true }) });
+    r = await silenced(() => sf.pushToSalesforce(PAYLOAD));
+    out.push(['sf: a field named only in the message text is still found',
+      r.success === true && !!posts[1] && !('Product__c' in posts[1])]);
+
+    posts = harness(() => ({ ok: false, json: async () => ([{ errorCode: 'REQUIRED_FIELD_MISSING',
+      message: 'Required fields are missing: [LastName]', fields: ['LastName'] }]) }));
+    r = await silenced(() => sf.pushToSalesforce(PAYLOAD));
+    out.push(['sf: an unrelated error does NOT trigger strip-and-retry', r.success === false && posts.length === 1, String(posts.length)]);
+
+    posts = harness(() => ({ ok: false, json: async () => ([{ errorCode: 'INVALID_FIELD_FOR_INSERT_UPDATE',
+      message: "No such column 'Product__c' on sobject of type Lead", fields: ['Product__c'] }]) }));
+    r = await silenced(() => sf.pushToSalesforce(PAYLOAD));
+    out.push(['sf: a retry that also fails is reported, not swallowed', r.success === false && posts.length === 2, String(posts.length)]);
+
+    global.fetch = realFetch;
+    return out;
+  };
+}
+
+/* ============================================================
    12. A Meta failure must reach recordFailure
 
    Every push function ended in Promise.allSettled, which never rejects.
@@ -1858,6 +1978,8 @@ async function section12() {
    unhandledRejection and the suite prints no totals at all, which reads
    as UNMEASURED rather than as a failure. */
 section12()
+  .then(() => results16().catch((e) => [['sf: section 16 ran to completion', false, e && e.message]]))
+  .then((rows) => { for (const [n, c, x] of rows) ok(n, c, x); })
   .catch((err) => { ok('capi: section 12 completed', false, err && err.message); })
   .then(() => {
     console.log('');
