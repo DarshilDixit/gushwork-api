@@ -21,7 +21,8 @@ const src   = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
 const dbsrc = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
 
 let pass = 0, fail = 0;
-let results16 = async () => [];   // section 16 is async; invoked by the tail AFTER section 12
+let results16 = async () => [];
+let results19 = async () => [];   // section 19 is async too; invoked by the tail   // section 16 is async; invoked by the tail AFTER section 12
 const failures = [];
 function ok(name, cond, extra) {
   if (cond) { pass++; }
@@ -2044,6 +2045,75 @@ function finish() {
 }
 
 /* ============================================================
+   19. META_TEST_EVENT_CODE — off unless set, invisible when unset
+
+   test_event_code is a TOP-LEVEL field on the request, a sibling of data.
+   Putting it inside the event object is the usual mistake and Meta ignores
+   it silently there, which looks like "the code did not work" rather than
+   "the code was in the wrong place".
+
+   The byte-identity assertion below compares the REQUEST BODY the module
+   builds with the flag unset against a hand-written expectation of the same
+   shape — event_time and the random event_id suffix normalised, because
+   those legitimately vary per call and nothing else may.
+   ============================================================ */
+{
+  const META = require('../meta-capi.js');
+  const realFetch = global.fetch;
+  const realCode = process.env.META_TEST_EVENT_CODE;
+  process.env.META_PIXEL_ID = process.env.META_PIXEL_ID || 'test-pixel';
+  process.env.META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN || 'test-token';
+
+  const silenced = async (fn) => {
+    const l = console.log, w = console.warn, e = console.error;
+    console.log = console.warn = console.error = () => {};
+    try { return await fn(); } finally { console.log = l; console.warn = w; console.error = e; }
+  };
+  const capture = async () => {
+    let body = null;
+    global.fetch = async (u, o) => { body = o.body; return { ok: true, json: async () => ({ events_received: 1 }) }; };
+    await silenced(() => META.pushFormEventsToMeta(
+      { session_id: 'FIXED', email: 'a@b.com', page_url: 'https://gushwork.ai/ai-demo', sell_to: 'B2B' }, {}
+    ).catch(() => null));
+    return body;
+  };
+
+  results19 = async () => {
+    const out = [];
+    try {
+      delete process.env.META_TEST_EVENT_CODE;
+      const off = JSON.parse(await capture());
+      out.push(['tec: unset -> no test_event_code key at all',
+        !Object.prototype.hasOwnProperty.call(off, 'test_event_code'), Object.keys(off).join(',')]);
+      out.push(['tec: unset -> the body is exactly { data: [...] }',
+        JSON.stringify(Object.keys(off)) === '["data"]', Object.keys(off).join(',')]);
+
+      process.env.META_TEST_EVENT_CODE = 'TEST00000';
+      const on = JSON.parse(await capture());
+      out.push(['tec: set -> the code is present', on.test_event_code === 'TEST00000', String(on.test_event_code)]);
+      out.push(['tec: set -> it is a SIBLING of data, not a property of the event',
+        'test_event_code' in on && !('test_event_code' in on.data[0]),
+        Object.keys(on).join(',') + ' | event: ' + Object.keys(on.data[0]).join(',')]);
+
+      /* The event must be untouched by the flag — only the envelope changes. */
+      const norm = (e) => { const c = { ...e }; delete c.event_time; delete c.event_id; return JSON.stringify(c); };
+      out.push(['tec: the event object itself is identical with and without the code',
+        norm(on.data[0]) === norm(off.data[0])]);
+
+      process.env.META_TEST_EVENT_CODE = '';
+      const empty = JSON.parse(await capture());
+      out.push(['tec: an empty env var counts as unset',
+        !Object.prototype.hasOwnProperty.call(empty, 'test_event_code')]);
+    } finally {
+      global.fetch = realFetch;
+      if (realCode === undefined) delete process.env.META_TEST_EVENT_CODE;
+      else process.env.META_TEST_EVENT_CODE = realCode;
+    }
+    return out;
+  };
+}
+
+/* ============================================================
    12. A Meta failure must reach recordFailure
 
    Every push function ended in Promise.allSettled, which never rejects.
@@ -2183,6 +2253,7 @@ async function section12() {
    as UNMEASURED rather than as a failure. */
 section12()
   .then(() => results16().catch((e) => [['sf: section 16 ran to completion', false, e && e.message]]))
+  .then((rows) => { for (const [n, c, x] of rows) ok(n, c, x); return results19().catch((e) => [['tec: section 19 ran to completion', false, e && e.message]]); })
   .then((rows) => { for (const [n, c, x] of rows) ok(n, c, x); })
   .catch((err) => { ok('capi: section 12 completed', false, err && err.message); })
   .then(() => {
