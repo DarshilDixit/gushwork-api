@@ -428,6 +428,56 @@ const P = build(popup);
   ok('fork: the two files are still distinct', popup !== demo);
 }
 
+/* ============================================================
+   RevenueHero router id — read from the page, in BOTH files
+
+   /ai-demo carries data-rh-router="6804"; every other page has no
+   attribute and keeps 6138. Getting this wrong is silent: a CRM demo
+   routed to the AEO router books with the wrong team and nothing
+   anywhere says so.
+
+   READ AT USE TIME, not at parse time, and that is the point of the
+   function. This IIFE runs when the script is parsed while init() waits
+   for DOMContentLoaded, and the only DOM the parse-time code touches is
+   document.head. A querySelector on the body evaluated up there returns
+   null whenever the script tag sits in Webflow's head — and null falls
+   through to 6138, which is a wrong answer that looks like a default.
+
+   LIFTED AND RUN against a stubbed document, from both files, because
+   "the source contains a querySelector" is not "it returns 6804".
+   ============================================================ */
+{
+  const runRouter = (src, attrValue) => {
+    const fnSrc = liftFn(src, 'rhRouterId');
+    const def = /const RH_ROUTER_ID_DEFAULT = '(\d+)';/.exec(src);
+    const document = {
+      querySelector: (sel) => {
+        if (sel !== '[data-rh-router]' || attrValue === undefined) return null;
+        return { getAttribute: (a) => (a === 'data-rh-router' ? attrValue : null) };
+      },
+    };
+    return new Function('document', 'RH_ROUTER_ID_DEFAULT',
+      fnSrc + '\nreturn rhRouterId();')(document, def && def[1]);
+  };
+
+  for (const [label, src] of [['demo', demo], ['ads', popup]]) {
+    ok(`router: ${label} default is 6138`,
+       /const RH_ROUTER_ID_DEFAULT = '6138';/.test(src));
+    eq(`router: ${label} reads 6804 from data-rh-router`, runRouter(src, '6804'), '6804');
+    eq(`router: ${label} falls back to 6138 with no attribute`, runRouter(src, undefined), '6138');
+    eq(`router: ${label} falls back to 6138 on an empty attribute`, runRouter(src, ''), '6138');
+    /* Parse-time evaluation is the failure this shape exists to prevent, so
+       assert the read is inside a function and not at the top level. */
+    ok(`router: ${label} does not evaluate the attribute at parse time`,
+       !/const RH_ROUTER_ID\s*=\s*\n?\s*document\.querySelector/.test(src));
+    ok(`router: ${label} constructs RevenueHero by calling the function`,
+       /routerId: rhRouterId\(\)/.test(src) && !/routerId: RH_ROUTER_ID\b/.test(src));
+  }
+  // EQUIVALENCE: the fork must carry the identical unit.
+  eq('router: both files carry a byte-identical rhRouterId',
+     liftFn(demo, 'rhRouterId'), liftFn(popup, 'rhRouterId'));
+}
+
 /* ============================================================ */
 console.log('');
 if (failures.length) {
