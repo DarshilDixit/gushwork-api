@@ -385,7 +385,16 @@
         // Intercept programmatic value assignment (input.value = '...').
         // This is what makes the label float when Apollo enrichment or
         // intl-tel-input reformatting writes a value directly.
-        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+        /* HTMLInputElement's descriptor does not apply to a <textarea>.
+           Calling its getter on one throws, and the throw escapes the
+           forEach — so every field AFTER the textarea in DOM order silently
+           loses its floating label. Skip the interception for textareas;
+           checkValue, the poll and the MutationObserver still keep the
+           label in sync, only a direct programmatic .value = assignment
+           goes unnoticed, and nothing assigns to this field. */
+        const nativeInputValueSetter = input instanceof HTMLTextAreaElement
+          ? null
+          : Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
         if (nativeInputValueSetter) {
           const originalDescriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
           Object.defineProperty(input, 'value', {
@@ -629,6 +638,7 @@
       phone: '',
       company: '',
       hear_about_us: '',
+      about_business: '',
       utm_source: '',
       utm_medium: '',
       utm_campaign: '',
@@ -2569,6 +2579,12 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
         // of whatever the lead happened to type.
         if (canonicalWebsite) formState.website = canonicalWebsite;
         formState.hear_about_us = getField('hear-about-us');
+        /* Read HERE, at submit, not at init: the visitor has not typed
+           anything when the page loads, so an init-time read would store an
+           empty string on every lead forever. Same place and the same way
+           as every other typed field above. Capped client-side by
+           maxlength=1000 on the textarea and again server side. */
+        formState.about_business = getField('about-business');
 
         // Phone (optional) — E.164, no spaces (+916388639290);
         // raw value fallback if utils.js hasn't loaded yet

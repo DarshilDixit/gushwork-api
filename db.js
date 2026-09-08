@@ -444,6 +444,12 @@ async function initDB() {
          runs on every deploy, and after this column exists a NULL means
          "unrecognised page", which must not quietly become aeo. */
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS product TEXT`,
+      /* Free text from the About-your-business textarea, added Sept 2026.
+         Capped at 1000 chars at parse time — the same number as the
+         maxlength on the textarea, so what the visitor can see on screen is
+         what the column keeps. Storage only for now: not in Slack, not on
+         the dashboard, not in the CSV export or SDR search. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS about_business TEXT`,
       /* What the visitor actually came in saying, before the partner overwrite.
          hear_about_us is a single column with three possible authors — the ad
          prefill, the visitor, and partnerHearAboutUs — and the last one wins,

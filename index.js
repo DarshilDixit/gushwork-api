@@ -77,7 +77,19 @@ app.use(cors({
 }));
 
 app.use('/booking-confirmed-webhook-rh', express.raw({ type: 'application/json' }));
-app.use(express.json({ limit: '10kb' }));
+/* 50kb, raised from 10kb when the About-your-business textarea landed.
+
+   THE LIMIT IS THE ONLY THING THAT CAN PREVENT THIS FAILURE, and a
+   server-side slice cannot: express.json rejects an oversized body with a
+   413 BEFORE any route handler runs, so /submit never executes and the
+   whole lead is lost rather than the one field. The slice in the routes is
+   a backstop for the column, not a guard for this.
+
+   Measured with the real 31-key formState: a worst-case body was already
+   12,755 bytes WITHOUT the textarea — over the old limit. 50kb leaves
+   ~38kb of headroom, and a maxlength=1000 textarea costs at most 6kb of
+   that even if every character escapes to \u00XX. */
+app.use(express.json({ limit: '50kb' }));
 
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, max: 100,
@@ -279,6 +291,9 @@ async function initAWSTable() {
          table, not Railway, so a product they cannot see is a product they
          cannot report on. Same slug, resolved once at write time. */
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS product TEXT`,
+      /* Free text from the About-your-business textarea, capped at 1000
+         chars server side. Mirrors leads.about_business. */
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS about_business TEXT`,
     ];
 
     for (const sql of migrations) {
@@ -313,8 +328,8 @@ function syncToAWS(data) {
        step_reached, completed, submitted_at, loops_sent,
        ps_xid, ps_partner_key, ps_partner_name, ps_partner_email, ps_customer_key,
        ps_click_at, ps_click_history,
-       ps_signup_sent_at, ps_signup_verified_at, ps_qualified_sent_at, hear_about_us_raw, product, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,NOW())
+       ps_signup_sent_at, ps_signup_verified_at, ps_qualified_sent_at, hear_about_us_raw, product, about_business, updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,NOW())
     ON CONFLICT (session_id) DO UPDATE SET
       page_url                = COALESCE(EXCLUDED.page_url,                gw_form_leads.page_url),
       email                   = COALESCE(EXCLUDED.email,                   gw_form_leads.email),
@@ -394,6 +409,9 @@ function syncToAWS(data) {
       /* COALESCE for the same reason as the Railway side: a later partial
          sync must not blank a slug an earlier write already resolved. */
       product                 = COALESCE(EXCLUDED.product,                 gw_form_leads.product),
+      /* COALESCE: the textarea is a step-2 field, so /partial syncs a NULL
+         first and /submit fills it. An overwrite would blank it back. */
+      about_business          = COALESCE(EXCLUDED.about_business,          gw_form_leads.about_business),
       updated_at              = NOW()
   `, [
     data.session_id,                        data.page_url                  || null,
@@ -435,7 +453,7 @@ function syncToAWS(data) {
     data.ps_click_history ? JSON.stringify(data.ps_click_history) : null,
     data.ps_signup_sent_at       || null,   data.ps_signup_verified_at     || null,
     data.ps_qualified_sent_at    || null,   data.hear_about_us_raw         || null,
-    data.product                 || null
+    data.product                 || null,   data.about_business            || null
   ]).then(() => {
     console.log(`[AWS] ✅ Synced session ${data.session_id}`);
   }).catch(err => {
@@ -8415,6 +8433,12 @@ app.post('/partial', async (req, res) => {
   const step_reached       = parseInt(req.body.step_reached) || 1;
   const website_check_failed = req.body.website_check_failed === true || req.body.website_check_failed === 'true';
   const website_check_reason = (req.body.website_check_reason || '').toString().trim().slice(0, 100);
+  /* Free text, hard-capped. 1000 matches the maxlength on the textarea, so
+     a browser cannot send more than the column keeps and nobody loses a
+     sentence they can see on screen. The cap does NOT protect express.json
+     — that rejects an oversized body before this line runs; the raised
+     limit is what protects it. This protects the column. */
+  const about_business     = (req.body.about_business     || '').toString().trim().slice(0, 1000);
   /* PartnerStack attribution, captured at step 1 as well as at submit.
      The lead row is CREATED here, so a partner-referred visitor who reaches
      step 1 and drops would otherwise have no partner on the row at all —
@@ -8442,8 +8466,8 @@ app.post('/partial', async (req, res) => {
     const elv = await lookupElvStatus(email);
 
     await pool.query(`
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW(),$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39)
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW(),$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40)
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -8492,12 +8516,15 @@ app.post('/partial', async (req, res) => {
         /* COALESCE, never overwrite. /partial fires repeatedly as the visitor
            moves through step 1; a later call must not blank a slug an earlier
            one resolved. Same reason as the ps_ columns above. */
-        product               = COALESCE(EXCLUDED.product,               leads.product)
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product]);
+        product               = COALESCE(EXCLUDED.product,               leads.product),
+        /* COALESCE for the same reason as product: the textarea is a step-2
+           field, so /partial writes NULL and /submit fills it in. */
+        about_business        = COALESCE(EXCLUDED.about_business,        leads.about_business)
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business]);
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/partial] Enrichment sync failed (non-blocking):', err.message));
 
-    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false,hear_about_us_raw:hear_about_us,product,...ps});
+    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false,hear_about_us_raw:hear_about_us,product,about_business,...ps});
 
     // StartTrial fires ONLY for qualified (B2B) leads on BUSINESS emails —
     // free-mailbox leads (gmail/yahoo/...) are skipped so Meta optimises
@@ -8550,6 +8577,12 @@ app.post('/submit', async (req, res) => {
   const disqualified_reason = (req.body.disqualified_reason || '').toString().trim().slice(0, 100);
   const website_check_failed = req.body.website_check_failed === true || req.body.website_check_failed === 'true';
   const website_check_reason = (req.body.website_check_reason || '').toString().trim().slice(0, 100);
+  /* Free text, hard-capped. 1000 matches the maxlength on the textarea, so
+     a browser cannot send more than the column keeps and nobody loses a
+     sentence they can see on screen. The cap does NOT protect express.json
+     — that rejects an oversized body before this line runs; the raised
+     limit is what protects it. This protects the column. */
+  const about_business     = (req.body.about_business     || '').toString().trim().slice(0, 1000);
   // PartnerStack attribution. Read once, stored below and mirrored to AWS.
   const ps = readPartnerStackPayload(req.body, { email, website });
   /* Step 7. peek only — never an API call here. The identity resolver runs
@@ -8576,8 +8609,8 @@ app.post('/submit', async (req, res) => {
     const elv = await lookupElvStatus(email);
 
     await pool.query(`
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW(),$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38)
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW(),$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39)
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -8629,12 +8662,15 @@ app.post('/submit', async (req, res) => {
            not //, because this is SQL: Postgres has no // comment and the
            whole statement fails with a 42601 syntax error. This line shipped
            as // and took every /submit down with it. */
-        product               = COALESCE(EXCLUDED.product,               leads.product)
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product]);
+        product               = COALESCE(EXCLUDED.product,               leads.product),
+        /* COALESCE for the same reason as product, and a BLOCK comment for
+           the same reason as the line above. */
+        about_business        = COALESCE(EXCLUDED.about_business,        leads.about_business)
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business]);
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/submit] Enrichment sync failed (non-blocking):', err.message));
 
-    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true,hear_about_us_raw:hear_about_us,product,...ps});
+    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true,hear_about_us_raw:hear_about_us,product,about_business,...ps});
 
     if (!alreadyCompleted) {
       slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us:hearAboutUsFinal,ps_partner_key:ps.ps_partner_key,ps_partner_name:(psIdentity||{}).name,ps_partner_email:(psIdentity||{}).email,ps_click_at:ps.ps_click_at,hear_about_us_raw:hear_about_us,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,elv_status:elv?.status||null,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});

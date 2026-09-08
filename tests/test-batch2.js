@@ -1378,9 +1378,22 @@ function finish() {
     ok(label + ': placeholders == binds', maxN === binds.length,
        maxN + ' placeholders vs ' + binds.length + ' binds');
     ok(label + ': product is in the column list', cols.includes('product'));
-    ok(label + ': product sits at the highest placeholder',
-       vals[cols.indexOf('product')] === '$' + maxN,
-       'got ' + vals[cols.indexOf('product')]);
+    /* Each column maps to its OWN placeholder, and that placeholder's bind
+       is the variable of the same name. Checked by NAME rather than by
+       position: an assertion that "product is the last bind" silently
+       becomes wrong the moment another column is appended, which is exactly
+       what happened when about_business landed. */
+    const bindFor = (name) => {
+      const v = vals[cols.indexOf(name)];
+      const n = /^\$(\d+)$/.exec(v || '');
+      return n ? binds[+n[1] - 1] : null;
+    };
+    for (const name of ['product', 'about_business']) {
+      ok(label + ': ' + name + ' maps to a placeholder', /^\$\d+$/.test(vals[cols.indexOf(name)] || ''),
+         'got ' + vals[cols.indexOf(name)]);
+      ok(label + ': ' + name + ' is bound to the variable of the same name',
+         bindFor(name) === name, name + ' -> ' + bindFor(name));
+    }
     /* Anything in VALUES that is not a $n must be a literal. A stray bare
        identifier there means the placeholder run has been shifted. */
     ok(label + ': every non-placeholder VALUES item is a literal',
@@ -1391,11 +1404,9 @@ function finish() {
   };
 
   const p = checkInsert('product /partial', 'leads', "app.post('/partial'", '\n\n');
-  ok('product /partial: product is the last bind', p && p.binds[p.binds.length - 1] === 'product',
-     p && p.binds[p.binds.length - 1]);
+
   const s2 = checkInsert('product /submit', 'leads', "app.post('/submit'", '\n\n');
-  ok('product /submit: product is the last bind', s2 && s2.binds[s2.binds.length - 1] === 'product',
-     s2 && s2.binds[s2.binds.length - 1]);
+
 
   // ── syncToAWS, the mirror the other repo reads
   {
@@ -1416,10 +1427,19 @@ function finish() {
        maxN + ' vs ' + binds.length);
     ok('product syncToAWS: updated_at is still last and bound to NOW()',
        cols[cols.length - 1] === 'updated_at' && vals[vals.length - 1] === 'NOW()');
-    ok('product syncToAWS: product sits at $' + maxN,
-       vals[cols.indexOf('product')] === '$' + maxN);
-    ok('product syncToAWS: product is the final bind',
-       /^data\.product\s*\|\|\s*null$/.test(binds[binds.length - 1]), binds[binds.length - 1]);
+    /* By name, not by position — see the note in checkInsert. */
+    const awsBindFor = (name) => {
+      const v = vals[cols.indexOf(name)];
+      const n = /^\$(\d+)$/.exec(v || '');
+      return n ? binds[+n[1] - 1] : null;
+    };
+    for (const name of ['product', 'about_business']) {
+      ok('product syncToAWS: ' + name + ' maps to a placeholder',
+         /^\$\d+$/.test(vals[cols.indexOf(name)] || ''), 'got ' + vals[cols.indexOf(name)]);
+      ok('product syncToAWS: ' + name + ' is bound to data.' + name,
+         new RegExp('^data\\.' + name + '\\s*\\|\\|\\s*null$').test(awsBindFor(name) || ''),
+         name + ' -> ' + awsBindFor(name));
+    }
     ok('product syncToAWS: the conflict clause COALESCEs product',
        /product\s*=\s*COALESCE\(EXCLUDED\.product,\s*gw_form_leads\.product\)/
          .test(src.slice(insAt, src.indexOf('  ]).then', insAt))));
