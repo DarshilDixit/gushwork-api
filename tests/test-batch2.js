@@ -1840,60 +1840,71 @@ function finish() {
 }
 
 /* ============================================================
-   17. /monitor/metrics — every destructured name must match its query
+   17. /monitor/metrics — queries are bound BY NAME, not by position
 
-   Twelve queries run in one Promise.all and are destructured POSITIONALLY.
-   On 8 Sept the per-product query was inserted at position 2 while its
-   name was appended to the end of the list, so every binding from index 2
-   onward shifted by one. The dashboard reported 0 people with 497
+   Twelve queries run at once here. They used to be destructured
+   POSITIONALLY, and on 8 Sept a query inserted at position 2 with its name
+   appended at the end shifted nine bindings by one: 0 people with 497
    completed, "no new form entries in the last 24 hours" on a night with
-   real leads, and "not tracked" on every funnel stage — all from one line,
-   with the database untouched.
+   real leads, "not tracked" on every funnel stage. One line, no database
+   involvement, and invisible to both the query test and the renderer test
+   because the binding lives between them.
 
-   The query was verified by execution. The renderer was verified by
-   execution. The BINDING BETWEEN THEM is in neither, which is exactly
-   where it broke.
-
-   A count-only check would catch an insertion but not a reordering, so
-   this checks something stronger: for each name, which columns the route
-   body reads from it, and whether that name's query actually selects
-   them. Measured — with the bug present this reports 7 mismatched names
-   including byProduct missing 'product'; with it fixed, 0.
+   The array is now an object, so the LANGUAGE enforces the pairing and a
+   whole class of bug is gone rather than guarded. These assertions keep it
+   that way, and keep the weaker column check underneath as a second net —
+   it is the one that would notice a key labelled with the wrong name.
    ============================================================ */
 {
   const mLines = src.split('\n');
-  const L = mLines.findIndex((l) => l.includes('const [totals, people,'));
-  ok('metrics: the Promise.all destructuring is still here', L > 0);
-  const names = L > 0 ? /const \[([^\]]*)\]/.exec(mLines[L])[1].split(',').map((x) => x.trim()) : [];
+  const L = mLines.findIndex((l) => /const \{ totals, people,.*\} = await allNamed\(\{/.test(l));
+  ok('metrics: the twelve queries are bound BY NAME, not positionally', L > 0);
+  ok('metrics: no positional Promise.all destructuring is left in this route',
+     !/const \[totals, people,/.test(src));
+  ok('metrics: allNamed preserves concurrency by awaiting an already-started object',
+     /const settled = await Promise\.all\(keys\.map\(\(k\) => jobs\[k\]\)\);/.test(src));
 
-  /* Query texts in ARRAY ORDER. Six-space indentation is how every entry in
-     this array is written; anything else would not be a top-level entry. */
-  const queries = [];
-  {
-    let cur = null;
-    for (let i = L + 1; i < mLines.length; i++) {
-      if (/^    \]\);/.test(mLines[i])) break;
-      if (/^      pool\.query\(/.test(mLines[i])) { if (cur !== null) queries.push(cur); cur = ''; }
-      if (cur !== null) cur += mLines[i] + '\n';
-    }
-    if (cur !== null) queries.push(cur);
+  const names = L > 0 ? /const \{([^}]*)\}/.exec(mLines[L])[1].split(',').map((x) => x.trim()) : [];
+
+  /* Every destructured name must be a key that actually exists in the
+     object, or it is silently undefined at the use site. */
+  const keys = [];
+  for (let i = L + 1; i < mLines.length; i++) {
+    if (/^    \}\);/.test(mLines[i])) break;
+    const m = /^      (\w+): pool\.query\(/.exec(mLines[i]);
+    if (m) keys.push(m[1]);
   }
-  ok('metrics: one destructured name per query',
-     names.length === queries.length, names.length + ' names vs ' + queries.length + ' queries');
+  ok('metrics: one labelled query per destructured name',
+     names.length === keys.length, names.length + ' names vs ' + keys.length + ' keys');
+  const missing = names.filter((n) => !keys.includes(n));
+  ok('metrics: every destructured name exists as a key', missing.length === 0, missing.join(','));
+  const unused = keys.filter((k) => !names.includes(k));
+  ok('metrics: every key is destructured (an unread query is a wasted round trip)',
+     unused.length === 0, unused.join(','));
 
-  const bodyStart = src.indexOf('    ]);', src.indexOf('const [totals, people,'));
+  /* Second net: a key CAN still be given the wrong name. For each name,
+     check the query under that key selects the columns the route reads. */
+  const qText = {};
+  {
+    let cur = null, key = null;
+    for (let i = L + 1; i < mLines.length; i++) {
+      if (/^    \}\);/.test(mLines[i])) break;
+      const m = /^      (\w+): pool\.query\(/.exec(mLines[i]);
+      if (m) { if (key) qText[key] = cur; key = m[1]; cur = ''; }
+      if (key) cur += mLines[i] + '\n';
+    }
+    if (key) qText[key] = cur;
+  }
+  const bodyStart = src.indexOf('    });', src.indexOf('await allNamed({'));
   const body = src.slice(bodyStart, src.indexOf('\napp.', bodyStart));
-
   const selected = (q) => {
     const set = new Set();
-    for (const m of q.matchAll(/\bAS\s+([a-z_][a-z0-9_]*)/gi)) set.add(m[1].toLowerCase());
-    const sel = /SELECT([\s\S]*?)FROM/i.exec(q);
+    for (const m of (q || '').matchAll(/\bAS\s+([a-z_][a-z0-9_]*)/gi)) set.add(m[1].toLowerCase());
+    const sel = /SELECT([\s\S]*?)FROM/i.exec(q || '');
     if (sel) for (const m of sel[1].matchAll(/(?:^|,)\s*(?:[a-z]\.)?([a-z_][a-z0-9_]*)\s*(?:,|$)/gim))
       set.add(m[1].toLowerCase());
     return set;
   };
-  /* Three ways the route reads a result: name.rows[0].col, an alias
-     (const t = name.rows[0]; t.col), and name.rows.map((r) => r.col). */
   const readFrom = (name) => {
     const set = new Set();
     for (const m of body.matchAll(new RegExp(name + '\\.rows\\[0\\]\\.([a-z_][a-z0-9_]*)', 'gi')))
@@ -1906,23 +1917,18 @@ function finish() {
         set.add(c[1].toLowerCase());
     return set;
   };
-
   const mismatched = [];
-  names.forEach((n, i) => {
-    const missing = [...readFrom(n)].filter((c) => !selected(queries[i] || '').has(c));
-    if (missing.length) mismatched.push(n + ' cannot supply ' + missing.join(','));
-  });
-  ok('metrics: every name is bound to a query that selects what the route reads from it',
+  for (const n of names) {
+    const bad = [...readFrom(n)].filter((c) => !selected(qText[n]).has(c));
+    if (bad.length) mismatched.push(n + ' cannot supply ' + bad.join(','));
+  }
+  ok('metrics: each name reads only columns its own query selects',
      mismatched.length === 0, mismatched.join(' | '));
 
-  /* The specific binding that broke, named so a failure says which one. */
-  const iProd = names.indexOf('byProduct');
-  ok('metrics: byProduct exists in the destructuring', iProd >= 0);
-  ok('metrics: byProduct is bound to the per-product query',
-     iProd >= 0 && /COALESCE\(product, 'untagged'\)/.test(queries[iProd] || ''),
-     'position ' + iProd);
-  ok('metrics: and that query groups by product, so it returns one row per product',
-     iProd >= 0 && /GROUP BY 1/.test(queries[iProd] || ''));
+  ok('metrics: byProduct is the per-product query',
+     /COALESCE\(product, 'untagged'\)/.test(qText.byProduct || ''));
+  ok('metrics: and it groups by product, so it returns one row per product',
+     /GROUP BY 1/.test(qText.byProduct || ''));
 }
 
 /* ============================================================
