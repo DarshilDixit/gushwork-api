@@ -2142,7 +2142,7 @@ app.get('/monitor/metrics', async (req, res) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   try {
-    const [totals, people, recovered, byDay, enrichCount, enrichCoverage, pendingPartials, noBooking, recent, today, topFunnel, byProduct] = await Promise.all([
+    const [totals, people, byProduct, recovered, byDay, enrichCount, enrichCoverage, pendingPartials, noBooking, recent, today, topFunnel] = await Promise.all([
       pool.query(`
         SELECT
           COUNT(*)                                                          AS total,

@@ -1840,6 +1840,92 @@ function finish() {
 }
 
 /* ============================================================
+   17. /monitor/metrics — every destructured name must match its query
+
+   Twelve queries run in one Promise.all and are destructured POSITIONALLY.
+   On 8 Sept the per-product query was inserted at position 2 while its
+   name was appended to the end of the list, so every binding from index 2
+   onward shifted by one. The dashboard reported 0 people with 497
+   completed, "no new form entries in the last 24 hours" on a night with
+   real leads, and "not tracked" on every funnel stage — all from one line,
+   with the database untouched.
+
+   The query was verified by execution. The renderer was verified by
+   execution. The BINDING BETWEEN THEM is in neither, which is exactly
+   where it broke.
+
+   A count-only check would catch an insertion but not a reordering, so
+   this checks something stronger: for each name, which columns the route
+   body reads from it, and whether that name's query actually selects
+   them. Measured — with the bug present this reports 7 mismatched names
+   including byProduct missing 'product'; with it fixed, 0.
+   ============================================================ */
+{
+  const mLines = src.split('\n');
+  const L = mLines.findIndex((l) => l.includes('const [totals, people,'));
+  ok('metrics: the Promise.all destructuring is still here', L > 0);
+  const names = L > 0 ? /const \[([^\]]*)\]/.exec(mLines[L])[1].split(',').map((x) => x.trim()) : [];
+
+  /* Query texts in ARRAY ORDER. Six-space indentation is how every entry in
+     this array is written; anything else would not be a top-level entry. */
+  const queries = [];
+  {
+    let cur = null;
+    for (let i = L + 1; i < mLines.length; i++) {
+      if (/^    \]\);/.test(mLines[i])) break;
+      if (/^      pool\.query\(/.test(mLines[i])) { if (cur !== null) queries.push(cur); cur = ''; }
+      if (cur !== null) cur += mLines[i] + '\n';
+    }
+    if (cur !== null) queries.push(cur);
+  }
+  ok('metrics: one destructured name per query',
+     names.length === queries.length, names.length + ' names vs ' + queries.length + ' queries');
+
+  const bodyStart = src.indexOf('    ]);', src.indexOf('const [totals, people,'));
+  const body = src.slice(bodyStart, src.indexOf('\napp.', bodyStart));
+
+  const selected = (q) => {
+    const set = new Set();
+    for (const m of q.matchAll(/\bAS\s+([a-z_][a-z0-9_]*)/gi)) set.add(m[1].toLowerCase());
+    const sel = /SELECT([\s\S]*?)FROM/i.exec(q);
+    if (sel) for (const m of sel[1].matchAll(/(?:^|,)\s*(?:[a-z]\.)?([a-z_][a-z0-9_]*)\s*(?:,|$)/gim))
+      set.add(m[1].toLowerCase());
+    return set;
+  };
+  /* Three ways the route reads a result: name.rows[0].col, an alias
+     (const t = name.rows[0]; t.col), and name.rows.map((r) => r.col). */
+  const readFrom = (name) => {
+    const set = new Set();
+    for (const m of body.matchAll(new RegExp(name + '\\.rows\\[0\\]\\.([a-z_][a-z0-9_]*)', 'gi')))
+      set.add(m[1].toLowerCase());
+    for (const a of body.matchAll(new RegExp('const (\\w+)\\s*=\\s*' + name + '\\.rows\\[0\\]', 'g')))
+      for (const c of body.matchAll(new RegExp('\\b' + a[1] + '\\.([a-z_][a-z0-9_]*)', 'gi')))
+        set.add(c[1].toLowerCase());
+    for (const m of body.matchAll(new RegExp(name + '\\.rows\\.map\\(\\s*\\(?(\\w+)\\)?\\s*=>\\s*\\(?\\{([\\s\\S]*?)\\}\\)?\\s*\\)', 'g')))
+      for (const c of m[2].matchAll(new RegExp('\\b' + m[1] + '\\.([a-z_][a-z0-9_]*)', 'gi')))
+        set.add(c[1].toLowerCase());
+    return set;
+  };
+
+  const mismatched = [];
+  names.forEach((n, i) => {
+    const missing = [...readFrom(n)].filter((c) => !selected(queries[i] || '').has(c));
+    if (missing.length) mismatched.push(n + ' cannot supply ' + missing.join(','));
+  });
+  ok('metrics: every name is bound to a query that selects what the route reads from it',
+     mismatched.length === 0, mismatched.join(' | '));
+
+  /* The specific binding that broke, named so a failure says which one. */
+  const iProd = names.indexOf('byProduct');
+  ok('metrics: byProduct exists in the destructuring', iProd >= 0);
+  ok('metrics: byProduct is bound to the per-product query',
+     iProd >= 0 && /COALESCE\(product, 'untagged'\)/.test(queries[iProd] || ''),
+     'position ' + iProd);
+  ok('metrics: and that query groups by product, so it returns one row per product',
+     iProd >= 0 && /GROUP BY 1/.test(queries[iProd] || ''));
+}
+
+/* ============================================================
    12. A Meta failure must reach recordFailure
 
    Every push function ended in Promise.allSettled, which never rejects.
