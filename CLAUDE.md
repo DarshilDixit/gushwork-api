@@ -49,7 +49,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `index.js` | Routes, website checking, email verification, alerting, the monitor dashboard, cron |
 | `db.js` | Schema + migrations. Runs on every boot; everything is `IF NOT EXISTS` |
 | `salesforce.js` | Lead upsert by email. Refresh-token OAuth |
-| `meta-capi.js` | Conversions API — `Lead`, `Schedule`, `StartTrial`, `Contact` |
+| `meta-capi.js` | Conversions API — `Lead`, `Schedule`, `StartTrial`, `Contact`. Also owns the product catalogue (`PRODUCTS`, `resolveProduct`), which `index.js` imports |
 | `loops.js` | Loops.so contact push for the lead-magnet landing page |
 | `partnerstack.js` | PartnerStack API. TWO hosts and TWO auth schemes: `partnerlinks.io` conversion (Bearer tracking token) and `api.partnerstack.com` v2 partnerships + actions (Basic public:secret) |
 | `lead-magnet.js` | `/lm/*` routes. Separate table, deliberately not joined to `leads` |
@@ -398,6 +398,134 @@ is not finished until it is in `gushwork-form-popup.js` too.**
 `node tests/test-ads-parity.js` now enforces that — it lifts both files and
 compares them, and it also pins the modal as deliberate so a future sync cannot
 "tidy" the fork's own presentation away.
+
+**A `//` COMMENT INSIDE SQL TAKES THE STATEMENT DOWN, and this already
+happened.** Postgres has no `//`. On 8 Sept 2026 a single line —
+`// COALESCE for the same reason as /partial.` — shipped inside the
+`/submit` INSERT and broke **every form completion**: SQLSTATE 42601,
+`syntax error at or near "//"`, a 500 from the route, and nothing after
+the INSERT ran. No `completed`, no `submitted_at`, no step-2 fields, no
+Slack, no Salesforce, no Meta `Lead`, no PartnerStack conversion. It was
+live for 31 minutes and caught one real lead.
+
+Sibling of the backtick trap above, and worse, because a backtick fails at
+**parse time in Node** where you cannot miss it. This is valid JavaScript
+and invalid SQL, so it fails only when the query runs. Use `/* ... */`
+inside SQL, always. `tests/test-batch2.js` section 13 lints for it.
+
+**IT SURVIVED SIX GREEN SUITES, A REVIEW CARD AND A MERGE — because every
+SQL assertion in this repo reads the query as TEXT.** That is the real
+lesson and it generalises past this one bug: *a source-level assertion
+cannot tell you whether a query parses.* The placeholder arithmetic in
+section 11 was careful, correct, and checking a statement that could never
+execute. The same blind spot is documented above for ordering assertions
+and for the 21 dead PartnerStack call sites; this is its third appearance.
+
+When you touch SQL, **execute it**. It costs nothing: build a `CREATE TEMP
+TABLE` from the real migrations, run the real statement against it inside a
+transaction, and `ROLLBACK`. That runs against the AWS mirror, needs no
+production write, and would have caught this in seconds. For a read-only
+query, `EXPLAIN` is enough — a syntax error is `42601` and an absent table
+is `42P01`, so the two are distinguishable without any schema at all.
+
+**`/monitor/funnel` had been broken since the Eastern Time migration
+(`eb50c08`) for exactly the same reason** — three `//` lines sitting among
+correct `--` ones. Nobody noticed because a dashboard tab erroring is
+quieter than a lead path erroring. Found by the section 13 lint on the day
+it was written, not by anyone opening the tab.
+
+**Product tagging: AEO is the DEFAULT, and only the exceptions are listed.**
+`PRODUCTS`, `PRODUCT_PATHS`, `DEFAULT_PRODUCT` and `resolveProduct` live in
+`meta-capi.js` and are imported by `index.js` — one catalogue, so the
+stored column and the Meta event cannot disagree. Today `PRODUCT_PATHS` is
+`{'/ai-demo': 'crm'}`; everything else is `aeo`.
+
+This is the opposite of how the rest of the repo works, deliberately. An
+AEO allowlist rots: the form is live on a dozen pages — `/demo`, `/start`,
+`/pricing`, `/consulting-lead-generation` and the SEO landers — and new
+landers get added by people who will never open this file. Measured on 90
+days of real leads, a `/demo`-only list tagged **82%** and left **631 leads
+(408 completed)** sending unlabelled events; the default tags **99.7%**. A
+default fails only when a genuinely new product launches, which is rare,
+deliberate, and logged once per unmapped path.
+
+**Adding a product** means one entry in `PRODUCT_PATHS` and one in
+`PRODUCTS`. **Adding a new AEO landing page means nothing at all**, which
+is the entire point.
+
+**An unreadable `page_url` is NOT the default — it returns null and the
+event goes untagged.** "We could not tell which page this was" is not "this
+was the default page", the same rule the lead-path checkers follow. The
+leading-slash guard in `resolveProduct` is load-bearing: `new URL(x, base)`
+succeeds for almost any string, so without it `'not a url'` becomes
+`/not%20a%20url` and reaches Meta as a real AEO lead.
+
+**`Contact` is excluded from product tagging by EVENT NAME, not by its
+page.** `PRODUCT_EXCLUDED_EVENTS`. With a default in place the lead-magnet
+LP resolves to `aeo` like any other unmapped page, so this list is the only
+thing keeping a PDF download off a 12000 `predicted_ltv`. A test asserts it
+from the page that WOULD tag, so a regression to page-based exclusion
+fails.
+
+**`predicted_ltv` is the same per product on every event; only `value`
+varies, and it is 0 on all three upstream events.** 12000 aeo / 5000 crm,
+PROVISIONAL. Changing one changes how Meta weights these conversions — a
+business decision to surface, not a tidy-up.
+
+**`leads.product` and `gw_form_leads.product` hold the resolved slug**,
+never a raw page and never anything a page author typed; nothing reads
+`req.body.product`. Both conflict clauses COALESCE it. Historical rows were
+backfilled to `aeo` once by hand; that backfill is deliberately NOT a boot
+migration, because those run on every deploy and a NULL now means
+"page_url was unreadable".
+
+**`about_business` is capped at 1000 chars, and the cap is NOT what
+protects the request.** `express.json({ limit: '50kb' })` is. A
+server-side `slice` runs inside the route, and express rejects an oversized
+body with a 413 **before any handler runs** — so an unbounded textarea
+loses the whole lead, not the one field. The limit was raised from 10kb
+when the textarea landed; measured, a worst-case body was already 12,755
+bytes without it. The `slice(0, 1000)` is a backstop for the column and
+matches `maxlength="1000"` on the Webflow textarea, so what the visitor
+sees on screen is what the column keeps.
+
+**A Meta CAPI failure only reaches `recordFailure` because the push
+functions THROW.** They end in `Promise.allSettled`, which never rejects,
+so until `throwIfAnyFailed` existed the `.catch(...)` at all five call
+sites — every one calling `recordFailure('Meta CAPI', ...)` — could not
+fire. Same class as the 21 silent PartnerStack call sites, reached from the
+opposite direction: there the `FAILURE_MONITORS` entry was missing, here it
+was always present and the promise shape swallowed the failure. Two shapes
+must both keep arriving: a rejected promise, and a resolved
+`{success: false}`. Every caller is fire-and-forget with a `.catch` and
+none `await`; a caller without one turns a Meta outage into an unhandled
+rejection, and a test asserts that.
+
+**Meta auth failures match FOUR CODES, not `/OAuth/i`.** `isAuthFailure`
+bypasses both thresholds and pages critical — Slack and email — on the
+first occurrence. Meta stamps `type: "OAuthException"` on nearly every
+Graph API error, including a bad parameter (100), a rate limit (80004) and
+a transient server error (2), so the generic list made all of them page
+instantly: measured, 8 of 11 realistic bodies, of which only 4 were
+credential problems. `isAuthFailure(error, source)` now takes the source
+and matches only 190/102/463/467 for Meta. **Every other integration still
+uses the full list** — the three non-Meta callers pass no source at all.
+
+**`recordSuccess('Meta CAPI')` is wired through an injected reporter**, and
+before that it was never called anywhere, so the streak only reset when an
+alert fired — "3 consecutive failures" actually meant "3 failures since the
+last alert, ever". `meta-capi.js` reports each landed event via
+`setMetaOutcomeReporter`; injected rather than imported, because a module
+reaching back into `index.js` is how a require cycle starts. Success only:
+failures already arrive through the call-site `.catch`, and reporting from
+both would double-count.
+
+**`git checkout <file>` restores from HEAD, not from "before my scratch
+edit".** Used as an undo for a mutation-test tweak while the real change
+was still uncommitted, it silently deletes the work. That happened four
+times in one session. **Commit before mutation testing** — which is also
+the correct order, because a mutation must be measured against a committed
+baseline.
 
 **Two copies of the label map.** `WEBSITE_REASON_LABELS` is a normal JS object.
 The monitor dashboard has a second copy (`var WLBL=`) inside a JS string that gets
