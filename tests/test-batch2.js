@@ -1009,6 +1009,311 @@ function finish() {
      after.page_url === 'https://gushwork.ai/demo');
 }
 
+/* ============================================================
+   10. Product tagging — AEO (/demo) vs CRM (/ai-demo)
+
+   Meta has to tell two products apart on ONE pixel. The slug is resolved
+   from page_url's pathname and nothing else: real ad traffic lands on
+   /start and submits on /demo, so a landing_page lookup would match
+   neither page and tag every ad lead as unknown.
+
+   This section EXECUTES meta-capi.js rather than reading it. The payload
+   is what Meta actually receives, and no source-level assertion can tell
+   you what a built object contains.
+
+   The Contact golden below was captured by running the PREVIOUS module
+   (git show HEAD:meta-capi.js) against the same input and diffing — not
+   typed by hand. The lead magnet must not acquire product fields.
+   ============================================================ */
+{
+  const META = require('../meta-capi.js');
+  /* Neither buildEventData nor resolveProduct may EVER throw: both run inside
+     the lead path, where an exception would take the event with it, and an
+     unrecognised form page must send its event untagged rather than fail.
+
+     So every call in this section goes through these two, which RECORD a throw
+     and carry on. Without that, a throwing build does not fail an assertion —
+     it crashes the suite, and a crash prints no totals and reads as neither a
+     pass nor a catch. Measured: three mutations that made this code throw came
+     back UNMEASURED until this existed. The tally is asserted at the end. */
+  let threwCount = 0, threwFirst = '';
+  const record = (e) => { threwCount++; if (!threwFirst) threwFirst = e.message; };
+  const cd = (ev, payload) => {
+    try { return META.buildEventData(ev, payload, {}).custom_data; }
+    catch (e) { record(e); return {}; }
+  };
+  const rp = (url) => {
+    try { return META.resolveProduct({ page_url: url }); }
+    catch (e) { record(e); return '__threw__'; }
+  };
+  const build = (ev, payload, options) => {
+    try { return META.buildEventData(ev, payload, options); }
+    catch (e) { record(e); return { user_data: {}, custom_data: {} }; }
+  };
+  const FIVE = ['content_ids', 'content_type', 'value', 'currency', 'predicted_ltv'];
+
+  /* Calls buildEventData DIRECTLY, not through cd(): cd already swallows a
+     throw into the tally, so routing this through it would leave every
+     "builds rather than throwing" assertion below unable to fail. Not
+     hypothetical — it was written that way first, and only the section-end
+     tally was catching a throwing build. */
+  const safeCd = (ev, payload) => {
+    try { return { threw: false, custom_data: META.buildEventData(ev, payload, {}).custom_data }; }
+    catch (e) { return { threw: true, custom_data: {}, error: e.message }; }
+  };
+
+  // ── The catalogue itself. These numbers move ad spend; pin them.
+  eq('product: the catalogue has exactly two products',
+     Object.keys(META.PRODUCTS).sort(), ['aeo', 'crm']);
+  eq('product: aeo is content_ids [aeo], predicted_ltv 12000',
+     META.PRODUCTS.aeo, { content_ids: ['aeo'], predicted_ltv: 12000 });
+  eq('product: crm is content_ids [crm], predicted_ltv 5000',
+     META.PRODUCTS.crm, { content_ids: ['crm'], predicted_ltv: 5000 });
+
+  /* AEO is the DEFAULT and the exceptions are listed. An AEO allowlist
+     would rot: the form is already on a dozen pages and new SEO landers
+     get added routinely by people who will never open this file. Measured
+     on 90 days of real leads, a /demo-only list left 631 leads (18%, 408
+     completed) sending unlabelled events. A default only fails when a new
+     product launches, which is rare and deliberate — and logged. */
+  eq('product: /ai-demo is the only mapped exception',
+     META.PRODUCT_PATHS, { '/ai-demo': 'crm' });
+  ok('product: the default is aeo', META.DEFAULT_PRODUCT === 'aeo');
+  ok('product: every mapped path names a real product',
+     Object.values(META.PRODUCT_PATHS).every((s) => s in META.PRODUCTS));
+  ok('product: the default names a real product', META.DEFAULT_PRODUCT in META.PRODUCTS);
+  /* Excluded by EVENT NAME, not by hoping a page resolves to null. With a
+     default in place the lead-magnet LP resolves to aeo, so the only thing
+     keeping a PDF download off a 12000 LTV is this list. */
+  eq('product: Contact is excluded by event name',
+     META.PRODUCT_EXCLUDED_EVENTS, ['Contact']);
+
+  // ── resolveProduct
+  const RESOLVE = [
+    ['https://gushwork.ai/ai-demo',                    'crm'],
+    ['https://gushwork.ai/ai-demo/',                   'crm'],
+    ['https://gushwork.ai/ai-demo?utm_campaign=crm',   'crm'],
+    ['https://gushwork.ai/AI-DEMO',                    'crm'],
+    ['https://gushwork.webflow.io/ai-demo',            'crm'],
+    ['/ai-demo',                                       'crm'],
+    // Everything else that IS a page takes the default.
+    ['https://gushwork.ai/demo',                       'aeo'],
+    ['https://gushwork.ai/demo/',                      'aeo'],
+    ['https://gushwork.ai/demo?utm_source=fb&fbclid=x','aeo'],
+    ['https://gushwork.ai/DEMO',                       'aeo'],
+    ['/demo',                                          'aeo'],
+    /* The pages a /demo-only allowlist was silently missing — 631 leads
+       in 90 days. These are the whole reason aeo is the default. */
+    ['https://gushwork.ai/start',                      'aeo'],
+    ['https://gushwork.ai/start-now',                  'aeo'],
+    ['https://gushwork.ai/pricing',                    'aeo'],
+    ['https://gushwork.ai/consulting-lead-generation',  'aeo'],
+    ['https://gushwork.ai/manufacturing-seo-services',  'aeo'],
+    ['https://gushwork.ai/',                           'aeo'],
+    /* Near-misses on the CRM path must NOT become crm. */
+    ['https://gushwork.ai/ai-demo-v2',                 'aeo'],
+    ['https://gushwork.ai/x/ai-demo',                  'aeo'],
+    /* No readable page at all. NOT the default — "we could not tell which
+       page this was" is not "this was the default page". */
+    ['',                                               null],
+    [null,                                             null],
+    [undefined,                                        null],
+    ['not a url',                                      null],
+    ['http://',                                        null],
+    ['ht!tp://%%%',                                    null],
+  ];
+  for (const [url, expected] of RESOLVE) {
+    const r = { threw: false, slug: rp(url) };
+    ok('product: ' + JSON.stringify(url) + ' resolves to ' + JSON.stringify(expected),
+       !r.threw && r.slug === expected,
+       r.threw ? 'THREW: ' + r.error : JSON.stringify(r.slug));
+  }
+
+  /* /ai-demo contains the string "demo". A prefix or substring match would
+     tag every CRM lead as AEO and nothing downstream would notice. */
+  ok('product: /ai-demo is never mistaken for /demo', rp('https://gushwork.ai/ai-demo') === 'crm');
+  ok('product: /demo does not leak into crm via a substring match', rp('https://gushwork.ai/demo') === 'aeo');
+  ok('product: resolveProduct() with no argument returns null rather than throwing',
+     (() => { try { return META.resolveProduct() === null; } catch { return false; } })());
+  ok('product: resolveProduct never reads landing_page', rp('') === null);
+
+  // ── The five fields on a recognised page
+  const aeo = cd('Lead', { page_url: 'https://gushwork.ai/demo', email: 'a@b.com' });
+  eq('product: aeo content_ids',  aeo.content_ids, ['aeo']);
+  ok('product: content_type is product', aeo.content_type === 'product');
+  ok('product: value is the number 0',   aeo.value === 0 && typeof aeo.value === 'number');
+  ok('product: currency is USD',         aeo.currency === 'USD');
+  ok('product: aeo predicted_ltv is 12000', aeo.predicted_ltv === 12000);
+  const crm = cd('Lead', { page_url: 'https://gushwork.ai/ai-demo', email: 'a@b.com' });
+  eq('product: crm content_ids', crm.content_ids, ['crm']);
+  ok('product: crm predicted_ltv is 5000', crm.predicted_ltv === 5000);
+
+  /* Per spec: predicted_ltv is the same per product on EVERY event, and only
+     value varies — which is 0 on all three upstream events. */
+  for (const [slug, url, ltv] of [['aeo', 'https://gushwork.ai/demo', 12000],
+                                  ['crm', 'https://gushwork.ai/ai-demo', 5000]]) {
+    const ltvs = [], vals = [];
+    for (const ev of ['StartTrial', 'Lead', 'Schedule']) {
+      const c = cd(ev, { page_url: url, email: 'a@b.com' });
+      ltvs.push(c.predicted_ltv); vals.push(c.value);
+    }
+    ok('product: ' + slug + ' predicted_ltv is ' + ltv + ' on all three upstream events',
+       ltvs.every((v) => v === ltv), JSON.stringify(ltvs));
+    ok('product: ' + slug + ' value is 0 on all three upstream events',
+       vals.every((v) => v === 0), JSON.stringify(vals));
+  }
+
+  /* A page we can READ but have not mapped takes the default and is tagged.
+     This is the case a /demo-only allowlist was silently dropping. */
+  for (const url of ['https://gushwork.ai/start', 'https://gushwork.ai/pricing',
+                     'https://gushwork.ai/some-lander-nobody-told-us-about']) {
+    const r = safeCd('Lead', { page_url: url, email: 'a@b.com', company: 'Acme' });
+    ok('product: ' + JSON.stringify(url) + ' builds an event rather than throwing', !r.threw, r.error);
+    ok('product: ' + JSON.stringify(url) + ' takes the aeo default',
+       JSON.stringify(r.custom_data.content_ids) === '["aeo"]' &&
+       r.custom_data.predicted_ltv === 12000,
+       JSON.stringify(r.custom_data));
+  }
+
+  /* A value we cannot read as a page is NOT the default. "We could not tell
+     which page this was" is not "this was the default page" — the same rule
+     the lead-path checkers follow, pointed the other way.
+
+     The garbage strings matter: new URL(x, base) succeeds for almost
+     anything, so without the leading-slash guard "not a url" resolves to
+     /not%20a%20url and would be reported to Meta as a real aeo lead. */
+  for (const url of ['', null, undefined, 'not a url', 'ht!tp://%%%',
+                     'http://', 12345, {}, [], true]) {
+    const r = safeCd('Lead', { page_url: url, email: 'a@b.com', company: 'Acme' });
+    ok('product: ' + JSON.stringify(url) + ' builds an event rather than throwing',
+       !r.threw, r.error);
+    const present = FIVE.filter((k) => k in r.custom_data);
+    ok('product: ' + JSON.stringify(url) + ' is untagged, not defaulted',
+       present.length === 0, 'present: ' + present.join(','));
+  }
+  eq('product: an unreadable page still sends exactly the event it always sent',
+     cd('Lead', { page_url: '', company: 'Acme', sell_to: 'B2B' }),
+     { company_name: 'Acme', sell_to: 'B2B' });
+  for (const ev of ['StartTrial', 'Lead', 'Schedule']) {
+    const r = safeCd(ev, { page_url: '', email: 'a@b.com' });
+    ok('product: ' + ev + ' with no readable page is untagged, not an error',
+       !r.threw && FIVE.every((k) => !(k in r.custom_data)), r.error);
+    const d = safeCd(ev, { page_url: 'https://gushwork.ai/whatever', email: 'a@b.com' });
+    ok('product: ' + ev + ' on an unmapped page is tagged aeo',
+       !d.threw && JSON.stringify(d.custom_data.content_ids) === '["aeo"]', d.error);
+  }
+
+  /* Contact, the lead magnet. Golden captured from the previous module. */
+  const LM = { session_id: 's', email: 'a@b.com', website: 'w.com', sell_to: 'B2B',
+    page_url: 'https://gushwork.ai/150-buyer-questions',
+    landing_page: 'https://gushwork.ai/150-buyer-questions',
+    fbc: 'fb.1.2.3', fbp: 'fb.1.2.4', industry_category: 'SaaS',
+    product_or_service: 'CRM software', is_free_email: false };
+  ok('product: Contact custom_data is byte-identical to before product tagging',
+     JSON.stringify(cd('Contact', LM)) ===
+     '{"sell_to":"B2B","industry_category":"SaaS","product_or_service":"CRM software","is_free_email":"false"}',
+     JSON.stringify(cd('Contact', LM)));
+  ok('product: Contact carries none of the five', FIVE.every((k) => !(k in cd('Contact', LM))));
+  /* Contact is excluded by EVENT NAME, and that is the only thing keeping a
+     PDF download off a 12000 LTV now that aeo is the default: the lead-magnet
+     LP resolves to aeo like any other unmapped page. Asserted from the page
+     that WOULD tag, so a regression to page-based exclusion fails here. */
+  ok('product: resolveProduct alone would tag the lead-magnet LP',
+     rp(LM.page_url) === 'aeo');
+  ok('product: Contact stays untagged even from a mapped product page',
+     FIVE.every((k) => !(k in cd('Contact', { ...LM, page_url: 'https://gushwork.ai/ai-demo' }))));
+  ok('product: the same page DOES tag a non-excluded event',
+     cd('Lead', { ...LM, page_url: 'https://gushwork.ai/ai-demo' }).content_type === 'product');
+
+  /* The tag must come from page_url ALONE. event_source_url falls back to
+     landing_page, and letting the product tag do the same would mis-tag every
+     ad lead: real traffic lands on /start and submits on /demo, and a lander
+     that happened to sit at a product path would tag a lead that never saw
+     that form. Measured — without this, adding the fallback survived. */
+  ok('product: an empty page_url is NOT rescued by a recognised landing_page',
+     FIVE.every((k) => !(k in cd('Lead',
+       { email: 'a@b.com', page_url: '', landing_page: 'https://gushwork.ai/demo' }))));
+  ok('product: a crm landing_page cannot pull an aeo page onto crm',
+     JSON.stringify(cd('Lead',
+       { email: 'a@b.com', page_url: 'https://gushwork.ai/start',
+         landing_page: 'https://gushwork.ai/ai-demo' }).content_ids) === '["aeo"]');
+  ok('product: landing_page cannot change a tag page_url already decided',
+     JSON.stringify(cd('Lead', { page_url: 'https://gushwork.ai/demo', landing_page: 'https://gushwork.ai/ai-demo' }).content_ids) === '["aeo"]');
+
+  /* A path that fell through to the default is LOGGED, once, so a new
+     product page that should have been mapped surfaces instead of quietly
+     becoming aeo. This is the safety net that makes a default acceptable:
+     the failure mode of a default is silent mis-attribution, and a log line
+     is what turns it back into something someone can notice.
+
+     Executed against a captured console.log, because "there is a log call
+     in the source" and "a log line comes out" are different claims. */
+  {
+    const realLog = console.log;
+    const lines = [];
+    console.log = (...a) => lines.push(a.join(' '));
+    let unmapped, mappedLines, repeatLines;
+    try {
+      const uniq = '/brand-new-lander-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      rp('https://gushwork.ai' + uniq);
+      unmapped = lines.filter((l) => l.includes(uniq));
+      lines.length = 0;
+      rp('https://gushwork.ai' + uniq + '?utm_source=fb');   // same path, second time
+      rp('https://gushwork.ai' + uniq + '/');                // and with a trailing slash
+      repeatLines = lines.filter((l) => l.includes(uniq));
+      lines.length = 0;
+      rp('https://gushwork.ai/ai-demo');
+      mappedLines = lines.slice();
+    } finally {
+      console.log = realLog;
+    }
+    ok('product: an unmapped path logs exactly once', unmapped.length === 1,
+       unmapped.length + ' line(s)');
+    ok('product: the log names the path and the default it took',
+       unmapped.length === 1 && /aeo/.test(unmapped[0]) && /PRODUCT_PATHS/.test(unmapped[0]),
+       unmapped[0]);
+    ok('product: the same path does not log again', repeatLines.length === 0,
+       repeatLines.join(' | '));
+    ok('product: a mapped path logs nothing', mappedLines.length === 0,
+       mappedLines.join(' | '));
+    ok('product: the logger is bounded so junk paths cannot grow it forever',
+       /_defaultedPaths\.size >= \d+/.test(
+         fs.readFileSync(path.join(__dirname, '..', 'meta-capi.js'), 'utf8')));
+  }
+
+  /* Nothing outside custom_data moved, and the catalogue cannot be mutated
+     by a caller holding a built event. */
+  const full = build('Lead',
+    { page_url: 'https://gushwork.ai/demo', email: 'a@b.com', phone: '+91 63886 39290',
+      first_name: 'A', last_name: 'B', enriched_city: 'Pune', fbc: 'f', fbp: 'g' },
+    { clientIpAddress: '1.2.3.4', clientUserAgent: 'UA' });
+  eq('product: user_data is untouched by tagging', Object.keys(full.user_data).sort(),
+     ['client_ip_address','client_user_agent','ct','em','fbc','fbp','fn','ln','ph']);
+  ok('product: event_source_url is still page_url', full.event_source_url === 'https://gushwork.ai/demo');
+  ok('product: action_source is still website', full.action_source === 'website');
+  /* Defensive: this must FAIL, never throw. A test that crashes prints no
+     totals, and an UNMEASURED run reads like neither a pass nor a catch. */
+  ok('product: the catalogue cannot be mutated through a built event',
+     (() => { try {
+                const ids = cd('Lead', { page_url: 'https://gushwork.ai/demo' }).content_ids;
+                if (!Array.isArray(ids)) return false;
+                ids.push('x');
+                return JSON.stringify(META.PRODUCTS.aeo.content_ids) === '["aeo"]';
+              } catch { return false; } })());
+
+  /* sendEvent must keep going through the builder. Inlining the payload back
+     into sendEvent would leave every assertion above passing against a
+     function production no longer calls. */
+  const mcsrc = fs.readFileSync(path.join(__dirname, '..', 'meta-capi.js'), 'utf8');
+  ok('product: sendEvent builds its payload through buildEventData',
+     /const eventData = buildEventData\(eventName, payload, options\);/.test(mcsrc));
+  ok('product: sendEvent does not build an event payload of its own',
+     (mcsrc.match(/event_name: eventName/g) || []).length === 1);
+
+  ok('product: nothing in this section made buildEventData or resolveProduct throw',
+     threwCount === 0, threwCount + ' throw(s), first: ' + threwFirst);
+}
+
 /* ============================================================ */
 console.log('');
 console.log(`  passed: ${pass}`);
