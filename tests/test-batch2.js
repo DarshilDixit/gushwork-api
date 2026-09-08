@@ -23,6 +23,7 @@ const dbsrc = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
 let pass = 0, fail = 0;
 let results16 = async () => [];
 let results19 = async () => [];   // section 19 is async too; invoked by the tail   // section 16 is async; invoked by the tail AFTER section 12
+let results20 = async () => [];   // section 20 is async too; invoked by the tail
 const failures = [];
 function ok(name, cond, extra) {
   if (cond) { pass++; }
@@ -2246,6 +2247,125 @@ async function section12() {
   }
 }
 
+/* ============================================================
+   20. backfill-sf keeps going when Salesforce rejects a lead
+
+   552db39 made pushToSalesforce THROW on failure instead of returning
+   { success: false }, so that a dead Salesforce could reach alertOps
+   from /submit. runBackfill's loop had no try/catch, so from that
+   commit the first rejected lead aborted the entire backfill: no FAILED
+   entry for it, no attempt at any lead after it, and the summary counts
+   simply stopped where the throw happened.
+
+   That is the worst possible time for it. This tool only ever runs
+   after Salesforce has been rejecting things, so "rejections are
+   likely" is its normal operating condition.
+
+   Driven by EXECUTION, not read from the source. The whole point is
+   whether the loop reaches the second lead, and no source-text
+   assertion can answer that — an ordering or presence assertion here
+   passes just as happily with the abort still in place.
+   ============================================================ */
+{
+  const { runBackfill } = require('../backfill-sf.js');
+
+  const COLS = ['email','first_name','last_name','company','phone','website',
+                'submitted_at','created_at','updated_at','completed','booking_uid','start_time'];
+
+  results20 = async () => {
+    const out = [];
+    const realFetch = global.fetch;
+    const realTimeout = global.setTimeout;
+    const realLog = console.log, realWarn = console.warn, realErr = console.error;
+    const realEnv = {
+      SF_LOGIN_URL: process.env.SF_LOGIN_URL,
+      SF_CLIENT_ID: process.env.SF_CLIENT_ID,
+      SF_CLIENT_SECRET: process.env.SF_CLIENT_SECRET,
+      SF_REFRESH_TOKEN: process.env.SF_REFRESH_TOKEN,
+    };
+    try {
+      process.env.SF_LOGIN_URL = 'https://stub.invalid';
+      process.env.SF_CLIENT_ID = 'x';
+      process.env.SF_CLIENT_SECRET = 'x';
+      process.env.SF_REFRESH_TOKEN = 'x';
+
+      /* The loop paces the SF API with a 500ms sleep per lead. Run the
+         timer immediately so the suite stays about a second long. */
+      global.setTimeout = (fn) => { fn(); return 0; };
+
+      const attempted = [];
+      const json = (status, body) => ({
+        ok: status >= 200 && status < 300,
+        status,
+        json: async () => body,
+        text: async () => JSON.stringify(body),
+      });
+      global.fetch = async (url, opts = {}) => {
+        const u = String(url);
+        if (u.includes('/oauth2/token')) return json(200, { access_token: 't', instance_url: 'https://stub.invalid' });
+        if (u.includes('/query/')) return json(200, { records: [] });   // no existing lead, not converted
+        if (u.includes('/sobjects/Lead')) {
+          const body = JSON.parse(opts.body || '{}');
+          attempted.push(body.Email);
+          /* A rejection Salesforce really returns, and NOT an unknown-field
+             one — those take the strip-and-retry path instead of throwing. */
+          if (body.Email === 'reject@example.net') {
+            return json(400, [{ message: 'REQUIRED_FIELD_MISSING', errorCode: 'REQUIRED_FIELD_MISSING', fields: [] }]);
+          }
+          return json(201, { id: '00Q' + body.Email });
+        }
+        throw new Error('unexpected fetch in section 20: ' + u);
+      };
+
+      const pool = {
+        query: async (sql) => {
+          if (/information_schema/.test(sql)) return { rows: COLS.map((c) => ({ column_name: c })) };
+          return { rows: [
+            { email: 'reject@example.net', first_name: 'A', last_name: 'One',   company: 'C1', submitted_at: '2026-09-01T00:00:00Z' },
+            { email: 'after@example.net',  first_name: 'B', last_name: 'Two',   company: 'C2', submitted_at: '2026-09-02T00:00:00Z' },
+            { email: 'last@example.net',   first_name: 'C', last_name: 'Three', company: 'C3', submitted_at: '2026-09-03T00:00:00Z' },
+          ] };
+        },
+      };
+
+      console.log = console.warn = console.error = () => {};
+      let res = null, threw = null;
+      try { res = await runBackfill(pool, { from: '2026-01-01T00:00:00Z' }); }
+      catch (err) { threw = err; }
+      console.log = realLog; console.warn = realWarn; console.error = realErr;
+
+      out.push(['backfill: a rejected lead does not abort the run',
+        threw === null, threw && threw.message]);
+
+      /* The regression in one line: pre-fix this was ['reject@example.net']. */
+      out.push(['backfill: every lead is still attempted after a rejection',
+        attempted.length === 3, JSON.stringify(attempted)]);
+
+      const rows = (res && res.results) || [];
+      out.push(['backfill: one log entry per lead', rows.length === 3, String(rows.length)]);
+      out.push(['backfill: the rejected lead is recorded FAILED',
+        !!rows[0] && rows[0].action === 'FAILED', rows[0] && rows[0].action]);
+      out.push(['backfill: the FAILED entry carries the thrown reason, not undefined',
+        !!rows[0] && /Lead creation failed/.test(String(rows[0].error)), rows[0] && String(rows[0].error)]);
+      out.push(['backfill: the lead AFTER the rejection is pushed',
+        !!rows[1] && rows[1].action === 'pushed', rows[1] && rows[1].action]);
+      out.push(['backfill: the last lead is pushed',
+        !!rows[2] && rows[2].action === 'pushed', rows[2] && rows[2].action]);
+      out.push(['backfill: summary counts 2 pushed, 1 failed',
+        !!res && res.summary.pushed === 2 && res.summary.failed === 1,
+        res && JSON.stringify(res.summary)]);
+    } finally {
+      console.log = realLog; console.warn = realWarn; console.error = realErr;
+      global.fetch = realFetch;
+      global.setTimeout = realTimeout;
+      for (const k of Object.keys(realEnv)) {
+        if (realEnv[k] === undefined) delete process.env[k]; else process.env[k] = realEnv[k];
+      }
+    }
+    return out;
+  };
+}
+
 /* ============================================================ */
 /* Section 12 is async, so the totals are printed from its continuation.
    The catch is not optional: without it a throw in there escapes as an
@@ -2254,6 +2374,7 @@ async function section12() {
 section12()
   .then(() => results16().catch((e) => [['sf: section 16 ran to completion', false, e && e.message]]))
   .then((rows) => { for (const [n, c, x] of rows) ok(n, c, x); return results19().catch((e) => [['tec: section 19 ran to completion', false, e && e.message]]); })
+  .then((rows) => { for (const [n, c, x] of rows) ok(n, c, x); return results20().catch((e) => [['backfill: section 20 ran to completion', false, e && e.message]]); })
   .then((rows) => { for (const [n, c, x] of rows) ok(n, c, x); })
   .catch((err) => { ok('capi: section 12 completed', false, err && err.message); })
   .then(() => {

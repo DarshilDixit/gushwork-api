@@ -167,14 +167,30 @@ async function runBackfill(pool, opts = {}) {
       continue;
     }
 
-    const result = await pushToSalesforce(payload);
-    if (result && result.success) {
+    /* pushToSalesforce THROWS on failure, it does not return { success: false }.
+       That changed on 552db39 (7 Sept 2026), so that a create failure could
+       reach alertOps('critical', 'Salesforce', ...) from /submit instead of
+       being swallowed. This loop had no try/catch, so from that commit the
+       first rejected lead aborted the whole backfill: no FAILED entry, no
+       log for the leads after it, and the summary counts simply stopped.
+       That is precisely backwards for this tool, which only ever runs when
+       Salesforce has been rejecting things. Catch it here, record the lead as
+       FAILED with the reason, and keep going — the run's job is to report on
+       every named lead, not to stop at the first bad one. */
+    let result = null;
+    let thrown = null;
+    try {
+      result = await pushToSalesforce(payload);
+    } catch (err) {
+      thrown = err;
+    }
+    if (!thrown && result && result.success) {
       entry.action = 'pushed';
       entry.leadId = result.leadId;
       pushed++;
     } else {
       entry.action = 'FAILED';
-      entry.error = result && result.error;
+      entry.error = thrown ? (thrown.message || String(thrown)) : (result && result.error);
       failed++;
     }
     log.push(entry);
