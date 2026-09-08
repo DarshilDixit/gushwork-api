@@ -1768,14 +1768,18 @@ function finish() {
   };
   const PAYLOAD = { first_name: 'A', last_name: 'B', email: 'a@b.com', company: 'Acme',
     product: 'crm', about_business: 'We move pallets.', sell_to: 'B2B' };
-  const harness = (behaviour) => {
+  const harness = (behaviour, existing = false) => {
     const posts = [];
     global.fetch = async (url, opts) => {
       if (String(url).includes('/oauth2/token'))
         return { ok: true, json: async () => ({ access_token: 't', instance_url: 'https://sf.invalid' }) };
-      if (String(url).includes('/query')) return { ok: true, json: async () => ({ totalSize: 0, records: [] }) };
-      posts.push(JSON.parse(opts.body));
-      return behaviour(JSON.parse(opts.body), posts.length);
+      if (String(url).includes('/query'))
+        return { ok: true, json: async () => ({ totalSize: existing ? 1 : 0, records: existing ? [{ Id: '00Qx' }] : [] }) };
+      const body = JSON.parse(opts.body);
+      body.__method = opts.method;
+      posts.push(body);
+      posts.__headers = opts.headers;
+      return behaviour(body, posts.length);
     };
     return posts;
   };
@@ -1798,14 +1802,14 @@ function finish() {
   results16 = async () => {
     const out = [];
     let posts = harness(() => ({ ok: true, json: async () => ({ id: '00Q1', success: true }) }));
-    let r = await silenced(() => sf.pushToSalesforce(PAYLOAD));
+    let r = await silenced(() => sf.pushToSalesforce(PAYLOAD).catch(() => null));
     out.push(['sf: happy path creates the lead with both fields',
-      r.success === true && posts[0].Product__c === 'crm' && posts[0].About_Business__c === 'We move pallets.', JSON.stringify(r)]);
+      !!r && r.success === true && posts[0].Product__c === 'crm' && posts[0].About_Business__c === 'We move pallets.', JSON.stringify(r)]);
     out.push(['sf: and needs only one POST', posts.length === 1, String(posts.length)]);
 
     posts = harness(reject(['Product__c']));
-    r = await silenced(() => sf.pushToSalesforce(PAYLOAD));
-    out.push(['sf: a rejected Product__c does NOT lose the lead', r.success === true, JSON.stringify(r)]);
+    r = await silenced(() => sf.pushToSalesforce(PAYLOAD).catch(() => null));
+    out.push(['sf: a rejected Product__c does NOT lose the lead', !!r && r.success === true, JSON.stringify(r)]);
     out.push(['sf: it retries exactly once', posts.length === 2, String(posts.length)]);
     /* posts[1] does not exist when no retry happened. Reading through it
        THROWS, which loses every assertion after it and turns a broken guard
@@ -1815,24 +1819,83 @@ function finish() {
       !!posts[1] && !('Product__c' in retryBody) && retryBody.About_Business__c === 'We move pallets.']);
     out.push(['sf: every other field survives the retry',
       !!posts[1] && retryBody.Email === 'a@b.com' && retryBody.Company === 'Acme' && retryBody.sell_to__c === 'B2B']);
-    out.push(['sf: the caller is told what was dropped', JSON.stringify(r.droppedFields) === '["Product__c"]', JSON.stringify(r.droppedFields)]);
+    out.push(['sf: the caller is told what was dropped', JSON.stringify((r||{}).droppedFields) === '["Product__c"]', JSON.stringify(r.droppedFields)]);
 
     posts = harness((body) => ('Product__c' in body)
       ? { ok: false, json: async () => ([{ errorCode: 'INVALID_FIELD', message: "No such column 'Product__c' on sobject of type Lead" }]) }
       : { ok: true, json: async () => ({ id: '00Q4', success: true }) });
-    r = await silenced(() => sf.pushToSalesforce(PAYLOAD));
+    r = await silenced(() => sf.pushToSalesforce(PAYLOAD).catch(() => null));
     out.push(['sf: a field named only in the message text is still found',
-      r.success === true && !!posts[1] && !('Product__c' in posts[1])]);
+      !!r && r.success === true && !!posts[1] && !('Product__c' in posts[1])]);
 
+    /* Failures now REJECT rather than resolving { success:false } — that is
+       the whole point of the change, so the assertions catch the rejection. */
     posts = harness(() => ({ ok: false, json: async () => ([{ errorCode: 'REQUIRED_FIELD_MISSING',
       message: 'Required fields are missing: [LastName]', fields: ['LastName'] }]) }));
-    r = await silenced(() => sf.pushToSalesforce(PAYLOAD));
-    out.push(['sf: an unrelated error does NOT trigger strip-and-retry', r.success === false && posts.length === 1, String(posts.length)]);
+    let threw = false;
+    r = await silenced(() => sf.pushToSalesforce(PAYLOAD).catch(() => { threw = true; }));
+    out.push(['sf: an unrelated error rejects, and does NOT strip-and-retry',
+      threw === true && posts.length === 1, 'threw=' + threw + ' posts=' + posts.length]);
 
     posts = harness(() => ({ ok: false, json: async () => ([{ errorCode: 'INVALID_FIELD_FOR_INSERT_UPDATE',
       message: "No such column 'Product__c' on sobject of type Lead", fields: ['Product__c'] }]) }));
-    r = await silenced(() => sf.pushToSalesforce(PAYLOAD));
-    out.push(['sf: a retry that also fails is reported, not swallowed', r.success === false && posts.length === 2, String(posts.length)]);
+    threw = false;
+    r = await silenced(() => sf.pushToSalesforce(PAYLOAD).catch(() => { threw = true; }));
+    out.push(['sf: a retry that also fails REJECTS, so the critical alert fires',
+      threw === true && posts.length === 2, 'threw=' + threw + ' posts=' + posts.length]);
+
+    /* THE SILENCE, pinned. Every one of these resolved quietly before, so the
+       .catch raising alertOps('critical','Salesforce','Lead not created')
+       could never fire — for any write failure, on either path. */
+    const alertsOn = async (existing, resp) => {
+      harness(resp, existing);
+      let a = false;
+      await silenced(() => sf.pushToSalesforce(PAYLOAD).catch(() => { a = true; }));
+      return a;
+    };
+    const rejectWith = (code) => () => ({ ok: false, json: async () => ([{ errorCode: code, message: 'x' }]) });
+    out.push(['sf: an UPDATE rejected by a duplicate rule alerts',
+      await alertsOn(true, rejectWith('DUPLICATES_DETECTED')) === true]);
+    out.push(['sf: an UPDATE rejected by a validation rule alerts',
+      await alertsOn(true, rejectWith('FIELD_CUSTOM_VALIDATION_EXCEPTION')) === true]);
+    out.push(['sf: a CREATE rejection alerts',
+      await alertsOn(false, rejectWith('REQUIRED_FIELD_MISSING')) === true]);
+    out.push(['sf: a SUCCESSFUL write still does not alert (no storm)',
+      await alertsOn(true, () => ({ ok: true, status: 204, json: async () => ({}) })) === false]);
+
+    /* The duplicate-rule header the create path always had and the update
+       path never did — which is the bug that surfaced all of this.
+
+       Asserted on the CAPTURED REQUEST, with no source-text fallback. The
+       first version of this had `|| /header/.test(sfsrc)`, which the CREATE
+       path satisfies on its own, so deleting the header from the UPDATE path
+       still passed. Measured — that mutation survived. */
+    const hdrPosts = harness(() => ({ ok: true, status: 204, json: async () => ({}) }), true);
+    await silenced(() => sf.pushToSalesforce(PAYLOAD).catch(() => null));
+    const hdrs = hdrPosts.__headers || {};
+    out.push(['sf: the UPDATE is a PATCH', (hdrPosts[0] || {}).__method === 'PATCH', (hdrPosts[0] || {}).__method]);
+    out.push(['sf: the UPDATE sends Sforce-Duplicate-Rule-Header allowSave=true',
+      hdrs['Sforce-Duplicate-Rule-Header'] === 'allowSave=true',
+      JSON.stringify(hdrs['Sforce-Duplicate-Rule-Header'])]);
+
+    /* The unknown-field retry on the UPDATE path. It guarded creates only
+       until now, so an unknown field on an update took the whole record
+       down — and this case was missing here too, so removing the retry
+       survived. */
+    const upPosts = harness((body) => ('Product__c' in body)
+      ? { ok: false, json: async () => ([{ errorCode: 'INVALID_FIELD_FOR_INSERT_UPDATE',
+          message: "No such column 'Product__c' on sobject of type Lead", fields: ['Product__c'] }]) }
+      : { ok: true, status: 204, json: async () => ({}) }, true);
+    /* .catch, always: an unguarded rejection here aborts the rest of section
+       16 and the run comes back UNMEASURED instead of failing. Measured —
+       removing the retry did exactly that. */
+    const upRes = await silenced(() => sf.pushToSalesforce(PAYLOAD).catch(() => null));
+    out.push(['sf: an UPDATE survives an unknown field', !!upRes && upRes.success === true, JSON.stringify(upRes)]);
+    out.push(['sf: the UPDATE retried once, dropping only the named field',
+      upPosts.length === 2 && !('Product__c' in (upPosts[1] || {})) && !!(upPosts[1] || {}).About_Business__c,
+      'posts=' + upPosts.length]);
+    out.push(['sf: and the UPDATE reports what it dropped',
+      JSON.stringify((upRes || {}).droppedFields) === '["Product__c"]', JSON.stringify((upRes || {}).droppedFields)]);
 
     global.fetch = realFetch;
     return out;

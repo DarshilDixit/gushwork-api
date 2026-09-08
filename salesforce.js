@@ -251,15 +251,19 @@ async function pushToSalesforce(payload) {
     }
 
     if (!postOk) {
+      /* Throws for the same reason updateSFLead does — see there. */
       console.error('[SF] Lead creation failed:', JSON.stringify(result));
-      return { success: false, error: result };
+      throw new Error(`[SF] Lead creation failed for ${payload.email || 'n/a'}: ${JSON.stringify(result).slice(0, 300)}`);
     }
 
     console.log(`[SF] ✅ Lead created: ${result.id} | email: ${payload.email || 'n/a'}`);
     return { success: true, leadId: result.id };
   } catch (err) {
+    /* Log and RE-THROW. Swallowing here is what made a dead Salesforce, an
+       expired refresh token and a rejected record indistinguishable from a
+       success to every caller. */
     console.error('[SF] Create error:', err.message);
-    return { success: false, error: err.message };
+    throw err;
   }
 }
 
@@ -307,41 +311,73 @@ async function findSFLeadByEmail(email) {
    Also applies max length truncation to any string fields.
 -------------------------------------------------------- */
 async function updateSFLead(leadId, fields) {
-  if (!leadId) return { success: false, error: 'No leadId' };
-  try {
-    const { accessToken, instanceUrl } = await getSalesforceToken();
+  if (!leadId) throw new Error('[SF] updateSFLead called with no leadId');
+  const { accessToken, instanceUrl } = await getSalesforceToken();
 
-    // Apply truncation to any landing_page__c or other long fields passed directly
-    const safeFields = { ...fields };
-    if (safeFields['landing_page__c']) {
-      safeFields['landing_page__c'] = safeFields['landing_page__c'].substring(0, 255);
-    }
+  // Apply truncation to any landing_page__c or other long fields passed directly
+  const safeFields = { ...fields };
+  if (safeFields['landing_page__c']) {
+    safeFields['landing_page__c'] = safeFields['landing_page__c'].substring(0, 255);
+  }
 
-    const res = await fetch(
+  const patch = async (body) => {
+    const r = await fetch(
       `${instanceUrl}/services/data/v60.0/sobjects/Lead/${leadId}`,
       {
         method: 'PATCH',
         headers: {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
+          /* The CREATE path has always sent this and the update path never
+             did, so a duplicate rule that creates sail past would reject an
+             update outright. On 8 Sept Lead_Duplication_Phone rejected a
+             submit-time update and Product__c / About_Business__c were never
+             written; the booking-time update touched no phone field and went
+             through, which is why it looked intermittent. */
+          'Sforce-Duplicate-Rule-Header': 'allowSave=true',
         },
-        body: JSON.stringify(safeFields),
+        body: JSON.stringify(body),
       }
     );
+    if (r.status === 204) return { ok: true, result: null };
+    return { ok: false, result: await r.json() };
+  };
 
-    // SF returns 204 No Content on successful PATCH
-    if (res.status === 204) {
-      console.log(`[SF] ✅ Lead updated: ${leadId}`);
-      return { success: true, leadId };
+  let { ok, result } = await patch(safeFields);
+
+  /* Same strip-and-retry as the create path. It used to guard creates only,
+     so the graceful degradation was half installed: an unknown field on an
+     update took the whole record down. */
+  if (!ok) {
+    const unknown = sfUnknownFields(result);
+    if (unknown.length) {
+      const retry = { ...safeFields };
+      for (const f of unknown) delete retry[f];
+      console.warn(`[SF] Lead update rejected for unknown field(s) ${unknown.join(', ')} — retrying WITHOUT them. Check field-level security in Setup.`);
+      ({ ok, result } = await patch(retry));
+      if (ok) {
+        console.warn(`[SF] ✅ Lead ${leadId} updated after dropping ${unknown.join(', ')} — those values are NOT in Salesforce`);
+        return { success: true, leadId, droppedFields: unknown };
+      }
     }
-
-    const result = await res.json();
-    console.error('[SF] Lead update failed:', JSON.stringify(result));
-    return { success: false, error: result };
-  } catch (err) {
-    console.error('[SF] Update error:', err.message);
-    return { success: false, error: err.message };
   }
+
+  if (!ok) {
+    /* THROWS, and that is the point. Returning { success: false } meant the
+       .catch at every call site — the one raising the critical "Lead not
+       created" alert — could never fire, so every Salesforce write failure
+       was silent: duplicate rules, validation rules, an expired token, an
+       unreachable Salesforce. Proven by execution on 8 Sept: creates,
+       updates and token failures all resolved quietly.
+
+       All five call sites tolerate a rejection — four chain a .catch that
+       alerts, one awaits inside a try/catch. Checked before this changed. */
+    console.error('[SF] Lead update failed:', JSON.stringify(result));
+    throw new Error(`[SF] Lead update failed for ${leadId}: ${JSON.stringify(result).slice(0, 300)}`);
+  }
+
+  console.log(`[SF] ✅ Lead updated: ${leadId}`);
+  return { success: true, leadId };
 }
 
 /* Shared by all three paginated readers below. Salesforce pages at ~1,250
