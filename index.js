@@ -9,7 +9,7 @@ const { Pool }  = require('pg');
 const { pool, initDB } = require('./db');
 const { sendConversion, fetchPartnership, sendAction, fetchCustomer } = require('./partnerstack');
 const { pushToSalesforce, findSFLeadByEmail, updateSFLead, updateOpportunityFields, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails } = require('./salesforce');
-const { pushFormEventsToMeta, pushStartTrialToMeta, resolveProduct } = require('./meta-capi');
+const { pushFormEventsToMeta, pushStartTrialToMeta, resolveProduct, setMetaOutcomeReporter } = require('./meta-capi');
 const createLeadMagnetRouter = require('./lead-magnet');
 
 const app  = express();
@@ -986,9 +986,33 @@ const AUTH_FAILURE_PATTERNS = [
   /permission denied/i,
 ];
 
-function isAuthFailure(error) {
+/* Meta needs its OWN rule, and the generic list is actively wrong for it.
+
+   Meta stamps type:"OAuthException" on nearly every Graph API error — a bad
+   parameter (code 100), a rate limit (80004), a transient server error
+   (code 2). AUTH_FAILURE_PATTERNS contains /OAuth/i, /401/, /403/ and
+   /access.?token/i, so ALL of those matched, and an auth match bypasses both
+   thresholds to page critical with Slack AND email on the FIRST occurrence.
+   Measured against real Meta error bodies: 5 of 8 would have paged, and only
+   one of the five was a credential problem.
+
+   So for Meta we match the four codes that actually mean the token is dead:
+     190 invalid/expired access token
+     102 session invalid, user logged out
+     463 expired access token
+     467 invalid access token
+   Everything else from Meta is a normal failure and goes through the
+   3-strike threshold like any other integration.
+
+   Nothing else changes: a source with no special rule still uses the full
+   list, and the three non-Meta callers pass no source at all. */
+const META_AUTH_CODES = [190, 102, 463, 467];
+const META_AUTH_RE = new RegExp('"code"\\s*:\\s*(' + META_AUTH_CODES.join('|') + ')\\b');
+
+function isAuthFailure(error, source) {
   const msg = String(error || '');
   if (!msg) return false;
+  if (source === 'Meta CAPI') return META_AUTH_RE.test(msg);
   return AUTH_FAILURE_PATTERNS.some((re) => re.test(msg));
 }
 
@@ -1022,6 +1046,18 @@ function recordSuccess(source) {
   if (_failStreaks.get(source)) _failStreaks.set(source, 0);
 }
 
+/* recordSuccess('Meta CAPI') was never called ANYWHERE, so the Meta streak
+   only ever reset when an alert fired: "3 consecutive failures" actually
+   meant "3 failures since the last alert, ever", and three spread over a
+   month would trip it. meta-capi reports each landed event here.
+
+   Success only, deliberately. Failures reach recordFailure through the
+   call-site .catch, and reporting them from both places would double-count
+   every one of them. */
+setMetaOutcomeReporter((outcome) => {
+  if (outcome && outcome.ok) recordSuccess('Meta CAPI');
+});
+
 function recordFailure(source, id, error) {
   try {
     const cfg = FAILURE_MONITORS[source];
@@ -1030,7 +1066,7 @@ function recordFailure(source, id, error) {
     const errStr = String(error || '').substring(0, 200);
 
     // ── Credential failure: page NOW, skip every threshold ──
-    if (isAuthFailure(errStr)) {
+    if (isAuthFailure(errStr, source)) {
       alertOps('critical', source, 'Authentication failed', {
         'Affected': id || 'unknown',
         'Error': errStr,

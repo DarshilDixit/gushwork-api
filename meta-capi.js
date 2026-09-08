@@ -139,6 +139,22 @@ function resolveProduct({ page_url } = {}) {
   return DEFAULT_PRODUCT;
 }
 
+/* Reports each event's outcome to whoever wired one up — index.js uses it to
+   call recordSuccess('Meta CAPI'), which nothing ever called before, so the
+   failure streak never reset on a good send.
+
+   Injected rather than imported: meta-capi.js must not depend on index.js,
+   and a module that reaches back into the app is how a require cycle starts.
+   Never throws into the send path. */
+let _outcomeReporter = null;
+function setMetaOutcomeReporter(fn) {
+  _outcomeReporter = typeof fn === 'function' ? fn : null;
+}
+function reportOutcome(outcome) {
+  if (!_outcomeReporter) return;
+  try { _outcomeReporter(outcome); } catch { /* reporting must never break a send */ }
+}
+
 const FIXED_EVENT_ID_EVENTS = ['StartTrial', 'Contact'];
 
 /* The event payload, built and cleaned but NOT sent.
@@ -260,6 +276,7 @@ async function sendEvent(eventName, payload, options = {}) {
   }
 
   console.log(`[Meta CAPI] ✅ [${eventName}] sent: ${result.events_received} events received`);
+  reportOutcome({ ok: true, eventName });
   return { success: true, eventName, eventsReceived: result.events_received };
 }
 
@@ -332,6 +349,7 @@ async function pushContactToMeta(payload, options = {}) {
 
 module.exports = {
   pushFormEventsToMeta,
+  setMetaOutcomeReporter,
   pushStartTrialToMeta,
   pushContactToMeta,
   /* Exported for index.js, which resolves the same slug to persist it on the
