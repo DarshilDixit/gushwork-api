@@ -63,6 +63,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `README.md` | Repo landing blurb, not living documentation. This file is |
 | `tests/` | The test files described under Deploying, plus `crash-reporter.js` (required first by every suite), `measure.js` (the test bar and the mutation-testing rule) and the committed `.baseline.json` |
 | `docs/partnerstack.md` | PartnerStack handover: the two-step model, every ps_ column, env vars, test procedure, known gaps |
+| `docs/OPEN-ITEMS.md` | What is still open or deliberately decided in THIS repo, as of 9 Sept 2026. The meta-capi repo has its own; neither is complete alone |
 | `CLAUDE.md` | This file |
 
 **`gushwork-form.js` and `gushwork-form-popup.js` are in this repo, not a separate
