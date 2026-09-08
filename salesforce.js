@@ -71,6 +71,11 @@ const CUSTOM_FIELD_MAP = {
      COALESCEs the STORED value first (the opposite direction from every other
      column in that upsert) so the first non-empty value sticks. */
   hear_about_us_raw: 'hear_about_us_raw__c',
+  /* Created 8 Sept 2026 via the Tooling API, with FieldPermissions granted
+     and a real write/read round-trip — creating a field does NOT grant
+     access to it, which is the 4 Sept lesson. */
+  product: 'Product__c',
+  about_business: 'About_Business__c',
   page_url: 'page_url__c',
 
   // --- Meta tracking ---
@@ -154,6 +159,40 @@ function buildLeadFields(payload) {
    This makes it safe even if a separate SF/Cal integration
    has already created a Lead for this email.
 -------------------------------------------------------- */
+/* Salesforce rejects the ENTIRE record when it does not recognise one field.
+   Not the field — the record. So a Product__c that is missing, renamed, or
+   simply not visible to the integration user does not cost us a column, it
+   costs us the whole lead.
+
+   The fields exist and are permissioned today, verified by round-trip. This
+   guard is for the day that stops being true: a sandbox refresh, a profile
+   change, a field renamed by someone in Setup. It strips only the fields
+   Salesforce actually named and retries ONCE, so a lead still lands with
+   everything else intact.
+
+   INVALID_FIELD_FOR_INSERT_UPDATE is what a missing field-level permission
+   returns; INVALID_FIELD is what a genuinely absent field returns. Both are
+   handled, because from here they are the same problem.
+
+   Deliberately narrow: only these two error codes, only fields named in the
+   error, only one retry. A blanket "strip anything and keep trying" would
+   quietly post half a lead forever and nobody would find out. */
+const SF_UNKNOWN_FIELD_CODES = ['INVALID_FIELD_FOR_INSERT_UPDATE', 'INVALID_FIELD'];
+
+function sfUnknownFields(result) {
+  const arr = Array.isArray(result) ? result : [result];
+  const named = new Set();
+  for (const e of arr) {
+    if (!e || !SF_UNKNOWN_FIELD_CODES.includes(e.errorCode)) continue;
+    /* Salesforce names the offender in two shapes:
+         fields: ['Product__c']
+         message: "No such column 'Product__c' on sobject of type Lead" */
+    for (const f of e.fields || []) named.add(f);
+    for (const m of String(e.message || '').matchAll(/'([A-Za-z0-9_]+__c)'/g)) named.add(m[1]);
+  }
+  return [...named];
+}
+
 async function pushToSalesforce(payload) {
   try {
     const lead = buildLeadFields(payload);
@@ -177,22 +216,41 @@ async function pushToSalesforce(payload) {
     // No existing Lead — create new
     const { accessToken, instanceUrl } = await getSalesforceToken();
 
-    const res = await fetch(
-      `${instanceUrl}/services/data/v60.0/sobjects/Lead/`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-          'Sforce-Duplicate-Rule-Header': 'allowSave=true',
-        },
-        body: JSON.stringify(lead),
+    const post = async (body) => {
+      const r = await fetch(
+        `${instanceUrl}/services/data/v60.0/sobjects/Lead/`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+            'Sforce-Duplicate-Rule-Header': 'allowSave=true',
+          },
+          body: JSON.stringify(body),
+        }
+      );
+      return { ok: r.ok, result: await r.json() };
+    };
+
+    let { ok: postOk, result } = await post(lead);
+
+    /* One retry, with only the fields Salesforce named removed. Losing a
+       column beats losing the lead. */
+    if (!postOk) {
+      const unknown = sfUnknownFields(result);
+      if (unknown.length) {
+        const retry = { ...lead };
+        for (const f of unknown) delete retry[f];
+        console.warn(`[SF] Lead rejected for unknown field(s) ${unknown.join(', ')} — retrying WITHOUT them so the lead is not lost. Check field-level security in Setup.`);
+        ({ ok: postOk, result } = await post(retry));
+        if (postOk) {
+          console.warn(`[SF] ✅ Lead created after dropping ${unknown.join(', ')} — those values are NOT in Salesforce for ${payload.email || 'n/a'}`);
+          return { success: true, leadId: result.id, droppedFields: unknown };
+        }
       }
-    );
+    }
 
-    const result = await res.json();
-
-    if (!res.ok) {
+    if (!postOk) {
       console.error('[SF] Lead creation failed:', JSON.stringify(result));
       return { success: false, error: result };
     }
