@@ -2142,7 +2142,7 @@ app.get('/monitor/metrics', async (req, res) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   try {
-    const [totals, people, recovered, byDay, enrichCount, enrichCoverage, pendingPartials, noBooking, recent, today, topFunnel] = await Promise.all([
+    const [totals, people, recovered, byDay, enrichCount, enrichCoverage, pendingPartials, noBooking, recent, today, topFunnel, byProduct] = await Promise.all([
       pool.query(`
         SELECT
           COUNT(*)                                                          AS total,
@@ -2161,6 +2161,34 @@ app.get('/monitor/metrics', async (req, res) => {
           COUNT(DISTINCT LOWER(email)) FILTER (WHERE disqualified = true)     AS people_disqualified
         FROM leads
         WHERE email IS NOT NULL
+      `),
+      /* The same three headline measures, split by product.
+
+         PEOPLE, deduped by lower(email), exactly like the cards above — so
+         each row is directly comparable to the headline rather than being a
+         different unit sitting next to it.
+
+         The rows can sum to MORE than the headline. One person who arrived
+         once on /demo and once on /ai-demo is one person in the headline and
+         one person in each product row. That is correct for the question
+         "how many people has CRM seen", and the label on screen says
+         "counted once per product" so nobody reads the columns as a
+         partition. It is the same trap the PartnerStack ladder avoids by
+         being mutually exclusive; here overlap is meaningful, so it is
+         labelled instead of engineered away.
+
+         COALESCE to 'untagged' rather than dropping NULLs: a page_url
+         resolveProduct could not read is a real population, and a row that
+         silently vanishes is how a number stops adding up. */
+      pool.query(`
+        SELECT COALESCE(product, 'untagged')                                  AS product,
+               COUNT(DISTINCT LOWER(email))                                   AS people,
+               COUNT(DISTINCT LOWER(email)) FILTER (WHERE completed = true)   AS completed,
+               COUNT(DISTINCT LOWER(email)) FILTER (WHERE booking_uid IS NOT NULL) AS booked
+          FROM leads
+         WHERE email IS NOT NULL
+         GROUP BY 1
+         ORDER BY people DESC
       `),
       pool.query(`
         SELECT COUNT(*) AS recovered FROM (
@@ -2297,6 +2325,15 @@ app.get('/monitor/metrics', async (req, res) => {
     const peopleBooked       = parseInt(p.people_booked) || 0;
     const peopleDisqualified = parseInt(p.people_disqualified) || 0;
 
+    /* Ordered by volume, so aeo leads and a new product appears underneath
+       rather than being buried. */
+    const productBreakdown = byProduct.rows.map((r) => ({
+      product:   r.product,
+      people:    parseInt(r.people)    || 0,
+      completed: parseInt(r.completed) || 0,
+      booked:    parseInt(r.booked)    || 0,
+    }));
+
     const recoveredBookings = parseInt(recovered.rows[0].recovered) || 0;
     const leadsByDay        = byDay.rows.map(r => ({ day_label: r.day_label, count: parseInt(r.count) || 0 }));
 
@@ -2335,6 +2372,7 @@ app.get('/monitor/metrics', async (req, res) => {
       enrichTitlePct: titlePct, enrichFundingPct: fundingPct, enrichLocationPct: locPct,
       completedNoBookingSessions,
       peopleTotal, peopleCompleted, peopleBooked, peopleDisqualified,
+      productBreakdown,
       peopleNoBooking: noBookingUid,
       recoveredBookings,
       topFunnel: topFunnelOut,
@@ -3107,6 +3145,15 @@ app.get('/monitor', (req, res) => {
   '<div class="mc" title="People with a booking on at least one of their sessions."><div class="ml">People booked</div><div class="mv" id="m-book">&#8212;</div><div class="ms" id="m-bpct">&#8212;</div></div>' +
   '<div class="mc" title="People marked disqualified (B2C / Mixed) on at least one session."><div class="ml">Disqualified</div><div class="mv" id="m-disq">&#8212;</div><div class="ms" id="m-dsq">B2C / Mixed</div></div>' +
   '</div>' +
+  /* Same three measures as the cards above, same unit (people, deduped by
+     lower(email)), split by product. Deliberately a thin row rather than a
+     split inside each card: the cards keep their exact current meaning, and
+     "untagged" has somewhere to live. */
+  '<div class="card" style="padding:10px 14px;margin-top:-6px">' +
+  '<div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">By product' +
+  ' <span style="text-transform:none;letter-spacing:0;color:#aaa" title="Each row counts distinct people for that product. Somebody who arrived on both products is counted once in each row, so the rows can total more than the headline.">&#183; counted once per product</span></div>' +
+  '<table style="width:100%;font-size:13px"><tbody id="m-prodrows"><tr><td class="nd">&#8212;</td></tr></tbody></table>' +
+  '</div>' +
   '<div class="g4">' +
   '<div class="mc" title="Distinct qualified B2B people who COMPLETED the form and have no booking on any of their sessions. The SDR List is deliberately wider &#8212; it has no completed filter, so it also carries people who entered an email and never finished. Expect the SDR List to be the larger number."><div class="ml">No booking yet (SDR)</div><div class="mv" id="m-nb">&#8212;</div><div class="ms" id="m-nbs">&#8212;</div></div>' +
   '<div class="mc" title="People who completed the form without booking, and later booked on another session &#8212; your follow-up emails / prefill links / SDR nudges working."><div class="ml">Recovered bookings</div><div class="mv" id="m-rec">&#8212;</div><div class="ms">booked on a later session</div></div>' +
@@ -3388,6 +3435,19 @@ app.get('/monitor', (req, res) => {
      healthy." — a claim about the whole system made by a box that has
      never looked at one. Now it says what it actually knows and points at
      the tab that does the checking. */
+  /* One line per product. esc() on the label because it comes from a
+     database column, and PRODUCT_LABELS is only a display nicety \u2014 an
+     unknown slug still renders, as itself, rather than disappearing. */
+  'var PRODUCT_LABELS={aeo:"AEO",crm:"CRM",untagged:"Untagged"};' +
+  'function renderProductRow(rows){var tb=document.getElementById("m-prodrows");if(!tb)return;' +
+  'if(!rows||!rows.length){tb.innerHTML="<tr><td class=\\"nd\\">No product data yet.</td></tr>";return;}' +
+  'tb.innerHTML=rows.map(function(r){' +
+  'var label=PRODUCT_LABELS[r.product]||r.product;' +
+  'return "<tr><td style=\\"padding:3px 0;width:90px\\"><b>"+esc(label)+"</b></td>"+' +
+  '"<td style=\\"padding:3px 0\\">"+r.people+" people</td>"+' +
+  '"<td style=\\"padding:3px 0\\">"+r.completed+" completed</td>"+' +
+  '"<td style=\\"padding:3px 0\\">"+r.booked+" booked</td></tr>";' +
+  '}).join("");}' +
   'function renderAlerts(d){var a=[];if(d.pendingPartials>0)a.push({c:"aw",i:"!",m:d.pendingPartials+" session(s) waiting >2 hours without booking \\u2014 recovery cron will pick them up."});if(d.noBookingUid>0)a.push({c:"aw",i:"!",m:d.noBookingUid+" people (deduped, qualified B2B) completed the form but have no booking on any session. The SDR List is wider still \\u2014 it does not filter on completed."});if(!d.awsSynced)a.push({c:"ae",i:"x",m:"AWS sync disabled \\u2014 AWS_PG_HOST is not set, so nothing is reaching the gw_form_leads mirror."});if(d.total>5&&d.enriched<d.total*0.3)a.push({c:"aw",i:"!",m:"Low enrichment rate ("+Math.round(d.enriched/d.total*100)+"% of sessions)."});if(d.todayCount===0)a.push({c:"aw",i:"o",m:"No new form entries in the last 24 hours."});if(a.length===0)a.push({c:"an",i:"\\u00b7",m:"Nothing flagged by the Overview metrics. Live service checks are on the System Health tab."});document.getElementById("alerts").innerHTML=a.map(function(x){return"<div class=\\"alertbox "+x.c+"\\"><span>"+x.i+"</span><span>"+x.m+"</span></div>";}).join("");}' +
   /* Four stages, one window, one top-of-funnel denominator.
      Was: four bars all measured as a % of step 1, with "disqualified" sitting
@@ -3977,6 +4037,7 @@ app.get('/monitor', (req, res) => {
   'set("m-comp",d.peopleCompleted);set("m-cpct",pct(d.peopleCompleted,d.peopleTotal)+" of people \\u00B7 "+d.completed+" sessions");' +
   'set("m-book",d.peopleBooked);set("m-bpct",pct(d.peopleBooked,d.peopleCompleted)+" of completed \\u00B7 "+d.booked+" sessions");' +
   'set("m-disq",d.peopleDisqualified);set("m-dsq","B2C / Mixed \\u00B7 "+d.disqualified+" sessions");' +
+  'renderProductRow(d.productBreakdown);' +
   'set("m-nb",d.peopleNoBooking);set("m-nbs",d.completedNoBookingSessions+" completed sessions w/o booking");' +
   'set("m-rec",d.recoveredBookings);set("m-pend",d.pendingPartials);set("m-mail",d.loopsSent);' +
   'set("recon","Sessions = form visits \\u00B7 People = distinct emails. "+d.completedNoBookingSessions+" completed sessions without a booking \\u2192 "+d.noBookingUid+" actionable people after dedup, cross-session bookings & B2B filter.");' +
