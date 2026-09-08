@@ -1452,6 +1452,63 @@ function finish() {
   ok('product: nothing reads req.body.product', !/req\.body\.product/.test(src));
 }
 
+/* ============================================================
+   13. No JS comment syntax inside a SQL string
+
+   `// COALESCE for the same reason as /partial.` shipped inside the
+   /submit INSERT and took EVERY form completion down with it: Postgres
+   has no // comment, so the whole statement failed with a 42601 syntax
+   error, /submit returned 500, and nothing after the INSERT ran — no
+   Slack, no Salesforce, no Meta Lead, no PartnerStack conversion.
+
+   It survived review, six green suites and a merge because every
+   assertion in this repo reads the SQL as TEXT. Source-level assertions
+   cannot tell you whether a query parses. This one is still textual —
+   it is a lint, not an execution — but it targets the exact shape that
+   got through, and it is cheap enough to run on every statement.
+
+   CLAUDE.md already warns that a BACKTICK inside a SQL comment breaks
+   the file. This is its sibling: valid JavaScript, invalid SQL, and
+   silent until a query runs.
+   ============================================================ */
+{
+  /* Every backtick template literal that looks like SQL, from the files
+     that talk to Postgres. */
+  const SQL_FILES = ['index.js', 'db.js', 'lead-magnet.js', 'backfill-sf.js'];
+  const offenders = [];
+  for (const file of SQL_FILES) {
+    const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    const lits = text.match(/`(?:[^`\\]|\\.)*`/gs) || [];
+    for (const lit of lits) {
+      if (!/\b(SELECT|INSERT INTO|UPDATE|DELETE FROM|ALTER TABLE|CREATE TABLE)\b/i.test(lit)) continue;
+      /* A backtick inside a JS comment can make the scanner pair the wrong
+         delimiters, so skip anything that is obviously not a statement. */
+      if (!/\$\d|FROM|INTO|TABLE/i.test(lit)) continue;
+      for (const line of lit.split('\n')) {
+        if (/^\s*\/\//.test(line)) offenders.push(file + ': ' + line.trim().slice(0, 70));
+      }
+    }
+  }
+  /* One known false positive: alertIfBookingWithoutSubmit has a JS comment
+     containing a backtick, which makes the literal scanner pair across it.
+     Its SQL is single-quoted, so it cannot carry a comment at all. */
+  const real = offenders.filter((o) => !/completed. is ALSO set by/.test(o));
+  ok('sqlcomment: no // comment inside any SQL template literal',
+     real.length === 0, real.join(' | '));
+
+  /* Pin the two statements that actually broke, by execution shape: a SQL
+     comment in this repo is /* *\/ and nothing else. */
+  const submitIns = src.slice(src.indexOf('INSERT INTO leads', src.indexOf("app.post('/submit'")));
+  const submitSql = submitIns.slice(0, submitIns.indexOf('`'));
+  ok('sqlcomment: the /submit INSERT carries no // line', !/^\s*\/\//m.test(submitSql));
+  const partialIns = src.slice(src.indexOf('INSERT INTO leads', src.indexOf("app.post('/partial'")));
+  const partialSql = partialIns.slice(0, partialIns.indexOf('`'));
+  ok('sqlcomment: the /partial INSERT carries no // line', !/^\s*\/\//m.test(partialSql));
+  const awsIns = src.slice(src.indexOf('INSERT INTO gw_form_leads'));
+  const awsSql = awsIns.slice(0, awsIns.indexOf('`'));
+  ok('sqlcomment: the syncToAWS INSERT carries no // line', !/^\s*\/\//m.test(awsSql));
+}
+
 /* ============================================================ */
 console.log('');
 console.log(`  passed: ${pass}`);

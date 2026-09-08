@@ -2403,9 +2403,9 @@ app.get('/monitor/funnel', async (req, res) => {
         -- anything.
         gl AS (SELECT MIN(created_at) AS go_live FROM form_sessions),
         l AS (
-          // UTC day buckets on purpose — see the note on the sessions CTE above.
-          // Both CTEs must use the SAME zone or the FULL OUTER JOIN on s.d = l.d
-          // silently stops matching and every day splits into two half-rows.
+          -- UTC day buckets on purpose — see the note on the sessions CTE above.
+          -- Both CTEs must use the SAME zone or the FULL OUTER JOIN on s.d = l.d
+          -- silently stops matching and every day splits into two half-rows.
           SELECT date_trunc('day', l.created_at) AS d,
                  COUNT(*) FILTER (WHERE l.email IS NOT NULL AND l.email <> '' AND NOT (${WEBHOOK_LEAD_SQL})) AS step1,
                  COUNT(*) FILTER (WHERE l.submitted_at IS NOT NULL AND NOT (${WEBHOOK_LEAD_SQL}))            AS submitted,
