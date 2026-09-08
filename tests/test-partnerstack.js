@@ -2493,8 +2493,18 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   /* ── PR1.8: acknowledge, CSV, SDR list ───────────────────────────── */
 
   /* The raw value has to be able to LEAVE the dashboard. */
-  ok('exportH: the CSV carries hear_about_us_raw',
-     /'sell_to','hear_about_us','hear_about_us_raw'/.test(src));
+  /* By MEMBERSHIP, not adjacency. This asserted the literal string
+     'sell_to','hear_about_us','hear_about_us_raw' and broke the moment
+     'product','about_business' were inserted between them — a correct
+     change failing a test that was pinning column ORDER while claiming to
+     check column PRESENCE. Same shape as "product is the last bind". */
+  {
+    const m = /const cols = \[([\s\S]*?)\];/.exec(src);
+    const csvCols = m ? [...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]) : [];
+    ok('exportH: the CSV carries hear_about_us_raw', csvCols.includes('hear_about_us_raw'),
+       csvCols.length + ' columns found');
+    ok('exportH: and the columns it sits among', ['sell_to', 'hear_about_us'].every((c) => csvCols.includes(c)));
+  }
   /* An SDR opening a call wants to know how the person said they found us —
      on a partner lead hear_about_us reads "Partner - X". */
   ok('sdrH: the SDR list selects it', /l\.hear_about_us_raw,\s*\n\s*l\.ps_partner_name,/.test(src));
