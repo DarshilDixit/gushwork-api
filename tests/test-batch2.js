@@ -1636,6 +1636,90 @@ function finish() {
 }
 
 /* ============================================================
+   15. Slack — product and the free-text answer
+
+   BUILDS the blocks with the real slackSubmit rather than asserting the
+   source mentions the fields. What matters is what arrives in Slack: an
+   untagged lead must have NO Product line rather than an empty one, and
+   the textarea must be truncated with a visible ellipsis so a cut
+   sentence does not read as the whole answer.
+
+   Slack rejects a whole section over 3000 characters, so an untruncated
+   1000-char answer is close enough to the edge to bound deliberately.
+   ============================================================ */
+{
+  const lift = (name) => {
+    const m = new RegExp('(?:^|\\n)(?:async )?function ' + name + '\\s*\\(').exec(src);
+    let d = 0, start = src.indexOf('{', m.index);
+    for (let j = start; j < src.length; j++) {
+      if (src[j] === '{') d++; else if (src[j] === '}') { d--; if (!d) return src.slice(m.index, j + 1); }
+    }
+  };
+  const grab = (from, to) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)) + to.length);
+
+  /* bFields is instrumented to record every field set it is handed, so the
+     assertions below read the real payload the real function assembled. */
+  const build = new Function('CAP', `
+    var isUnverifiablePair = function () { return false; };
+    var UNVERIFIABLE_PAIR_NOTE = 'x';
+    var WEBSITE_SALES_HINTS = {};
+    var websiteReasonLabel = function (r) { return r || ''; };
+    ${grab('function bHeader(text)', '\n')}
+    ${grab('function bSection(text)', '\n')}
+    ${lift('bFields').replace('function bFields(fields) {', 'function bFields(fields) { CAP.push(fields);')}
+    ${grab('function bDivider()', '\n')}
+    ${grab('function bContext(text)', '\n')}
+    ${grab('const SLACK_ABOUT_MAX', ';')}
+    ${lift('slackTruncate')}
+    ${lift('slackSubmit')}
+    return slackSubmit;
+  `);
+  const fieldsFor = (payload) => {
+    const CAP = [];
+    const fn = build(CAP);
+    /* slackSubmit goes on to call a sender this sandbox does not define; the
+       blocks are already captured by then, so the throw is expected. */
+    try { fn(payload); } catch (e) { /* expected */ }
+    return CAP.flat().filter((f) => f && f.value);
+  };
+  const find = (f, label) => f.find((x) => x.label.includes(label));
+
+  const crm = fieldsFor({ email: 'a@b.com', product: 'crm', sell_to: 'B2B' });
+  ok('slack: a crm lead shows Product = crm', (find(crm, 'Product') || {}).value === 'crm');
+  const aeo = fieldsFor({ email: 'a@b.com', product: 'aeo' });
+  ok('slack: an aeo lead shows Product = aeo', (find(aeo, 'Product') || {}).value === 'aeo');
+  /* An empty field would read as "we know the product and it is blank". */
+  for (const v of [null, undefined, ''])
+    ok('slack: product ' + JSON.stringify(v) + ' produces NO Product line',
+       !find(fieldsFor({ email: 'a@b.com', product: v }), 'Product'));
+
+  const long = 'We are a 40-person logistics firm. '.repeat(60);
+  const ab = find(fieldsFor({ email: 'a@b.com', about_business: long }), 'About their business');
+  ok('slack: a long answer is present', !!ab);
+  ok('slack: truncated to the cap', ab && ab.value.length <= 280, ab && String(ab.value.length));
+  ok('slack: ends with an ellipsis, so a cut sentence is visible as cut',
+     ab && ab.value.endsWith('…'));
+  ok('slack: keeps the opening words', ab && ab.value.startsWith('We are a 40-person'));
+
+  const shortAb = find(fieldsFor({ email: 'a@b.com', about_business: 'We sell pallets.' }), 'About their business');
+  ok('slack: a short answer is passed through untouched',
+     shortAb && shortAb.value === 'We sell pallets.', shortAb && shortAb.value);
+  for (const v of [undefined, null, '', '   '])
+    ok('slack: about_business ' + JSON.stringify(v) + ' adds no block',
+       !find(fieldsFor({ email: 'a@b.com', about_business: v }), 'About their business'));
+
+  /* Worst case still has to fit Slack's per-section limit. */
+  const worst = fieldsFor({ email: 'a@b.com', about_business: 'x'.repeat(5000), company: 'y'.repeat(300) });
+  const total = worst.reduce((n, x) => n + x.label.length + String(x.value).length + 3, 0);
+  ok('slack: even a pathological payload stays under the 3000-char section limit',
+     total < 3000, String(total));
+
+  /* And /submit must actually pass them, or none of the above ever runs. */
+  ok('slack: /submit passes product and about_business to slackSubmit',
+     /slackSubmit\(\{first_name,last_name,email,phone,company,website,sell_to,product,about_business,/.test(src));
+}
+
+/* ============================================================
    12. A Meta failure must reach recordFailure
 
    Every push function ended in Promise.allSettled, which never rejects.

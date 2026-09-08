@@ -1309,6 +1309,24 @@ function slackPartial(d) {
   sendSlack(blocks, label);
 }
 
+/* Free text in a Slack notification is truncated, not sent whole.
+
+   Slack rejects a section whose text exceeds 3000 characters — the whole
+   message, not just the field — so an untruncated 1000-char answer plus
+   labels is close enough to the edge to be worth bounding. 280 is what
+   someone actually reads in a notification; the full text is in the
+   database and on the dashboard.
+
+   The ellipsis is deliberate: a silently cut sentence reads as if that is
+   all the visitor wrote. */
+const SLACK_ABOUT_MAX = 280;
+function slackTruncate(text, max = SLACK_ABOUT_MAX) {
+  const t = String(text == null ? '' : text).trim();
+  if (!t) return '';
+  if (t.length <= max) return t;
+  return t.slice(0, max - 1).trimEnd() + '\u2026';
+}
+
 function slackSubmit(d) {
   const name = [d.first_name, d.last_name].filter(Boolean).join(' ');
   const blocks = [];
@@ -1322,8 +1340,18 @@ function slackSubmit(d) {
     { label: '🌐 Website',          value: d.website       },
     { label: '🎯 Sells to',         value: d.sell_to       },
     { label: '💬 Heard about us',   value: d.hear_about_us },
+    /* Which product the form was selling. Null for a page we could not
+       read, and bFields drops empty values, so an untagged lead simply
+       has no Product line rather than an empty one. */
+    { label: '📦 Product',          value: d.product       },
   ]);
   if (lf) blocks.push(lf);
+  /* Its own block, not a field: the fields above render as a two-column
+     grid and a paragraph of prose destroys that layout. */
+  {
+    const about = slackTruncate(d.about_business);
+    if (about) blocks.push(bFields([{ label: '📝 About their business', value: about }]));
+  }
   // Above the website-check line on purpose: this says nothing checked out
   // at all, which is a bigger fact than which check said what.
   if (isUnverifiablePair(d)) {
@@ -8709,7 +8737,7 @@ app.post('/submit', async (req, res) => {
     syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true,hear_about_us_raw:hear_about_us,product,about_business,...ps});
 
     if (!alreadyCompleted) {
-      slackSubmit({first_name,last_name,email,phone,company,website,sell_to,hear_about_us:hearAboutUsFinal,ps_partner_key:ps.ps_partner_key,ps_partner_name:(psIdentity||{}).name,ps_partner_email:(psIdentity||{}).email,ps_click_at:ps.ps_click_at,hear_about_us_raw:hear_about_us,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,elv_status:elv?.status||null,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
+      slackSubmit({first_name,last_name,email,phone,company,website,sell_to,product,about_business,hear_about_us:hearAboutUsFinal,ps_partner_key:ps.ps_partner_key,ps_partner_name:(psIdentity||{}).name,ps_partner_email:(psIdentity||{}).email,ps_click_at:ps.ps_click_at,hear_about_us_raw:hear_about_us,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,elv_status:elv?.status||null,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
 
       pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,hear_about_us:hearAboutUsFinal,hear_about_us_raw:hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'form completed', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
 
