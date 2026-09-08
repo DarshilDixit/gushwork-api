@@ -1461,8 +1461,17 @@ function finish() {
 
   /* One resolver. A second copy in index.js is how the column and the Meta
      event end up disagreeing about the same lead. */
-  ok('product: index.js imports resolveProduct from meta-capi',
-     /const \{ pushFormEventsToMeta, pushStartTrialToMeta, resolveProduct \} = require\('\.\/meta-capi'\);/.test(src));
+  /* By SYMBOL, not by the exact import line: pinning the whole line means
+     the assertion fails the next time anything else is imported from the
+     same module, which says nothing about resolveProduct. */
+  {
+    const imp = /const \{([^}]*)\} = require\('\.\/meta-capi'\);/.exec(src);
+    const names = imp ? imp[1].split(',').map((x) => x.trim()) : [];
+    ok('product: index.js imports resolveProduct from meta-capi',
+       names.includes('resolveProduct'), names.join(','));
+    ok('product: it imports the push functions from the same module',
+       names.includes('pushFormEventsToMeta') && names.includes('pushStartTrialToMeta'), names.join(','));
+  }
   ok('product: index.js defines no catalogue of its own',
      !/const PRODUCTS\s*=/.test(src) && !/predicted_ltv/.test(src));
   ok('product: both routes resolve from page_url and nothing else',
@@ -1527,6 +1536,103 @@ function finish() {
   const awsIns = src.slice(src.indexOf('INSERT INTO gw_form_leads'));
   const awsSql = awsIns.slice(0, awsIns.indexOf('`'));
   ok('sqlcomment: the syncToAWS INSERT carries no // line', !/^\s*\/\//m.test(awsSql));
+}
+
+/* ============================================================
+   14. Meta auth failures — narrowed to the codes that mean it
+
+   isAuthFailure bypasses BOTH thresholds and pages critical, Slack and
+   email, on the first occurrence. AUTH_FAILURE_PATTERNS contains
+   /OAuth/i, /401/, /403/ and /access.?token/i — and Meta stamps
+   type:"OAuthException" on nearly every Graph API error, including a bad
+   parameter (100), a rate limit (80004) and a transient server error (2).
+   Measured on realistic bodies, 8 of 11 would have paged and only 4 were
+   credential problems.
+
+   Meta now matches only the four codes that mean the token is dead:
+   190, 102, 463, 467. Every other source is untouched — the three
+   non-Meta callers pass no source at all and keep the full list.
+
+   The REAL function is lifted and executed here, against the message
+   format throwIfAnyFailed actually builds, because the question is what
+   a live Meta error body does to it — not whether a regex exists.
+   ============================================================ */
+{
+  const grab = (from, to) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)) + to.length);
+  const patterns = grab('const AUTH_FAILURE_PATTERNS = [', '];');
+  const codes    = grab('const META_AUTH_CODES = [', '];');
+  const metaRe   = grab('const META_AUTH_RE = ', ');');
+  const fnSrc    = grab('function isAuthFailure(error, source) {', '\n}');
+  const isAuthFailure = new Function(patterns + '\n' + codes + '\n' + metaRe + '\n' + fnSrc +
+                                     '\nreturn isAuthFailure;')();
+  const genericOnly = new Function(patterns +
+    '\nreturn (m) => AUTH_FAILURE_PATTERNS.some((r) => r.test(m));')();
+  const msg = (ev, e) => ev + ': ' + (typeof e === 'string' ? e : JSON.stringify(e));
+
+  eq('metaauth: the four auth codes are pinned', JSON.parse(codes.replace(/[^[]*/, '').replace(/;$/, '')),
+     [190, 102, 463, 467]);
+
+  /* Real Meta bodies that are NOT credential problems. Each one of these
+     paged critical before this change. */
+  const NOT_AUTH = [
+    ['bad parameter (100)',        { message: 'Invalid parameter', type: 'OAuthException', code: 100 }],
+    ['unknown custom_data field',  { message: '(#100) param custom_data[predicted_ltv] must be a number', type: 'OAuthException', code: 100 }],
+    ['rate limit (80004)',         { message: '(#80004) There have been too many calls', type: 'OAuthException', code: 80004 }],
+    ['transient 500 (code 2)',     { message: 'An unexpected error has occurred', type: 'OAuthException', code: 2 }],
+    ['network drop',               'ECONNREFUSED'],
+    ['non-JSON gateway page',      'Unexpected token < in JSON at position 0'],
+    ['pixel not configured',       'Missing credentials'],
+  ];
+  for (const [label, e] of NOT_AUTH)
+    ok('metaauth: ' + label + ' goes through the threshold, not an instant page',
+       isAuthFailure(msg('Lead', e), 'Meta CAPI') === false);
+
+  const AUTH = [
+    ['190 expired token',   { message: 'Error validating access token: Session has expired', type: 'OAuthException', code: 190 }],
+    ['102 session invalid', { message: 'Session key invalid or no longer valid', type: 'OAuthException', code: 102 }],
+    ['463 expired token',   { message: 'Error validating access token', type: 'OAuthException', code: 463 }],
+    ['467 invalid token',   { message: 'Error validating access token', type: 'OAuthException', code: 467 }],
+  ];
+  for (const [label, e] of AUTH)
+    ok('metaauth: ' + label + ' still pages critical immediately',
+       isAuthFailure(msg('Lead', e), 'Meta CAPI') === true);
+
+  /* Every other integration keeps the old behaviour. The same body that is
+     ignored for Meta must still page for Salesforce. */
+  ok('metaauth: Gmail 535 still pages with no source',
+     isAuthFailure('535-5.7.8 Username and Password not accepted') === true);
+  ok('metaauth: Salesforce INVALID_SESSION_ID still pages',
+     isAuthFailure('INVALID_SESSION_ID', 'Salesforce') === true);
+  ok('metaauth: an OAuthException from Salesforce still pages',
+     isAuthFailure('{"type":"OAuthException","code":100}', 'Salesforce') === true);
+  ok('metaauth: the SAME body from Meta does not',
+     isAuthFailure('{"type":"OAuthException","code":100}', 'Meta CAPI') === false);
+  ok('metaauth: an empty error is never an auth failure',
+     isAuthFailure('', 'Meta CAPI') === false);
+  ok('metaauth: recordFailure passes the source through',
+     /if \(isAuthFailure\(errStr, source\)\) \{/.test(src));
+
+  /* The point of the change, as a number. */
+  const count = (f) => [...NOT_AUTH, ...AUTH].filter(([, e]) => f(msg('Lead', e))).length;
+  const before = count((m) => genericOnly(m));
+  const after  = count((m) => isAuthFailure(m, 'Meta CAPI'));
+  ok('metaauth: the generic list over-paged on these bodies', before > after, before + ' vs ' + after);
+  ok('metaauth: the new rule pages on exactly the four real auth codes', after === AUTH.length, String(after));
+
+  /* recordSuccess('Meta CAPI') was never called anywhere, so the streak only
+     reset when an alert fired. Wired through an injected reporter so
+     meta-capi.js does not have to require index.js. */
+  ok('metaauth: index.js wires a Meta outcome reporter',
+     /setMetaOutcomeReporter\(\(outcome\) => \{/.test(src));
+  ok('metaauth: it calls recordSuccess only on ok',
+     /if \(outcome && outcome\.ok\) recordSuccess\('Meta CAPI'\);/.test(src));
+  const mc = fs.readFileSync(path.join(__dirname, '..', 'meta-capi.js'), 'utf8');
+  ok('metaauth: meta-capi reports an outcome only on a real success',
+     /reportOutcome\(\{ ok: true, eventName \}\);/.test(mc) &&
+     (mc.match(/reportOutcome\(/g) || []).length === 2);   // the definition + the one call
+  ok('metaauth: a throwing reporter cannot break a send',
+     /try \{ _outcomeReporter\(outcome\); \} catch/.test(mc));
+  ok('metaauth: meta-capi does not require index.js', !/require\('\.\/index/.test(mc));
 }
 
 /* ============================================================ */
