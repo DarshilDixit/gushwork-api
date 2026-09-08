@@ -258,6 +258,7 @@
       phone: '',
       company: '',
       hear_about_us: '',
+      about_business: '',
       utm_source: '',
       utm_medium: '',
       utm_campaign: '',
@@ -2170,6 +2171,12 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
         // of whatever the lead happened to type.
         if (canonicalWebsite) formState.website = canonicalWebsite;
         formState.hear_about_us = getField('hear-about-us');
+        /* Read HERE, at submit, not at init: the visitor has not typed
+           anything when the page loads, so an init-time read would store an
+           empty string on every lead forever. Same place and the same way
+           as every other typed field above. Capped client-side by
+           maxlength=1000 on the textarea and again server side. */
+        formState.about_business = getField('about-business');
 
         // Phone (optional) — E.164, no spaces (+916388639290);
         // raw value fallback if utils.js hasn't loaded yet
