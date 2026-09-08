@@ -49,7 +49,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `index.js` | Routes, website checking, email verification, alerting, the monitor dashboard, cron |
 | `db.js` | Schema + migrations. Runs on every boot; everything is `IF NOT EXISTS` |
 | `salesforce.js` | Lead upsert by email. Refresh-token OAuth |
-| `meta-capi.js` | Conversions API — `Lead`, `Schedule`, `StartTrial`, `Contact` |
+| `meta-capi.js` | Conversions API — `Lead`, `Schedule`, `StartTrial`, `Contact`. Also owns the product catalogue (`PRODUCTS`, `resolveProduct`), which `index.js` imports |
 | `loops.js` | Loops.so contact push for the lead-magnet landing page |
 | `partnerstack.js` | PartnerStack API. TWO hosts and TWO auth schemes: `partnerlinks.io` conversion (Bearer tracking token) and `api.partnerstack.com` v2 partnerships + actions (Basic public:secret) |
 | `lead-magnet.js` | `/lm/*` routes. Separate table, deliberately not joined to `leads` |
@@ -398,6 +398,74 @@ is not finished until it is in `gushwork-form-popup.js` too.**
 `node tests/test-ads-parity.js` now enforces that — it lifts both files and
 compares them, and it also pins the modal as deliberate so a future sync cannot
 "tidy" the fork's own presentation away.
+
+**Product tagging: AEO is the DEFAULT, and only the exceptions are listed.**
+`PRODUCTS`, `PRODUCT_PATHS`, `DEFAULT_PRODUCT` and `resolveProduct` live in
+`meta-capi.js` and are imported by `index.js` — one catalogue, so the stored
+column and the Meta event cannot disagree about the same lead. Today
+`PRODUCT_PATHS` is `{'/ai-demo': 'crm'}` and everything else is `aeo`.
+
+This is the opposite of how the rest of the repo works, and it is deliberate.
+An AEO allowlist rots: the form is live on a dozen pages — `/demo`, `/start`,
+`/pricing`, `/consulting-lead-generation` and the SEO landers — and new landers
+get added by people who will never open this file. Measured on 90 days of real
+leads, a `/demo`-only list tagged 82% and left 631 leads (408 completed) sending
+unlabelled events; the default tags 99.7%. A default only fails when a genuinely
+new product launches, which is rare and deliberate — and an unmapped path is
+logged once per path so even that surfaces.
+
+**Adding a product means one entry in `PRODUCT_PATHS` and one in `PRODUCTS`.**
+Adding a new AEO landing page means nothing at all, which is the point.
+
+**An unreadable `page_url` is NOT the default — it returns null and the event
+goes untagged.** "We could not tell which page this was" is not "this was the
+default page", the same rule the lead-path checkers follow. The leading-slash
+guard in `resolveProduct` is load-bearing: `new URL(x, base)` succeeds for almost
+any string, so without it `'not a url'` becomes `/not%20a%20url` and would be
+reported to Meta as a real AEO lead.
+
+**`Contact` is excluded from product tagging by EVENT NAME, not by its page.**
+`PRODUCT_EXCLUDED_EVENTS`. With a default in place the lead-magnet LP resolves to
+`aeo` like any other unmapped page, so this list is the only thing keeping a PDF
+download off a 12000 `predicted_ltv`. A test asserts it from the page that WOULD
+tag, so a regression to page-based exclusion fails.
+
+**`predicted_ltv` is the same per product on every event; only `value` varies,
+and it is 0 on all three upstream events.** The numbers (12000 aeo / 5000 crm)
+are PROVISIONAL. Changing one changes how Meta's algorithm weights these
+conversions — a business decision to surface, not a tidy-up.
+
+**`leads.product` and `gw_form_leads.product` hold the resolved slug, never a
+raw page and never anything a page author typed.** Nothing reads
+`req.body.product`. Both conflict clauses COALESCE it, because `/partial` fires
+repeatedly through step 1 and a later call must not blank a slug an earlier one
+resolved. Historical rows were backfilled to `aeo` by hand, once; that backfill
+is deliberately NOT a boot migration, because those run on every deploy and a
+NULL now means "page_url was unreadable".
+
+**A Meta CAPI failure only reaches `recordFailure` because the push functions
+THROW.** They end in `Promise.allSettled`, which never rejects, so until
+`throwIfAnyFailed` existed the `.catch(...)` at all five call sites — every one
+of them calling `recordFailure('Meta CAPI', ...)` — could not fire. Same class of
+defect as the 21 silent PartnerStack call sites, reached by a different route:
+there the `FAILURE_MONITORS` entry was missing, here the entry was always present
+and the promise shape swallowed it. Two failure shapes must both keep arriving: a
+rejected promise, and a resolved `{success: false}`. Every caller is
+fire-and-forget with a `.catch` and none `await`; a caller without one turns a
+Meta outage into an unhandled rejection, and a test asserts that.
+
+**Almost every Meta API error pages CRITICAL on the first occurrence.**
+`AUTH_FAILURE_PATTERNS` includes `/OAuth/i`, and Meta stamps
+`type: "OAuthException"` on nearly all Graph errors including a plain bad
+parameter (code 100). So a rejected `custom_data` field is not three warnings, it
+is an immediate Slack-plus-email page, bounded only by the 3-hour critical
+cooldown. Known, not changed — narrowing it to the real auth codes
+(190/102/463/467) is a change to shared alerting behaviour and needs its own
+decision.
+
+**`recordSuccess('Meta CAPI')` is never called**, so the streak never resets on a
+good send. "Consecutive failures" for this source really means "3 failures since
+the last alert, ever", not 3 in a row.
 
 **Two copies of the label map.** `WEBSITE_REASON_LABELS` is a normal JS object.
 The monitor dashboard has a second copy (`var WLBL=`) inside a JS string that gets
