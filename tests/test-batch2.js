@@ -1635,15 +1635,156 @@ function finish() {
   ok('metaauth: meta-capi does not require index.js', !/require\('\.\/index/.test(mc));
 }
 
-/* ============================================================ */
-console.log('');
-console.log(`  passed: ${pass}`);
-console.log(`  failed: ${fail}`);
-if (failures.length) {
-  console.log('');
-  failures.forEach((f) => console.log('  ✗ ' + f));
+/* ============================================================
+   12. A Meta failure must reach recordFailure
+
+   Every push function ended in Promise.allSettled, which never rejects.
+   So the .catch(...) at each call site in index.js — the one calling
+   recordFailure('Meta CAPI', ...) — could not fire, at five call sites
+   that all read like alerting. 'Meta CAPI' has always had a
+   FAILURE_MONITORS entry, so unlike the PartnerStack case the table was
+   never the problem; the promise shape was.
+
+   Asserted by EXECUTION. A source-level assertion cannot tell you whether
+   a handler ran — that is the whole lesson of the 21 dead PartnerStack
+   call sites. Each case drives the real function through the real
+   call-site shape (fire-and-forget with a .catch) and asserts on whether
+   the handler was reached.
+
+   The two failure shapes are separate cases on purpose: reporting only
+   the thrown one would leave the resolved success:false one exactly as
+   silent as it was before.
+
+   This is the one ASYNC section, which is why the totals below are
+   printed from its continuation rather than at the end of the file.
+   ============================================================ */
+async function section12() {
+  const META = require('../meta-capi.js');
+  const realFetch = global.fetch;
+  const realPixel = process.env.META_PIXEL_ID;
+  const realToken = process.env.META_ACCESS_TOKEN;
+  process.env.META_PIXEL_ID = 'test-pixel';
+  process.env.META_ACCESS_TOKEN = 'test-token';
+
+  // Silence the module's own logging so a suite run stays readable.
+  const quiet = () => {
+    const l = console.log, w = console.warn, e = console.error;
+    console.log = console.warn = console.error = () => {};
+    return () => { console.log = l; console.warn = w; console.error = e; };
+  };
+  /* The exact call-site shape from index.js. `seen` stands in for
+     recordFailure: if it stays empty, nothing alerted. */
+  const callSite = async (fn, payload) => {
+    const seen = [];
+    const un = quiet();
+    try { await fn(payload, {}).catch((err) => seen.push(err.message)); }
+    finally { un(); }
+    return seen;
+  };
+
+  const DEMO = 'https://gushwork.ai/demo';
+  const CASES = [
+    ['Lead',       'pushFormEventsToMeta', { session_id: 's', email: 'a@b.com', page_url: DEMO }],
+    ['Schedule',   'pushFormEventsToMeta', { session_id: 's', email: 'a@b.com', booking_uid: 'bk', page_url: DEMO }],
+    ['StartTrial', 'pushStartTrialToMeta', { session_id: 's', email: 'a@b.com', sell_to: 'B2B', page_url: DEMO }],
+    ['Contact',    'pushContactToMeta',    { session_id: 's', email: 'a@b.com', page_url: 'https://gushwork.ai/lm' }],
+  ];
+
+  try {
+    // 1. the network failure that was proved dead
+    global.fetch = async () => { throw new Error('ECONNREFUSED'); };
+    for (const [label, fnName, payload] of CASES) {
+      const seen = await callSite(META[fnName], payload);
+      ok('capi: ' + label + ' — a network failure reaches the handler',
+         seen.length === 1, JSON.stringify(seen));
+      ok('capi: ' + label + ' — the error names the event and the cause',
+         seen.length === 1 && seen[0].includes(label) && seen[0].includes('ECONNREFUSED'), seen[0]);
+    }
+
+    /* 2. Meta answered, and said no. This RESOLVED with success:false and
+       printed at console.log level, in a line that reads like a success. */
+    global.fetch = async () => ({ ok: false,
+      json: async () => ({ error: { message: 'Invalid parameter', code: 100 } }) });
+    for (const [label, fnName, payload] of CASES) {
+      const seen = await callSite(META[fnName], payload);
+      ok('capi: ' + label + ' — a 4xx from Meta reaches the handler',
+         seen.length === 1, JSON.stringify(seen));
+      ok('capi: ' + label + " — the error carries Meta's own message",
+         seen.length === 1 && seen[0].includes('Invalid parameter'), seen[0]);
+    }
+
+    // 3. pixel not configured at all — every event silently dropped
+    delete process.env.META_PIXEL_ID;
+    {
+      const seen = await callSite(META.pushFormEventsToMeta, CASES[0][2]);
+      ok('capi: an unconfigured pixel reaches the handler',
+         seen.length === 1 && seen[0].includes('Missing credentials'), JSON.stringify(seen));
+    }
+    process.env.META_PIXEL_ID = 'test-pixel';
+
+    /* 4. a gateway error page instead of JSON: res.json() throws inside
+       sendEvent, which used to degrade into the same silence. */
+    global.fetch = async () => ({ ok: true,
+      json: async () => { throw new Error('Unexpected token < in JSON'); } });
+    {
+      const seen = await callSite(META.pushFormEventsToMeta, CASES[0][2]);
+      ok('capi: a non-JSON response reaches the handler', seen.length === 1, JSON.stringify(seen));
+    }
+
+    /* 5. Success must still RESOLVE. A handler that fires on a good send
+       would alert on every single lead, which is its own kind of broken. */
+    global.fetch = async () => ({ ok: true, json: async () => ({ events_received: 1 }) });
+    for (const [label, fnName, payload] of CASES) {
+      const seen = await callSite(META[fnName], payload);
+      ok('capi: ' + label + ' — a successful send does NOT reach the handler',
+         seen.length === 0, JSON.stringify(seen));
+    }
+
+    /* 6. StartTrial short-circuits for non-B2B before sending anything.
+       That is a skip, not a failure, and must not alert. */
+    {
+      const seen = await callSite(META.pushStartTrialToMeta,
+        { session_id: 's', email: 'a@b.com', sell_to: 'B2C', page_url: DEMO });
+      ok('capi: StartTrial skipped for non-B2B does not alert', seen.length === 0, JSON.stringify(seen));
+    }
+
+    /* 7. Every call site in index.js must still have a handler attached.
+       Making these reject is only safe while that is true — a caller
+       without one turns a Meta outage into an unhandled rejection. */
+    const lm = fs.readFileSync(path.join(__dirname, '..', 'lead-magnet.js'), 'utf8');
+    const callsites = [...src.matchAll(/push(?:FormEvents|StartTrial|Contact)ToMeta\(/g)].length;
+    ok('capi: index.js still has five Meta call sites', callsites === 5, String(callsites));
+    ok('capi: neither file ever awaits a push (a rejection must not 500 a route)',
+       !/await\s+push(?:FormEvents|StartTrial|Contact)ToMeta\(/.test(src) &&
+       !/await\s+push(?:FormEvents|StartTrial|Contact)ToMeta\(/.test(lm));
+    ok('capi: the lead-magnet Contact call still has a .catch',
+       /pushContactToMeta\([\s\S]{0,1200}?\.catch\(/.test(lm));
+    ok('capi: both /partial and /submit still record the failure they catch',
+       (src.match(/recordFailure\('Meta CAPI'/g) || []).length === 5);
+  } finally {
+    global.fetch = realFetch;
+    if (realPixel === undefined) delete process.env.META_PIXEL_ID; else process.env.META_PIXEL_ID = realPixel;
+    if (realToken === undefined) delete process.env.META_ACCESS_TOKEN; else process.env.META_ACCESS_TOKEN = realToken;
+  }
 }
-console.log('');
-process.exit(fail === 0 ? 0 : 1);
+
+/* ============================================================ */
+/* Section 12 is async, so the totals are printed from its continuation.
+   The catch is not optional: without it a throw in there escapes as an
+   unhandledRejection and the suite prints no totals at all, which reads
+   as UNMEASURED rather than as a failure. */
+section12()
+  .catch((err) => { ok('capi: section 12 completed', false, err && err.message); })
+  .then(() => {
+    console.log('');
+    console.log(`  passed: ${pass}`);
+    console.log(`  failed: ${fail}`);
+    if (failures.length) {
+      console.log('');
+      failures.forEach((f) => console.log('  ✗ ' + f));
+    }
+    console.log('');
+    process.exit(fail === 0 ? 0 : 1);
+  });
 
 }

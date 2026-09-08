@@ -280,6 +280,50 @@ async function sendEvent(eventName, payload, options = {}) {
   return { success: true, eventName, eventsReceived: result.events_received };
 }
 
+/* Turn "some events did not reach Meta" into a rejection.
+
+   Every push function below ends in Promise.allSettled, which NEVER
+   rejects. So for the life of this file the .catch(...) at each call site
+   in index.js — the one calling recordFailure('Meta CAPI', ...) — could
+   not fire. Five call sites, all of them looking like alerting, none of
+   them alerting. 'Meta CAPI' has always had a FAILURE_MONITORS entry, so
+   unlike the PartnerStack case the table was never the problem; the
+   promise shape was.
+
+   Proven by execution rather than by reading: with global.fetch stubbed
+   to throw, pushFormEventsToMeta RESOLVED with status 'rejected' inside
+   the results array, and the call-site handler never ran.
+
+   A failure has TWO shapes and both have to arrive, because reporting
+   only the first would leave the second exactly as silent as before:
+
+     - the promise REJECTED — network, DNS, or a non-JSON body from
+       res.json();
+     - it RESOLVED with success:false — Meta answered 4xx/5xx, or the
+       pixel is not configured at all. This one printed at console.log
+       level in a line that reads like a success.
+
+   Thrown AFTER the per-event logging below, so the log still names each
+   event before the handler sees one combined error. Every call site is
+   fire-and-forget with a .catch already attached, so this can only reach
+   a handler that is already there — nothing new can become an unhandled
+   rejection. */
+function throwIfAnyFailed(eventNames, results) {
+  const failures = results
+    .map((r, i) => {
+      if (r.status === 'rejected') {
+        return `${eventNames[i]}: ${(r.reason && r.reason.message) || r.reason}`;
+      }
+      if (r.value && r.value.success === false) {
+        const e = r.value.error;
+        return `${eventNames[i]}: ${typeof e === 'string' ? e : JSON.stringify(e)}`;
+      }
+      return null;
+    })
+    .filter(Boolean);
+  if (failures.length) throw new Error(failures.join('; '));
+}
+
 /**
  * Determine which events to fire based on the payload and send them all.
  *
@@ -309,6 +353,7 @@ async function pushFormEventsToMeta(payload, options = {}) {
     }
   });
 
+  throwIfAnyFailed(events, results);
   return results;
 }
 
@@ -335,6 +380,7 @@ async function pushStartTrialToMeta(payload, options = {}) {
     }
   });
 
+  throwIfAnyFailed(['StartTrial'], results);
   return results;
 }
 
@@ -344,6 +390,7 @@ async function pushContactToMeta(payload, options = {}) {
     if (r.status === 'fulfilled') console.log('[Meta CAPI] [Contact]:', r.value);
     else console.error('[Meta CAPI] [Contact] failed:', r.reason);
   });
+  throwIfAnyFailed(['Contact'], results);
   return results;
 }
 
