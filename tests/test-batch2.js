@@ -891,6 +891,124 @@ function finish() {
   }
 }
 
+/* ============================================================
+   9. The Schedule payload — no column may be shadowed by the join
+
+   SELECT * over leads LEFT JOIN enrichment_data was silently stripping em
+   off every Schedule event for a lead Apollo never enriched. Both tables
+   carry session_id and email; node-postgres assigns row fields in column
+   order, so enrichment_data (last) won, and a LEFT JOIN miss wrote NULL
+   over a real address. Free-email leads skip /enrich entirely, so they
+   have no enrichment row at all — and em is the primary match key.
+
+   The guard above it did not catch this: it reads a separate
+   SELECT email FROM leads, so it saw an address the payload then dropped.
+
+   Asserted two ways on purpose. The source assertions pin the shape; the
+   last three EXECUTE node-postgres's own row builder against the real
+   column list, because "the columns are named" and "a real address
+   survives the join" are different claims.
+   ============================================================ */
+{
+  const m = /const SCHEDULE_LEAD_SQL = `([\s\S]*?)`;/.exec(src);
+  ok('schedule: SCHEDULE_LEAD_SQL is defined', !!m);
+  const sql = m ? m[1] : '';
+
+  ok('schedule: the Schedule lead lookup is not SELECT *', !/SELECT\s+\*/i.test(sql));
+  ok('schedule: no SELECT * over this join is left anywhere in index.js',
+     !/SELECT \* FROM leads l LEFT JOIN enrichment_data/i.test(src));
+
+  /* All three booking routes share ONE query. Booking arrives by three
+     routes, and a fix on one is a fix on one third. */
+  ok('schedule: all three booking routes use the shared query',
+     (src.match(/pool\.query\(SCHEDULE_LEAD_SQL,/g) || []).length === 3);
+
+  // Output column names, as Postgres would name them.
+  const body = sql.slice(sql.indexOf('SELECT') + 6, sql.indexOf('FROM'));
+  const outCols = [], srcOf = {};
+  for (const raw of body.split(/,(?![^(]*\))/)) {
+    const part = raw.trim();
+    if (!part) continue;
+    const alias = /\bAS\s+(\w+)\s*$/i.exec(part);
+    if (alias) { outCols.push(alias[1]); srcOf[alias[1]] = 'coalesce'; continue; }
+    const plain = /^([le])\.(\w+)$/.exec(part);
+    if (plain) { outCols.push(plain[2]); srcOf[plain[2]] = plain[1]; }
+  }
+  const dupes = outCols.filter((c, i) => outCols.indexOf(c) !== i);
+  ok('schedule: every output column name is unique', dupes.length === 0,
+     'duplicated: ' + dupes.join(', '));
+  ok('schedule: email is taken from leads, never the join',      srcOf.email === 'l');
+  ok('schedule: session_id is taken from leads, never the join', srcOf.session_id === 'l');
+
+  /* Every column the two consumers read must be selected. A missing one is
+     invisible here and shows up only as a quietly worse event in Meta. */
+  for (const f of ['session_id','email','phone','first_name','last_name','company',
+                   'sell_to','page_url','landing_page','fbc','fbp',
+                   'enriched_city','enriched_state','enriched_country',
+                   'enriched_company_size','enriched_industry','enriched_seniority',
+                   'enriched_funding_stage'])
+    ok('schedule: sendEvent input ' + f + ' is selected', outCols.includes(f));
+  for (const f of ['website_check_failed','website_check_reason'])
+    ok('schedule: isWebsiteVerified input ' + f + ' is selected', outCols.includes(f));
+
+  /* Every referenced column must exist, on the table it is read from. A typo
+     here does not fail loudly — the query rejects and Schedule never fires. */
+  const leadsCols = new Set(), enrichCols = new Set();
+  for (const table of [['leads', leadsCols], ['enrichment_data', enrichCols]]) {
+    const b = new RegExp('CREATE TABLE IF NOT EXISTS ' + table[0] + '\\s*\\(([\\s\\S]*?)\\n      \\);').exec(dbsrc);
+    if (b) for (const line of b[1].split('\n')) {
+      const c = /^\s*(\w+)\s+(SERIAL|UUID|TEXT|INT|INTEGER|BOOLEAN|TIMESTAMPTZ|JSONB)/.exec(line);
+      if (c) table[1].add(c[1]);
+    }
+  }
+  for (const mm of dbsrc.matchAll(/ALTER TABLE (leads|enrichment_data) ADD COLUMN IF NOT EXISTS (\w+)/g))
+    (mm[1] === 'leads' ? leadsCols : enrichCols).add(mm[2]);
+  const unknown = [];
+  for (const ref of sql.matchAll(/\b([le])\.(\w+)/g))
+    if (!(ref[1] === 'l' ? leadsCols : enrichCols).has(ref[2]))
+      unknown.push((ref[1] === 'l' ? 'leads.' : 'enrichment_data.') + ref[2]);
+  ok('schedule: every referenced column exists in the schema', unknown.length === 0,
+     'unknown: ' + unknown.join(', '));
+
+  /* Each COALESCE must read enrichment_data FIRST and leads second, on the
+     same column, aliased to that column. Flipping the arms, or pointing both
+     at one table, silently stops consulting enrichment and every assertion
+     above still passes — measured, it survived. */
+  let badCoalesce = [];
+  for (const c of sql.matchAll(/COALESCE\(\s*(\w+)\.(\w+),\s*(\w+)\.(\w+)\s*\)\s*AS\s+(\w+)/g)) {
+    const [, t1, c1, t2, c2, alias] = c;
+    if (!(t1 === 'e' && t2 === 'l' && c1 === c2 && alias === c1)) badCoalesce.push(c[0].replace(/\s+/g, ' '));
+  }
+  ok('schedule: every COALESCE is enrichment-first, leads-second, same column',
+     badCoalesce.length === 0, badCoalesce.join(' | '));
+  ok('schedule: the enriched columns are all COALESCEd, not taken from one table',
+     (sql.match(/COALESCE\(/g) || []).length === 7);
+
+  /* EXECUTED, not read. node-postgres's own row builder, driven with the real
+     column list, for the exact case that caused this: no enrichment row. */
+  const PgResult = require('pg/lib/result.js');
+  const build = (names, values) => {
+    const r = new PgResult(undefined, undefined);
+    r.addFields(names.map((n) => ({ name: n, dataTypeID: 25, format: 'text' })));
+    return r.parseRow(values);
+  };
+  const before = build(
+    ['session_id', 'email', 'page_url', 'id', 'session_id', 'email'],
+    ['sess-1', 'lead@gmail.com', 'https://gushwork.ai/demo', null, null, null]);
+  ok('schedule: (control) the old SELECT * shape really did null out email',
+     before.email === null && before.session_id === null);
+  const after = build(outCols, outCols.map((c) =>
+    c === 'session_id' ? 'sess-1' :
+    c === 'email'      ? 'lead@gmail.com' :
+    c === 'page_url'   ? 'https://gushwork.ai/demo' : null));
+  ok('schedule: a free-email lead now keeps its email through the join',
+     after.email === 'lead@gmail.com', JSON.stringify(after.email));
+  ok('schedule: and keeps its session_id, so event_id stays stable',
+     after.session_id === 'sess-1');
+  ok('schedule: and keeps page_url, which is what carries the product',
+     after.page_url === 'https://gushwork.ai/demo');
+}
+
 /* ============================================================ */
 console.log('');
 console.log(`  passed: ${pass}`);
