@@ -570,6 +570,31 @@ function bFields(fields) {
   return { type: 'section', fields: filtered.map(f => ({ type: 'mrkdwn', text: `*${f.label}*\n${f.value}` })) };
 }
 function bDivider() { return { type: 'divider' }; }
+
+/* Promise.all, but bound BY NAME.
+
+   /monitor/metrics runs twelve queries at once. With Promise.all they were
+   destructured POSITIONALLY, and on 8 Sept a query inserted at position 2
+   with its name appended at the end shifted nine bindings by one: the
+   dashboard reported 0 people with 497 completed, "no new form entries in
+   the last 24 hours" on a night with real leads, and "not tracked" on every
+   funnel stage. One line, no database involvement, and neither the query
+   test nor the renderer test could see it because the binding lives between
+   them.
+
+   A positional array cannot express "this name goes with this query", so
+   nothing can check it. An object can, and the language checks it: a
+   mislabelled key is undefined at the use site instead of silently being
+   someone else's rows.
+
+   Concurrency is unchanged. The object literal evaluates every pool.query()
+   before this function is called, so all twelve are already in flight; this
+   only waits for them. */
+async function allNamed(jobs) {
+  const keys = Object.keys(jobs);
+  const settled = await Promise.all(keys.map((k) => jobs[k]));
+  return Object.fromEntries(keys.map((k, i) => [k, settled[i]]));
+}
 function bContext(text) { return { type: 'context', elements: [{ type: 'mrkdwn', text }] }; }
 
 /* ─────────────────────────────────────────────────────────────────
@@ -2142,8 +2167,8 @@ app.get('/monitor/metrics', async (req, res) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   try {
-    const [totals, people, byProduct, recovered, byDay, enrichCount, enrichCoverage, pendingPartials, noBooking, recent, today, topFunnel] = await Promise.all([
-      pool.query(`
+    const { totals, people, byProduct, recovered, byDay, enrichCount, enrichCoverage, pendingPartials, noBooking, recent, today, topFunnel } = await allNamed({
+      totals: pool.query(`
         SELECT
           COUNT(*)                                                          AS total,
           COUNT(*) FILTER (WHERE completed = true)                          AS completed,
@@ -2153,7 +2178,7 @@ app.get('/monitor/metrics', async (req, res) => {
           COUNT(*) FILTER (WHERE completed = true AND booking_uid IS NULL)  AS completed_no_booking_sessions
         FROM leads
       `),
-      pool.query(`
+      people: pool.query(`
         SELECT
           COUNT(DISTINCT LOWER(email))                                        AS people_total,
           COUNT(DISTINCT LOWER(email)) FILTER (WHERE completed = true)        AS people_completed,
@@ -2180,7 +2205,7 @@ app.get('/monitor/metrics', async (req, res) => {
          COALESCE to 'untagged' rather than dropping NULLs: a page_url
          resolveProduct could not read is a real population, and a row that
          silently vanishes is how a number stops adding up. */
-      pool.query(`
+      byProduct: pool.query(`
         SELECT COALESCE(product, 'untagged')                                  AS product,
                COUNT(DISTINCT LOWER(email))                                   AS people,
                COUNT(DISTINCT LOWER(email)) FILTER (WHERE completed = true)   AS completed,
@@ -2190,7 +2215,7 @@ app.get('/monitor/metrics', async (req, res) => {
          GROUP BY 1
          ORDER BY people DESC
       `),
-      pool.query(`
+      recovered: pool.query(`
         SELECT COUNT(*) AS recovered FROM (
           SELECT LOWER(l.email) AS em
           FROM leads l
@@ -2206,7 +2231,7 @@ app.get('/monitor/metrics', async (req, res) => {
           GROUP BY LOWER(l.email)
         ) x
       `),
-      pool.query(`
+      byDay: pool.query(`
         /* "Form entries per day" — a deliberate ROW count over the leads table,
            people count and not a session count. Daily inbound volume is the
            question; deduping by email would flatten exactly the repeat-attempt
@@ -2233,8 +2258,8 @@ app.get('/monitor/metrics', async (req, res) => {
         GROUP BY d.day
         ORDER BY d.day ASC
       `),
-      pool.query(`SELECT COUNT(*) AS count FROM enrichment_data`),
-      pool.query(`
+      enrichCount: pool.query(`SELECT COUNT(*) AS count FROM enrichment_data`),
+      enrichCoverage: pool.query(`
         SELECT
           COUNT(*) AS total,
           COUNT(*) FILTER (WHERE enriched_title IS NOT NULL)         AS has_title,
@@ -2242,7 +2267,7 @@ app.get('/monitor/metrics', async (req, res) => {
           COUNT(*) FILTER (WHERE enriched_country IS NOT NULL)       AS has_location
         FROM enrichment_data
       `),
-      pool.query(`
+      pendingPartials: pool.query(`
         SELECT COUNT(*) AS count
         FROM leads l
         WHERE l.email IS NOT NULL
@@ -2257,7 +2282,7 @@ app.get('/monitor/metrics', async (req, res) => {
               AND booked.booked_at >= l.created_at
           )
       `),
-      pool.query(`
+      noBooking: pool.query(`
         SELECT COUNT(*) AS count FROM (
           SELECT DISTINCT ON (LOWER(email)) email
           FROM leads
@@ -2269,12 +2294,12 @@ app.get('/monitor/metrics', async (req, res) => {
           ORDER BY LOWER(email), created_at DESC
         ) deduped
       `),
-      pool.query(`
+      recent: pool.query(`
         SELECT session_id, email, company, first_name, last_name,
                completed, booking_uid, disqualified, created_at, page_url
         FROM leads ORDER BY created_at DESC LIMIT 50
       `),
-      pool.query(`SELECT COUNT(*) AS count FROM leads WHERE created_at >= NOW() - INTERVAL '24 hours'`),
+      today: pool.query(`SELECT COUNT(*) AS count FROM leads WHERE created_at >= NOW() - INTERVAL '24 hours'`),
       /* ── Top-of-funnel, for the Overview funnel widget ──
          Scoped to the SESSION-TRACKED WINDOW, not all time, and that is the
          whole point. form_sessions starts at go_live (21 Aug 2026 10:32 UTC);
@@ -2290,7 +2315,7 @@ app.get('/monitor/metrics', async (req, res) => {
          everything below is PEOPLE. Sessions -> Step 1 is therefore
          visits-to-people and is not a pure conversion rate. Same denominator
          /monitor/funnel uses, same caveat. */
-      pool.query(`
+      topFunnel: pool.query(`
         WITH gl AS (SELECT MIN(created_at) AS go_live FROM form_sessions),
         s AS (
           SELECT COUNT(*) FILTER (WHERE user_agent IS NULL OR user_agent !~* $1) AS sessions,
@@ -2309,7 +2334,7 @@ app.get('/monitor/metrics', async (req, res) => {
         SELECT gl.go_live, s.sessions, s.bot_sessions, p.step1, p.completed, p.booked
           FROM gl CROSS JOIN s CROSS JOIN p
       `, [BOT_RE])
-    ]);
+    });
 
     const t = totals.rows[0];
     const total        = parseInt(t.total) || 0;
