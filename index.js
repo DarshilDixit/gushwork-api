@@ -8647,6 +8647,44 @@ app.post('/submit', async (req, res) => {
   } catch (err) { console.error('[/submit]', err.message); res.status(500).json({ error: 'Submit failed' }); }
 });
 
+/* The lead behind a Schedule event, for all THREE booking routes.
+
+   Was SELECT *, and that was silently costing match quality on every
+   booked conversion from a lead Apollo never enriched. Both tables in
+   this join carry session_id and email, and node-postgres builds the row
+   object by assigning columns in order — so the LAST table wins, and
+   enrichment_data is last. A free-email lead skips /enrich entirely
+   (see the personal-domain early return in /enrich), so there is no
+   enrichment row, the LEFT JOIN fills those two with NULL, and the
+   Schedule event went to Meta with NO em hash at all. em is the primary
+   match key; without it the event contributes almost nothing.
+
+   The guard just above did not catch it because it reads a SEPARATE
+   SELECT email FROM leads — so the guard saw a real address and the
+   payload then did not carry one.
+
+   Named columns now, one source each, so no column can be shadowed by
+   the join again. Every column here has a consumer: isWebsiteVerified
+   reads the website_check pair, and sendEvent reads all the rest.
+
+   COALESCE on the enriched columns is strictly additive — enrichment_data
+   still wins exactly as before, and leads.* is only consulted where the
+   old query produced NULL. */
+const SCHEDULE_LEAD_SQL = `
+  SELECT l.session_id, l.email, l.phone, l.first_name, l.last_name,
+         l.company, l.sell_to, l.page_url, l.landing_page, l.fbc, l.fbp,
+         l.website_check_failed, l.website_check_reason,
+         COALESCE(e.enriched_company_size,  l.enriched_company_size)  AS enriched_company_size,
+         COALESCE(e.enriched_industry,      l.enriched_industry)      AS enriched_industry,
+         COALESCE(e.enriched_seniority,     l.enriched_seniority)     AS enriched_seniority,
+         COALESCE(e.enriched_funding_stage, l.enriched_funding_stage) AS enriched_funding_stage,
+         COALESCE(e.enriched_city,          l.enriched_city)          AS enriched_city,
+         COALESCE(e.enriched_state,         l.enriched_state)         AS enriched_state,
+         COALESCE(e.enriched_country,       l.enriched_country)       AS enriched_country
+    FROM leads l
+    LEFT JOIN enrichment_data e ON e.session_id = l.session_id
+   WHERE l.session_id = $1`;
+
 app.post('/booking-confirmed', async (req, res) => {
   const session_id  = (req.body.session_id  || '').toString().trim().slice(0, 100);
   const booking_uid = (req.body.booking_uid || '').toString().trim().slice(0, 100);
@@ -8674,7 +8712,7 @@ app.post('/booking-confirmed', async (req, res) => {
       findSFLeadByEmail(email).then(leadId => {
         if (leadId) return updateSFLead(leadId, { booking_uid__c: booking_uid, booking_start_time__c: start_time || '', booking_event_type__c: event_type || '', completed__c: true });
       }).catch(err => { console.warn('[/booking-confirmed] SF update failed (non-blocking):', err.message); alertOps('warning', 'Salesforce', 'Booking not recorded', { 'Session': session_id, 'Error': err.message, 'Impact': 'The lead exists in Salesforce but the booking is missing.' }); });
-      pool.query('SELECT * FROM leads l LEFT JOIN enrichment_data e ON e.session_id=l.session_id WHERE l.session_id=$1', [session_id]).then(r => {
+      pool.query(SCHEDULE_LEAD_SQL, [session_id]).then(r => {
         const fullLead = r.rows[0] || {};
         if (!isWebsiteVerified(fullLead)) { console.log(`[/booking-confirmed] ⏭ Meta CAPI Schedule skipped — website not verified: session ${session_id}`); return; }
         return pushFormEventsToMeta({...fullLead, booking_uid}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''});
@@ -8747,7 +8785,7 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
         findSFLeadByEmail(email).then(leadId => {
           if (leadId) return updateSFLead(leadId, { booking_uid__c: bookingUid, booking_start_time__c: startTime || '', booking_event_type__c: eventType || '', completed__c: true });
         }).catch(err => { console.warn('[/cal-webhook] SF update failed (non-blocking):', err.message); alertOps('warning', 'Salesforce', 'Booking not recorded', { 'Email': email, 'Error': err.message, 'Impact': 'The lead exists in Salesforce but the booking is missing.' }); });
-        pool.query('SELECT * FROM leads l LEFT JOIN enrichment_data e ON e.session_id=l.session_id WHERE l.session_id=$1', [lead.session_id]).then(r => {
+        pool.query(SCHEDULE_LEAD_SQL, [lead.session_id]).then(r => {
           const fullLead = r.rows[0] || {};
           if (!isWebsiteVerified(fullLead)) { console.log(`[/cal-webhook] ⏭ Meta CAPI Schedule skipped — website not verified: session ${lead.session_id}`); return; }
           return pushFormEventsToMeta({...fullLead, booking_uid: bookingUid}, {clientIpAddress:'',clientUserAgent:''});
@@ -9052,7 +9090,7 @@ if (payload.router_name && payload.router_name !== 'Inbound Router - Website') {
           if (leadId) return updateSFLead(leadId, { booking_uid__c: bookingUid, booking_start_time__c: startTime || '', booking_event_type__c: eventType || '', completed__c: true });
         }).catch(err => { console.warn('[/rh-webhook] ⚠ SF update failed (non-blocking):', err.message); alertOps('warning', 'Salesforce', 'Booking not recorded', { 'Email': email, 'Error': err.message, 'Impact': 'The lead exists in Salesforce but the booking is missing.' }); });
 
-        pool.query('SELECT * FROM leads l LEFT JOIN enrichment_data e ON e.session_id=l.session_id WHERE l.session_id=$1', [lead.session_id]).then(r => {
+        pool.query(SCHEDULE_LEAD_SQL, [lead.session_id]).then(r => {
           const fullLead = r.rows[0] || {};
           if (!isWebsiteVerified(fullLead)) { console.log(`[/rh-webhook] ⏭ Meta CAPI Schedule skipped — website not verified: session ${lead.session_id}`); return; }
           return pushFormEventsToMeta({...fullLead, booking_uid: bookingUid}, {clientIpAddress:'',clientUserAgent:''});
