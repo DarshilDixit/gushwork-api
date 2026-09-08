@@ -579,7 +579,24 @@
   -------------------------------------------------------- */
   (function () {
     const RAILWAY_API_URL = 'https://gushwork-api-production.up.railway.app';
-    const RH_ROUTER_ID = '6138';
+    /* RevenueHero router, per page.
+
+       READ AT USE TIME, not here. This IIFE runs when the script is parsed
+       and init() is deferred to DOMContentLoaded, so at this point the only
+       DOM that reliably exists is document.head — the CSS block above is the
+       one thing that touches the document before init, and it appends to
+       head for exactly that reason. Evaluating the attribute here would
+       return null whenever the script tag sits in Webflow's head, and the
+       page would fall back to 6138 SILENTLY: a CRM demo routed to the AEO
+       router books with the wrong team and nothing anywhere says so.
+
+       /ai-demo carries data-rh-router="6804" on its form-wrapper. Every
+       other page has no attribute and keeps 6138. */
+    const RH_ROUTER_ID_DEFAULT = '6138';
+    function rhRouterId() {
+      return document.querySelector('[data-rh-router]')?.getAttribute('data-rh-router')
+        || RH_ROUTER_ID_DEFAULT;
+    }
     const ENRICHMENT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
     // TEMPORARY (per team decision, July 2026): website check still runs
     // and still shows the red error, but no longer blocks progression.
@@ -2565,7 +2582,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
         // hero.submit() starts immediately alongside submitLead()
         // Both resolve concurrently — eliminates sequential lag
         // ───────────────────────────────────────────────────
-        const hero = new RevenueHero({ routerId: RH_ROUTER_ID });
+        const hero = new RevenueHero({ routerId: rhRouterId() });
         const rhPromise = hero.submit({
           Email: formState.email,
           'First Name': formState.first_name,
