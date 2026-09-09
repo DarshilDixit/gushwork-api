@@ -8502,7 +8502,7 @@ app.post('/session', async (req, res) => {
      The form sends page_referrer from today so the column can be added
      here later without a second Webflow re-pin. */
   try {
-    await pool.query(
+    const sess = await pool.query(
       `INSERT INTO form_sessions
          (session_id, page_url, referrer, utm_source, utm_medium, utm_campaign, utm_content, utm_term, user_agent)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
@@ -8516,7 +8516,8 @@ app.post('/session', async (req, res) => {
          utm_content  = COALESCE(form_sessions.utm_content,  EXCLUDED.utm_content),
          utm_term     = COALESCE(form_sessions.utm_term,     EXCLUDED.utm_term),
          user_agent   = COALESCE(form_sessions.user_agent,   EXCLUDED.user_agent),
-         updated_at   = NOW()`,
+         updated_at   = NOW()
+       RETURNING hits`,
       [
         session_id,
         s(req.body.page_url, 500),
@@ -8535,6 +8536,32 @@ app.post('/session', async (req, res) => {
         s(req.headers['user-agent'], 500),
       ]
     );
+
+    /* The detail behind form_sessions.hits, which is only a counter.
+       hit_no comes from the RETURNING above rather than a second read, so
+       the number always matches the counter it explains.
+
+       ITS OWN try/catch, INSIDE the outer one and after the upsert. This
+       table is a reporting convenience and must never be able to cost a
+       page-load record, let alone a lead: if it throws, form_sessions has
+       already been written and the response was sent before either query
+       ran. A test drives /session with this insert failing and asserts the
+       response and the upsert are unchanged.
+
+       page_url is kept whole -- host and query string included. The query
+       string is the thing that distinguishes a fresh ad click (lands on
+       /start?utm_source=...) from an internal navigation (lands on /demo
+       bare), which is the question this table exists to answer, and
+       gushwork.one and gushwork.webflow.io both appear in real rows. */
+    try {
+      await pool.query(
+        `INSERT INTO form_page_views (session_id, page_url, hit_no, source)
+         VALUES ($1, $2, $3, 'session_route')`,
+        [session_id, s(req.body.page_url, 2000), sess.rows[0] ? sess.rows[0].hits : null]
+      );
+    } catch (err) {
+      console.warn('[/session] page view not recorded (ignored):', err.message);
+    }
   } catch (err) {
     // Response already sent — never rethrow, and never alert: a reporting
     // row is not worth waking anyone up for.
