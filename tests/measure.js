@@ -45,6 +45,7 @@ const SUITES = [
   'test-ads-parity.js',
   'test-partnerstack.js',
   'test-sf-readers.js',
+  'test-submit-gate.js',
 ];
 
 const BASELINE = path.join(__dirname, '.baseline.json');

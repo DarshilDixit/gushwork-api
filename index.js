@@ -8760,8 +8760,33 @@ app.post('/submit', async (req, res) => {
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
   try {
-    const existing        = await pool.query('SELECT completed FROM leads WHERE session_id=$1', [session_id]);
-    const alreadyCompleted = existing.rows[0]?.completed === true;
+    /* submitted_at, NOT completed. All three booking routes set
+       completed=true on the lead row, so a visitor whose booking lands
+       BEFORE their first submit arrives here with completed already
+       true — and every downstream announcement below is then skipped
+       for a lead nobody has been told about: no Slack post, no
+       Salesforce Lead created (the booking routes only ever UPDATE an
+       existing one), no Meta Lead event, no PartnerStack conversion.
+       The only trace is a log line reading "Slack skipped", which looks
+       exactly like a correct dedup.
+
+       submitted_at is written by this route and by nothing else except
+       the two webhook safety nets that create a row from scratch, so it
+       is the only column that answers "have we already announced this
+       session". Same reasoning as alertIfBookingWithoutSubmit, which
+       has always gated on submitted_at for exactly this reason -- and
+       says so in its own comment.
+
+       NO CONFIRMED PRODUCTION INSTANCE. The reachable population is the
+       leads that book before submitting at all (booking_uid set,
+       submitted_at null -- 6 rows on 9 Sep 2026, all real form traffic)
+       and then come back and submit. Searching on booked_at <
+       submitted_at does NOT isolate it: submitted_at is overwritten on
+       every submit, so that predicate is dominated by ordinary repeat
+       submits. This is fixed because the gate is wrong, not because a
+       lead was counted lost. tests/test-submit-gate.js drives it. */
+    const existing         = await pool.query('SELECT submitted_at FROM leads WHERE session_id=$1', [session_id]);
+    const alreadySubmitted = existing.rows[0]?.submitted_at != null;
     const enrichRow       = await pool.query('SELECT * FROM enrichment_data WHERE session_id=$1', [session_id]);
     const enrich          = enrichRow.rows[0] || {};
 
@@ -8835,7 +8860,7 @@ app.post('/submit', async (req, res) => {
 
     syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true,hear_about_us_raw:hear_about_us,product,about_business,...ps});
 
-    if (!alreadyCompleted) {
+    if (!alreadySubmitted) {
       slackSubmit({first_name,last_name,email,phone,company,website,sell_to,product,about_business,hear_about_us:hearAboutUsFinal,ps_partner_key:ps.ps_partner_key,ps_partner_name:(psIdentity||{}).name,ps_partner_email:(psIdentity||{}).email,ps_click_at:ps.ps_click_at,hear_about_us_raw:hear_about_us,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,elv_status:elv?.status||null,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
 
       pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,product,about_business,hear_about_us:hearAboutUsFinal,hear_about_us_raw:hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'form completed', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
@@ -8855,17 +8880,17 @@ app.post('/submit', async (req, res) => {
 
       console.log(`[/submit] ✅ Lead completed: ${email} | session: ${session_id} | email check: ${elv?.status || 'not stored'}`);
     } else {
-      console.log(`[/submit] ⏭ Slack skipped — already completed: ${email} | session: ${session_id}`);
+      console.log(`[/submit] ⏭ Slack skipped — this session was already submitted: ${email} | session: ${session_id}`);
     }
     res.json({ ok: true });
 
     // Off the critical path on purpose — the lead is no longer waiting.
-    if (!elv && !alreadyCompleted) finaliseElvVerdict({ session_id, email, website_check_reason });
-    if (!alreadyCompleted) runPartnerStackIdentity({ session_id, ps })
+    if (!elv && !alreadySubmitted) finaliseElvVerdict({ session_id, email, website_check_reason });
+    if (!alreadySubmitted) runPartnerStackIdentity({ session_id, ps })
       .then(identity => upgradePartnerHearAboutUs({ session_id, email, ps, identity }))
       .catch(err => console.warn('[PartnerStack] Partner identity failed (non-blocking):', err.message));
-    if (!alreadyCompleted) runPartnerStackEligibility({ session_id, email, website, ps });
-    if (!alreadyCompleted) runPartnerStackSignup({ session_id, email, website, company, phone, first_name, last_name, disqualified, ps, ctx: readPartnerStackRequestContext(req, page_url) })
+    if (!alreadySubmitted) runPartnerStackEligibility({ session_id, email, website, ps });
+    if (!alreadySubmitted) runPartnerStackSignup({ session_id, email, website, company, phone, first_name, last_name, disqualified, ps, ctx: readPartnerStackRequestContext(req, page_url) })
       .catch(err => console.warn('[PartnerStack] Signup conversion failed (non-blocking):', err.message));
   } catch (err) { console.error('[/submit]', err.message); res.status(500).json({ error: 'Submit failed' }); }
 });
