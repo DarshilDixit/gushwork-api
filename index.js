@@ -1452,6 +1452,55 @@ function slackSubmit(d) {
   sendSlack(blocks, `${d.website_check_failed ? '⚠️ Lead Form Completed (website check failed)' : '✅ Lead Form Completed'} — ${d.email}`);
 }
 
+/* The other half of the "changed after booking" story.
+   slackSubmit's appended line only reaches a lead whose booking arrived
+   BEFORE their first submit, because slackSubmit sits inside
+   `if (!alreadySubmitted)`. The commoner and more consequential order --
+   submitted, booked, then changed who they are and submitted again --
+   produces no lead alert at all, correctly, because that submit is a
+   dedup. This is that case, and only that case. The two are mutually
+   exclusive by construction and a test asserts it.
+
+   ITS OWN MESSAGE, and deliberately NOT via alertOps. alertOps keys its
+   cooldown on `severity:source:title` with nothing per-lead in it, so a
+   second such change within the hour would be silently swallowed and
+   folded into an "Also occurred" count on some later alert. For a
+   per-person fact that is the wrong shape entirely -- a phantom "the
+   cooldown ate it" theory cost two turns of investigation on 9 Sep, and
+   routing this through alertOps would have made that theory true.
+   sendSlack posts every time.
+
+   Rare by construction, so it will not become noise: it needs a booking,
+   a completed earlier submit AND a changed identity field, and once the
+   change is written the same edit cannot fire it a second time.
+
+   READS AS A FOLLOW-UP, not a lead. The header says so, the first line
+   says so in words, and there is no green tick anywhere -- somebody
+   skimming the channel must not count this as a second person. */
+function slackIdentityChangedAfterBooking(d) {
+  const name = [d.first_name, d.last_name].filter(Boolean).join(' ') || 'This lead';
+  const blocks = [];
+  blocks.push(bHeader('🔄 Details changed after booking — follow-up, not a new lead'));
+  blocks.push(bDivider());
+  blocks.push(bSection(
+    `*${name}* already filled in the form and already has a call booked. ` +
+    'They have just changed the details below. Anything sent about them earlier — ' +
+    'the lead post, the Salesforce lead, the ad conversion — used the OLD values.'
+  ));
+  const cf = bFields([{
+    label: '🔄 What changed',
+    value: d.changes.map((c) => `${LEAD_FIELD_LABELS[c.field] || c.field}: ${c.from} \u2192 ${c.to}`).join('\n'),
+  }]);
+  if (cf) blocks.push(cf);
+  const nf = bFields([
+    { label: '📧 Email now',   value: d.email      },
+    { label: '🏢 Company now', value: d.company    },
+    { label: '🆔 Session',     value: d.session_id },
+  ]);
+  if (nf) blocks.push(nf);
+  sendSlack(blocks, `Details changed after booking — ${name}`);
+}
+
 const nodemailer = require('nodemailer');
 
 let _gmailTransport = null;
@@ -9114,6 +9163,14 @@ app.post('/submit', async (req, res) => {
 
       console.log(`[/submit] ✅ Lead completed: ${email} | session: ${session_id} | email check: ${elv?.status || 'not stored'}`);
     } else {
+      /* The lead alert above is correctly suppressed -- this session has
+         already been announced. But if they had ALREADY BOOKED and have
+         now changed who they are, nobody has been told, and whoever takes
+         the call has the old details in front of them. */
+      if (identityDiff.wasBooked && identityDiff.changes.length > 0) {
+        console.log(`[/submit] 🔄 Identity changed after booking — posting a follow-up: ${email} | session: ${session_id}`);
+        slackIdentityChangedAfterBooking({ session_id, email, company, first_name, last_name, changes: identityDiff.changes });
+      }
       console.log(`[/submit] ⏭ Slack skipped — this session was already submitted: ${email} | session: ${session_id}`);
     }
     res.json({ ok: true });
