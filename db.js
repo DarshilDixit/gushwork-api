@@ -237,6 +237,57 @@ async function initDB() {
       console.error('[DB] Form-sessions table init FAILED (non-fatal):', err.message);
     }
 
+    /* One row per page load that reaches /session -- the DETAIL behind
+       form_sessions.hits, which is only a counter. Reconstructing what a
+       visitor actually did previously meant reading Railway deploy logs,
+       which roll off with the deployment.
+
+       SCOPE, and the name says it: gushwork-form.js is on the 16
+       form-bearing pages ONLY, and it is the only thing that calls
+       /session. Measured 9 Sep 2026 -- the homepage, /pricing and
+       /who-its-for have ZERO rows here while 990, 263 and 76 leads
+       respectively arrived at the form FROM them. So these are loads of
+       form pages, not of the site. Non-form hops reach the database only
+       as first-touch attribution on the lead row.
+
+       NO REFERRER COLUMN, deliberately. The only referrer in the /session
+       payload today is gw_referrer, which the site-wide Webflow script
+       writes once per session -- first-touch, and therefore the same value
+       on every hit. Storing it per page view would repeat one value down
+       the whole column, which is worse than not having it: it reads as a
+       per-hit fact and is not one. The form now sends page_referrer (the
+       real per-hit value) so the column can be added here later without
+       another Webflow re-pin.
+
+       source is NOT NULL and says how the row was observed.
+       'session_route' means a request actually reached this server at this
+       timestamp. Anything client-reported must arrive under a different
+       value rather than being blended into the same column. */
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS form_page_views (
+          id             BIGSERIAL PRIMARY KEY,
+          session_id     TEXT NOT NULL,
+          page_url       TEXT,
+          hit_no         INT,
+          source         TEXT NOT NULL,
+          created_at     TIMESTAMPTZ DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS form_page_views_session_idx
+          ON form_page_views (session_id, created_at);
+        /* For pruning later. There is no retention job in v1 on purpose:
+           16k rows in three weeks needs none, and any per-year projection
+           is really a projection of Facebook ad spend on /start, which was
+           78.7 percent of all sessions when this was written. */
+        CREATE INDEX IF NOT EXISTS form_page_views_created_idx
+          ON form_page_views (created_at);
+      `);
+      console.log('[DB] Form-page-views table ready');
+    } catch (err) {
+      console.error('[DB] Form-page-views table init FAILED (non-fatal):', err.message);
+    }
+
     /* -------------------------------------------------------
        EMAIL VERIFICATIONS — the ELV verdict, keyed by email
 
