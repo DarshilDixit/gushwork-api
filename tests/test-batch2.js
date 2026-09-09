@@ -481,7 +481,7 @@ function finish() {
      /elv_status\s+= COALESCE\(EXCLUDED\.elv_status,\s+leads\.elv_status\)/.test(submit));
   ok('submit: evaluates the flag', /alertUnverifiablePair\(\{ email, elv_status: elv\?\.status, website_check_reason \}\)/.test(submit));
   ok('submit: re-checks on a miss rather than storing a blank',
-     /if \(!elv && !alreadyCompleted\) finaliseElvVerdict\(/.test(submit));
+     /if \(!elv && !alreadySubmitted\) finaliseElvVerdict\(/.test(submit));
   ok('submit: the re-check runs AFTER the response, not before',
      submit.indexOf('res.json({ ok: true })') < submit.indexOf('finaliseElvVerdict({'));
 
