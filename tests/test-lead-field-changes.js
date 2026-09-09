@@ -71,12 +71,25 @@ Module._load = function (request) {
 };
 
 const realFetch = global.fetch.bind(global);
-global.fetch = async (url, opts) =>
-  String(url).startsWith(BASE) ? realFetch(url, opts) : { ok: true, status: 200, text: async () => 'ok', json: async () => ({}) };
+/* Outbound calls are captured so the Slack payload can be inspected as
+   sent. The lead webhook and the ops webhook get DIFFERENT urls: a
+   Salesforce push failing in this harness fires alertOps, and that must
+   not be mistaken for the lead alert. */
+const SLACK_LEAD = 'https://hooks.slack.com/services/LEAD';
+const SLACK_OPS  = 'https://hooks.slack.com/services/OPS';
+let sent = [];
+global.fetch = async (url, opts) => {
+  if (String(url).startsWith(BASE)) return realFetch(url, opts);
+  let body = null;
+  try { body = JSON.parse(opts && opts.body); } catch { /* not JSON */ }
+  sent.push({ url: String(url), body });
+  return { ok: true, status: 200, text: async () => 'ok', json: async () => ({}) };
+};
 
 Object.assign(process.env, {
   PORT: String(PORT), DATABASE_URL: 'postgres://stub/stub',
   ALLOWED_ORIGIN: 'https://www.gushwork.ai', MONITOR_TOKEN: 'tok',
+  SLACK_WEBHOOK_URL: SLACK_LEAD, SLACK_ALERTS_WEBHOOK_URL: SLACK_OPS,
 });
 
 const realLog = console.log, realWarn = console.warn, realErr = console.error;
@@ -115,7 +128,7 @@ const BODY = {
 };
 
 async function drive(route, upsertRow, failChanges) {
-  S.queries = []; S.upsertRow = upsertRow; S.failChanges = failChanges; logged = [];
+  S.queries = []; S.upsertRow = upsertRow; S.failChanges = failChanges; logged = []; sent = [];
   const res = await realFetch(BASE + route, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Origin: 'https://www.gushwork.ai', 'User-Agent': 'suite/1.0' },
@@ -124,7 +137,7 @@ async function drive(route, upsertRow, failChanges) {
   let body = null;
   try { body = await res.json(); } catch { /* non-JSON */ }
   await sleep(700);
-  return { status: res.status, body, queries: S.queries.slice(), logged: logged.slice() };
+  return { status: res.status, body, queries: S.queries.slice(), logged: logged.slice(), sent: sent.slice() };
 }
 
 (async () => {
@@ -167,6 +180,57 @@ async function drive(route, upsertRow, failChanges) {
     ok(`${route}: the failure is logged, not silent`,
        bad.logged.some((l) => /lead-changes.*not recorded/.test(l)), bad.logged.join(' | ').slice(0, 200));
   }
+
+  /* ── the Slack line: only after a booking ───────────────────────
+     slackSubmit sits inside `if (!alreadySubmitted)`, and the gate query
+     is stubbed to submitted_at = null, so the alert fires here. That is
+     the reachable shape: a lead that BOOKED BEFORE EVER SUBMITTING, then
+     came back and submitted under different details. */
+  const leadAlert = (r) => {
+    const hit = r.sent.find((c) => c.url === SLACK_LEAD);
+    return hit ? JSON.stringify(hit.body) : '';
+  };
+
+  quiet(); const booked = await drive('/submit', CHANGED, false); loud();
+  const bookedTxt = leadAlert(booked);
+  ok('slack: the lead alert was posted at all', bookedTxt.length > 0,
+     booked.sent.map((c) => c.url).join(', ') || '(nothing sent)');
+  ok('slack: the changed-after-booking block is present', /Changed after booking/.test(bookedTxt));
+  ok('slack: it shows the old value', /first@colemangroup\.co/.test(bookedTxt));
+  ok('slack: it shows the new value', /second@northwind\.com/.test(bookedTxt));
+  ok('slack: company change is included too', /Coleman Group/.test(bookedTxt) && /Northwind/.test(bookedTxt));
+  ok('slack: fields are labelled for an SDR, not by column name',
+     /Email:/.test(bookedTxt) && !/"email: /.test(bookedTxt));
+  ok('slack: it says why the SDR should care',
+     /already had a call booked/.test(bookedTxt) && /old details/.test(bookedTxt));
+  ok('slack: unchanged fields are not listed as changed',
+     !/Phone: /.test(bookedTxt) && !/Sells to: /.test(bookedTxt));
+  ok('slack: it is ONE message, not two',
+     booked.sent.filter((c) => c.url === SLACK_LEAD).length === 1,
+     String(booked.sent.filter((c) => c.url === SLACK_LEAD).length));
+
+  /* Same changes, but they had NOT booked -- an ordinary correction. */
+  const NOT_BOOKED = Object.assign({}, CHANGED, { prev_booked: false });
+  quiet(); const unbooked = await drive('/submit', NOT_BOOKED, false); loud();
+  const unbookedTxt = leadAlert(unbooked);
+  ok('slack: the alert still posts for an unbooked lead', unbookedTxt.length > 0);
+  ok('slack: but carries NO changed-after-booking block',
+     !/Changed after booking/.test(unbookedTxt), unbookedTxt.slice(0, 200));
+
+  /* Booked, but nothing actually changed. */
+  const NO_CHANGE = Object.assign({}, CHANGED, {
+    prev_email: CHANGED.email, prev_company: CHANGED.company,
+  });
+  quiet(); const nochange = await drive('/submit', NO_CHANGE, false); loud();
+  const nochangeTxt = leadAlert(nochange);
+  ok('slack: alert posts when a booked lead changed nothing', nochangeTxt.length > 0);
+  ok('slack: and carries no block when nothing changed',
+     !/Changed after booking/.test(nochangeTxt), nochangeTxt.slice(0, 200));
+
+  /* /partial never posts a lead alert at all, so it cannot double up. */
+  quiet(); const partialRun = await drive('/partial', CHANGED, false); loud();
+  ok('slack: /partial posts no lead alert', leadAlert(partialRun) === '',
+     leadAlert(partialRun).slice(0, 120));
 
   /* ── the endpoint ───────────────────────────────────────────── */
   quiet();
