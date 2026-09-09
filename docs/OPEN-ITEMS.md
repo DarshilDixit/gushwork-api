@@ -190,6 +190,36 @@ a fix on one is a fix on one third. `tests/test-batch1-e2e.js` still needs
 `DATABASE_URL` and is still not in the bar; whether to bring it in is
 still a real decision about the bar, not a tidy-up.
 
+### 12. Two live pages serve a different `gushwork-form.js` than everything else
+
+Found 10 Sept 2026 by sweeping every form page after a Webflow republish,
+not by anything in this repo. Both are page-level script tags, which a
+Project-Settings republish does not touch.
+
+**`/meeting-booked` is pinned to `6f10ad92` — `v3.4`, 25 March 2026.** Six
+months stale, and it is **not** an inert page: it carries `step-1`,
+`step-2`, `step-3` and an email field, so it is a working lead form running
+code from before essentially everything. No DNS fallback, no
+email-in-website-field catch, no typo nudge, no website-check verdicts, no
+PartnerStack capture, no product tagging, no `utm_term`. **238 sessions in
+the 19 days to 9 Sept.**
+
+Whoever fixes this should check what that page is *for* before repinning it.
+A post-booking confirmation page carrying a full second copy of the lead
+form may itself be the bug, and repinning it to `v5.9.0` would make it a
+fully-functional duplicate entry point rather than a broken one.
+
+**`/careers` uses no SHA at all** —
+`cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api/gushwork-form.js`. jsDelivr
+then serves the default branch best-effort; it was serving `v5.8.0` hours
+after `v5.9.0` was pinned everywhere else. That is the mutable-ref problem
+the pinning rule exists to remove, in its loosest form. It has **no** form
+elements, so today it only fires `/session` — 659 sessions of it — but what
+it serves will keep drifting on the CDN's schedule, with nobody watching.
+
+Neither is urgent in the sense of losing a lead **today**, and neither is
+fixable from this repo: both are Webflow edits.
+
 ---
 
 ## Decided
