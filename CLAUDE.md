@@ -125,6 +125,24 @@ delete the file.
   reached step 1. Join on `session_id` when you want a funnel.
 - **`lead_magnet_leads`** — the LP funnel. Never joined to `leads` at write time.
 - **`enrichment_data`** — Apollo responses.
+- **`form_page_views`** — one row per `/session` call, i.e. per load of a
+  form-bearing page. The detail behind `form_sessions.hits`, which is only a
+  counter. **Named for its scope on purpose:** `gushwork-form.js` is on 16
+  pages only, so these are loads of form pages, not of the site — the
+  homepage and `/pricing` have zero rows here while hundreds of leads arrived
+  at the form from them. **No referrer column in v1**, deliberately: the only
+  referrer in the payload is first-touch and identical on every hit, so
+  storing it per page view would repeat one value down the column and read as
+  a per-hit fact it is not. `source` is `NOT NULL` and today only ever
+  `'session_route'` — see `docs/OPEN-ITEMS.md` for why anything
+  client-reported must never share that value.
+- **`lead_field_changes`** — append-only log of the seven identity fields
+  (`email`, `company`, `website`, `phone`, `first_name`, `last_name`,
+  `sell_to`) changing on a lead row, because both upserts are last-write-wins
+  on 35 columns and the old value is otherwise gone. A row is written only
+  when old and new are both non-null and **differ** — a first set is not a
+  change. `booking_uid_present` is read from **before** the upsert, so it
+  answers "had they already booked when they changed it?".
 
 ---
 
@@ -896,22 +914,40 @@ node tests/test-batch-a.js      # logic, no dependencies
 node tests/test-ads-parity.js   # the two form files against each other, no dependencies
 node tests/test-partnerstack.js # PartnerStack steps 1-10, no dependencies
 node tests/test-sf-readers.js   # EXECUTES the Salesforce readers against a stubbed fetch
+node tests/test-submit-gate.js       # BOOTS /submit and watches all five announcements fire
+node tests/test-session-payload.js   # EXECUTES the real form-file functions, both files
+node tests/test-session-page-views.js # BOOTS /session, incl. what happens when the write fails
+node tests/test-lead-field-changes.js # BOOTS /partial + /submit, and parses the dashboard JS
 
-node tests/measure.js --check   # or just this: runs all six and checks the totals
+node tests/measure.js --check   # or just this: runs all ten and checks the totals
 node tests/test-batch1-db.js    # needs DATABASE_URL
 node tests/test-batch1-e2e.js   # boots the real server, needs DATABASE_URL
 ```
 
-**The six dependency-free suites are the bar.** They run anywhere in about a
-second each — run all six after any change to `index.js`, `lead-magnet.js`, or
+**The ten dependency-free suites are the bar.** They run anywhere in about a
+second each — run all ten after any change to `index.js`, `lead-magnet.js`, or
 either form file, always. Do not install Postgres and do not point anything at
 the production database from a feature branch.
+
+**Read `measure.js` output in full, not through `tail`.** `--save` re-baselines
+whether or not suites failed, so a truncated read plus a `--save` will happily
+record a red bar as the new normal. That happened on 10 Sept: two suites were
+failing on a version-banner assertion through two merges because the output was
+piped to `tail -6` and the failures were above the cut.
+
+**Four of the ten BOOT A ROUTE** rather than reading source text —
+`test-submit-gate`, `test-session-page-views`, `test-lead-field-changes` and
+`test-session-payload`. They stub `pg` and `global.fetch` and drive the real
+express stack over HTTP, so they need no database and no network. They exist
+because a source assertion cannot tell a reachable statement from an
+unreachable one, and cannot tell you whether the dashboard's inline JavaScript
+parses at all.
 
 Tests read the real functions out of `index.js` rather than a copy. A test that
 exercises a duplicate of the source can pass while production is broken. Keep it
 that way.
 
-**All six suites require `tests/crash-reporter.js` first, and it is not
+**All ten suites require `tests/crash-reporter.js` first, and it is not
 optional.** A suite that crashes prints a stack trace, zero `✗` lines and exits
 1 — which reads as a clean run to anything counting markers and as a caught
 mutation to anything counting exit codes. Three of the six did exactly that
@@ -925,7 +961,7 @@ an explicit `SUITE DID NOT COMPLETE` marker, and deliberately prints no totals.
 code.** Both were the practice here until 7 Sept 2026 and both are broken:
 
 ```bash
-node tests/measure.js --check       # the normal bar: all six suites + totals
+node tests/measure.js --check       # the normal bar: all ten suites + totals
 node tests/measure.js --mutation    # after breaking a line, for a verdict
 node tests/measure.js --save        # re-baseline, when a count intentionally moves
 ```

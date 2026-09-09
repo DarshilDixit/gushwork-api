@@ -162,17 +162,33 @@ failures to Railway, they simply never alerted. Grepping a week of
 `[SF] Lead … failed` and `[Meta CAPI] … error` gives the answer before an
 alert does.
 
-### 11. No test exercises a route end to end
+### 11. Route-level coverage exists now, but only for four routes — PARTLY CLOSED 10 Sept 2026
 
-Every one of the six suites reads source text or drives a unit. None boots a
-route. That is the seam that produced the two worst bugs of 8 Sept — the
-`//` in SQL, which no source-level assertion can see, and the `byProduct`
-misbinding, where the query and the renderer were each verified in isolation
-and the binding between them was in neither.
+**Was:** every suite read source text or drove a unit; none booted a route.
+That is the seam that produced the two worst bugs of 8 Sept — the `//` in
+SQL, which no source-level assertion can see, and the `byProduct`
+misbinding, where the query and the renderer were each verified in
+isolation and the binding between them was in neither.
 
-`tests/test-batch1-e2e.js` does boot the real server but needs
-`DATABASE_URL` and is not in the six-suite bar. Whether to bring it in is a
-real decision about the bar, not a tidy-up.
+**Now:** four suites boot the real `index.js` in-process with `pg` and
+`global.fetch` stubbed, and drive routes over real HTTP with no database
+and no network — `test-submit-gate.js` (`/submit`),
+`test-session-page-views.js` (`/session`), `test-lead-field-changes.js`
+(`/partial`, `/submit`, `/monitor/lead-changes`, and the monitor page's
+inline JavaScript), and `test-session-payload.js`, which executes the real
+form-file functions rather than diffing their text.
+
+They are in the bar, they need no `DATABASE_URL`, and they caught things a
+source assertion structurally cannot: that all five `/submit`
+announcements were unreachable, and that the dashboard's inline JS parses
+at all — `node --check index.js` says nothing about JavaScript inside an
+HTML string, which is how `/monitor/funnel` stayed broken for weeks.
+
+**Still open:** the other routes. `/booking-confirmed` and both booking
+webhooks have no route-level test, and booking arrives by three routes, so
+a fix on one is a fix on one third. `tests/test-batch1-e2e.js` still needs
+`DATABASE_URL` and is still not in the bar; whether to bring it in is
+still a real decision about the bar, not a tidy-up.
 
 ---
 
@@ -288,3 +304,72 @@ used on 8 Sept once someone insisted:
   their mutations could even be measured.
 - **Mutate the guard and watch it fail.** Several assertions written on 8 Sept
   survived their first mutation, including two that looked thorough.
+
+### The sessionStorage path array is PARKED, and what would justify it
+
+**Proposed and not built, 10 Sept 2026.** The site-wide Webflow script would
+append each page load to a `sessionStorage` array, which the form script then
+posts as one field — capturing the whole journey including non-form pages,
+which `form_page_views` structurally cannot.
+
+Parked for four reasons, strongest first:
+
+- **Server-observed beats client-asserted.** A `form_page_views` row means a
+  request reached this server at this timestamp. An array entry means the
+  browser said, in bulk and after the fact, where it had been. Unverifiable.
+- **It needs the riskiest deploy step twice** — the Webflow global custom
+  code *and* both script pins — for a gain nobody can currently size.
+- **`form_page_views` is what would size it.** Its per-hit URLs and
+  timestamps let you measure how often a session's form-page hits are
+  non-contiguous, which implies non-form browsing in between. That is
+  unmeasurable today because nothing records it.
+- **Frequency.** 93.6% of sessions were single-hit when this was written,
+  and that is a floor, not a total: a bfcache restore does not re-fire
+  `DOMContentLoaded`, so back-navigation is invisible to the counter.
+
+**If it ever lands, its rows must stay distinguishable from server-observed
+hits rather than being blended into the same column.** `form_page_views.source`
+is `NOT NULL` for exactly this reason and today only ever holds
+`'session_route'`. Merging a client-reported hop into that value would destroy
+the one property that makes the table trustworthy.
+
+**What would flip the decision:** `form_page_views` showing routine gaps or
+page jumps implying non-form browsing; someone needing content-page
+attribution (blog → demo) for a real decision; or a Webflow deploy already
+scheduled for another reason, which collapses the marginal cost to one
+global-script edit.
+
+### Tracking logic is split across two scripts and one of them is not in this repo
+
+**Recorded for the site-wide analytics ticket, 10 Sept 2026,** so it is not
+rediscovered the hard way. This cost real time twice in one investigation,
+including one wrong conclusion stated confidently from a `grep` of a single
+file.
+
+- **The site-wide script is Webflow global custom code.** It runs on **every**
+  page and writes **only to `sessionStorage`** — `gw_referrer`,
+  `gw_landing_page`, `gw_utm_*`, the PartnerStack cookies. It never touches
+  Postgres. It is **not in this repository** and a repo grep cannot see it.
+- **`gushwork-form.js` is on the 16 form-bearing pages only**, and is the only
+  thing that writes to Postgres — `/session`, `/partial`, `/submit`.
+- **So attribution IS captured on non-form pages**, client-side, and posted
+  when the visitor reaches a form. The **entry point is not lost; the middle
+  hops are.** Measured: the homepage, `/pricing` and `/who-its-for` have zero
+  `form_sessions` rows while 990, 263 and 76 leads respectively arrived at the
+  form *from* them.
+
+**`captureUTMs()` applies three different persistence policies in one
+function**, and nothing on screen or in the schema says so:
+
+| Key | Policy |
+|---|---|
+| `gw_referrer`, `gw_landing_page` | **first-touch** — written once, never updated |
+| `gw_utm_*` | **overwrite unconditionally** — a fresh ad click replaces them |
+| `gw_previous_page` | **last-touch** — rewritten on every internal hop (`gushwork-form.js:328`) |
+
+A session can therefore hold hit 1's landing page next to hit 3's UTMs, and
+both look equally authoritative. That is a reporting hazard, not a bug to
+"fix" in passing — changing any one of the three moves historical numbers.
+
+**No analytics infrastructure beyond `form_page_views` belongs in this repo.**
+That is the backlog ticket's job.
