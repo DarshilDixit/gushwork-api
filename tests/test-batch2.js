@@ -1733,9 +1733,23 @@ function finish() {
   ok('slack: even a pathological payload stays under the 3000-char section limit',
      total < 3000, String(total));
 
-  /* And /submit must actually pass them, or none of the above ever runs. */
-  ok('slack: /submit passes product and about_business to slackSubmit',
-     /slackSubmit\(\{first_name,last_name,email,phone,company,website,sell_to,product,about_business,/.test(src));
+  /* And /submit must actually pass them, or none of the above ever runs.
+
+     Checked by SLICING the call rather than by pinning its opening keys.
+     The old form matched the literal prefix
+     `slackSubmit({first_name,last_name,...`, so prepending any new key
+     broke it -- which is exactly what happened when identity_changes and
+     changed_after_booking were added, and the failure had nothing to do
+     with product or about_business. An assertion should fail for the
+     thing it names. */
+  {
+    const seg  = src.slice(src.indexOf("app.post('/submit'"));
+    const from = seg.indexOf('slackSubmit({');
+    const call = from === -1 ? '' : seg.slice(from, seg.indexOf('});', from));
+    ok('slack: /submit calls slackSubmit at all', call.length > 0);
+    ok('slack: /submit passes product to slackSubmit', /\bproduct\b/.test(call));
+    ok('slack: /submit passes about_business to slackSubmit', /\babout_business\b/.test(call));
+  }
 }
 
 /* ============================================================
