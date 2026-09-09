@@ -100,6 +100,25 @@ take. Pinning removes the purge from the process entirely.
 **Use the full 40-character SHA.** Short SHAs work today but are ambiguous as the
 repo grows, and a collision resolves to the wrong file rather than erroring.
 
+**AND SWEEP EVERY PAGE, not just the two you changed.** The pin lives in a
+`<script src>`, and Webflow lets a *page* carry its own script tag that a
+Project-Settings republish never touches. Two were found stale on 10 Sept, both
+invisible from inside this repo:
+
+```bash
+for p in /demo /start /start-now /ai-demo /meeting-booked /careers \
+         /consulting-lead-generation /manufacturing-lead-generation \
+         /financial-services-lead-generation /lead-gen /seo-leads \
+         /financial-services-seo /manufacturing-seo-services /consulting-seo-services; do
+  echo "$p -> $(curl -s "https://www.gushwork.ai$p" | grep -oE 'gushwork-api@[0-9a-f]{7,40}' | sort -u | tr '\n' ' ')"
+done
+```
+
+Anything not on the SHA you just pinned is serving different code to real
+visitors. A page with **no** `@sha` at all is worse than a stale one: jsDelivr
+then serves the default branch best-effort, so what a visitor gets depends on
+that CDN's cache and drifts on its own.
+
 **Pin both files to the same SHA**, even when only one of them changed. The bytes
 would be identical either way — a commit SHA names a snapshot of the whole repo,
 so asking for an untouched file at a newer SHA returns the same blob — but pinning
@@ -929,11 +948,26 @@ second each — run all ten after any change to `index.js`, `lead-magnet.js`, or
 either form file, always. Do not install Postgres and do not point anything at
 the production database from a feature branch.
 
-**Read `measure.js` output in full, not through `tail`.** `--save` re-baselines
-whether or not suites failed, so a truncated read plus a `--save` will happily
-record a red bar as the new normal. That happened on 10 Sept: two suites were
-failing on a version-banner assertion through two merges because the output was
-piped to `tail -6` and the failures were above the cut.
+**NEVER PIPE `measure.js`. Not through `tail`, not through `grep`, not through
+`head`. Run it bare and read all of it, or do not claim the bar.**
+
+This is a hard rule, not advice, because **a truncated pass and a truncated
+failure are indistinguishable**. The grand-total line is the LAST thing
+`measure.js` prints, so any pipe short enough to be convenient shows a
+plausible total with every per-suite result hidden above it. `tail -3` on a
+green bar and `tail -3` on a red bar look identical — and the total does not
+move when a suite fails, because a failed assertion still counts toward it.
+
+`--save` compounds it: it re-baselines whether or not suites failed, so one
+truncated read plus a `--save` records a red bar as the new normal.
+
+It happened **three times on 10 Sept**, twice after this warning was already
+written. Two of those shipped: PR 51 and PR 52 both merged with
+`test-batch2.js` failing. Neither changed production behaviour, but neither bar
+had actually been read.
+
+If the output is genuinely too long to read, that is a reason to fix the
+output, not to pipe it.
 
 **Four of the ten BOOT A ROUTE** rather than reading source text —
 `test-submit-gate`, `test-session-page-views`, `test-lead-field-changes` and
