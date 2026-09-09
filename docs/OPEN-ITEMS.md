@@ -190,35 +190,55 @@ a fix on one is a fix on one third. `tests/test-batch1-e2e.js` still needs
 `DATABASE_URL` and is still not in the bar; whether to bring it in is
 still a real decision about the bar, not a tidy-up.
 
-### 12. Two live pages serve a different `gushwork-form.js` than everything else
+### 12. Two live pages load the form script by mistake — the fix is REMOVAL
 
 Found 10 Sept 2026 by sweeping every form page after a Webflow republish,
 not by anything in this repo. Both are page-level script tags, which a
-Project-Settings republish does not touch.
+Project-Settings republish does not touch. **Darshil is removing both tags
+rather than repinning them** — neither page is supposed to carry the form.
 
-**`/meeting-booked` is pinned to `6f10ad92` — `v3.4`, 25 March 2026.** Six
-months stale, and it is **not** an inert page: it carries `step-1`,
-`step-2`, `step-3` and an email field, so it is a working lead form running
-code from before essentially everything. No DNS fallback, no
-email-in-website-field catch, no typo nudge, no website-check verdicts, no
-PartnerStack capture, no product tagging, no `utm_term`. **238 sessions in
-the 19 days to 9 Sept.**
+An earlier draft of this entry called `/meeting-booked` "a working lead
+form six months out of date" and suggested repinning it. That was wrong on
+the evidence, and repinning would have been the harmful fix. What the data
+actually shows:
 
-Whoever fixes this should check what that page is *for* before repinning it.
-A post-booking confirmation page carrying a full second copy of the lead
-form may itself be the bug, and repinning it to `v5.9.0` would make it a
-fully-functional duplicate entry point rather than a broken one.
+**`/meeting-booked`** — pinned to `6f10ad92` (`v3.4`, 25 March 2026). It
+does carry leftover `step-1` / `step-2` / `step-3` markup and an email
+field, which is what made it look live. In **224 non-bot sessions it has
+produced exactly one `leads` row, on 27 March 2026**, and that row is not a
+capture: this is the RevenueHero post-booking confirmation page, the URL
+carries `?theme=light&name=…&email=…`, the row has
+`prefill_source = url_param`, and the person **already had the booking that
+sent them there**. So the script read the confirmation redirect's own query
+string back into a second lead row for someone who had just booked.
+Nothing in the six months since. Repinning it to `v5.9.0` would have turned
+a dormant duplicate-row generator into a working one.
 
-**`/careers` uses no SHA at all** —
+**`/careers`** — no SHA at all:
 `cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api/gushwork-form.js`. jsDelivr
-then serves the default branch best-effort; it was serving `v5.8.0` hours
-after `v5.9.0` was pinned everywhere else. That is the mutable-ref problem
-the pinning rule exists to remove, in its loosest form. It has **no** form
-elements, so today it only fires `/session` — 659 sessions of it — but what
-it serves will keep drifting on the CDN's schedule, with nobody watching.
+serves the default branch best-effort, so it was still on `v5.8.0` hours
+after `v5.9.0` was pinned everywhere else — the mutable-ref problem the
+pinning rule exists to remove, in its loosest form. It has **no** form
+elements and has **never** produced a lead. It only ever fired `/session`:
+**629 non-bot sessions**. (Five leads carry `/careers` as their
+`landing_page`, but all five submitted on `/demo` — that is ordinary
+attribution and is unaffected by removing the tag.)
 
-Neither is urgent in the sense of losing a lead **today**, and neither is
-fixable from this repo: both are Webflow edits.
+**Historical `form_sessions` rows: NOTE, do not delete.** See the
+Definitions note in `CLAUDE.md`. 853 non-bot rows across the two pages,
+5.7% of the Sessions card. The rows are *true* — somebody did load a page
+carrying the script — and deleting them would move every historical
+session number at once to correct a 0.30-point error, which is the same
+trade the internal-address distortion is already deliberately left alone
+for. Once both tags are removed the population is closed, bounded and
+dated, which is much easier to explain than a silent retroactive edit.
+
+The one number to watch while it closes is the `partial` health row: it
+turns red on `sessions >= HEALTH_MIN_SAMPLE` (8) with zero leads in a
+2-hour window, and these pages contributed roughly four such sessions per
+window — sessions that could never produce a lead. That biases toward a
+**false red**, which is the safe direction for a health check, and it stops
+entirely once the tags are gone.
 
 ---
 
