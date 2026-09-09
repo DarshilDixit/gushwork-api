@@ -8495,6 +8495,12 @@ app.post('/session', async (req, res) => {
   res.json({ ok: true });
 
   const s = (v, n) => (v || '').toString().trim().slice(0, n) || null;
+  /* req.body.page_referrer is the PER-HIT referrer and is deliberately not
+     stored yet. req.body.referrer is gw_referrer -- first-touch, written
+     once per session by the site-wide Webflow script -- so it is the same
+     value on every hit and would repeat down any per-page-view column.
+     The form sends page_referrer from today so the column can be added
+     here later without a second Webflow re-pin. */
   try {
     await pool.query(
       `INSERT INTO form_sessions
@@ -8519,6 +8525,12 @@ app.post('/session', async (req, res) => {
         s(req.body.utm_medium, 100),
         s(req.body.utm_campaign, 100),
         s(req.body.utm_content, 100),
+        /* This has always been read here. What was missing was the
+           SENDING half: neither form file put utm_term in the /session
+           payload, so this bound null on every call and
+           form_sessions.utm_term was null on all 15,309 rows while
+           leads.utm_term was populated. Fixed in the form files, which
+           means it only takes effect once Webflow is re-pinned. */
         s(req.body.utm_term, 100),
         s(req.headers['user-agent'], 500),
       ]

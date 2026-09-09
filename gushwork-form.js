@@ -470,7 +470,23 @@
           utm_medium: formState.utm_medium,
           utm_campaign: formState.utm_campaign,
           utm_content: formState.utm_content,
+          /* utm_term was missing here from the day this route shipped, so
+             form_sessions.utm_term was null on all 15,309 rows while
+             leads.utm_term (sent by /partial) was populated. Comparing the
+             two tables therefore showed a UTM that "changed" between them
+             when nothing had changed at all -- which is what got escalated
+             on 9 Sep 2026. */
+          utm_term: formState.utm_term,
           referrer: formState.referrer,
+          /* The referrer for THIS page load. formState.referrer above is
+             gw_referrer, which the site-wide Webflow script writes ONCE per
+             session, so it is first-touch and identical on every hit -- and
+             recording it against an individual page view would repeat one
+             value down the entire column. Sent so a real per-hit referrer
+             column can be added server side later WITHOUT another Webflow
+             re-pin, which is the expensive half of shipping a form change.
+             Nothing reads it yet, deliberately. */
+          page_referrer: document.referrer || '',
         }),
       }, NET_TIMEOUT_MS.session).catch(() => {});
     }
@@ -2391,7 +2407,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.8.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.9.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
