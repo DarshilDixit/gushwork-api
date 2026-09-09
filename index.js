@@ -1371,6 +1371,42 @@ function slackSubmit(d) {
     { label: '📦 Product',          value: d.product       },
   ]);
   if (lf) blocks.push(lf);
+  /* ONLY when they had already booked, and directly under the fields it
+     contradicts. A typo fixed at step 1 is nobody's business; changing who
+     you are after taking a calendar slot is, because whatever already went
+     out about this lead -- the earlier Slack post, the Salesforce Lead, the
+     Meta event -- used the old values, and the person walking into the call
+     is working from them.
+
+     Appended to this alert rather than sent as its own message: a second
+     notification about one person is noise to whoever is reading it, and
+     this is context for a call, not an incident.
+
+     The booking condition lives HERE rather than at the call site so a
+     future caller cannot light it up for an ordinary correction.
+
+     WHERE THIS DOES NOT FIRE, which is the case you would most expect it
+     to: slackSubmit sits inside `if (!alreadySubmitted)`. A visitor who
+     submits, THEN books, THEN changes their email and submits again gets
+     no alert at all, because that second submit is correctly deduped --
+     the change is in lead_field_changes and on the dashboard, but not in
+     Slack. What this DOES cover is the other order: booked before ever
+     submitting, then came back and submitted under different details.
+     That is the population the submitted_at gate fix unblocked, and it is
+     reachable because submitted_at is still null so the alert fires.
+     Covering the first order needs a message outside this gate, which is
+     a separate decision about whether a second notification for one
+     person is worth the noise. */
+  if (d.changed_after_booking === true && Array.isArray(d.identity_changes) && d.identity_changes.length > 0) {
+    const lines = d.identity_changes
+      .map((c) => `${LEAD_FIELD_LABELS[c.field] || c.field}: ${c.from} \u2192 ${c.to}`)
+      .join('\n');
+    const chf = bFields([{
+      label: '🔄 Changed after booking',
+      value: `${lines}\n→ They already had a call booked when they changed this, so anything sent about them earlier used the old details.`,
+    }]);
+    if (chf) blocks.push(chf);
+  }
   /* Its own block, not a field: the fields above render as a two-column
      grid and a paragraph of prose destroys that layout. */
   {
@@ -8676,21 +8712,39 @@ app.post('/enrich', async (req, res) => {
    are unchanged. */
 const LEAD_IDENTITY_FIELDS = ['email', 'company', 'website', 'phone', 'first_name', 'last_name', 'sell_to'];
 
+/* Read by SDRs, not engineers. "Sells to", not "sell_to". */
+const LEAD_FIELD_LABELS = {
+  email: 'Email', company: 'Company', website: 'Website', phone: 'Phone',
+  first_name: 'First name', last_name: 'Last name', sell_to: 'Sells to',
+};
+
+/* ONE definition of what counts as a change, used by both the table and
+   the Slack line. Computing it twice would let the two disagree, and a
+   Slack post contradicting the change log is worse than no Slack post. */
+function diffLeadIdentityFields(row) {
+  const changes = [];
+  if (!row) return { changes, wasBooked: false };
+  for (const f of LEAD_IDENTITY_FIELDS) {
+    const before = row['prev_' + f];
+    const after  = row[f];
+    /* A first set is not a change. Requiring both sides non-null keeps
+       the table to real switches -- otherwise every field of every new
+       lead lands here and the switches are lost inside them. */
+    if (before == null || after == null) continue;
+    if (String(before) === String(after)) continue;
+    changes.push({ field: f, from: String(before), to: String(after) });
+  }
+  return { changes, wasBooked: row.prev_booked === true };
+}
+
 function recordLeadFieldChanges(session_id, row, source_route) {
   try {
     if (!session_id || !row) return;
-    const fields = [], olds = [], news = [];
-    for (const f of LEAD_IDENTITY_FIELDS) {
-      const before = row['prev_' + f];
-      const after  = row[f];
-      /* A first set is not a change. Requiring both sides non-null keeps
-         the table to real switches -- otherwise every field of every new
-         lead lands here and the switches are lost inside them. */
-      if (before == null || after == null) continue;
-      if (String(before) === String(after)) continue;
-      fields.push(f); olds.push(String(before)); news.push(String(after));
-    }
-    if (fields.length === 0) return;
+    const { changes } = diffLeadIdentityFields(row);
+    if (changes.length === 0) return;
+    const fields = changes.map((c) => c.field);
+    const olds   = changes.map((c) => c.from);
+    const news   = changes.map((c) => c.to);
 
     console.log(`[lead-changes] ${source_route} — ${fields.length} identity field(s) changed on session ${session_id}: ${fields.join(', ')}${row.prev_booked === true ? ' (ALREADY BOOKED)' : ''}`);
 
@@ -9033,6 +9087,7 @@ app.post('/submit', async (req, res) => {
     `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business]);
 
     /* After the write, off the response path. Never awaited. */
+    const identityDiff = diffLeadIdentityFields(upsert.rows[0]);
     recordLeadFieldChanges(session_id, upsert.rows[0], '/submit');
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/submit] Enrichment sync failed (non-blocking):', err.message));
@@ -9040,7 +9095,7 @@ app.post('/submit', async (req, res) => {
     syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true,hear_about_us_raw:hear_about_us,product,about_business,...ps});
 
     if (!alreadySubmitted) {
-      slackSubmit({first_name,last_name,email,phone,company,website,sell_to,product,about_business,hear_about_us:hearAboutUsFinal,ps_partner_key:ps.ps_partner_key,ps_partner_name:(psIdentity||{}).name,ps_partner_email:(psIdentity||{}).email,ps_click_at:ps.ps_click_at,hear_about_us_raw:hear_about_us,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,elv_status:elv?.status||null,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
+      slackSubmit({identity_changes:identityDiff.changes,changed_after_booking:identityDiff.wasBooked,first_name,last_name,email,phone,company,website,sell_to,product,about_business,hear_about_us:hearAboutUsFinal,ps_partner_key:ps.ps_partner_key,ps_partner_name:(psIdentity||{}).name,ps_partner_email:(psIdentity||{}).email,ps_click_at:ps.ps_click_at,hear_about_us_raw:hear_about_us,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,elv_status:elv?.status||null,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
 
       pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,product,about_business,hear_about_us:hearAboutUsFinal,hear_about_us_raw:hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'form completed', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
 
