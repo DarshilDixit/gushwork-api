@@ -357,6 +357,25 @@ nothing else. So Overview, All Leads, SDR List and Duplicates all count our own
 testing. This is a known distortion, not a decision anyone made — flag it, don't
 quietly "fix" it, because excluding them moves every historical number at once.
 
+**853 session rows come from two pages that were never meant to have the
+form, and they are staying.** `/careers` (629 non-bot) and `/meeting-booked`
+(224) carried the form script by mistake until 10 Sept 2026. `/careers` has no
+form elements and never produced a lead; `/meeting-booked` produced exactly one
+row, in March, by reading its own post-booking redirect's query string back in
+for somebody who had already booked. Both tags are being removed.
+
+They are **5.7% of the Sessions card**, which reads 14,848 with them and 13,995
+without — so Sessions to Step 1 shows **4.98%** where the form-pages-only figure
+is **5.28%**. The rows are not deleted: they are true, somebody did load a page
+carrying the script, and rewriting them would move every historical session
+number at once to correct a 0.30-point error. Same trade as the internal
+addresses above, and the population is closed and dated once the tags go.
+
+Also biases the `partial` health row toward a **false red** — it reddens on
+8+ sessions with zero leads in 2 hours, and these two contributed about four
+such sessions per window that could never produce a lead. Safe direction, and
+it ends with the tags. See `docs/OPEN-ITEMS.md` item 12.
+
 **"Form entries per day" is deliberately a row count, not a people count.** It
 counts rows in `leads` per ET day — everyone who reached step 1, undeduped, all
 stages. That is a departure from the people-by-default rule and it is intentional:
