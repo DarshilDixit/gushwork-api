@@ -39,7 +39,7 @@ const PORT = 41239;
 const BASE = `http://127.0.0.1:${PORT}`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const S = { queries: [], failChanges: false, upsertRow: null };
+const S = { queries: [], failChanges: false, upsertRow: null, submittedAt: null };
 let unhandled = 0;
 process.on('unhandledRejection', () => { unhandled++; });
 
@@ -54,7 +54,7 @@ function stubQuery(q, params) {
     S.queries.push({ kind: 'upsert', flat, params });
     return { rows: [S.upsertRow], rowCount: 1 };
   }
-  if (/SELECT submitted_at FROM leads/i.test(flat)) return { rows: [{ submitted_at: null }], rowCount: 1 };
+  if (/SELECT submitted_at FROM leads/i.test(flat)) return { rows: [{ submitted_at: S.submittedAt }], rowCount: 1 };
   if (/UPDATE leads SET ps_signup_sent_at = NOW/i.test(flat)) return { rows: [{ session_id: 'x' }], rowCount: 1 };
   return { rows: [], rowCount: 0 };
 }
@@ -127,8 +127,9 @@ const BODY = {
   page_url: 'https://www.gushwork.ai/demo', website_check_reason: 'resolved',
 };
 
-async function drive(route, upsertRow, failChanges) {
+async function drive(route, upsertRow, failChanges, submittedAt) {
   S.queries = []; S.upsertRow = upsertRow; S.failChanges = failChanges; logged = []; sent = [];
+  S.submittedAt = submittedAt === undefined ? null : submittedAt;
   const res = await realFetch(BASE + route, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Origin: 'https://www.gushwork.ai', 'User-Agent': 'suite/1.0' },
@@ -139,6 +140,9 @@ async function drive(route, upsertRow, failChanges) {
   await sleep(700);
   return { status: res.status, body, queries: S.queries.slice(), logged: logged.slice(), sent: sent.slice() };
 }
+
+const NOT_BOOKED = Object.assign({}, CHANGED, { prev_booked: false });
+const NO_CHANGE  = Object.assign({}, CHANGED, { prev_email: CHANGED.email, prev_company: CHANGED.company });
 
 (async () => {
   await sleep(900);
@@ -186,10 +190,15 @@ async function drive(route, upsertRow, failChanges) {
      is stubbed to submitted_at = null, so the alert fires here. That is
      the reachable shape: a lead that BOOKED BEFORE EVER SUBMITTING, then
      came back and submitted under different details. */
-  const leadAlert = (r) => {
-    const hit = r.sent.find((c) => c.url === SLACK_LEAD);
+  /* Both messages go to the lead webhook, so they are told apart by their
+     header rather than by destination. */
+  const pick = (r, re) => {
+    const hit = r.sent.filter((c) => c.url === SLACK_LEAD).find((c) => re.test(JSON.stringify(c.body)));
     return hit ? JSON.stringify(hit.body) : '';
   };
+  const leadAlert = (r) => pick(r, /Lead Form Completed/);
+  const followUp  = (r) => pick(r, /follow-up, not a new lead/);
+  const ALREADY   = new Date('2026-09-08T19:31:30Z');
 
   quiet(); const booked = await drive('/submit', CHANGED, false); loud();
   const bookedTxt = leadAlert(booked);
@@ -210,7 +219,6 @@ async function drive(route, upsertRow, failChanges) {
      String(booked.sent.filter((c) => c.url === SLACK_LEAD).length));
 
   /* Same changes, but they had NOT booked -- an ordinary correction. */
-  const NOT_BOOKED = Object.assign({}, CHANGED, { prev_booked: false });
   quiet(); const unbooked = await drive('/submit', NOT_BOOKED, false); loud();
   const unbookedTxt = leadAlert(unbooked);
   ok('slack: the alert still posts for an unbooked lead', unbookedTxt.length > 0);
@@ -218,9 +226,7 @@ async function drive(route, upsertRow, failChanges) {
      !/Changed after booking/.test(unbookedTxt), unbookedTxt.slice(0, 200));
 
   /* Booked, but nothing actually changed. */
-  const NO_CHANGE = Object.assign({}, CHANGED, {
-    prev_email: CHANGED.email, prev_company: CHANGED.company,
-  });
+
   quiet(); const nochange = await drive('/submit', NO_CHANGE, false); loud();
   const nochangeTxt = leadAlert(nochange);
   ok('slack: alert posts when a booked lead changed nothing', nochangeTxt.length > 0);
@@ -231,6 +237,59 @@ async function drive(route, upsertRow, failChanges) {
   quiet(); const partialRun = await drive('/partial', CHANGED, false); loud();
   ok('slack: /partial posts no lead alert', leadAlert(partialRun) === '',
      leadAlert(partialRun).slice(0, 120));
+
+  /* ── the standalone follow-up ────────────────────────────────────
+     submitted_at is SET, so the lead alert is correctly deduped and the
+     appended line above cannot reach this lead at all. This is the order
+     with real consequences: submitted, booked, then changed who they are
+     and submitted again. */
+  quiet(); const fu = await drive('/submit', CHANGED, false, ALREADY); loud();
+  const fuTxt = followUp(fu);
+  ok('followup: a standalone message was posted', fuTxt.length > 0,
+     fu.sent.map((c) => c.url).join(', ') || '(nothing sent)');
+  ok('followup: the ordinary lead alert did NOT fire', leadAlert(fu) === '');
+  ok('followup: header marks it as a follow-up, not a new lead',
+     /Details changed after booking/.test(fuTxt) && /follow-up, not a new lead/.test(fuTxt));
+  ok('followup: no green tick anywhere, so it cannot be skimmed as a new lead',
+     !/\u2705/.test(fuTxt) && !/Lead Form Completed/.test(fuTxt), fuTxt.slice(0, 160));
+  ok('followup: says in words that they already submitted and already booked',
+     /already filled in the form and already has a call booked/.test(fuTxt));
+  ok('followup: warns that earlier messages used the old values', /used the OLD values/.test(fuTxt));
+  ok('followup: shows old and new', /first@colemangroup\.co/.test(fuTxt) && /second@northwind\.com/.test(fuTxt));
+  ok('followup: labelled for an SDR', /Email:/.test(fuTxt));
+  ok('followup: carries the session id so the lead can be found',
+     /aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/.test(fuTxt));
+
+  /* NOT alertOps: no severity footer, and nothing on the ops webhook. */
+  ok('followup: does not carry an alertOps severity footer', !/Severity:/.test(fuTxt), fuTxt.slice(0, 200));
+  ok('followup: was not routed to the ops webhook',
+     !fu.sent.some((c) => c.url === SLACK_OPS && /follow-up, not a new lead/.test(JSON.stringify(c.body))));
+
+  /* THE COOLDOWN REASON, proved rather than asserted: two changes in a
+     row both post. Through alertOps the second would be swallowed for an
+     hour and folded into an "Also occurred" count on a later alert. */
+  quiet(); const fu2 = await drive('/submit', CHANGED, false, ALREADY); loud();
+  eq('followup: first change posts exactly one message',
+     fu.sent.filter((c) => c.url === SLACK_LEAD).length, 1);
+  eq('followup: an immediate second change posts too — no cooldown',
+     fu2.sent.filter((c) => c.url === SLACK_LEAD).length, 1);
+
+  /* Booked, already submitted, but nothing changed. */
+  quiet(); const fuNo = await drive('/submit', NO_CHANGE, false, ALREADY); loud();
+  ok('followup: silent when nothing changed', followUp(fuNo) === '');
+
+  /* Already submitted and changed, but never booked -- an ordinary edit. */
+  quiet(); const fuUnbooked = await drive('/submit', NOT_BOOKED, false, ALREADY); loud();
+  ok('followup: silent when they had not booked', followUp(fuUnbooked) === '');
+
+  /* MUTUALLY EXCLUSIVE. The earlier run with submitted_at null produced
+     the appended line; it must not also produce a standalone message. */
+  ok('followup: the appended-line case posts no standalone message', followUp(booked) === '');
+  ok('followup: the standalone case carries no appended lead alert', leadAlert(fu) === '');
+
+  /* /partial never posts either message. */
+  quiet(); const fuPartial = await drive('/partial', CHANGED, false, ALREADY); loud();
+  ok('followup: /partial posts nothing', followUp(fuPartial) === '' && leadAlert(fuPartial) === '');
 
   /* ── the endpoint ───────────────────────────────────────────── */
   quiet();
