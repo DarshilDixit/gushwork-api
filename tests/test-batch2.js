@@ -506,7 +506,23 @@ function finish() {
     const cols    = splitTop(body.match(/INSERT INTO leads \(([\s\S]*?)\)\n/)[1]);
     const values  = splitTop(body.match(/VALUES \(([\s\S]*?)\)\n/)[1]);
     const arr     = body.slice(body.lastIndexOf('`, ['));
-    const params  = splitTop(arr.slice(arr.indexOf('[') + 1, arr.lastIndexOf(']')));
+    /* Match the closing bracket by depth from the opening one, rather
+       than taking the LAST ']' in the segment. lastIndexOf reached past
+       the end of the params array into ordinary code that follows the
+       query -- recordLeadFieldChanges(session_id, upsert.rows[0], ...)
+       was enough to inflate the count by one and fail an assertion whose
+       arithmetic was correct. The check is unchanged; only the slice that
+       feeds it is now anchored. */
+    const closeBracket = (str, open) => {
+      let depth = 0;
+      for (let i = open; i < str.length; i++) {
+        if (str[i] === '[') depth++;
+        else if (str[i] === ']') { depth--; if (depth === 0) return i; }
+      }
+      return str.length;
+    };
+    const open    = arr.indexOf('[');
+    const params  = splitTop(arr.slice(open + 1, closeBracket(arr, open)));
     const highest = Math.max(...(body.match(/\$(\d+)/g) || []).map((s) => +s.slice(1)));
     eq(`${name}: INSERT column count matches the VALUES list`, values.length, cols.length);
     eq(`${name}: highest placeholder matches the params array length`, params.length, highest);

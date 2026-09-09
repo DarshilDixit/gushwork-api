@@ -1,5 +1,5 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.8.0  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.9.0  (/demo PAGE VERSION - thru github/jsdlivr)
 
   v5.7.0 — three fixes, all "the check failed for reasons that are not
   the lead's fault":

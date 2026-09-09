@@ -48,6 +48,7 @@ const SUITES = [
   'test-submit-gate.js',
   'test-session-payload.js',
   'test-session-page-views.js',
+  'test-lead-field-changes.js',
 ];
 
 const BASELINE = path.join(__dirname, '.baseline.json');
