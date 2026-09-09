@@ -2911,6 +2911,40 @@ app.get('/monitor/leads', async (req, res) => {
   }
 });
 
+/* The identity-change log for one lead, fetched lazily when a row is
+   expanded on All Leads. Deliberately NOT joined into /monitor/leads:
+   that query returns one row per lead and a join to a one-to-many table
+   would multiply rows, which is the mixed-unit arithmetic the Partners
+   tab already had to be rescued from. Almost every lead has no changes at
+   all, so the join would also be paid on every page load to return
+   nothing. */
+app.get('/monitor/lead-changes', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+
+  const session_id = (req.query.session_id || '').toString().trim().slice(0, 100);
+  if (!session_id) return res.status(400).json({ error: 'session_id required' });
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT field, old_value, new_value, source_route, step_reached,
+              booking_uid_present, changed_at
+         FROM lead_field_changes
+        WHERE session_id = $1
+        ORDER BY changed_at, id
+        LIMIT 200`,
+      [session_id]
+    );
+    res.json({ ok: true, changes: rows });
+  } catch (err) {
+    console.warn('[/monitor/lead-changes]', err.message);
+    /* "We could not read this" is not "there were no changes." An empty
+       list here would render as a clean history for a lead that might
+       have one. */
+    res.status(500).json({ error: 'Could not read the change log', unavailable: true });
+  }
+});
+
 app.get('/monitor/filter-options', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
@@ -3891,7 +3925,29 @@ app.get('/monitor', (req, res) => {
   'function dateManual(){var p=document.getElementById("fpreset");if(p)p.value="";loadLeads(1);}' +
   'function exportLeads(){var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,product=document.getElementById("fproduct").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"format=csv&stage="+stage+"&sort="+curSort+"&dir="+curDir;if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(product&&product!=="all")url+="&product="+encodeURIComponent(product);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;window.location.href=url;}' +
   'async function loadFilterOptions(){if(filterOptsLoaded)return;try{var r=await fetch(API+"/monitor/filter-options"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(10000)});if(!r.ok)return;var d=await r.json();var sel=document.getElementById("fsource");if(sel&&d.utmSource){d.utmSource.forEach(function(v){var o=document.createElement("option");o.value=v;o.textContent=v;sel.appendChild(o);});}var ps=document.getElementById("fpartner");if(ps&&d.partners){d.partners.forEach(function(p){var o=document.createElement("option");o.value=p.key;o.textContent="Partner: "+(p.name||p.key)+(p.email?" <"+p.email+">":"");ps.appendChild(o);});}var dl=document.getElementById("hearlist");if(dl&&d.hearAbout){dl.innerHTML=d.hearAbout.map(function(v){return"<option value=\\""+esc(v)+"\\"></option>";}).join("");}filterOptsLoaded=true;}catch(e){}}' +
-  'function toggleRow(sid){var row=document.getElementById("er-"+sid);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=row.previousElementSibling&&row.previousElementSibling.querySelector(".xbtn");if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";}' +
+  'function toggleRow(sid){var row=document.getElementById("er-"+sid);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=row.previousElementSibling&&row.previousElementSibling.querySelector(".xbtn");if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";if(!vis)loadChanges(sid);}' +
+  /* Lazily fetched, once per row, on first expand. lead_field_changes is
+     one-to-many against leads, so joining it into /monitor/leads would
+     multiply the rows of a list whose whole contract is one row per lead
+     -- and almost every lead has no changes, so the join would be paid on
+     every page load to return nothing.
+
+     A failed fetch says "unavailable", never "no changes", and clears
+     data-loaded so it can be retried. An empty history and an unreadable
+     one are different facts and must not render the same way. */
+  'function loadChanges(sid){var el=document.getElementById("lc-"+sid);if(!el||el.getAttribute("data-loaded"))return;el.setAttribute("data-loaded","1");' +
+  'var un=function(){el.innerHTML="<div style=\\"margin-top:10px;color:#b45309;font-size:12px\\">Change log unavailable \\u2014 this is not the same as no changes.</div>";el.removeAttribute("data-loaded");};' +
+  'fetch(API+"/monitor/lead-changes"+(TP||"?")+(TP?"&":"")+"session_id="+encodeURIComponent(sid)).then(function(r){return r.json();}).then(function(d){' +
+  'if(!d||!d.ok){un();return;}' +
+  'if(!d.changes||!d.changes.length){el.innerHTML="<div style=\\"margin-top:10px;color:#999;font-size:12px\\">No identity fields changed on this lead.</div>";return;}' +
+  'var h="<div style=\\"margin-top:10px;font-weight:600;font-size:12px\\">What changed on this lead</div><table style=\\"width:100%;font-size:11px;margin-top:4px;border-collapse:collapse\\">";' +
+  'for(var i=0;i<d.changes.length;i++){var c=d.changes[i];' +
+  'h+="<tr><td style=\\"color:#999;white-space:nowrap;padding:2px 6px 2px 0\\">"+et(c.changed_at)+"</td>"' +
+  '+"<td style=\\"padding:2px 6px 2px 0\\"><b>"+esc(c.field)+"</b></td>"' +
+  '+"<td style=\\"padding:2px 6px 2px 0\\">"+esc(c.old_value||"\\u2014")+" \\u2192 "+esc(c.new_value||"\\u2014")+"</td>"' +
+  '+"<td style=\\"color:#999;padding:2px 6px 2px 0\\">"+esc(c.source_route||"")+"</td>"' +
+  '+"<td style=\\"padding:2px 0\\">"+(c.booking_uid_present?"<span class=\\"badge bx\\">after booking</span>":"")+"</td></tr>";}' +
+  'el.innerHTML=h+"</table>";}).catch(un);}' +
   'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,product=document.getElementById("fproduct").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
   'var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"page="+curPage+"&stage="+stage+"&sort="+curSort+"&dir="+curDir;' +
   'if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(product&&product!=="all")url+="&product="+encodeURIComponent(product);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;' +
@@ -3901,7 +3957,7 @@ app.get('/monitor', (req, res) => {
   'if(!d.leads.length){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\">No leads match your filters.</td></tr>";document.getElementById("lpag").innerHTML="";return;}' +
   'var html=d.leads.map(function(l){var sid=esc(l.session_id),name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\\u2014",src=l.utm_source?esc(l.utm_source)+(l.utm_medium?" / "+esc(l.utm_medium):""):(l.referrer?"referral":"\\u2014");' +
   'return"<tr><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+esc(l.product||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
-  '"<tr class=\\"erow\\" id=\\"er-"+sid+"\\" style=\\"display:none\\"><td></td><td colspan=\\"10\\">"+enrichPanel(l)+"</td></tr>";}).join("");' +
+  '"<tr class=\\"erow\\" id=\\"er-"+sid+"\\" style=\\"display:none\\"><td></td><td colspan=\\"10\\">"+enrichPanel(l)+"<div id=\\"lc-"+sid+"\\"></div></td></tr>";}).join("");' +
   'document.getElementById("ltbody").innerHTML=html;renderPag(d.page,d.pages);}catch(e){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function renderPag(pg,pages){if(pages<=1){document.getElementById("lpag").innerHTML="";return;}var h="";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg-1)+")\\""+(pg<=1?" disabled":"")+">&larr;</button>";var s=Math.max(1,pg-2),e=Math.min(pages,pg+2);if(s>1)h+="<button class=\\"pb\\" onclick=\\"loadLeads(1)\\">1</button>"+(s>2?"<span class=\\"pi\\">&#8230;</span>":"");for(var i=s;i<=e;i++)h+="<button class=\\"pb"+(i===pg?" act":"")+ "\\" onclick=\\"loadLeads("+i+")\\" >"+i+"</button>";if(e<pages)h+=(e<pages-1?"<span class=\\"pi\\">&#8230;</span>":"")+"<button class=\\"pb\\" onclick=\\"loadLeads("+pages+")\\" >"+pages+"</button>";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg+1)+")\\"" +(pg>=pages?" disabled":"")+">&rarr;</button><span class=\\"pi\\">Page "+pg+" of "+pages+"</span>";document.getElementById("lpag").innerHTML=h;}' +
   'var lmLeads=[],lmChart=null,lmFilter="all";' +
@@ -8603,6 +8659,54 @@ app.post('/enrich', async (req, res) => {
   } catch (err) { console.error('[/enrich] Error:', err.message, err.detail||''); recordFailure('Apollo', email || 'unknown', err.message); res.json({ first_name:'',last_name:'',title:'',company:'',company_size:'',industry:'',linkedin_url:'',website:'' }); }
 });
 
+/* ── Identity-field change log ───────────────────────────────────
+   Both lead upserts are last-write-wins on 35 columns. These seven are
+   the ones that change WHO the lead is, so a change to any of them is
+   worth keeping; the rest are enrichment and attribution, where
+   last-write-wins is correct and a log would be noise.
+
+   Fed by the prev CTE on each upsert -- one round trip, no extra read,
+   and no trigger. A trigger would catch more write paths for less code
+   but would put the behaviour somewhere a grep of this repo cannot see
+   it, which is the failure mode that cost the most time on 9 Sep 2026.
+
+   FIRE AND FORGET, and never awaited. This is a reporting table. If it
+   is unwritable the lead must be entirely unaffected -- tests drive
+   /partial and /submit with this insert failing and assert both routes
+   are unchanged. */
+const LEAD_IDENTITY_FIELDS = ['email', 'company', 'website', 'phone', 'first_name', 'last_name', 'sell_to'];
+
+function recordLeadFieldChanges(session_id, row, source_route) {
+  try {
+    if (!session_id || !row) return;
+    const fields = [], olds = [], news = [];
+    for (const f of LEAD_IDENTITY_FIELDS) {
+      const before = row['prev_' + f];
+      const after  = row[f];
+      /* A first set is not a change. Requiring both sides non-null keeps
+         the table to real switches -- otherwise every field of every new
+         lead lands here and the switches are lost inside them. */
+      if (before == null || after == null) continue;
+      if (String(before) === String(after)) continue;
+      fields.push(f); olds.push(String(before)); news.push(String(after));
+    }
+    if (fields.length === 0) return;
+
+    console.log(`[lead-changes] ${source_route} — ${fields.length} identity field(s) changed on session ${session_id}: ${fields.join(', ')}${row.prev_booked === true ? ' (ALREADY BOOKED)' : ''}`);
+
+    pool.query(
+      `INSERT INTO lead_field_changes
+         (session_id, field, old_value, new_value, source_route, step_reached, booking_uid_present)
+       SELECT $1, t.f, t.o, t.n, $2, $3, $4
+         FROM unnest($5::text[], $6::text[], $7::text[]) AS t(f, o, n)`,
+      [session_id, source_route, row.step_reached == null ? null : row.step_reached,
+       row.prev_booked === true, fields, olds, news]
+    ).catch(err => console.warn('[lead-changes] not recorded (ignored):', err.message));
+  } catch (err) {
+    console.warn('[lead-changes] not recorded (ignored):', err && err.message);
+  }
+}
+
 app.post('/partial', async (req, res) => {
   _lastLeadAt = Date.now(); // heartbeat: form traffic is flowing
   const session_id         = (req.body.session_id         || '').toString().trim().slice(0, 100);
@@ -8667,7 +8771,11 @@ app.post('/partial', async (req, res) => {
        table; no ELV call, nothing that can slow the form down. */
     const elv = await lookupElvStatus(email);
 
-    await pool.query(`
+    const upsert = await pool.query(`
+      WITH prev AS (
+        SELECT email, company, website, phone, first_name, last_name, sell_to, booking_uid
+          FROM leads WHERE session_id = $1
+      )
       INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW(),$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40)
       ON CONFLICT (session_id) DO UPDATE SET
@@ -8722,7 +8830,21 @@ app.post('/partial', async (req, res) => {
         /* COALESCE for the same reason as product: the textarea is a step-2
            field, so /partial writes NULL and /submit fills it in. */
         about_business        = COALESCE(EXCLUDED.about_business,        leads.about_business)
+      RETURNING
+        (SELECT p.email      FROM prev p) AS prev_email,
+        (SELECT p.company    FROM prev p) AS prev_company,
+        (SELECT p.website    FROM prev p) AS prev_website,
+        (SELECT p.phone      FROM prev p) AS prev_phone,
+        (SELECT p.first_name FROM prev p) AS prev_first_name,
+        (SELECT p.last_name  FROM prev p) AS prev_last_name,
+        (SELECT p.sell_to    FROM prev p) AS prev_sell_to,
+        (SELECT p.booking_uid IS NOT NULL FROM prev p) AS prev_booked,
+        leads.email, leads.company, leads.website, leads.phone,
+        leads.first_name, leads.last_name, leads.sell_to, leads.step_reached
     `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business]);
+
+    /* After the write, off the response path. Never awaited. */
+    recordLeadFieldChanges(session_id, upsert.rows[0], '/partial');
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/partial] Enrichment sync failed (non-blocking):', err.message));
 
@@ -8835,7 +8957,11 @@ app.post('/submit', async (req, res) => {
        by a re-check after the response — see finaliseElvVerdict. */
     const elv = await lookupElvStatus(email);
 
-    await pool.query(`
+    const upsert = await pool.query(`
+      WITH prev AS (
+        SELECT email, company, website, phone, first_name, last_name, sell_to, booking_uid
+          FROM leads WHERE session_id = $1
+      )
       INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW(),$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39)
       ON CONFLICT (session_id) DO UPDATE SET
@@ -8893,7 +9019,21 @@ app.post('/submit', async (req, res) => {
         /* COALESCE for the same reason as product, and a BLOCK comment for
            the same reason as the line above. */
         about_business        = COALESCE(EXCLUDED.about_business,        leads.about_business)
+      RETURNING
+        (SELECT p.email      FROM prev p) AS prev_email,
+        (SELECT p.company    FROM prev p) AS prev_company,
+        (SELECT p.website    FROM prev p) AS prev_website,
+        (SELECT p.phone      FROM prev p) AS prev_phone,
+        (SELECT p.first_name FROM prev p) AS prev_first_name,
+        (SELECT p.last_name  FROM prev p) AS prev_last_name,
+        (SELECT p.sell_to    FROM prev p) AS prev_sell_to,
+        (SELECT p.booking_uid IS NOT NULL FROM prev p) AS prev_booked,
+        leads.email, leads.company, leads.website, leads.phone,
+        leads.first_name, leads.last_name, leads.sell_to, leads.step_reached
     `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business]);
+
+    /* After the write, off the response path. Never awaited. */
+    recordLeadFieldChanges(session_id, upsert.rows[0], '/submit');
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/submit] Enrichment sync failed (non-blocking):', err.message));
 

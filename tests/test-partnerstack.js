@@ -3600,7 +3600,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     ok(`form(${name}): history is capped at 10 client-side too`, /slice\(0,\s*10\)/.test(f));
     ok(`form(${name}): a corrupt cookie cannot break the submit`,
        /JSON\.parse\(rawClicks\)/.test(f) && /catch \(err\)/.test(f));
-    ok(`form(${name}): version banner says v5.8.0`, /Form initialised v5\.8\.0/.test(f));
+    ok(`form(${name}): version banner says v5.9.0`, /Form initialised v5\.9\.0/.test(f));
   }
 
   console.log('');

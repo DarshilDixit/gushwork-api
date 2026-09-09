@@ -288,6 +288,65 @@ async function initDB() {
       console.error('[DB] Form-page-views table init FAILED (non-fatal):', err.message);
     }
 
+    /* Append-only log of the identity fields changing on a lead row.
+
+       Both upserts are last-write-wins: 35 columns are
+       COALESCE(EXCLUDED.x, leads.x), and only hear_about_us_raw keeps the
+       first value. So a visitor who reaches step 2, goes back and edits
+       their email, and submits again silently replaces who the row is
+       about. The old value is gone and nothing anywhere records that it
+       existed -- which on 9 Sep 2026 meant a lead row reading one address
+       while the Slack post, the Salesforce Lead and the Meta event had all
+       gone out under a different one.
+
+       SEVEN FIELDS ONLY: the ones that change WHO the lead is. The other
+       28 last-write-wins columns are enrichment and attribution, where
+       last-write-wins is the right behaviour and a change log would be
+       noise.
+
+       A CHANGE, NOT A FIRST SET. A row is written only when the old value
+       and the new value are both non-null and differ. Recording the
+       initial set of every field would roughly double the table and carry
+       no signal -- nobody needs telling that a blank became a value.
+
+       booking_uid_present is read from BEFORE the upsert, so it answers
+       the question that actually matters: had this person already booked
+       when they changed it? Somebody switching email after taking a
+       calendar slot is a different event from somebody fixing a typo at
+       step 1.
+
+       NOT A TRIGGER, deliberately. A BEFORE UPDATE trigger would catch
+       every write path including the booking routes and backfill-sf.js,
+       and needs no application change at all -- but it puts behaviour
+       somewhere a grep of this repo will never find it. Three separate
+       times in one investigation the answer turned out to be in a place
+       nobody could grep: the Webflow site-wide script, the Webflow script
+       pin, and deploy logs that had rolled off. The CTE is more code and
+       stays visible. */
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS lead_field_changes (
+          id                  BIGSERIAL PRIMARY KEY,
+          session_id          TEXT NOT NULL,
+          field               TEXT NOT NULL,
+          old_value           TEXT,
+          new_value           TEXT,
+          source_route        TEXT NOT NULL,
+          step_reached        INT,
+          booking_uid_present BOOLEAN NOT NULL DEFAULT false,
+          changed_at          TIMESTAMPTZ DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS lead_field_changes_session_idx
+          ON lead_field_changes (session_id, changed_at);
+        CREATE INDEX IF NOT EXISTS lead_field_changes_changed_idx
+          ON lead_field_changes (changed_at);
+      `);
+      console.log('[DB] Lead-field-changes table ready');
+    } catch (err) {
+      console.error('[DB] Lead-field-changes table init FAILED (non-fatal):', err.message);
+    }
+
     /* -------------------------------------------------------
        EMAIL VERIFICATIONS — the ELV verdict, keyed by email
 
