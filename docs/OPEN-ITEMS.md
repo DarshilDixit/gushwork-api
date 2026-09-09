@@ -190,12 +190,27 @@ a fix on one is a fix on one third. `tests/test-batch1-e2e.js` still needs
 `DATABASE_URL` and is still not in the bar; whether to bring it in is
 still a real decision about the bar, not a tidy-up.
 
-### 12. Two live pages load the form script by mistake — the fix is REMOVAL
+### 12. Two live pages loaded the form script by mistake — REMOVED AND VERIFIED 9 Sept 2026
 
 Found 10 Sept 2026 by sweeping every form page after a Webflow republish,
-not by anything in this repo. Both are page-level script tags, which a
-Project-Settings republish does not touch. **Darshil is removing both tags
-rather than repinning them** — neither page is supposed to carry the form.
+not by anything in this repo. Both were page-level script tags, which a
+Project-Settings republish does not touch. **Both tags were removed rather
+than repinned** — neither page is supposed to carry the form.
+
+**Verified after the republish:** a sweep of all fourteen URLs shows the
+twelve real form pages on `5d3bbb14…` and `/meeting-booked` and `/careers`
+serving no `gushwork-form` reference at all. The full path list in
+`form_sessions` confirms the sweep is complete — the only other entry is
+`/demo#`, which is `/demo` with a fragment (1 session, 21 Aug).
+
+The database side is corroborating but was still thin at the time of
+writing: zero sessions from either page in the 30 minutes after the
+republish, against an expected rate of roughly 1.4/hour for `/careers` and
+0.5/hour for `/meeting-booked`. At those rates a quiet hour proves little,
+and Webflow's own CDN may serve a cached page briefly, so a trickle
+immediately afterwards would not have meant the removal failed. **The
+served HTML is the proof; the row counts confirm it over a day**, where ~34
+and ~12 sessions respectively would otherwise have been expected.
 
 An earlier draft of this entry called `/meeting-booked` "a working lead
 form six months out of date" and suggested repinning it. That was wrong on
