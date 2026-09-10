@@ -2469,6 +2469,41 @@ async function section12() {
      other assertion in all ten suites. arrived_step wins because it is
      the more specific truth: the write itself came from step 1, which
      is a stronger statement than "the row had not got to step 2 yet". */
+  /* ── the sell_to clarification: 18 of the 27 rows in the table ──
+     Every one of them was reading as a prospect edit until 10 Sep 2026.
+     sell_to is a radio button, and this exact string is composed by
+     handleDisqualifiedNext, not chosen by anyone. */
+  eq('ladder: B2C -> the clarified label is ours',
+     A('sell_to', 'B2C', 'B2B (clarified from B2C)', 1, 1), 'ours_sell_to_clarified');
+  eq('ladder: Mixed -> the clarified label is ours',
+     A('sell_to', 'Mixed', 'B2B (clarified from Mixed)', 1, 1), 'ours_sell_to_clarified');
+  /* One real row today, and its own bug — see OPEN-ITEMS item 14. The
+     rule matches by composition, so it covers the nested form for free. */
+  eq('ladder: the compounded form is ours too',
+     A('sell_to', 'B2B (clarified from Mixed)', 'B2B (clarified from B2B (clarified from Mixed))', 1, 1),
+     'ours_sell_to_clarified');
+  /* Matched by COMPOSITION, not by field. Somebody going back and
+     picking a different radio is a real change and must keep alerting. */
+  eq('ladder: a genuine switch between options is still the prospect',
+     A('sell_to', 'B2B', 'B2C', 1, 1), 'prospect_edit');
+  eq('ladder: a clarified-looking value that is not OUR composition is still the prospect',
+     A('sell_to', 'B2C', 'B2B (clarified from Mixed)', 1, 1), 'prospect_edit');
+  ok('ladder: the clarification is suppressed from Slack',
+     I.LEAD_CHANGE_ALERTABLE.indexOf('ours_sell_to_clarified') === -1);
+  ok('ladder: and is a declared state', I.LEAD_CHANGE_ATTRIBUTIONS.indexOf('ours_sell_to_clarified') !== -1);
+
+  /* THREE COPIES OF ONE LITERAL. The server now depends on the exact
+     string both form files compose; change the wording in either and
+     every clarification silently starts alerting as a prospect edit
+     again. Same shape as the three lists and the label map. */
+  const formSrc  = fs.readFileSync(path.join(__dirname, '..', 'gushwork-form.js'), 'utf8');
+  const popupSrc = fs.readFileSync(path.join(__dirname, '..', 'gushwork-form-popup.js'), 'utf8');
+  const composed = "formState.sell_to = 'B2B (clarified from ' + formState.sell_to + ')';";
+  ok('sync: gushwork-form.js composes the exact string the server matches', formSrc.includes(composed));
+  ok('sync: gushwork-form-popup.js composes it identically', popupSrc.includes(composed));
+  ok('sync: and the server prefix is that same literal',
+     /const SELL_TO_CLARIFIED_PREFIX = 'B2B \(clarified from ';/.test(src));
+
   eq('ladder: arrived_step outranks prev_step when both say it was us',
      A('website', 'a.com', 'b.com', 1, 1), 'ours_earlier_step');
   eq('ladder: one host containing the other could be our canonical resolution',

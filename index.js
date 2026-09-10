@@ -4067,6 +4067,7 @@ app.get('/monitor', (req, res) => {
   'if(a==="maybe_our_canonical")return "<span class=\\"badge bw\\">them, or our own check resolved it</span>";' +
   'if(a==="ours_earlier_step")return "<span style=\\"color:#999\\">us \\u2014 filled in before they saw the field</span>";' +
   'if(a==="ours_replacing_guess")return "<span style=\\"color:#999\\">us \\u2014 they typed over our guess</span>";' +
+  'if(a==="ours_sell_to_clarified")return "<span style=\\"color:#999\\">us \\u2014 they said \\u201cactually B2B\\u201d</span>";' +
   'return esc(a);}' +
   /* Where in the form. Only shown when it says something: a step-2 field
      written by a step-1 request is the shape of the datapartnerinc bug,
@@ -8883,10 +8884,13 @@ function identityHostsAreNested(a, b) {
 }
 
 /* ── WHO changed it: us, or the prospect? ────────────────────────
-   Four values, mutually exclusive and exhaustive, first match wins --
+   Five values, mutually exclusive and exhaustive, first match wins --
    the same shape as the stage ladder. Any change is exactly one of
    these. If you add a value it goes in the ladder or it does not exist.
 
+   0. ours_sell_to_clarified — the exact label our own disqualified step
+                             composes when someone says "actually B2B".
+                             18 of the 27 rows in the table.
    1. ours_earlier_step    — a step-2 field changed by a write that
                              arrived at step 1. The step-2 inputs are not
                              on screen, and formState only picks up their
@@ -8906,10 +8910,10 @@ function identityHostsAreNested(a, b) {
                              separable from what we store.
    4. prospect_edit        — everything else. The person changed it.
 
-   ONLY 1 AND 2 ARE SUPPRESSED FROM SLACK. maybe_our_canonical still
+   ONLY 0, 1 AND 2 ARE SUPPRESSED FROM SLACK. maybe_our_canonical still
    alerts, marked as uncertain in the text: dropping a possible real edit
    silently is worse than one extra line an SDR can read past. */
-const LEAD_CHANGE_ATTRIBUTIONS = ['ours_earlier_step', 'ours_replacing_guess', 'maybe_our_canonical', 'prospect_edit'];
+const LEAD_CHANGE_ATTRIBUTIONS = ['ours_sell_to_clarified', 'ours_earlier_step', 'ours_replacing_guess', 'maybe_our_canonical', 'prospect_edit'];
 const LEAD_CHANGE_ALERTABLE    = ['maybe_our_canonical', 'prospect_edit'];
 
 /* ONE definition, used by BOTH Slack surfaces -- the line appended to
@@ -8925,8 +8929,42 @@ function alertableIdentityChanges(changes) {
   return changes.filter((c) => !c || !c.attribution || LEAD_CHANGE_ALERTABLE.indexOf(c.attribution) !== -1);
 }
 
+/* The exact string our own code composes when a visitor who picked B2C
+   or Mixed at step 1 then says "actually we are B2B" on the disqualified
+   step: handleDisqualifiedNext in gushwork-form.js does
+   sell_to = 'B2B (clarified from ' + sell_to + ')'. The visitor made a
+   real choice, but they did not change the sell_to VALUE -- the radio
+   still says what they first picked, and our code composed a new label
+   out of both answers.
+
+   Measured 10 Sep 2026: this is 18 of the 27 rows in the whole table,
+   the single largest source, every one of them on /partial at step 1
+   and every one previously reading as a prospect edit. sell_to is a
+   radio button; nobody retypes it.
+
+   MATCHED BY EXACT COMPOSITION, not by field. A real switch between
+   options -- somebody going back and picking a different radio -- is a
+   genuine change and must keep alerting, and this shape cannot be
+   produced by choosing one. It also matches the compounded form
+   'B2B (clarified from B2B (clarified from Mixed))', which is one real
+   row today and its own bug, noted in docs/OPEN-ITEMS.md item 14.
+
+   THE LITERAL IS DUPLICATED IN THE TWO FORM FILES, so this is a
+   fourth pair that must stay in sync -- change the wording there and
+   every clarification starts alerting as a prospect edit again. A test
+   asserts all three copies match. */
+const SELL_TO_CLARIFIED_PREFIX = 'B2B (clarified from ';
+
+function isSellToClarification(from, to) {
+  return String(to) === SELL_TO_CLARIFIED_PREFIX + String(from) + ')';
+}
+
 function identityChangeAttribution(field, from, to, arrivedStep, prevStep) {
   const fieldStep = LEAD_IDENTITY_FIELD_STEP[field] || 1;
+  /* First because it is the most specific match, not because it
+     outranks anything: sell_to is a step-1 field, so neither step rung
+     below can fire on it and the three cannot overlap. */
+  if (field === 'sell_to' && isSellToClarification(from, to)) return 'ours_sell_to_clarified';
   if (arrivedStep != null && arrivedStep < fieldStep) return 'ours_earlier_step';
   if (prevStep    != null && prevStep    < fieldStep) return 'ours_replacing_guess';
   if (field === 'website' && identityHostsAreNested(from, to)) return 'maybe_our_canonical';

@@ -372,6 +372,35 @@ const NO_CHANGE  = Object.assign({}, CHANGED, { prev_email: CHANGED.email, prev_
   ok('attribution: and says on the line that it might be our own check',
      /own check resolved it/.test(followUp(nested)), followUp(nested).slice(0, 300));
 
+  /* ── the sell_to clarification, driven ──────────────────────────
+     18 of the 27 rows in the real table on 10 Sep 2026, all of them on
+     /partial at step 1, all of them reading as a prospect edit. The
+     visitor picked B2C or Mixed on the radio, was shown the
+     disqualified step, and clicked "actually we are B2B";
+     handleDisqualifiedNext composed the new label. They made a choice;
+     they did not change the value. */
+  const CLARIFIED = Object.assign({}, CHANGED, {
+    prev_email: CHANGED.email, prev_company: CHANGED.company,
+    prev_sell_to: 'Mixed', sell_to: 'B2B (clarified from Mixed)', prev_step_reached: 1,
+  });
+  quiet(); const clar = await drive('/submit', CLARIFIED, false, ALREADY); loud();
+  const clarCh = clar.queries.find((q) => q.kind === 'changes');
+  ok('sell_to: the clarification is still RECORDED', !!clarCh);
+  eq('sell_to: labelled as ours, not a prospect edit',
+     ((clarCh || { params: [] }).params[10] || []).join(','), 'ours_sell_to_clarified');
+  ok('sell_to: and posts no follow-up', followUp(clar) === '', followUp(clar).slice(0, 160));
+
+  /* A genuine switch between radio options must still alert. */
+  const SWITCHED = Object.assign({}, CHANGED, {
+    prev_email: CHANGED.email, prev_company: CHANGED.company,
+    prev_sell_to: 'B2B', sell_to: 'B2C', prev_step_reached: 1,
+  });
+  quiet(); const sw = await drive('/submit', SWITCHED, false, ALREADY); loud();
+  const swCh = sw.queries.find((q) => q.kind === 'changes');
+  eq('sell_to: a real switch between options is still the prospect',
+     ((swCh || { params: [] }).params[10] || []).join(','), 'prospect_edit');
+  ok('sell_to: and still posts the follow-up', followUp(sw).length > 0);
+
   /* ── back navigation ────────────────────────────────────────────
      A step-1 /partial landing on a row already at step 2. Derivable
      only because prev_step is read from BEFORE the upsert; step_reached

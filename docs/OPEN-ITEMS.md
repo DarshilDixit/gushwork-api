@@ -318,6 +318,48 @@ nobody re-derives them:
   or a second tab looks the same. **To separate them** the form would have
   to send that flag on `/partial` — again a re-pin.
 
+### 14. The "actually B2B" clarification re-wraps its own output
+
+**Found 10 Sept 2026** while checking what was producing 18 of the 27
+rows in `lead_field_changes`. Not fixed — it lives in the two form files,
+so it needs a Webflow re-pin, and it is cosmetic rather than costly.
+
+`handleDisqualifiedNext` (`gushwork-form.js:2130`,
+`gushwork-form-popup.js:2538`) composes the label from whatever `sell_to`
+currently holds:
+
+```js
+formState.sell_to = 'B2B (clarified from ' + formState.sell_to + ')';
+```
+
+Reaching that branch twice without an intervening `handleStep1Next` — a
+browser-back to the disqualified step and a second click on "actually
+B2B" — wraps the label again. **One real row today:**
+
+```
+B2B (clarified from Mixed) -> B2B (clarified from B2B (clarified from Mixed))
+```
+
+`_submitting` stops a double-click but not a popstate return, because the
+`finally` has already cleared it and `initBrowserBack` re-shows the step.
+
+**Cost is low and bounded.** `sell_to` is capped at 50 characters
+server-side, so a third wrap truncates rather than growing without limit;
+nothing keys or filters on the string; and the SDR still reads "B2B". The
+attribution rule matches by composition, so the nested form is already
+labelled `ours_sell_to_clarified` and does not alert.
+
+**If it is ever fixed**, the fix is to compose from the ORIGINAL radio
+value rather than from `formState.sell_to` — keep the first pick in its
+own field and build the label from that. Both files, so both pins.
+
+**The literal is now load-bearing in three places** —
+`gushwork-form.js`, `gushwork-form-popup.js` and
+`SELL_TO_CLARIFIED_PREFIX` in `index.js`. Change the wording in any one
+and every clarification starts alerting as a prospect edit again. A test
+asserts all three match; add it to the sync list in `CLAUDE.md` if that
+list is ever restructured.
+
 ---
 
 ## Decided
