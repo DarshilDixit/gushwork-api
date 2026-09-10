@@ -152,8 +152,9 @@ const NO_CHANGE  = Object.assign({}, CHANGED, { prev_email: CHANGED.email, prev_
     quiet(); const good = await drive(route, CHANGED, false); loud();
     const ch = good.queries.find((q) => q.kind === 'changes');
     ok(`${route}: a change row was written`, !!ch);
-    if (ch) {
-      const [sid, src, step, booked, arrived, prevStep, backNav, fields, olds, news, attrs, fsteps] = ch.params;
+    {
+      const P = (ch || { params: [] }).params;
+      const [sid, src, step, booked, arrived, prevStep, backNav, fields = [], olds = [], news = [], attrs = [], fsteps = []] = P;
       eq(`${route}: session_id`, sid, BODY.session_id);
       eq(`${route}: source_route names the route`, src, route);
       eq(`${route}: booking_uid_present read from BEFORE the upsert`, booked, true);
@@ -326,7 +327,7 @@ const NO_CHANGE  = Object.assign({}, CHANGED, { prev_email: CHANGED.email, prev_
   quiet(); const realw = await drive('/submit', REAL_WEBSITE, false, ALREADY); loud();
   const realCh = realw.queries.find((q) => q.kind === 'changes');
   ok('fold: a real domain change on the SAME field still records', !!realCh);
-  if (realCh) eq('fold: recorded as the prospect editing it', realCh.params[10].join(','), 'prospect_edit');
+  eq('fold: recorded as the prospect editing it', ((realCh || { params: [] }).params[10] || []).join(','), 'prospect_edit');
   ok('fold: and still posts the follow-up', followUp(realw).length > 0);
 
   /* A path change is not formatting either. */
@@ -350,10 +351,9 @@ const NO_CHANGE  = Object.assign({}, CHANGED, { prev_email: CHANGED.email, prev_
   quiet(); const guess = await drive('/submit', OVER_GUESS, false, ALREADY); loud();
   const guessCh = guess.queries.find((q) => q.kind === 'changes');
   ok('attribution: typing over an Apollo guess is still RECORDED', !!guessCh);
-  if (guessCh) {
-    eq('attribution: labelled as ours, not a prospect edit', guessCh.params[10].join(','), 'ours_replacing_guess');
-    eq('attribution: prev_step recorded', guessCh.params[5], 1);
-  }
+  eq('attribution: labelled as ours, not a prospect edit',
+     ((guessCh || { params: [] }).params[10] || []).join(','), 'ours_replacing_guess');
+  eq('attribution: prev_step recorded', (guessCh || { params: [] }).params[5], 1);
   ok('attribution: and posts no follow-up', followUp(guess) === '', followUp(guess).slice(0, 160));
 
   /* A subdomain move is the exact shape domainsMatch accepts before
@@ -366,7 +366,8 @@ const NO_CHANGE  = Object.assign({}, CHANGED, { prev_email: CHANGED.email, prev_
   });
   quiet(); const nested = await drive('/submit', NESTED, false, ALREADY); loud();
   const nestedCh = nested.queries.find((q) => q.kind === 'changes');
-  if (nestedCh) eq('attribution: a subdomain move is labelled uncertain', nestedCh.params[10].join(','), 'maybe_our_canonical');
+  eq('attribution: a subdomain move is labelled uncertain',
+     ((nestedCh || { params: [] }).params[10] || []).join(','), 'maybe_our_canonical');
   ok('attribution: an uncertain change STILL posts, rather than being dropped', followUp(nested).length > 0);
   ok('attribution: and says on the line that it might be our own check',
      /own check resolved it/.test(followUp(nested)), followUp(nested).slice(0, 300));

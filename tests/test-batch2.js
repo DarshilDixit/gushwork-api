@@ -2463,6 +2463,14 @@ async function section12() {
      A('website', 'a.com', 'b.com', 1, 2), 'ours_earlier_step');
   eq('ladder: a step-2 field on a row that had only reached step 1 is them filling it in',
      A('website', 'apollo-guess.com', 'typed.com', 2, 1), 'ours_replacing_guess');
+  /* BOTH ours_* conditions hold here, so only the ORDER decides which
+     label the row gets. Without this case the two rungs are swappable
+     and nothing notices -- measured: swapping them survived every
+     other assertion in all ten suites. arrived_step wins because it is
+     the more specific truth: the write itself came from step 1, which
+     is a stronger statement than "the row had not got to step 2 yet". */
+  eq('ladder: arrived_step outranks prev_step when both say it was us',
+     A('website', 'a.com', 'b.com', 1, 1), 'ours_earlier_step');
   eq('ladder: one host containing the other could be our canonical resolution',
      A('website', 'acme.com', 'shop.acme.com', 2, 2), 'maybe_our_canonical');
   eq('ladder: an unrelated domain cannot be ours — domainsMatch would have refused it',
@@ -2507,13 +2515,18 @@ async function section12() {
                                     website: 'https://othercorp.io/' }), { arrived_step: 2 }).changes.length, 1);
   eq('diff: a first set is still not a change',
      I.diffLeadIdentityFields(row({ prev_website: null, website: 'acme.com' }), { arrived_step: 2 }).changes.length, 0);
+  /* Indexed defensively. A mutation that empties `changes` must FAIL
+     this assertion, not throw out of the suite -- a crash prints no
+     totals and reads as UNMEASURED, which is neither a catch nor a
+     clean run. Caught doing exactly that while mutation-testing the
+     www. fold. */
   eq('diff: each change carries its field step',
-     I.diffLeadIdentityFields(row({ prev_website: 'a.com', website: 'b.com' }), { arrived_step: 2 }).changes[0].field_step, 2);
+     (I.diffLeadIdentityFields(row({ prev_website: 'a.com', website: 'b.com' }), { arrived_step: 2 }).changes[0] || {}).field_step, 2);
   ok('diff: back navigation is arrived < prev, read from before the upsert',
      I.diffLeadIdentityFields(row({ prev_email: 'a@x.com', email: 'b@y.com' }), { arrived_step: 1 }).backNavigation === true &&
      I.diffLeadIdentityFields(row({ prev_email: 'a@x.com', email: 'b@y.com' }), { arrived_step: 2 }).backNavigation === false);
   ok('diff: RAW values are stored, only the comparison is folded',
-     I.diffLeadIdentityFields(row({ prev_website: 'a.com', website: 'HTTPS://B.com/' }), { arrived_step: 2 }).changes[0].to === 'HTTPS://B.com/');
+     (I.diffLeadIdentityFields(row({ prev_website: 'a.com', website: 'HTTPS://B.com/' }), { arrived_step: 2 }).changes[0] || {}).to === 'HTTPS://B.com/');
 }
 
 /* ============================================================
