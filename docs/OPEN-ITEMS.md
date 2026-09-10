@@ -255,6 +255,69 @@ window — sessions that could never produce a lead. That biases toward a
 **false red**, which is the safe direction for a health check, and it stops
 entirely once the tags are gone.
 
+### 13. `/partial` stores an Apollo-derived website that `/submit` then overwrites
+
+**Opened 10 Sept 2026**, out of the false-positive follow-up alert for
+`www.datapartnerinc.com` → `https://www.datapartnerinc.com/`. The alert
+itself is fixed; the thing that produced the two spellings is not, and that
+half was deliberately deferred.
+
+**What happens.** Two different pieces of our own code write two different
+representations of one website, one round trip apart, and the visitor may
+have typed neither:
+
+- **Step 1, `/partial`.** `applyEnrichment` (`gushwork-form.js:1999`) takes
+  Apollo's `website_url`, strips the scheme and any trailing slash, and puts
+  it in `formState`. `savePartial(1)` posts the whole `formState`, so that
+  cleaned guess reaches `/partial` and lands in `leads.website` — even
+  though website is a step-2 field the visitor has not seen yet.
+- **Step 2, `/submit`.** `handleStep2Next` (`gushwork-form.js:2188`)
+  replaces it with the website check's `canonical_url`, which is
+  `response.url` (`index.js:5453`) and therefore absolute, with a trailing
+  slash on the root.
+
+**It is not only the change log.** `leads.website` genuinely flips value, so
+the new spelling also goes to the AWS mirror through `syncToAWS`, to
+Salesforce through `pushToSalesforce`, and onto the SDR's screen — and where
+Apollo's guess and the typed answer are different *domains*, not just
+different spellings, the row shows Apollo's guess to anyone who looks
+between step 1 and step 2. The comparator fix makes the log honest about
+this; it does not stop it happening.
+
+**Two candidate approaches, neither taken:**
+
+1. **Stop `/partial` sending the enrichment-derived website at all.** The
+   most honest — a field the visitor has not seen has no answer yet, and
+   `leads.website` would only ever hold something they saw. Costs the
+   website of every lead who drops between step 1 and step 2, which is a
+   real loss for the SDR list. **Needs a Webflow re-pin** (both form files).
+2. **Normalise on write so both steps store the same shape.** Cheapest, and
+   server-side only, so **no re-pin** — `/partial` and `/submit` would both
+   run the value through one normaliser before the upsert. Does not fix the
+   Apollo-guess-versus-typed-answer case at all, only the spelling.
+
+**Both move stored data.** Historical `leads.website` values are a mix of
+the two shapes today, so either approach makes new rows disagree with old
+ones — the same trade as the internal addresses and the 853 stray session
+rows above. Nothing should be backfilled without deciding that separately.
+
+**Two things that are NOT separable from what we store**, recorded so
+nobody re-derives them:
+
+- **A website change where one host contains the other** —
+  `acme.com` → `shop.acme.com`. `domainsMatch` (`gushwork-form.js:1008`)
+  accepts exactly that shape before storing a `canonical_url`, so our own
+  redirect-following and a person typing a different subdomain are
+  identical in the column. Logged as `maybe_our_canonical` and still
+  alerted, marked. **To separate them** the form would have to send the
+  typed value alongside the resolved one (`website_typed`) or a
+  `website_canonicalised` boolean — a form change, so a Webflow re-pin.
+- **Whether a lower step arriving after a higher one was browser-back.**
+  `back_navigation` records that it happened; `_isPopstateNav`
+  (`gushwork-form.js:287`) is client-side only and never sent, so a reload
+  or a second tab looks the same. **To separate them** the form would have
+  to send that flag on `/partial` — again a re-pin.
+
 ---
 
 ## Decided

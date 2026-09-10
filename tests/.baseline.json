@@ -1,9 +1,9 @@
 {
-  "savedAt": "2026-09-09T19:55:50.740Z",
-  "grandTotal": 2326,
+  "savedAt": "2026-09-10T13:53:46.398Z",
+  "grandTotal": 2403,
   "suites": {
     "test-batch1.js": 109,
-    "test-batch2.js": 539,
+    "test-batch2.js": 590,
     "test-batch-a.js": 315,
     "test-ads-parity.js": 172,
     "test-partnerstack.js": 991,
@@ -11,6 +11,6 @@
     "test-submit-gate.js": 14,
     "test-session-payload.js": 21,
     "test-session-page-views.js": 23,
-    "test-lead-field-changes.js": 72
+    "test-lead-field-changes.js": 98
   }
 }

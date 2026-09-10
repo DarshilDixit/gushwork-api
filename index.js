@@ -1397,15 +1397,35 @@ function slackSubmit(d) {
      Covering the first order needs a message outside this gate, which is
      a separate decision about whether a second notification for one
      person is worth the noise. */
+  /* ONLY CHANGES THE PROSPECT COULD HAVE MADE. On 10 Sep 2026 this
+     alerted for www.datapartnerinc.com -> https://www.datapartnerinc.com/
+     with the visitor having touched nothing: our own two normalisations,
+     one round trip apart. The fold in normaliseIdentityValue keeps that
+     pair from reaching here at all; LEAD_CHANGE_ALERTABLE keeps the rest
+     of our own writes -- enrichment filling a step-2 field from step 1,
+     and a typed value landing over an Apollo guess -- from reading as an
+     edit. Both are still recorded in lead_field_changes and still shown
+     on the dashboard, labelled; they are just not worth waking an SDR
+     for. maybe_our_canonical DOES still alert, marked uncertain, because
+     silently dropping a possible real edit is the worse failure. */
   if (d.changed_after_booking === true && Array.isArray(d.identity_changes) && d.identity_changes.length > 0) {
-    const lines = d.identity_changes
-      .map((c) => `${LEAD_FIELD_LABELS[c.field] || c.field}: ${c.from} \u2192 ${c.to}`)
-      .join('\n');
-    const chf = bFields([{
-      label: '🔄 Changed after booking',
-      value: `${lines}\n→ They already had a call booked when they changed this, so anything sent about them earlier used the old details.`,
-    }]);
-    if (chf) blocks.push(chf);
+    /* Inside the guard on purpose: an ordinary lead has no
+       identity_changes at all and must not pay for this, and the
+       slackSubmit sandbox in tests/test-batch2.js lifts this function
+       alone -- a call evaluated unconditionally at the top would throw
+       there and silently truncate every block after it. */
+    const alertable = alertableIdentityChanges(d.identity_changes);
+    if (alertable.length > 0) {
+      const lines = alertable
+        .map((c) => `${LEAD_FIELD_LABELS[c.field] || c.field}: ${c.from} \u2192 ${c.to}`
+                    + (c.attribution === 'maybe_our_canonical' ? ' (or our own check resolved it \u2014 worth an eye)' : ''))
+        .join('\n');
+      const chf = bFields([{
+        label: '🔄 Changed after booking',
+        value: `${lines}\n→ They already had a call booked when they changed this, so anything sent about them earlier used the old details.`,
+      }]);
+      if (chf) blocks.push(chf);
+    }
   }
   /* Its own block, not a field: the fields above render as a two-column
      grid and a paragraph of prose destroys that layout. */
@@ -1489,7 +1509,10 @@ function slackIdentityChangedAfterBooking(d) {
   ));
   const cf = bFields([{
     label: '🔄 What changed',
-    value: d.changes.map((c) => `${LEAD_FIELD_LABELS[c.field] || c.field}: ${c.from} \u2192 ${c.to}`).join('\n'),
+    value: alertableIdentityChanges(d.changes)
+      .map((c) => `${LEAD_FIELD_LABELS[c.field] || c.field}: ${c.from} \u2192 ${c.to}`
+                  + (c.attribution === 'maybe_our_canonical' ? ' (or our own check resolved it \u2014 worth an eye)' : ''))
+      .join('\n'),
   }]);
   if (cf) blocks.push(cf);
   const nf = bFields([
@@ -3013,7 +3036,9 @@ app.get('/monitor/lead-changes', async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT field, old_value, new_value, source_route, step_reached,
-              booking_uid_present, changed_at
+              booking_uid_present, changed_at,
+              attribution, field_step, arrived_step, prev_step,
+              back_navigation, hit_no
          FROM lead_field_changes
         WHERE session_id = $1
         ORDER BY changed_at, id
@@ -4030,9 +4055,28 @@ app.get('/monitor', (req, res) => {
   'h+="<tr><td style=\\"color:#999;white-space:nowrap;padding:2px 6px 2px 0\\">"+et(c.changed_at)+"</td>"' +
   '+"<td style=\\"padding:2px 6px 2px 0\\"><b>"+esc(c.field)+"</b></td>"' +
   '+"<td style=\\"padding:2px 6px 2px 0\\">"+esc(c.old_value||"\\u2014")+" \\u2192 "+esc(c.new_value||"\\u2014")+"</td>"' +
-  '+"<td style=\\"color:#999;padding:2px 6px 2px 0\\">"+esc(c.source_route||"")+"</td>"' +
+  '+"<td style=\\"padding:2px 6px 2px 0\\">"+ATTR(c.attribution)+"</td>"' +
+  '+"<td style=\\"color:#999;padding:2px 6px 2px 0;white-space:nowrap\\">"+esc(c.source_route||"")+WHERE_(c)+"</td>"' +
   '+"<td style=\\"padding:2px 0\\">"+(c.booking_uid_present?"<span class=\\"badge bx\\">after booking</span>":"")+"</td></tr>";}' +
   'el.innerHTML=h+"</table>";}).catch(un);}' +
+  /* Plain language, read by SDRs. An unlabelled row is one written
+     before 10 Sep 2026, when nothing recorded who made the change -- it
+     says so rather than claiming the prospect did it. */
+  'function ATTR(a){if(!a)return "<span style=\\"color:#999\\">not recorded</span>";' +
+  'if(a==="prospect_edit")return "<span class=\\"badge bx\\">they changed it</span>";' +
+  'if(a==="maybe_our_canonical")return "<span class=\\"badge bw\\">them, or our own check resolved it</span>";' +
+  'if(a==="ours_earlier_step")return "<span style=\\"color:#999\\">us \\u2014 filled in before they saw the field</span>";' +
+  'if(a==="ours_replacing_guess")return "<span style=\\"color:#999\\">us \\u2014 they typed over our guess</span>";' +
+  'return esc(a);}' +
+  /* Where in the form. Only shown when it says something: a step-2 field
+     written by a step-1 request is the shape of the datapartnerinc bug,
+     and the hit number tells a reload apart from one sitting. */
+  'function WHERE_(c){var b=[];' +
+  'if(c.arrived_step!=null&&c.field_step!=null&&c.arrived_step<c.field_step)b.push("step "+c.field_step+" field, written at step "+c.arrived_step);' +
+  'else if(c.arrived_step!=null)b.push("at step "+c.arrived_step);' +
+  'if(c.back_navigation===true)b.push("came back from step "+c.prev_step);' +
+  'if(c.hit_no!=null&&c.hit_no>1)b.push("page load "+c.hit_no);' +
+  'return b.length?"<div style=\\"color:#999;font-size:10px\\">"+esc(b.join(" \\u00b7 "))+"</div>":"";}' +
   'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,product=document.getElementById("fproduct").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
   'var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"page="+curPage+"&stage="+stage+"&sort="+curSort+"&dir="+curDir;' +
   'if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(product&&product!=="all")url+="&product="+encodeURIComponent(product);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;' +
@@ -8767,12 +8811,142 @@ const LEAD_FIELD_LABELS = {
   first_name: 'First name', last_name: 'Last name', sell_to: 'Sells to',
 };
 
+/* Which step of the form each field lives on. Load-bearing, not
+   documentation: a step-2 field arriving on a step-1 write cannot have
+   been typed by the visitor, because the step-2 inputs are not on screen
+   yet. That is the whole basis of the ours_earlier_step attribution
+   below. Matches validateStep1 / validateStep2 in gushwork-form.js. */
+const LEAD_IDENTITY_FIELD_STEP = {
+  email: 1, sell_to: 1,
+  company: 2, website: 2, phone: 2, first_name: 2, last_name: 2,
+};
+
+/* ── What counts as a DIFFERENCE ─────────────────────────────────
+   Fold exactly what our own code varies, and nothing more. The
+   comparator's job is to undo OUR transformations, not to guess what a
+   human meant, so each field folds only what some line in this repo
+   actually changes about it:
+
+     website  — scheme, a leading www., host case and a trailing slash.
+                /partial stores Apollo's website_url with the scheme
+                stripped (gushwork-form.js applyEnrichment); /submit
+                stores the website check's canonical_url, which is
+                response.url and therefore absolute with a trailing
+                slash on the root. On 10 Sep 2026 that pair alerted as
+                "changed after booking" for www.datapartnerinc.com ->
+                https://www.datapartnerinc.com/ with the visitor having
+                touched nothing.
+     phone    — punctuation. intlTelInput gives E.164, but the fallback
+                at gushwork-form.js handleStep2Next sends the raw value
+                when utils.js has not loaded, so one session can write
+                "+91 63886 39290" and then "+916388639290".
+     email    — case and whitespace. Both routes already lowercase before
+                the upsert so this is a no-op today; it is here so the
+                comparator does not start lying if that ever moves.
+     the rest — whitespace only. NOTHING in this repo recases a company
+                or a person's name, so "acme inc" -> "Acme Inc" is the
+                person's own edit and stays a change.
+
+   THE PATH AND THE SUBDOMAIN SURVIVE ON PURPOSE. Only a bare trailing
+   slash is stripped and only a leading www. is folded, so
+   acme.com -> acme.com/uk and acme.com -> shop.acme.com are both still
+   changes. Folding either would hide a real one. */
+function normaliseIdentityValue(field, value) {
+  const v = String(value == null ? '' : value).trim();
+  if (field === 'website') {
+    const bare  = v.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+    const slash = bare.indexOf('/');
+    /* Host only. A URL path IS case-sensitive and nothing here recases
+       one, so lowercasing the whole string would fold acme.com/UK into
+       acme.com/uk and lose a real difference. */
+    const host  = (slash === -1 ? bare : bare.slice(0, slash)).toLowerCase().replace(/^www\./, '');
+    return host + (slash === -1 ? '' : bare.slice(slash));
+  }
+  if (field === 'email') return v.toLowerCase();
+  if (field === 'phone') return v.replace(/[^0-9]/g, '');
+  return v.replace(/\s+/g, ' ');
+}
+
+/* One host contains the other. This is the exact shape domainsMatch in
+   gushwork-form.js accepts before it will store a canonical_url, so a
+   website change of this shape MIGHT be our own resolution following a
+   redirect and might equally be the person typing a different
+   subdomain. Nothing we store separates the two -- see
+   docs/OPEN-ITEMS.md item 13 -- so it is labelled honestly rather than
+   guessed at. A change to an unrelated domain cannot be ours: the
+   canonical is thrown away when domainsMatch fails. */
+function identityHostsAreNested(a, b) {
+  const host = (x) => normaliseIdentityValue('website', x).split('/')[0];
+  const ha = host(a), hb = host(b);
+  if (!ha || !hb || ha === hb) return false;
+  return ha.endsWith('.' + hb) || hb.endsWith('.' + ha);
+}
+
+/* ── WHO changed it: us, or the prospect? ────────────────────────
+   Four values, mutually exclusive and exhaustive, first match wins --
+   the same shape as the stage ladder. Any change is exactly one of
+   these. If you add a value it goes in the ladder or it does not exist.
+
+   1. ours_earlier_step    — a step-2 field changed by a write that
+                             arrived at step 1. The step-2 inputs are not
+                             on screen, and formState only picks up their
+                             typed values inside handleStep2Next, so the
+                             visitor cannot have done this. It is
+                             applyEnrichment or prefillFromURL.
+   2. ours_replacing_guess — a step-2 field changed on a row that had
+                             only reached step 1 before this write. The
+                             old value was therefore written before the
+                             visitor could see the field: this is them
+                             filling the form in, not changing an answer.
+                             Catches the Apollo-guess case even when the
+                             two spellings do not fold.
+   3. maybe_our_canonical  — a website change where one host contains the
+                             other. Could be our canonical resolution
+                             following a redirect, could be them. Not
+                             separable from what we store.
+   4. prospect_edit        — everything else. The person changed it.
+
+   ONLY 1 AND 2 ARE SUPPRESSED FROM SLACK. maybe_our_canonical still
+   alerts, marked as uncertain in the text: dropping a possible real edit
+   silently is worse than one extra line an SDR can read past. */
+const LEAD_CHANGE_ATTRIBUTIONS = ['ours_earlier_step', 'ours_replacing_guess', 'maybe_our_canonical', 'prospect_edit'];
+const LEAD_CHANGE_ALERTABLE    = ['maybe_our_canonical', 'prospect_edit'];
+
+/* ONE definition, used by BOTH Slack surfaces -- the line appended to
+   the lead alert and the standalone follow-up. There are two of them,
+   and filtering only the one you happen to be looking at leaves the
+   other firing on our own writes; the follow-up is the one that
+   actually fired for datapartnerinc on 10 Sep 2026. A change with no
+   attribution at all is a row written before this existed, or a caller
+   that has not been updated -- it alerts, because "we do not know who
+   changed this" must not silently become "we changed it". */
+function alertableIdentityChanges(changes) {
+  if (!Array.isArray(changes)) return [];
+  return changes.filter((c) => !c || !c.attribution || LEAD_CHANGE_ALERTABLE.indexOf(c.attribution) !== -1);
+}
+
+function identityChangeAttribution(field, from, to, arrivedStep, prevStep) {
+  const fieldStep = LEAD_IDENTITY_FIELD_STEP[field] || 1;
+  if (arrivedStep != null && arrivedStep < fieldStep) return 'ours_earlier_step';
+  if (prevStep    != null && prevStep    < fieldStep) return 'ours_replacing_guess';
+  if (field === 'website' && identityHostsAreNested(from, to)) return 'maybe_our_canonical';
+  return 'prospect_edit';
+}
+
 /* ONE definition of what counts as a change, used by both the table and
    the Slack line. Computing it twice would let the two disagree, and a
    Slack post contradicting the change log is worse than no Slack post. */
-function diffLeadIdentityFields(row) {
+function diffLeadIdentityFields(row, ctx) {
   const changes = [];
-  if (!row) return { changes, wasBooked: false };
+  if (!row) return { changes, wasBooked: false, backNavigation: false };
+  /* The step of THIS write, passed in by the route. Deliberately not
+     row.step_reached: that comes back from the upsert's
+     GREATEST(EXCLUDED.step_reached, leads.step_reached), so a step-1
+     /partial landing on a row already at step 2 reads as 2 and the
+     out-of-step signal -- the one that identifies our own enrichment
+     writing a step-2 field -- disappears before anything can see it. */
+  const arrivedStep = ctx && ctx.arrived_step != null ? ctx.arrived_step : null;
+  const prevStep    = row.prev_step_reached == null ? null : row.prev_step_reached;
   for (const f of LEAD_IDENTITY_FIELDS) {
     const before = row['prev_' + f];
     const after  = row[f];
@@ -8780,30 +8954,61 @@ function diffLeadIdentityFields(row) {
        the table to real switches -- otherwise every field of every new
        lead lands here and the switches are lost inside them. */
     if (before == null || after == null) continue;
-    if (String(before) === String(after)) continue;
-    changes.push({ field: f, from: String(before), to: String(after) });
+    /* Compare NORMALISED, store RAW. A difference that is only scheme,
+       trailing slash, case or whitespace is our own tidy-up and is not a
+       change at all; what actually went into the column is still the
+       fact, so the row keeps both original spellings. */
+    if (normaliseIdentityValue(f, before) === normaliseIdentityValue(f, after)) continue;
+    changes.push({
+      field: f,
+      from: String(before),
+      to: String(after),
+      field_step: LEAD_IDENTITY_FIELD_STEP[f] || 1,
+      attribution: identityChangeAttribution(f, before, after, arrivedStep, prevStep),
+    });
   }
-  return { changes, wasBooked: row.prev_booked === true };
+  /* A lower step arriving after a higher one. initBrowserBack() lets a
+     visitor pop back to step 1 and press Next again, which is the common
+     way this happens -- but a reload or a second tab looks identical from
+     here, so the column says what was observed and not why. _isPopstateNav
+     is client-side only and never sent; see docs/OPEN-ITEMS.md item 13. */
+  const backNavigation = arrivedStep != null && prevStep != null && arrivedStep < prevStep;
+  return { changes, wasBooked: row.prev_booked === true, backNavigation };
 }
 
-function recordLeadFieldChanges(session_id, row, source_route) {
+function recordLeadFieldChanges(session_id, row, source_route, ctx) {
   try {
     if (!session_id || !row) return;
-    const { changes } = diffLeadIdentityFields(row);
+    const { changes, backNavigation } = diffLeadIdentityFields(row, ctx);
     if (changes.length === 0) return;
     const fields = changes.map((c) => c.field);
     const olds   = changes.map((c) => c.from);
     const news   = changes.map((c) => c.to);
+    const attrs  = changes.map((c) => c.attribution);
+    const fsteps = changes.map((c) => c.field_step);
+    const arrivedStep = ctx && ctx.arrived_step != null ? ctx.arrived_step : null;
 
-    console.log(`[lead-changes] ${source_route} — ${fields.length} identity field(s) changed on session ${session_id}: ${fields.join(', ')}${row.prev_booked === true ? ' (ALREADY BOOKED)' : ''}`);
+    console.log(`[lead-changes] ${source_route} — ${fields.length} identity field(s) changed on session ${session_id}: ${changes.map((c) => c.field + '=' + c.attribution).join(', ')}${backNavigation ? ' (came back from a later step)' : ''}${row.prev_booked === true ? ' (ALREADY BOOKED)' : ''}`);
 
     pool.query(
+      /* hit_no is the visitor's most recent form-page load at this
+         moment, so a reader can tell an edit made in one sitting from
+         one made after reloading the page. One indexed lookup on
+         form_page_views (session_id, created_at), inside a query that is
+         already fire-and-forget and off the lead's critical path.
+         NULL where the session predates page-view recording, or the page
+         never called /session -- which is not the same as zero loads. */
       `INSERT INTO lead_field_changes
-         (session_id, field, old_value, new_value, source_route, step_reached, booking_uid_present)
-       SELECT $1, t.f, t.o, t.n, $2, $3, $4
-         FROM unnest($5::text[], $6::text[], $7::text[]) AS t(f, o, n)`,
+         (session_id, field, old_value, new_value, source_route, step_reached, booking_uid_present,
+          attribution, field_step, arrived_step, prev_step, back_navigation, hit_no)
+       SELECT $1, t.f, t.o, t.n, $2, $3, $4, t.a, t.fs, $5, $6, $7,
+              (SELECT v.hit_no FROM form_page_views v
+                WHERE v.session_id = $1 ORDER BY v.created_at DESC, v.id DESC LIMIT 1)
+         FROM unnest($8::text[], $9::text[], $10::text[], $11::text[], $12::int[]) AS t(f, o, n, a, fs)`,
       [session_id, source_route, row.step_reached == null ? null : row.step_reached,
-       row.prev_booked === true, fields, olds, news]
+       row.prev_booked === true, arrivedStep,
+       row.prev_step_reached == null ? null : row.prev_step_reached, backNavigation,
+       fields, olds, news, attrs, fsteps]
     ).catch(err => console.warn('[lead-changes] not recorded (ignored):', err.message));
   } catch (err) {
     console.warn('[lead-changes] not recorded (ignored):', err && err.message);
@@ -8876,7 +9081,7 @@ app.post('/partial', async (req, res) => {
 
     const upsert = await pool.query(`
       WITH prev AS (
-        SELECT email, company, website, phone, first_name, last_name, sell_to, booking_uid
+        SELECT email, company, website, phone, first_name, last_name, sell_to, booking_uid, step_reached
           FROM leads WHERE session_id = $1
       )
       INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business)
@@ -8942,12 +9147,13 @@ app.post('/partial', async (req, res) => {
         (SELECT p.last_name  FROM prev p) AS prev_last_name,
         (SELECT p.sell_to    FROM prev p) AS prev_sell_to,
         (SELECT p.booking_uid IS NOT NULL FROM prev p) AS prev_booked,
+        (SELECT p.step_reached FROM prev p) AS prev_step_reached,
         leads.email, leads.company, leads.website, leads.phone,
         leads.first_name, leads.last_name, leads.sell_to, leads.step_reached
     `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business]);
 
     /* After the write, off the response path. Never awaited. */
-    recordLeadFieldChanges(session_id, upsert.rows[0], '/partial');
+    recordLeadFieldChanges(session_id, upsert.rows[0], '/partial', { arrived_step: step_reached });
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/partial] Enrichment sync failed (non-blocking):', err.message));
 
@@ -9062,7 +9268,7 @@ app.post('/submit', async (req, res) => {
 
     const upsert = await pool.query(`
       WITH prev AS (
-        SELECT email, company, website, phone, first_name, last_name, sell_to, booking_uid
+        SELECT email, company, website, phone, first_name, last_name, sell_to, booking_uid, step_reached
           FROM leads WHERE session_id = $1
       )
       INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business)
@@ -9131,13 +9337,14 @@ app.post('/submit', async (req, res) => {
         (SELECT p.last_name  FROM prev p) AS prev_last_name,
         (SELECT p.sell_to    FROM prev p) AS prev_sell_to,
         (SELECT p.booking_uid IS NOT NULL FROM prev p) AS prev_booked,
+        (SELECT p.step_reached FROM prev p) AS prev_step_reached,
         leads.email, leads.company, leads.website, leads.phone,
         leads.first_name, leads.last_name, leads.sell_to, leads.step_reached
     `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business]);
 
     /* After the write, off the response path. Never awaited. */
-    const identityDiff = diffLeadIdentityFields(upsert.rows[0]);
-    recordLeadFieldChanges(session_id, upsert.rows[0], '/submit');
+    const identityDiff = diffLeadIdentityFields(upsert.rows[0], { arrived_step: 2 });
+    recordLeadFieldChanges(session_id, upsert.rows[0], '/submit', { arrived_step: 2 });
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/submit] Enrichment sync failed (non-blocking):', err.message));
 
@@ -9167,7 +9374,12 @@ app.post('/submit', async (req, res) => {
          already been announced. But if they had ALREADY BOOKED and have
          now changed who they are, nobody has been told, and whoever takes
          the call has the old details in front of them. */
-      if (identityDiff.wasBooked && identityDiff.changes.length > 0) {
+      /* Only changes the prospect could have made. Our own enrichment
+         and canonical resolution reach this branch too, and this is the
+         message that fired for datapartnerinc on 10 Sep 2026 -- a scheme
+         and a trailing slash that our two routes wrote themselves, one
+         round trip apart. */
+      if (identityDiff.wasBooked && alertableIdentityChanges(identityDiff.changes).length > 0) {
         console.log(`[/submit] 🔄 Identity changed after booking — posting a follow-up: ${email} | session: ${session_id}`);
         slackIdentityChangedAfterBooking({ session_id, email, company, first_name, last_name, changes: identityDiff.changes });
       }
