@@ -152,8 +152,9 @@ const NO_CHANGE  = Object.assign({}, CHANGED, { prev_email: CHANGED.email, prev_
     quiet(); const good = await drive(route, CHANGED, false); loud();
     const ch = good.queries.find((q) => q.kind === 'changes');
     ok(`${route}: a change row was written`, !!ch);
-    if (ch) {
-      const [sid, src, step, booked, fields, olds, news] = ch.params;
+    {
+      const P = (ch || { params: [] }).params;
+      const [sid, src, step, booked, arrived, prevStep, backNav, fields = [], olds = [], news = [], attrs = [], fsteps = []] = P;
       eq(`${route}: session_id`, sid, BODY.session_id);
       eq(`${route}: source_route names the route`, src, route);
       eq(`${route}: booking_uid_present read from BEFORE the upsert`, booked, true);
@@ -162,6 +163,19 @@ const NO_CHANGE  = Object.assign({}, CHANGED, { prev_email: CHANGED.email, prev_
       eq(`${route}: new values`, news.join(','), 'second@northwind.com,Northwind');
       ok(`${route}: unchanged fields are absent`, !fields.includes('phone') && !fields.includes('sell_to'), fields.join(','));
       eq(`${route}: step_reached recorded`, step, 2);
+      /* WHERE it happened. arrived_step is the step of THIS write and
+         must NOT track step_reached, which comes back from the upsert's
+         GREATEST() and reads 2 for a step-1 /partial. That collapse is
+         what hid our own enrichment writing a step-2 field. */
+      eq(`${route}: arrived_step is the step of this write, not the row high-water mark`,
+         arrived, route === '/partial' ? 1 : 2);
+      eq(`${route}: field_step says where each field lives in the form`, fsteps.join(','), '1,2');
+      eq(`${route}: prev_step is null when the row had no step yet`, prevStep, null);
+      eq(`${route}: back_navigation is false without a prev_step to compare`, backNav, false);
+      /* email is a step-1 field, so a step-1 write CAN be the person.
+         company is a step-2 field, so the same write cannot be. */
+      eq(`${route}: attribution per field`, attrs.join(','),
+         route === '/partial' ? 'prospect_edit,ours_earlier_step' : 'prospect_edit,prospect_edit');
     }
 
     /* ── a first set is not a change ────────────────────────── */
@@ -281,6 +295,128 @@ const NO_CHANGE  = Object.assign({}, CHANGED, { prev_email: CHANGED.email, prev_
   /* Already submitted and changed, but never booked -- an ordinary edit. */
   quiet(); const fuUnbooked = await drive('/submit', NOT_BOOKED, false, ALREADY); loud();
   ok('followup: silent when they had not booked', followUp(fuUnbooked) === '');
+
+  /* ── THE FALSE POSITIVE, driven end to end ──────────────────────
+     10 Sep 2026. www.datapartnerinc.com -> https://www.datapartnerinc.com/
+     posted a follow-up for a booked lead who had touched nothing:
+     /partial had stored Apollo's website_url with the scheme stripped by
+     applyEnrichment, /submit stored the website check's canonical_url
+     with the scheme and a root slash back on. Two of our own
+     normalisations, one round trip apart.
+
+     Driven rather than asserted on source, because that is the only way
+     to show the fold is REACHED. An ordering or regex assertion here
+     survives an early return above the diff. */
+  const OURS_NORMALISED = Object.assign({}, CHANGED, {
+    prev_email: CHANGED.email, prev_company: CHANGED.company,
+    prev_website: 'www.datapartnerinc.com', website: 'https://www.datapartnerinc.com/',
+  });
+  quiet(); const norm = await drive('/submit', OURS_NORMALISED, false, ALREADY); loud();
+  ok('fold: scheme + trailing slash writes NO change row at all',
+     !norm.queries.some((q) => q.kind === 'changes'),
+     JSON.stringify((norm.queries.find((q) => q.kind === 'changes') || {}).params));
+  ok('fold: and posts no follow-up', followUp(norm) === '', followUp(norm).slice(0, 160));
+
+  /* Same visitor, a genuinely different domain. The fold must not have
+     turned the website field off -- this is the mutation that would make
+     the test above pass for the wrong reason. */
+  const REAL_WEBSITE = Object.assign({}, CHANGED, {
+    prev_email: CHANGED.email, prev_company: CHANGED.company,
+    prev_website: 'www.datapartnerinc.com', website: 'https://othercorp.io/',
+  });
+  quiet(); const realw = await drive('/submit', REAL_WEBSITE, false, ALREADY); loud();
+  const realCh = realw.queries.find((q) => q.kind === 'changes');
+  ok('fold: a real domain change on the SAME field still records', !!realCh);
+  eq('fold: recorded as the prospect editing it', ((realCh || { params: [] }).params[10] || []).join(','), 'prospect_edit');
+  ok('fold: and still posts the follow-up', followUp(realw).length > 0);
+
+  /* A path change is not formatting either. */
+  const PATH_CHANGE = Object.assign({}, CHANGED, {
+    prev_email: CHANGED.email, prev_company: CHANGED.company,
+    prev_website: 'acme.com', website: 'https://acme.com/uk',
+  });
+  quiet(); const pathw = await drive('/submit', PATH_CHANGE, false, ALREADY); loud();
+  ok('fold: only a BARE trailing slash is stripped, a path survives',
+     pathw.queries.some((q) => q.kind === 'changes'));
+
+  /* ── attribution suppresses the rest of our own writes ──────────
+     prev_step 1 means the old website was written before the visitor
+     could see the field: them filling the form in, not changing an
+     answer. Recorded, labelled, and NOT alerted. */
+  const OVER_GUESS = Object.assign({}, CHANGED, {
+    prev_email: CHANGED.email, prev_company: CHANGED.company,
+    prev_website: 'apollos-guess.com', website: 'https://whattheytyped.com/',
+    prev_step_reached: 1,
+  });
+  quiet(); const guess = await drive('/submit', OVER_GUESS, false, ALREADY); loud();
+  const guessCh = guess.queries.find((q) => q.kind === 'changes');
+  ok('attribution: typing over an Apollo guess is still RECORDED', !!guessCh);
+  eq('attribution: labelled as ours, not a prospect edit',
+     ((guessCh || { params: [] }).params[10] || []).join(','), 'ours_replacing_guess');
+  eq('attribution: prev_step recorded', (guessCh || { params: [] }).params[5], 1);
+  ok('attribution: and posts no follow-up', followUp(guess) === '', followUp(guess).slice(0, 160));
+
+  /* A subdomain move is the exact shape domainsMatch accepts before
+     storing a canonical_url, so it is honestly labelled uncertain -- and
+     it STILL alerts, marked, because dropping a possible real edit
+     silently is the worse failure. */
+  const NESTED = Object.assign({}, CHANGED, {
+    prev_email: CHANGED.email, prev_company: CHANGED.company,
+    prev_website: 'acme.com', website: 'https://shop.acme.com/', prev_step_reached: 2,
+  });
+  quiet(); const nested = await drive('/submit', NESTED, false, ALREADY); loud();
+  const nestedCh = nested.queries.find((q) => q.kind === 'changes');
+  eq('attribution: a subdomain move is labelled uncertain',
+     ((nestedCh || { params: [] }).params[10] || []).join(','), 'maybe_our_canonical');
+  ok('attribution: an uncertain change STILL posts, rather than being dropped', followUp(nested).length > 0);
+  ok('attribution: and says on the line that it might be our own check',
+     /own check resolved it/.test(followUp(nested)), followUp(nested).slice(0, 300));
+
+  /* ── the sell_to clarification, driven ──────────────────────────
+     18 of the 27 rows in the real table on 10 Sep 2026, all of them on
+     /partial at step 1, all of them reading as a prospect edit. The
+     visitor picked B2C or Mixed on the radio, was shown the
+     disqualified step, and clicked "actually we are B2B";
+     handleDisqualifiedNext composed the new label. They made a choice;
+     they did not change the value. */
+  const CLARIFIED = Object.assign({}, CHANGED, {
+    prev_email: CHANGED.email, prev_company: CHANGED.company,
+    prev_sell_to: 'Mixed', sell_to: 'B2B (clarified from Mixed)', prev_step_reached: 1,
+  });
+  quiet(); const clar = await drive('/submit', CLARIFIED, false, ALREADY); loud();
+  const clarCh = clar.queries.find((q) => q.kind === 'changes');
+  ok('sell_to: the clarification is still RECORDED', !!clarCh);
+  eq('sell_to: labelled as ours, not a prospect edit',
+     ((clarCh || { params: [] }).params[10] || []).join(','), 'ours_sell_to_clarified');
+  ok('sell_to: and posts no follow-up', followUp(clar) === '', followUp(clar).slice(0, 160));
+
+  /* A genuine switch between radio options must still alert. */
+  const SWITCHED = Object.assign({}, CHANGED, {
+    prev_email: CHANGED.email, prev_company: CHANGED.company,
+    prev_sell_to: 'B2B', sell_to: 'B2C', prev_step_reached: 1,
+  });
+  quiet(); const sw = await drive('/submit', SWITCHED, false, ALREADY); loud();
+  const swCh = sw.queries.find((q) => q.kind === 'changes');
+  eq('sell_to: a real switch between options is still the prospect',
+     ((swCh || { params: [] }).params[10] || []).join(','), 'prospect_edit');
+  ok('sell_to: and still posts the follow-up', followUp(sw).length > 0);
+
+  /* ── back navigation ────────────────────────────────────────────
+     A step-1 /partial landing on a row already at step 2. Derivable
+     only because prev_step is read from BEFORE the upsert; step_reached
+     comes back through GREATEST() and reads 2 either way. */
+  const CAME_BACK = Object.assign({}, CHANGED, { prev_step_reached: 2 });
+  quiet(); const back = await drive('/partial', CAME_BACK, false); loud();
+  const backCh = back.queries.find((q) => q.kind === 'changes');
+  ok('back-nav: a step-1 write after step 2 is flagged', !!backCh && backCh.params[6] === true,
+     backCh && String(backCh.params[6]));
+  ok('back-nav: and the log line says so in words',
+     back.logged.some((l) => /came back from a later step/.test(l)),
+     back.logged.filter((l) => /lead-changes/.test(l)).join(' | ').slice(0, 200));
+  quiet(); const fwd = await drive('/submit', Object.assign({}, CHANGED, { prev_step_reached: 2 }), false); loud();
+  const fwdCh = fwd.queries.find((q) => q.kind === 'changes');
+  ok('back-nav: a step-2 write on a step-2 row is NOT flagged',
+     !!fwdCh && fwdCh.params[6] === false, fwdCh && String(fwdCh.params[6]));
 
   /* MUTUALLY EXCLUSIVE. The earlier run with submitted_at null produced
      the appended line; it must not also produce a standalone message. */

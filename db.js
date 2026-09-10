@@ -315,6 +315,28 @@ async function initDB() {
        calendar slot is a different event from somebody fixing a typo at
        step 1.
 
+       A CHANGE THE PROSPECT MADE, not a change WE made. On 10 Sep 2026 a
+       "changed after booking" alert fired for
+       www.datapartnerinc.com -> https://www.datapartnerinc.com/ and the
+       visitor had not touched the field: /partial stored Apollo's guess
+       with the scheme stripped by our own code, and /submit stored the
+       website check's resolved canonical URL with the scheme back on.
+       Two of our own normalisations, in opposite directions, one round
+       trip apart. So the diff now folds exactly what our own code varies
+       (see normaliseIdentityValue in index.js) and every row carries an
+       attribution saying whether it could have been the person at all.
+
+       WHERE IT HAPPENED. step_reached is the row's high-water mark AFTER
+       the upsert, which is the wrong number for this question: a step-1
+       /partial arriving on a row already at step 2 records 2 and the
+       out-of-step signal disappears. arrived_step is the step of the
+       write itself, prev_step is where the row had got to before it, and
+       field_step is where the field lives in the form. Website is a
+       step-2 field that /partial can write from step 1 via enrichment,
+       which is exactly the bug above, and those three columns are what
+       makes that readable without opening the code. step_reached is left
+       alone rather than redefined -- existing rows mean what they meant.
+
        NOT A TRIGGER, deliberately. A BEFORE UPDATE trigger would catch
        every write path including the booking routes and backfill-sf.js,
        and needs no application change at all -- but it puts behaviour
@@ -341,6 +363,21 @@ async function initDB() {
           ON lead_field_changes (session_id, changed_at);
         CREATE INDEX IF NOT EXISTS lead_field_changes_changed_idx
           ON lead_field_changes (changed_at);
+
+        /* Added 10 Sep 2026. The table already exists in production, so
+           these are ALTERs rather than table columns. Every one is
+           nullable with no default: a row written before this deploy
+           genuinely does not know its arrived_step, and NULL says that.
+           Backfilling them from step_reached would put an inferred value
+           in an observational column, which is the mistake
+           docs/partnerstack.md records for first_ticked_at. */
+        ALTER TABLE lead_field_changes
+          ADD COLUMN IF NOT EXISTS attribution     TEXT,
+          ADD COLUMN IF NOT EXISTS field_step      INT,
+          ADD COLUMN IF NOT EXISTS arrived_step    INT,
+          ADD COLUMN IF NOT EXISTS prev_step       INT,
+          ADD COLUMN IF NOT EXISTS back_navigation BOOLEAN,
+          ADD COLUMN IF NOT EXISTS hit_no          INT;
       `);
       console.log('[DB] Lead-field-changes table ready');
     } catch (err) {

@@ -1690,6 +1690,9 @@ function finish() {
     ${grab('function bContext(text)', '\n')}
     ${grab('const SLACK_ABOUT_MAX', ';')}
     ${lift('slackTruncate')}
+    ${grab('const LEAD_CHANGE_ALERTABLE', ';')}
+    ${grab('const LEAD_FIELD_LABELS = {', '};')}
+    ${lift('alertableIdentityChanges')}
     ${lift('slackSubmit')}
     return slackSubmit;
   `);
@@ -2394,6 +2397,217 @@ async function section12() {
     }
     return out;
   };
+}
+
+/* ============================================================
+   21. The identity-change comparator — EXECUTED, fold by fold.
+
+   10 Sep 2026: a "changed after booking" follow-up fired for
+   www.datapartnerinc.com -> https://www.datapartnerinc.com/ and the
+   visitor had touched nothing. /partial stores Apollo's website_url with
+   the scheme stripped by our own applyEnrichment; /submit stores the
+   website check's canonical_url, which is response.url and therefore
+   absolute with a root slash. Two of our own normalisations in opposite
+   directions, one round trip apart.
+
+   The rule is FOLD EXACTLY WHAT OUR OWN CODE VARIES, NOTHING MORE, so
+   every fold below is paired with the nearest difference it must NOT
+   swallow. Each pair is separately mutation-testable: breaking one fold
+   fails its own assertion and leaves the others green.
+   ============================================================ */
+{
+  const idSrc = between("const LEAD_IDENTITY_FIELDS = ['email'", "app.post('/partial'");
+  const I = (new Function('pool', idSrc + `
+    return { normaliseIdentityValue, identityChangeAttribution, identityHostsAreNested,
+             diffLeadIdentityFields, alertableIdentityChanges,
+             LEAD_IDENTITY_FIELDS, LEAD_IDENTITY_FIELD_STEP,
+             LEAD_CHANGE_ATTRIBUTIONS, LEAD_CHANGE_ALERTABLE };
+  `))({ query: () => Promise.resolve({ rows: [] }) });
+
+  const same = (f, a, b) => I.normaliseIdentityValue(f, a) === I.normaliseIdentityValue(f, b);
+
+  /* website — the fold, and what must survive it */
+  ok('fold: scheme and a root trailing slash are ours (the datapartnerinc pair)',
+     same('website', 'www.datapartnerinc.com', 'https://www.datapartnerinc.com/'));
+  ok('fold: a leading www. is ours', same('website', 'acme.com', 'www.acme.com'));
+  ok('fold: host case is ours', same('website', 'ACME.com', 'acme.com'));
+  ok('fold: http vs https is ours', same('website', 'http://acme.com', 'https://acme.com'));
+  ok('fold: a PATH still differs', !same('website', 'acme.com', 'acme.com/uk'));
+  ok('fold: path CASE still differs — nothing here recases a path',
+     !same('website', 'acme.com/UK', 'acme.com/uk'));
+  ok('fold: a SUBDOMAIN still differs', !same('website', 'acme.com', 'shop.acme.com'));
+  ok('fold: a TLD correction still differs', !same('website', 'acme.co', 'acme.com'));
+  ok('fold: an unrelated domain still differs', !same('website', 'acme.com', 'othercorp.io'));
+  ok('fold: a trailing slash is stripped from a path too, but the path stays',
+     same('website', 'acme.com/uk/', 'acme.com/uk') && !same('website', 'acme.com/uk/', 'acme.com'));
+
+  /* phone — intlTelInput E.164 vs the raw fallback when utils.js has not loaded */
+  ok('fold: phone punctuation is ours', same('phone', '+91 63886 39290', '+916388639290'));
+  ok('fold: phone brackets and dashes are ours', same('phone', '+1 (612) 790-5259', '+16127905259'));
+  ok('fold: a different number still differs', !same('phone', '+916388639290', '+916388639291'));
+
+  /* email — a no-op today because both routes lowercase first */
+  ok('fold: email case is ours', same('email', 'Bob@Acme.com', 'bob@acme.com'));
+  ok('fold: a different local part still differs', !same('email', 'bob@acme.com', 'rob@acme.com'));
+
+  /* the free-text fields — whitespace only, DELIBERATELY not case */
+  ok('fold: company whitespace is ours', same('company', 'Acme   Inc ', 'Acme Inc'));
+  ok('fold: company CASE is NOT folded — nothing in this repo recases a company',
+     !same('company', 'acme inc', 'Acme Inc'));
+  ok('fold: a name is whitespace-folded but not recased',
+     same('first_name', ' Joseph ', 'Joseph') && !same('first_name', 'joseph', 'Joseph'));
+
+  /* ── the attribution ladder ──────────────────────────────────── */
+  const A = (f, from, to, arrived, prev) => I.identityChangeAttribution(f, from, to, arrived, prev);
+  eq('ladder: a step-2 field written at step 1 is ours, never the visitor',
+     A('website', 'a.com', 'b.com', 1, 2), 'ours_earlier_step');
+  eq('ladder: a step-2 field on a row that had only reached step 1 is them filling it in',
+     A('website', 'apollo-guess.com', 'typed.com', 2, 1), 'ours_replacing_guess');
+  /* BOTH ours_* conditions hold here, so only the ORDER decides which
+     label the row gets. Without this case the two rungs are swappable
+     and nothing notices -- measured: swapping them survived every
+     other assertion in all ten suites. arrived_step wins because it is
+     the more specific truth: the write itself came from step 1, which
+     is a stronger statement than "the row had not got to step 2 yet". */
+  /* ── the sell_to clarification: 18 of the 27 rows in the table ──
+     Every one of them was reading as a prospect edit until 10 Sep 2026.
+     sell_to is a radio button, and this exact string is composed by
+     handleDisqualifiedNext, not chosen by anyone. */
+  eq('ladder: B2C -> the clarified label is ours',
+     A('sell_to', 'B2C', 'B2B (clarified from B2C)', 1, 1), 'ours_sell_to_clarified');
+  eq('ladder: Mixed -> the clarified label is ours',
+     A('sell_to', 'Mixed', 'B2B (clarified from Mixed)', 1, 1), 'ours_sell_to_clarified');
+  /* One real row today, and its own bug — see OPEN-ITEMS item 14. The
+     rule matches by composition, so it covers the nested form for free. */
+  eq('ladder: the compounded form is ours too',
+     A('sell_to', 'B2B (clarified from Mixed)', 'B2B (clarified from B2B (clarified from Mixed))', 1, 1),
+     'ours_sell_to_clarified');
+  /* Matched by COMPOSITION, not by field. Somebody going back and
+     picking a different radio is a real change and must keep alerting. */
+  eq('ladder: a genuine switch between options is still the prospect',
+     A('sell_to', 'B2B', 'B2C', 1, 1), 'prospect_edit');
+  eq('ladder: a clarified-looking value that is not OUR composition is still the prospect',
+     A('sell_to', 'B2C', 'B2B (clarified from Mixed)', 1, 1), 'prospect_edit');
+  ok('ladder: the clarification is suppressed from Slack',
+     I.LEAD_CHANGE_ALERTABLE.indexOf('ours_sell_to_clarified') === -1);
+  ok('ladder: and is a declared state', I.LEAD_CHANGE_ATTRIBUTIONS.indexOf('ours_sell_to_clarified') !== -1);
+
+  /* THREE COPIES OF ONE LITERAL. The server now depends on the exact
+     string both form files compose; change the wording in either and
+     every clarification silently starts alerting as a prospect edit
+     again. Same shape as the three lists and the label map. */
+  const formSrc  = fs.readFileSync(path.join(__dirname, '..', 'gushwork-form.js'), 'utf8');
+  const popupSrc = fs.readFileSync(path.join(__dirname, '..', 'gushwork-form-popup.js'), 'utf8');
+  const composed = "formState.sell_to = 'B2B (clarified from ' + formState.sell_to + ')';";
+  ok('sync: gushwork-form.js composes the exact string the server matches', formSrc.includes(composed));
+  ok('sync: gushwork-form-popup.js composes it identically', popupSrc.includes(composed));
+  ok('sync: and the server prefix is that same literal',
+     /const SELL_TO_CLARIFIED_PREFIX = 'B2B \(clarified from ';/.test(src));
+
+  eq('ladder: arrived_step outranks prev_step when both say it was us',
+     A('website', 'a.com', 'b.com', 1, 1), 'ours_earlier_step');
+  eq('ladder: one host containing the other could be our canonical resolution',
+     A('website', 'acme.com', 'shop.acme.com', 2, 2), 'maybe_our_canonical');
+  eq('ladder: an unrelated domain cannot be ours — domainsMatch would have refused it',
+     A('website', 'acme.com', 'othercorp.io', 2, 2), 'prospect_edit');
+  eq('ladder: email is a step-1 field, so a step-1 write CAN be the visitor',
+     A('email', 'a@x.com', 'b@y.com', 1, 2), 'prospect_edit');
+  eq('ladder: unknown steps fall through to the visitor, never to us',
+     A('website', 'a.com', 'b.com', null, null), 'prospect_edit');
+  ok('ladder: every field has a step', I.LEAD_IDENTITY_FIELDS.every((f) => I.LEAD_IDENTITY_FIELD_STEP[f] > 0));
+  ok('ladder: is exhaustive — every verdict is a declared state',
+     [['website','a.com','b.com',1,2],['website','a.com','b.com',2,1],
+      ['website','acme.com','shop.acme.com',2,2],['email','a@x','b@y',1,1]]
+       .every((args) => I.LEAD_CHANGE_ATTRIBUTIONS.indexOf(A.apply(null, args)) !== -1));
+  ok('ladder: both ours_* states are excluded from Slack',
+     I.LEAD_CHANGE_ALERTABLE.indexOf('ours_earlier_step') === -1 &&
+     I.LEAD_CHANGE_ALERTABLE.indexOf('ours_replacing_guess') === -1);
+  ok('ladder: the uncertain state still alerts',
+     I.LEAD_CHANGE_ALERTABLE.indexOf('maybe_our_canonical') !== -1);
+  ok('ladder: alertable is a subset of the declared states',
+     I.LEAD_CHANGE_ALERTABLE.every((a) => I.LEAD_CHANGE_ATTRIBUTIONS.indexOf(a) !== -1));
+
+  /* A change carrying NO attribution — a row from before this existed —
+     alerts. "We do not know who changed this" must not become "we did". */
+  eq('alertable: an unlabelled change is still alerted',
+     I.alertableIdentityChanges([{ field: 'email' }]).length, 1);
+  eq('alertable: our own writes are dropped',
+     I.alertableIdentityChanges([{ field: 'website', attribution: 'ours_earlier_step' },
+                                 { field: 'website', attribution: 'ours_replacing_guess' }]).length, 0);
+
+  /* ── the diff itself, driven ─────────────────────────────────── */
+  const row = (o) => Object.assign({
+    prev_email: 'a@x.com', email: 'a@x.com', prev_company: 'C', company: 'C',
+    prev_website: null, website: null, prev_phone: null, phone: null,
+    prev_first_name: null, first_name: null, prev_last_name: null, last_name: null,
+    prev_sell_to: null, sell_to: null, prev_booked: false, prev_step_reached: 2, step_reached: 2,
+  }, o);
+  eq('diff: the datapartnerinc pair produces NO change at all',
+     I.diffLeadIdentityFields(row({ prev_website: 'www.datapartnerinc.com',
+                                    website: 'https://www.datapartnerinc.com/' }), { arrived_step: 2 }).changes.length, 0);
+  eq('diff: a real change on the same field still produces one',
+     I.diffLeadIdentityFields(row({ prev_website: 'www.datapartnerinc.com',
+                                    website: 'https://othercorp.io/' }), { arrived_step: 2 }).changes.length, 1);
+  eq('diff: a first set is still not a change',
+     I.diffLeadIdentityFields(row({ prev_website: null, website: 'acme.com' }), { arrived_step: 2 }).changes.length, 0);
+  /* Indexed defensively. A mutation that empties `changes` must FAIL
+     this assertion, not throw out of the suite -- a crash prints no
+     totals and reads as UNMEASURED, which is neither a catch nor a
+     clean run. Caught doing exactly that while mutation-testing the
+     www. fold. */
+  eq('diff: each change carries its field step',
+     (I.diffLeadIdentityFields(row({ prev_website: 'a.com', website: 'b.com' }), { arrived_step: 2 }).changes[0] || {}).field_step, 2);
+  ok('diff: back navigation is arrived < prev, read from before the upsert',
+     I.diffLeadIdentityFields(row({ prev_email: 'a@x.com', email: 'b@y.com' }), { arrived_step: 1 }).backNavigation === true &&
+     I.diffLeadIdentityFields(row({ prev_email: 'a@x.com', email: 'b@y.com' }), { arrived_step: 2 }).backNavigation === false);
+  ok('diff: RAW values are stored, only the comparison is folded',
+     (I.diffLeadIdentityFields(row({ prev_website: 'a.com', website: 'HTTPS://B.com/' }), { arrived_step: 2 }).changes[0] || {}).to === 'HTTPS://B.com/');
+}
+
+/* ============================================================
+   22. arrived_step must not be taken from the upsert's step_reached.
+
+   step_reached comes back through GREATEST(EXCLUDED.step_reached,
+   leads.step_reached), so a step-1 /partial on a row already at step 2
+   reads 2 -- and the out-of-step signal that identifies our own
+   enrichment writing a step-2 field disappears. This is a REACHABILITY
+   check on the call sites, not an ordering one: an offset comparison
+   would survive the wrong argument being passed.
+   ============================================================ */
+{
+  ok('call site: /partial passes the request step, not the row high-water mark',
+     /recordLeadFieldChanges\(session_id, upsert\.rows\[0\], '\/partial', \{ arrived_step: step_reached \}\)/.test(src));
+  ok('call site: /submit passes 2', /recordLeadFieldChanges\(session_id, upsert\.rows\[0\], '\/submit', \{ arrived_step: 2 \}\)/.test(src));
+  ok('call site: the Slack diff gets the same step as the log',
+     /diffLeadIdentityFields\(upsert\.rows\[0\], \{ arrived_step: 2 \}\)/.test(src));
+  ok('prev CTE: both upserts read step_reached from BEFORE the write',
+     (src.match(/sell_to, booking_uid, step_reached/g) || []).length === 2);
+  ok('prev CTE: both expose it as prev_step_reached',
+     (src.match(/AS prev_step_reached/g) || []).length === 2);
+  /* BOTH Slack surfaces filter. Filtering only the one you are looking
+     at leaves the other firing on our own writes -- and the standalone
+     follow-up is the one that actually fired on 10 Sep. */
+  ok('slack: the appended line filters', /const alertable = alertableIdentityChanges\(d\.identity_changes\);\s*\n\s*if \(alertable\.length > 0\)/.test(src));
+  ok('slack: the standalone follow-up filters its own list',
+     /value: alertableIdentityChanges\(d\.changes\)/.test(src));
+  ok('slack: and its GUARD filters too, so an all-ours change posts nothing',
+     /identityDiff\.wasBooked && alertableIdentityChanges\(identityDiff\.changes\)\.length > 0/.test(src));
+  /* The new columns must be written, and hit_no must come from a
+     subquery rather than a second round trip on the lead path. */
+  const ins = between('INSERT INTO lead_field_changes', 'AS t(f, o, n, a, fs)');
+  ok('insert: carries the attribution', /attribution/.test(ins));
+  ok('insert: carries all four location columns',
+     /field_step/.test(ins) && /arrived_step/.test(ins) && /prev_step/.test(ins) && /back_navigation/.test(ins));
+  ok('insert: hit_no is a scalar subquery on the indexed columns',
+     /SELECT v\.hit_no FROM form_page_views v\s+WHERE v\.session_id = \$1 ORDER BY v\.created_at DESC/.test(ins));
+  ok('insert: no // comment anywhere in it', !/\/\//.test(ins.replace(/https?:\/\//g, '')));
+  /* db.js adds them as nullable ALTERs with no default: a row written
+     before this deploy does not know its arrived_step, and NULL says so. */
+  ok('schema: the new columns are added to the existing table',
+     /ADD COLUMN IF NOT EXISTS attribution\s+TEXT/.test(dbsrc) &&
+     /ADD COLUMN IF NOT EXISTS back_navigation BOOLEAN/.test(dbsrc));
+  ok('schema: none of them is backfilled or defaulted',
+     !/ADD COLUMN IF NOT EXISTS (attribution|field_step|arrived_step|prev_step|back_navigation|hit_no)[^,;]*DEFAULT/.test(dbsrc));
 }
 
 /* ============================================================ */
