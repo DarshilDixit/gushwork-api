@@ -1392,27 +1392,57 @@ function slackNonIcpBlocked(d) {
   const blocks = [];
   blocks.push(bHeader('🚫 Lead Blocked — Non-ICP'));
   blocks.push(bDivider());
+
+  /* THE MATCH AND THE WEBSITE, TOGETHER AND FIRST.
+
+     A matched EMAIL blocks regardless of what the website says -- confirmed
+     decision, Swapnil, 11 Sept 2026, on the reasoning that a captive agent's
+     site is company-owned anyway. That decision is only reviewable if the
+     mismatch is visible when it happens, so the two are printed side by side
+     and a disagreement is called out in words rather than left for somebody
+     to spot by comparing two fields.
+
+     Four of the 84 matched leads in the 11 Sept sample were not agents: an
+     Allstate claims employee, a retired AmFam address, a tax preparer on a
+     farmersagent.com address, a dance instructor on compass.com. Every one
+     was identifiable only from the website and company below. */
+  const matchedVia = [];
+  if (d.matched_in_email)   matchedVia.push('email');
+  if (d.matched_in_website) matchedVia.push('website');
   blocks.push(bSection(
-    `*Matched domain:* \`${d.matched_domain || 'unknown'}\`` +
+    `*Matched:* \`${d.matched_domain || 'unknown'}\`` +
     (d.matched_label ? ` — ${d.matched_label}` : '') +
-    `\n*Stopped at:* ${d.stage === 'partial' ? 'step 1 (email domain)' : 'submit (email + website)'}` +
-    '\n_They were sent to /thank-you and never reached the calendar. No Meta event fired. Not pushed to Salesforce._'
+    (matchedVia.length ? `  _(matched on their ${matchedVia.join(' and ')})_` : '') +
+    `\n*Their website:* ${d.website || '_none given_'}` +
+    (d.matched_in_email && !d.matched_in_website && d.website
+      ? '\n⚠️ _Their email is a brand domain but their website is not. Blocked on the email, by design — worth a look if this shape keeps appearing._'
+      : '') +
+    `\n*Stopped at:* ${d.stage === 'partial' ? 'step 1 (email domain)' : 'submit (email + website)'}`
   ));
+
   const lf = bFields([
-    { label: '👤 Name',    value: name      },
-    { label: '📧 Email',   value: d.email   },
-    { label: '🏢 Company', value: d.company },
-    { label: '🌐 Website', value: d.website },
-    { label: '📞 Phone',   value: d.phone   },
-    { label: '🎯 Sells to',value: d.sell_to },
+    { label: '👤 Name',       value: name        },
+    { label: '📧 Email',      value: d.email     },
+    { label: '🏢 Company',    value: d.company   },
+    { label: '📞 Phone',      value: d.phone     },
+    { label: '🎯 Sells to',   value: d.sell_to   },
+    { label: '💬 Heard about us', value: d.hear_about_us },
   ]);
   if (lf) blocks.push(lf);
+
+  const about = slackTruncate(d.about_business);
+  if (about) blocks.push(bFields([{ label: '📝 About their business', value: about }]));
+
   blocks.push(bSection(
-    '*Wrong?* If this is a real prospect, the block is the domain list in ' +
-    '`NON_ICP_DOMAINS` (index.js). Turn the whole feature off with ' +
-    '`NON_ICP_BLOCK=false` on Railway — no deploy needed.'
+    '_They filled the whole form, were sent to /thank-you and never reached the calendar. ' +
+    'No Meta event fired. Not pushed to Salesforce._'
   ));
-  sendSlack(blocks, `🚫 Lead blocked (non-ICP): ${d.email || name || 'unknown'} — matched ${d.matched_domain || 'unknown'}`);
+  blocks.push(bSection(
+    '*Wrong?* The list is `NON_ICP_DOMAINS` in index.js. ' +
+    '`NON_ICP_BLOCK=false` on Railway turns the whole thing off without a deploy.'
+  ));
+  sendSlack(blocks,
+    `🚫 Lead blocked (non-ICP): ${d.email || name || 'unknown'} — matched ${d.matched_domain || 'unknown'}`);
 }
 
 function slackSubmit(d) {
@@ -6588,7 +6618,13 @@ async function nonIcpVerdict({ email, website } = {}) {
        exclusion ELV health and PartnerStack already use. */
     if (isPartnerStackTestEmail(email)) return { blocked: false, reason: 'test_email' };
 
-    const hit = nonIcpMatchHost(email) || nonIcpMatchHost(website);
+    /* BOTH sides are evaluated, not short-circuited, because which one matched
+       is reportable information: a brand email with an unrelated website is the
+       shape worth reviewing, and Slack says so out loud. The blocking rule is
+       unchanged -- either side is enough. */
+    const emailHit   = nonIcpMatchHost(email);
+    const websiteHit = nonIcpMatchHost(website);
+    const hit = emailHit || websiteHit;
     if (!hit) return { blocked: false, reason: null };
 
     /* Only now, and only for a lead we are about to block, do we go near the
@@ -6615,7 +6651,8 @@ async function nonIcpVerdict({ email, website } = {}) {
       }
     }
 
-    return { blocked: true, reason: hit.domain, label: hit.label };
+    return { blocked: true, reason: hit.domain, label: hit.label,
+             matched_in_email: !!emailHit, matched_in_website: !!websiteHit };
   } catch (err) {
     console.warn('[non-ICP] Verdict errored — NOT blocking (fail open):', err && err.message);
     return { blocked: false, reason: 'check_failed', detail: err && err.message };
@@ -9855,9 +9892,16 @@ app.post('/submit', async (req, res) => {
       /* ONE post, in place of the normal lead post -- not both. Two messages
          about one person is how a channel gets muted, and the normal post
          would read as a lead somebody should call. */
+      /* Recomputed rather than read off the row: which SIDE matched is not
+         stored (the column holds the domain, not the provenance), and it is
+         a pure string comparison. */
+      const emailSide   = nonIcpMatchHost(email);
+      const websiteSide = nonIcpMatchHost(website);
       slackNonIcpBlocked({ stage: 'submit', matched_domain: nonIcpReason,
         matched_label: NON_ICP_DOMAINS[nonIcpReason] || null,
-        first_name, last_name, email, phone, company, website, sell_to });
+        matched_in_email: !!emailSide, matched_in_website: !!websiteSide,
+        first_name, last_name, email, phone, company, website, sell_to,
+        hear_about_us: hearAboutUsFinal, about_business });
       /* Salesforce: deliberately NOT pushed. Swapnil, 11 Sept 2026 -- a
          blocked lead is not a lead an AE should find in their queue. This is
          the whole of "no Salesforce for blocked leads"; nothing was changed
@@ -9941,6 +9985,52 @@ app.post('/submit', async (req, res) => {
    COALESCE on the enriched columns is strictly additive — enrichment_data
    still wins exactly as before, and leads.* is only consulted where the
    old query produced NULL. */
+/* ── A blocked lead must not hold a calendar slot ────────────────────────
+   Suppressing the Meta event is not enough. A suppressed event still leaves a
+   real meeting on a real AE's calendar, which is the entire complaint this
+   feature exists to answer. So every booking route REFUSES THE WRITE: no
+   booking_uid, no booked_at, no completed flag, no mirror sync, no Salesforce
+   update, no Meta.
+
+   WHAT THIS CANNOT DO, AND IT MATTERS. The slot lives in Cal.com or
+   RevenueHero, not here. Refusing our write does not cancel it -- nothing in
+   this repo can. So the refusal is paired with a CRITICAL alert carrying the
+   booking id and start time, because the only thing that actually frees the
+   AE's diary is a human cancelling it. A silent refusal would be worse than
+   recording the booking: the slot would still be taken and nobody would know.
+
+   Returns true when the booking was refused, so each route can bail. */
+async function rejectBookingIfNonIcp(routeTag, sessionId, bookingUid, startTime) {
+  if (!sessionId) return false;
+  let row;
+  try {
+    const r = await pool.query(
+      'SELECT email, company, website, phone, non_icp_blocked, non_icp_reason FROM leads WHERE session_id=$1',
+      [sessionId]);
+    row = r.rows[0];
+  } catch (err) {
+    /* Fails OPEN, like every other part of this feature: if we cannot read the
+       row we do not know they are blocked, and refusing a booking we cannot
+       justify is worse than letting one through. */
+    console.warn(`[${routeTag}] Could not check non-ICP for ${sessionId} — allowing the booking:`, err.message);
+    return false;
+  }
+  if (!row || row.non_icp_blocked !== true) return false;
+
+  console.warn(`[${routeTag}] 🚫 REFUSING booking ${bookingUid} — lead is non-ICP (${row.non_icp_reason}): ${row.email}`);
+  alertOps('critical', 'Non-ICP', 'A blocked lead took a calendar slot', {
+    'Email':          row.email || 'unknown',
+    'Company':        row.company || 'unknown',
+    'Website':        row.website || 'unknown',
+    'Matched domain': row.non_icp_reason || 'unknown',
+    'Booking':        `${bookingUid || 'unknown'} at ${startTime || 'unknown'}`,
+    'Route':          routeTag,
+    'Impact':         'The booking was NOT recorded here, but the slot still exists in Cal/RevenueHero. Nothing in this service can cancel it.',
+    'Action':         'Cancel the meeting manually, then check how they reached the calendar — the form should have redirected them.',
+  });
+  return true;
+}
+
 const SCHEDULE_LEAD_SQL = `
   SELECT l.session_id, l.email, l.phone, l.first_name, l.last_name,
          l.company, l.sell_to, l.page_url, l.landing_page, l.fbc, l.fbp,
@@ -9970,6 +10060,10 @@ app.post('/booking-confirmed', async (req, res) => {
   if (!session_id || !booking_uid) return res.status(400).json({ error: 'session_id and booking_uid required' });
 
   try {
+    if (await rejectBookingIfNonIcp('/booking-confirmed', session_id, booking_uid, start_time)) {
+      return res.status(403).json({ ok: false, error: 'non_icp_blocked' });
+    }
+
     const existing = await pool.query('SELECT booking_uid FROM leads WHERE session_id=$1', [session_id]);
 
     if (existing.rows[0]?.booking_uid) {
@@ -10058,6 +10152,10 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
     if (existingLead.rows.length > 0) {
       const lead = existingLead.rows[0];
       if (!lead.booking_uid) {
+        /* Refuse before any write. See rejectBookingIfNonIcp. */
+        if (await rejectBookingIfNonIcp('/cal-webhook', lead.session_id, bookingUid, startTime)) {
+          return res.json({ ok: true, action: 'refused_non_icp' });
+        }
         // Checked BEFORE the update — the write below sets completed=true,
         // which would mask the very thing we are looking for.
         await alertIfBookingWithoutSubmit(lead.session_id, '/cal-webhook');
@@ -10081,6 +10179,32 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
         console.log(`[/cal-webhook] ⏭ Lead already booked: ${email} | existing booking: ${lead.booking_uid}`);
       }
       return res.json({ ok: true, action: 'updated_existing' });
+    }
+
+    /* SAFETY-NET PATH: a booking with no form row at all -- somebody who
+       reached the calendar without ever submitting. There is nothing to read
+       a block off, so the verdict is computed from the EMAIL here and the
+       booking is refused before the row is created.
+
+       Without this, the one route that bypasses the form entirely is also the
+       one route a realtor can use to reach an AE's diary untouched. Ten such
+       rows exist in production, all rh_webhook, so the path is live. */
+    {
+      const v = await nonIcpVerdict({ email, website: '' });
+      if (v.blocked) {
+        console.warn(`[/cal-webhook] 🚫 REFUSING safety-net booking ${bookingUid} — non-ICP email (${v.reason}): ${email}`);
+        alertOps('critical', 'Non-ICP', 'A blocked lead took a calendar slot', {
+          'Email':          email,
+          'Company':        'unknown — no form row',
+          'Website':        'unknown — no form row',
+          'Matched domain': v.reason,
+          'Booking':        `${bookingUid || 'unknown'} at ${startTime || 'unknown'}`,
+          'Route':          '/cal-webhook (safety net — never filled the form)',
+          'Impact':         'No lead row was created and the booking was NOT recorded, but the slot still exists in Cal/RevenueHero. Nothing in this service can cancel it.',
+          'Action':         'Cancel the meeting manually. This lead reached a calendar without going through the form at all.',
+        });
+        return res.json({ ok: true, action: 'refused_non_icp_safety_net' });
+      }
     }
 
     const enrichRow = await pool.query('SELECT * FROM enrichment_data WHERE LOWER(email)=LOWER($1) ORDER BY enriched_at DESC LIMIT 1', [email]);
@@ -10388,6 +10512,10 @@ if (rhRouter && !RH_ALLOWED_ROUTERS.some((r) => r.toLowerCase() === rhRouter)) {
       const lead = existingLead.rows[0];
       if (!lead.booking_uid) {
         console.log(`[/rh-webhook] ✏️ No existing booking_uid on this lead — writing booking_uid: ${bookingUid}`);
+        /* Refuse before any write. See rejectBookingIfNonIcp. */
+        if (await rejectBookingIfNonIcp('/rh-webhook', lead.session_id, bookingUid, startTime)) {
+          return res.json({ ok: true, action: 'refused_non_icp' });
+        }
         // Checked BEFORE the update — the write below sets completed=true,
         // which would mask the very thing we are looking for.
         await alertIfBookingWithoutSubmit(lead.session_id, '/rh-webhook');
@@ -10418,6 +10546,32 @@ if (rhRouter && !RH_ALLOWED_ROUTERS.some((r) => r.toLowerCase() === rhRouter)) {
     }
 
     console.log(`[/rh-webhook] ⚠ No existing session found for ${email} — falling into safety-net "create new" branch`);
+
+    /* SAFETY-NET PATH: a booking with no form row at all -- somebody who
+       reached the calendar without ever submitting. There is nothing to read
+       a block off, so the verdict is computed from the EMAIL here and the
+       booking is refused before the row is created.
+
+       Without this, the one route that bypasses the form entirely is also the
+       one route a realtor can use to reach an AE's diary untouched. Ten such
+       rows exist in production, all rh_webhook, so the path is live. */
+    {
+      const v = await nonIcpVerdict({ email, website: '' });
+      if (v.blocked) {
+        console.warn(`[/rh-webhook] 🚫 REFUSING safety-net booking ${bookingUid} — non-ICP email (${v.reason}): ${email}`);
+        alertOps('critical', 'Non-ICP', 'A blocked lead took a calendar slot', {
+          'Email':          email,
+          'Company':        'unknown — no form row',
+          'Website':        'unknown — no form row',
+          'Matched domain': v.reason,
+          'Booking':        `${bookingUid || 'unknown'} at ${startTime || 'unknown'}`,
+          'Route':          '/rh-webhook (safety net — never filled the form)',
+          'Impact':         'No lead row was created and the booking was NOT recorded, but the slot still exists in Cal/RevenueHero. Nothing in this service can cancel it.',
+          'Action':         'Cancel the meeting manually. This lead reached a calendar without going through the form at all.',
+        });
+        return res.json({ ok: true, action: 'refused_non_icp_safety_net' });
+      }
+    }
 
     const enrichRow = await pool.query('SELECT * FROM enrichment_data WHERE LOWER(email)=LOWER($1) ORDER BY enriched_at DESC LIMIT 1', [email]);
     const enrich    = enrichRow.rows[0] || {};

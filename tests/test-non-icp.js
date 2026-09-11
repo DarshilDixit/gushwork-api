@@ -312,6 +312,29 @@ const results7 = (async () => {
   /* And each one must actually return, or it logs and fires anyway. */
   const returning = (src.match(/if \(fullLead\.non_icp_blocked === true\) \{[\s\S]{0,220}?return; \}/g) || []).length;
   eq('all three Schedule guards return', returning, 3);
+  /* REFUSING THE BOOKING, not merely suppressing the event. A suppressed
+     Schedule still leaves a real slot on a real AE's calendar. */
+  eq('all three booking routes call the refusal helper',
+     (src.match(/await rejectBookingIfNonIcp\(/g) || []).length, 3);
+  for (const tag of ['/booking-confirmed', '/cal-webhook', '/rh-webhook']) {
+    ok(`booking refusal wired on ${tag}`,
+       new RegExp("rejectBookingIfNonIcp\\('" + tag.replace(/\//g, '\\/') + "'").test(src));
+  }
+  ok('the refusal bails before any booking write',
+     /rejectBookingIfNonIcp\([^)]*\)\) \{\s*return res/.test(src));
+  ok('the refusal raises a CRITICAL, because only a human can cancel the slot',
+     /alertOps\('critical', 'Non-ICP', 'A blocked lead took a calendar slot'/.test(src));
+  ok('the refusal says out loud that it cannot cancel the slot',
+     src.includes('Nothing in this service can cancel it.'));
+  ok('the refusal fails OPEN when the row cannot be read',
+     /Could not check non-ICP[\s\S]{0,120}return false;/.test(src));
+  /* The safety-net paths create a lead from a booking with no form row -- the
+     one route that bypasses the form entirely. Ten such rows exist. */
+  eq('both webhook safety nets are guarded',
+     (src.match(/refused_non_icp_safety_net/g) || []).length, 2);
+  ok('the safety net computes the verdict from the email',
+     /SAFETY-NET PATH[\s\S]{0,900}?await nonIcpVerdict\(\{ email, website: '' \}\)/.test(src));
+
   ok('SCHEDULE_LEAD_SQL selects the column',
      between('const SCHEDULE_LEAD_SQL', 'WHERE l.session_id').includes('l.non_icp_blocked'));
 
@@ -328,6 +351,15 @@ const results7 = (async () => {
   // Lead, at /submit — the blocked branch must skip Slack, Salesforce and Meta.
   const submitBranch = between('if (!alreadySubmitted && nonIcpBlocked) {', '} else if (!alreadySubmitted) {');
   ok('blocked branch posts the blocked-lead Slack message', submitBranch.includes('slackNonIcpBlocked('));
+  /* The full record a reviewer needs to spot a wrong block. */
+  const slackFn = between('function slackNonIcpBlocked(d)', 'function slackSubmit(d)');
+  for (const field of ['d.email', 'd.website', 'd.company', 'd.phone', 'd.matched_domain']) {
+    ok(`blocked Slack post carries ${field}`, slackFn.includes(field));
+  }
+  ok('blocked Slack post flags an email/website mismatch in words',
+     slackFn.includes('d.matched_in_email && !d.matched_in_website'));
+  ok('/submit passes both match sides to Slack',
+     submitBranch.includes('matched_in_email:') && submitBranch.includes('matched_in_website:'));
   ok('blocked branch does NOT call slackSubmit',            !submitBranch.includes('slackSubmit('));
   ok('blocked branch does NOT push to Salesforce',          !submitBranch.includes('pushToSalesforce('));
   ok('blocked branch does NOT fire Meta',                   !submitBranch.includes('pushFormEventsToMeta('));
@@ -394,8 +426,25 @@ const results7 = (async () => {
     ok(`${name}: has the non-ICP check`,        s.includes('function checkNonIcp('));
     ok(`${name}: fails open on a non-200`,      s.includes("return { blocked: false, status: 'backend_error' };"));
     ok(`${name}: redirects to /thank-you`,      s.includes("const NON_ICP_REDIRECT = '/thank-you';"));
-    ok(`${name}: step 1 checks the email`,      s.includes("const icp1 = await checkNonIcp(formState.email, '');"));
-    ok(`${name}: step 2 checks email+website`,  s.includes('const icp2 = await checkNonIcp(formState.email, formState.website);'));
+    /* STEP 1 DETECTS BUT MUST NOT REDIRECT (changed 11 Sept 2026). The lead
+       completes the form so we capture website, company and phone -- four of
+       the 84 matched leads were not agents and only their step-2 fields show
+       that. savePartial still stamps the row and /partial still suppresses
+       StartTrial. */
+    ok(`${name}: step 1 warms the verdict`,     s.includes("checkNonIcp(formState.email, '').catch(() => {});"));
+    ok(`${name}: step 1 does NOT redirect`,     !/icp1[\s\S]{0,200}redirectNonIcp/.test(s));
+    ok(`${name}: no icp1 block branch remains`, !s.includes('if (icp1.blocked)'));
+    /* STEP 2 READS CACHE ONLY -- no network call at the moment of decision and
+       no timeout to fall through. A lead who slips past because our own
+       request was slow is a realtor on an AE's calendar. */
+    ok(`${name}: step 2 decides from cache`,    s.includes('const icp2 = nonIcpCached(formState.email, getField(\'website\'))'));
+    ok(`${name}: step 2 never awaits the check`, !/const icp2 = await/.test(s));
+    ok(`${name}: step 2 falls back to the email-only verdict`,
+       s.includes('|| nonIcpCachedEmail(formState.email);'));
+    ok(`${name}: a null verdict does not block`, s.includes('if (icp2 && icp2.blocked) {'));
+    ok(`${name}: the cache reader never fetches`,
+       /function nonIcpCached\(email, website\) \{[\s\S]{0,220}?\}/.test(s)
+       && !/function nonIcpCached\(email, website\) \{[\s\S]{0,220}?fetch/.test(s));
     ok(`${name}: prewarms on email blur`,       s.includes("checkNonIcp(val, '').catch(() => {});"));
     ok(`${name}: prewarms on website blur`,     s.includes("checkNonIcp(getField('email'), val).catch(() => {});"));
     ok(`${name}: honours the server backstop`,  s.includes('submitRes.non_icp_blocked === true'));
@@ -405,18 +454,17 @@ const results7 = (async () => {
        widget, so the check has to sit above it or a blocked lead gets a
        calendar. Paired with a reachability assertion, because an offset
        comparison survives an early return. */
-    const iCheck = s.indexOf('const icp2 = await checkNonIcp(');
+    const iCheck = s.indexOf('const icp2 = nonIcpCached(');
     const iHero  = s.indexOf('const hero = new RevenueHero(');
     ok(`${name}: step-2 check runs BEFORE RevenueHero`, iCheck > 0 && iHero > 0 && iCheck < iHero,
        `check at ${iCheck}, hero at ${iHero}`);
     const guarded = s.slice(iCheck, iHero);
     ok(`${name}: the step-2 block actually returns`,
-       /if \(icp2\.blocked\) \{[\s\S]*await submitLead\(\);[\s\S]*redirectNonIcp\(icp2\);[\s\S]*return;[\s\S]*\}/.test(guarded));
-    ok(`${name}: the step-1 block actually returns`,
-       /if \(icp1\.blocked\) \{[\s\S]*await savePartial\(1\);[\s\S]*redirectNonIcp\(icp1\);[\s\S]*return;[\s\S]*\}/.test(s));
-    /* Step 1 must check BEFORE spending an Apollo credit. */
-    ok(`${name}: step-1 check precedes enrichment`,
-       s.indexOf("const icp1 = await checkNonIcp") < s.indexOf('await triggerEnrichment(formState.email);'));
+       /if \(icp2 && icp2\.blocked\) \{[\s\S]*await submitLead\(\);[\s\S]*redirectNonIcp\(icp2\);[\s\S]*return;[\s\S]*\}/.test(guarded));
+    /* Step 1 must warm BEFORE enrichment, so the verdict is in memory early
+       and an Apollo credit is not the thing that gates it. */
+    ok(`${name}: step-1 warm precedes enrichment`,
+       s.indexOf("checkNonIcp(formState.email, '').catch") < s.indexOf('await triggerEnrichment(formState.email);'));
   }
 
   /* NO CLIENT-SIDE COPY OF THE LIST. The two form files already carry

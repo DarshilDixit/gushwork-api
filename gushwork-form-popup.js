@@ -2290,6 +2290,30 @@
       return p;
     }
 
+    /* CACHE-ONLY read, for the moment of decision.
+
+       The step-2 Next click must not make a network call and must not have a
+       timeout it can fall through: a lead who slips past because our own
+       request was slow is a realtor on an AE's calendar. So the click reads
+       only what is already in memory, and the warming is done on blur --
+       email blur at step 1, website blur at step 2, both long before Next.
+
+       Returns null for "no verdict yet", which the caller must treat as
+       "do not block" and leave to the server backstop. Never awaits. */
+    function nonIcpCached(email, website) {
+      const k = nonIcpKey(email, website);
+      return _nonIcpVerdicts.has(k) ? _nonIcpVerdicts.get(k) : null;
+    }
+
+    /* Is the EMAIL alone already known to be blocked? A matched email blocks
+       regardless of the website (confirmed decision, 11 Sept 2026), so this
+       answers at step 2 even when the website pair has not resolved. The
+       email verdict is warmed at step 1, an entire step earlier, so in
+       practice it is always present by the time Next is clicked. */
+    function nonIcpCachedEmail(email) {
+      return nonIcpCached(email, '');
+    }
+
     function redirectNonIcp(v) {
       console.log('[GW] Non-ICP — redirecting to ' + NON_ICP_REDIRECT
         + (v && v.matched_domain ? ' (matched ' + v.matched_domain + ')' : ''));
@@ -2597,17 +2621,26 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
           formState.disqualified_reason = '';
         }
 
-        /* Non-ICP, on the email domain. Checked BEFORE enrichment so we do
-           not spend an Apollo credit on somebody we are about to turn away,
-           and savePartial still runs so the block is recorded server-side
-           and lands on the dashboard. Usually a cache hit from the blur
-           prewarm. */
-        const icp1 = await checkNonIcp(formState.email, '');
-        if (icp1.blocked) {
-          await savePartial(1);
-          redirectNonIcp(icp1);
-          return;
-        }
+        /* NO REDIRECT AT STEP 1 -- deliberate, changed 11 Sept 2026.
+
+           Detection and Meta suppression both happen at step 1: savePartial
+           below posts to /partial, which stamps non_icp_blocked and skips
+           StartTrial. What does NOT happen here is the redirect. A blocked
+           lead fills the whole form and is turned away at submit instead, so
+           we capture their website, company and phone.
+
+           That is not politeness, it is the only way to audit the list.
+           Four of the 84 matched leads in the 11 Sept sample are not agents
+           at all -- a claims employee at a carrier, a retired address, a tax
+           preparer on a carrier address, and a dance instructor on a
+           brokerage address -- and every one was identifiable only from the
+           website and company they type at step 2. Redirecting at step 1
+           would have hidden all four. (Brand names left out on purpose: a
+           test asserts this file contains no copy of the server's list.)
+
+           The check still runs here, warmed, so the verdict is in memory
+           before the step-2 click needs it. Result deliberately unused. */
+        checkNonIcp(formState.email, '').catch(() => {});
 
         setLoading('step-1-next', true, 'Loading...');
         await triggerEnrichment(formState.email);
@@ -2729,18 +2762,32 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
           formState.phone = phoneEl._iti && typeof intlTelInputUtils !== 'undefined' ? phoneEl._iti.getNumber(intlTelInputUtils.numberFormat.E164) : phoneEl.value.trim();
         }
 
-        /* Non-ICP on email AND website, and it has to be HERE -- before
-           RevenueHero. hero.submit() is what produces the booking widget, so
-           a check placed after it would hand a blocked lead a calendar and
-           then redirect them off it. This is the only place the website half
-           can be caught: 12 of the 84 known matches had a personal email and
-           a brokerage website, and nothing at step 1 can see those.
+        /* THE DECISION POINT, and it has to be HERE -- above RevenueHero.
+           hero.submit() is what produces the booking widget, so a check
+           placed after it hands a blocked lead a calendar and then pulls them
+           off it. This is also the only place the website half can be caught:
+           12 of the 84 known matches had a personal email and a brokerage
+           website, and nothing at step 1 can see those.
 
-           submitLead() still runs, so the lead is recorded, /submit stamps
-           the block, Slack gets the blocked-lead post, and Meta is suppressed
-           server-side. */
-        const icp2 = await checkNonIcp(formState.email, formState.website);
-        if (icp2.blocked) {
+           READS CACHE ONLY. No await, no fetch, no timeout to fall through --
+           see nonIcpCached. Both halves were warmed on blur: the email at
+           step 1, the pair when the website field lost focus. The email
+           verdict alone is decisive because a matched email blocks regardless
+           of the website.
+
+           A null verdict means "not warmed yet" and must NOT block. That lead
+           is caught by the server backstop after submitLead() below, and if
+           they somehow get as far as picking a slot, every booking route
+           rejects the booking outright. Three layers, and only this one is
+           allowed to be fast. */
+        /* Three keys, because the blur warmed the TYPED website while
+           formState.website may since have been replaced by the canonical URL
+           the redirect resolved to (www -> bare, http -> https). Looking up
+           only the canonical form would miss every site that redirects. */
+        const icp2 = nonIcpCached(formState.email, getField('website'))
+                  || nonIcpCached(formState.email, formState.website)
+                  || nonIcpCachedEmail(formState.email);
+        if (icp2 && icp2.blocked) {
           await submitLead();
           redirectNonIcp(icp2);
           return;
