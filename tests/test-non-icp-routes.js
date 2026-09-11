@@ -78,6 +78,11 @@ function stubQuery(q, params) {
       : { rows: [], rowCount: 0 };
   }
   if (/^SELECT booking_uid FROM leads/.test(flat))  return { rows: [{ booking_uid: null }], rowCount: 1 };
+  /* Aggregates (/monitor/metrics runs a dozen) must return ONE row, not zero.
+     Every field is read through `parseInt(x) || 0`, so an empty object yields
+     zeros -- but an empty ROW SET makes rows[0] undefined and the route 500s
+     on a different error than the one under test. */
+  if (/^SELECT[\s\S]*COUNT\(/i.test(flat)) return { rows: [{}], rowCount: 1 };
   /* What runPartnerStackSignup reads to see the block. */
   if (/^SELECT non_icp_blocked, non_icp_reason FROM leads WHERE session_id = \$1$/.test(flat)) {
     return { rows: [{ non_icp_blocked: S.psBlocked, non_icp_reason: S.psBlocked ? 'allstate.com' : null }], rowCount: 1 };
@@ -444,6 +449,30 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     ok('MONEY: a clean partner lead DOES still convert',
        S.fetches.some((u) => /partnerlinks\.io/.test(u)),
        'the conversion path is dead for everyone, not just blocked leads');
+  }
+
+  /* ========================================================
+     7. /monitor/metrics ACTUALLY RESPONDS
+
+     Added because it did not. `const peopleNonIcp = parseInt(p.people_non_icp)`
+     was written up with the other counters, above `const p = people.rows[0]`,
+     which is a temporal dead zone -- the route 500'd with
+     "Cannot access 'p' before initialization" and the whole Overview tab was
+     blank in production until it was curled by hand.
+
+     EVERY assertion on this route reads source text, and no boot test drove
+     it. A source assertion cannot tell you whether a function runs; that is
+     this repo's most-repeated lesson and it landed again here.
+     ======================================================== */
+  {
+    reset();
+    const r = await realFetch(BASE + '/monitor/metrics?token=stub', { signal: AbortSignal.timeout(15000) });
+    let body = null; try { body = await r.json(); } catch (_) {}
+    ok('metrics: responds 200, not 500', r.status === 200, String(r.status) + ' ' + JSON.stringify(body));
+    ok('metrics: no error in the body', !(body && body.error), body && body.error);
+    for (const k of ['total', 'completed', 'booked', 'disqualified', 'nonIcpBlocked', 'peopleNonIcp']) {
+      ok(`metrics: carries ${k}`, body && Object.prototype.hasOwnProperty.call(body, k), JSON.stringify(body).slice(0, 160));
+    }
   }
 
   loud();
