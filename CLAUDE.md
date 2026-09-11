@@ -86,6 +86,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `partnerstack.js` | PartnerStack API. TWO hosts and TWO auth schemes: `partnerlinks.io` conversion (Bearer tracking token) and `api.partnerstack.com` v2 partnerships + actions (Basic public:secret) |
 | `lead-magnet.js` | `/lm/*` routes. Separate table, deliberately not joined to `leads` |
 | `backfill-sf.js` | Manual recovery tool for re-syncing leads to Salesforce after a broken connection or outage. Not mounted by default — see below |
+| `tools/fire-non-icp-slack.js` | Fires the TWO non-ICP Slack paths for real — the blocked-lead post and the booking-refusal critical. Lifts them out of `index.js` like `fire-alert.js`. Not mounted, not called |
 | `tools/fire-alert.js` | Fires ONE real alert on purpose, to satisfy the fire-every-alert-path-once rule. Sends for real (Slack + email on a critical). Lifts `alertOps` out of `index.js` rather than reimplementing it, so what arrives is what production sends. Not mounted, not called by anything |
 | `gushwork-form.js` | The `/demo` form frontend. Lives here and is served live by jsDelivr — see below |
 | `gushwork-form-popup.js` | The Google Ads popup/modal form frontend. Lives here and is served live by jsDelivr — see below |
@@ -189,6 +190,18 @@ delete the file.
   a per-hit fact it is not. `source` is `NOT NULL` and today only ever
   `'session_route'` — see `docs/OPEN-ITEMS.md` for why anything
   client-reported must never share that value.
+- **`leads.non_icp_blocked` / `non_icp_reason`** — the non-ICP block. **NOT
+  `disqualified`**, deliberately: that column means exactly one thing (the
+  prospect self-declared B2C/Mixed) and is clearable by the "actually we're
+  B2B" button, which 47% of leads press. `non_icp_reason` holds the matched
+  brand domain, e.g. `kw.com`. **Blocked leads are counted in every headline
+  number** — they are still leads — and are marked rather than hidden on All
+  Leads. The dedicated surface is the **Blocked** tab. Mirrored to
+  `gw_form_leads` for the dialer, which does not yet read them (see
+  `docs/tickets/non-icp-v1-block.md` OPEN ITEMS #1).
+- **`leads.ps_signup_recheck_at`** — when a verified PartnerStack conversion
+  was last RE-checked, as opposed to `ps_signup_verified_at` which is when it
+  was first seen to exist. Two observations, two columns.
 - **`lead_field_changes`** — append-only log of the seven identity fields
   (`email`, `company`, `website`, `phone`, `first_name`, `last_name`,
   `sell_to`) changing on a lead row, because both upserts are last-write-wins
@@ -456,6 +469,61 @@ can't verify, it must not be green.
 ---
 
 ## Things that will bite you
+
+**A SOURCE ASSERTION CANNOT SEE RUNTIME BEHAVIOUR, and on 11-12 Sept that
+cost THREE production breaks in one night.** This is the repo's oldest lesson
+arriving in three new disguises, so the disguises are worth naming:
+
+| Break | Why the suite could not see it |
+|---|---|
+| `/monitor/metrics` 500, blank Overview | A **temporal dead zone** — `const` read above its declaration. `node --check` passes; a TDZ violation is a runtime error, not a syntax one |
+| Blocked tab: `leadRowsHtml is not defined` | A **scope** error. The function was declared inside `loadLeads`, so All Leads could see it and Blocked could not. Valid syntax, correct text, wrong scope |
+| A Meta guard that never fired | An `if (false)` around it moves no source offset, so every ordering assertion still passed |
+
+**The fix is not "write more assertions", it is "drive the thing".**
+`tests/test-non-icp-routes.js` boots the real app and (a) drives all eight
+`/monitor/*` routes for a 200, and (b) **evaluates the dashboard's inline
+script in a stubbed DOM**, asserts every shared helper is defined at TOP
+LEVEL, calls every tab loader, and **records what each table painted**.
+
+That last part is the one that matters and it is the least obvious. Each
+loader wraps its render in a `try/catch` that paints the error into the
+table — so a scope error arrives as a tidy "Could not load:" message, not a
+crash, and **a probe for a thrown error misses it entirely.** Assert on what
+the user sees.
+
+**A GUARD ADDED TO THE OBVIOUS SITE MISSES ITS SIBLINGS. This happened three
+times in one night, to the same column.** `leads.disqualified` has **fourteen
+call sites** across routes, crons, sweeps, health checks and metrics queries,
+and **no single grep reaches them all** — they are spread over `/submit`, the
+recovery cron, two PartnerStack sweeps, the SDR list, three Overview cards, a
+work queue, the stage ladder and a per-email history subquery.
+
+Introducing `non_icp_blocked` — a second column meaning "we rejected this
+lead" — turned **every** existing `disqualified` guard into half a guard
+overnight. Found in three waves: the PartnerStack conversion (cost money, fired
+in production), then the SDR list and recovery health, then three Overview
+counters a day later.
+
+**COUNTING PREDICATES IS NOT DECIDING THEM, and that mistake shipped too.**
+The first audit pinned the *number* of `disqualified` predicates at 13. The
+number was correct and it let two of the three waves through.
+
+`tests/test-non-icp.js` §10b is now a real audit: it resolves every predicate
+to its enclosing route, reads the **enclosing query** rather than a byte
+window, and requires each to be **either guarded or named in a `DELIBERATE`
+list with a written reason**. Two are deliberately exempt — the
+`/monitor/metrics` disqualified counters, and `/monitor/leads`' stage ladder
+and `prior_disqualified`.
+
+**Run that audit whenever you touch either column.** A new predicate added
+without a decision fails the suite, which is the only mechanism in this repo
+that reaches all fourteen sites.
+
+**The generalisable rule: a second column that means "we rejected this lead"
+is not additive.** It silently re-scopes every consumer of the first one. The
+work is not "update the guard I am thinking about", it is "enumerate which
+predicates on the old column now answer only half the question".
 
 **The non-ICP block has three traps, and two of them look like working code.**
 
@@ -1054,15 +1122,17 @@ node tests/test-submit-gate.js       # BOOTS /submit and watches all five announ
 node tests/test-session-payload.js   # EXECUTES the real form-file functions, both files
 node tests/test-session-page-views.js # BOOTS /session, incl. what happens when the write fails
 node tests/test-lead-field-changes.js # BOOTS /partial + /submit, and parses the dashboard JS
+node tests/test-non-icp.js           # the non-ICP block: list, matcher, guards, the disqualified AUDIT
+node tests/test-non-icp-routes.js    # BOOTS every /monitor route AND evaluates the dashboard JS
 
-node tests/measure.js --check   # or just this: runs all ten and checks the totals
+node tests/measure.js --check   # or just this: runs all twelve and checks the totals
 node tests/test-batch1-db.js    # needs DATABASE_URL
 node tests/test-batch1-e2e.js   # boots the real server, needs DATABASE_URL
 ```
 
-**The ten dependency-free suites are the bar.** They run anywhere in about a
-second each — run all ten after any change to `index.js`, `lead-magnet.js`, or
-either form file, always. Do not install Postgres and do not point anything at
+**The twelve dependency-free suites are the bar.** They run anywhere in about a
+second each — run all twelve after any change to `index.js`, `lead-magnet.js`,
+or either form file, always. Do not install Postgres and do not point anything at
 the production database from a feature branch.
 
 **NEVER PIPE `measure.js`. Not through `tail`, not through `grep`, not through
@@ -1086,9 +1156,12 @@ had actually been read.
 If the output is genuinely too long to read, that is a reason to fix the
 output, not to pipe it.
 
-**Four of the ten BOOT A ROUTE** rather than reading source text —
-`test-submit-gate`, `test-session-page-views`, `test-lead-field-changes` and
-`test-session-payload`. They stub `pg` and `global.fetch` and drive the real
+**Five of the twelve BOOT A ROUTE** rather than reading source text —
+`test-submit-gate`, `test-session-page-views`, `test-lead-field-changes`,
+`test-session-payload` and `test-non-icp-routes`. The last one goes furthest:
+it also **evaluates the dashboard's inline JavaScript** in a stubbed DOM and
+calls every tab loader, because three production breaks in one night were
+runtime behaviour no source assertion could see. They stub `pg` and `global.fetch` and drive the real
 express stack over HTTP, so they need no database and no network. They exist
 because a source assertion cannot tell a reachable statement from an
 unreachable one, and cannot tell you whether the dashboard's inline JavaScript
@@ -1098,7 +1171,7 @@ Tests read the real functions out of `index.js` rather than a copy. A test that
 exercises a duplicate of the source can pass while production is broken. Keep it
 that way.
 
-**All ten suites require `tests/crash-reporter.js` first, and it is not
+**All twelve suites require `tests/crash-reporter.js` first, and it is not
 optional.** A suite that crashes prints a stack trace, zero `✗` lines and exits
 1 — which reads as a clean run to anything counting markers and as a caught
 mutation to anything counting exit codes. Three of the six did exactly that

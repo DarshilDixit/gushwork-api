@@ -11,6 +11,76 @@ report six weeks later. Anyone who reads `Non-ICP-flagging-rules` and then reads
 
 ---
 
+## STATUS — read this first
+
+**Live in production since 11 September 2026.** `NON_ICP_BLOCK=true` on the
+`gushwork-api` Railway service. Form pinned in Webflow at
+`4b419c392256754c105c86791d2a854dd5ca6fed`, **v5.11.0** / **v5.11.0-ads**, all
+12 form pages verified on that SHA.
+
+### What is live
+
+| | |
+|---|---|
+| **Blocks** | A lead whose email domain **or** website host matches a national real-estate brokerage or insurance carrier brand. 41 entries in `NON_ICP_DOMAINS` (`index.js`). |
+| **Where** | Detected and stamped at `/partial` (step 1). **Redirected at `/submit`** (step 2) to `/thank-you?attendeeName=…`. |
+| **Meta** | All three upstream events suppressed — `StartTrial`, `Lead`, and `Schedule` on **all three** booking routes. |
+| **Bookings** | A blocked lead's booking is **refused** at every booking route, including both webhook safety nets, with a critical alert. |
+| **PartnerStack** | No conversion, no qualification. Guarded at `/submit`, at the retry sweep, and at the qualification poll. |
+| **Salesforce** | Blocked leads are **not pushed**. |
+| **Slack** | `🚫 Lead Blocked — Non-ICP` in the leads channel, carrying email, website, company, phone and the matched domain. |
+| **Dashboard** | Overview card, dedicated **Blocked** tab with the full expandable panel, row marker and opt-in filter in All Leads. |
+| **Off switch** | `NON_ICP_BLOCK=false` on Railway. No deploy needed. |
+
+### Turning it off, fastest first
+
+1. `railway variable set NON_ICP_BLOCK=false --service gushwork-api`
+2. One bad domain → delete its entry from `NON_ICP_DOMAINS` and deploy. The
+   Slack post names the matched domain precisely so this is a one-line fix.
+3. Full revert → the columns and indexes are `IF NOT EXISTS` additions and can
+   be left. The **form half rolls back separately**: re-pin Webflow to the
+   previous SHA and republish. Reverting this repo does not revert the browser.
+
+### Swapnil's three decisions, 11 September
+
+1. **Redirect at step 2, not step 1.** Detection and Meta suppression stay at
+   step 1; only the redirect moved, so a blocked lead completes the form and we
+   capture website, company and phone. Four of the 84 matched leads are not
+   agents at all and were identifiable *only* from step-2 fields.
+2. **A matched EMAIL blocks regardless of the website.** OR logic. Reasoning:
+   open the site and it is company-owned anyway. The Slack post prints the
+   matched domain and the website together and calls out a mismatch in words,
+   so the decision stays reviewable. **If that warning line starts appearing
+   often, revisit this.**
+3. **Scope is the BUSINESS TYPE, not "agents under national brands."** V1 can
+   only reach brand domains, so it misses the ~70 independent agencies and
+   realtors doing the same job. **When the LLM rules are scoped, write them
+   against what the company *is* — and retire V1 rather than extending it.**
+   Growing a domain list toward "every realtor" is the wrong shape and each
+   addition is another chance at a `paycompass.com`.
+
+### Deliberate choices, so nobody "fixes" them
+
+- **No Salesforce push for blocked leads.** Decision, not an omission.
+  `salesforce.js` is unchanged.
+- **The unwarmed-verdict gap is shipped as is.** Step 2 decides from cache only
+  — no network call at the moment of decision and no timeout to fall through.
+  If neither blur resolved in time the lead sees a calendar until `/submit`
+  answers; the booking routes then refuse the booking, so they cannot take a
+  slot. **Do not pick a timeout from first principles.** The critical alert is
+  the measurement: if it fires more than once or twice in a week, come back with
+  real numbers.
+- **A step-1-only block produces no Slack post.** Someone detected at step 1 who
+  abandons appears on the Blocked tab and nowhere else — the post carries
+  website, company and phone, none of which exist yet.
+- **The show-rate evidence has a caveat that matters.** Matched leads attend
+  47.1% against 66.4%, but that is **34 decided bookings** and `show_status='N'`
+  mixes cancellations with true no-shows. Split for the matched group it is
+  **11 cancelled / 7 genuine**, so the true no-show gap (20.6% vs 16.9%) is much
+  narrower than the headline. **Quote the attendance gap, not the no-show gap.**
+
+---
+
 ## What started it
 
 AEs reported that State Farm insurance agents and real-estate agents were
@@ -536,7 +606,31 @@ replacing them.
 
 ---
 
-## The Partners tab is stale on `allstate.com`, and why
+## The Partners tab was stale on `allstate.com` — RESOLVED 12 Sept
+
+**Fixed. Kept because the general problem behind it is real and recurs.**
+
+The row was cleared by hand (see below) and the tab now reads correctly:
+
+| | Before | After |
+|---|---|---|
+| `totals.conversions` | 5 | **4** |
+| `allstate.com` state | `converted` | **`skipped`** (`non_icp_blocked`) |
+| `signup_verified` | true | **false** |
+| **"Waiting on an AE"** | **1** | **0** |
+
+`bySfState: exists_unticked` is unchanged and correct — there really is an
+unticked Opportunity on that domain. It is simply no longer counted as
+actionable.
+
+**Three metrics queries had the same gap and were also fixed 12 Sept**:
+`pendingPartials` (the "Pending recovery" card, which read 1 for this lead),
+`noBooking` ("No booking yet"), and `partnerRevenueGaps`. See the CLAUDE.md
+entry on the `disqualified` audit for why they were missed.
+
+The re-check sweep (`runPartnerStackConversionRecheck`, 7-day cadence) now
+catches this class automatically. What follows is the original analysis.
+
 
 Checked 12 Sept after the customer was deleted from PartnerStack. The tab reads
 **our stamps**, not PartnerStack, so three numbers are now wrong:
@@ -583,32 +677,180 @@ data edit nobody has authorised.
 
 ## The `sdr-calling` dependency
 
-**Not urgent, but real, and it is not fixed by this PR.**
+**Moved to OPEN ITEMS #1 below**, which has the three exact WHERE clauses,
+the reason it can wait, and what would make it urgent.
 
-`sdr-calling`'s No Booking workflow selects leads from `gw_form_leads` that
-completed and never booked — which is exactly what a submit-time block looks
-like. Without a change there, an SDR rings somebody we turned away at the
-calendar minutes earlier.
+---
 
-**What this PR does:** adds `non_icp_blocked` and `non_icp_reason` to
-`gw_form_leads` and syncs them. Necessary, **not sufficient**.
+## OPEN ITEMS — each actionable cold
 
-**What `sdr-calling` must do:** add `AND non_icp_blocked IS NOT TRUE` to
-`no-booking/sync-form-leads-campaign.js :: fetchFormLeads`, and to
-`lib/population.js :: noBookingPopulation` and `lib/workflow-stats.js ::
-formLeadsNoBookingRows` so the dashboard and the campaign agree.
+Nothing here is blocking. Each says what to change, where, and what would make
+it urgent.
 
-**Before, alongside, or after?** **Alongside or after.** Not a blocker, and here
-is the reasoning:
+### 1. `sdr-calling` still dials blocked leads — three WHERE clauses
 
-- A **step-1 block collects no phone** — phone is a step-2 field, and No Booking
-  requires a non-empty phone. Those leads can never reach the dialer.
-- Only **submit-time blocks** are dialable, and those are the "personal email +
-  brokerage website" shape: **12 of 84 over six months, about 2 per month.**
-- The failure mode is an awkward call, not a lost lead or a wrong charge.
+**Separate repo. Not touched.** Blocked leads look identical to normal
+drop-offs in `gw_form_leads`: completed, no booking.
 
-Two per month of awkwardness is worth accepting to ship today. It should not be
-left open for long.
+The mirror columns **already ship** from here (`non_icp_blocked`,
+`non_icp_reason` on `gw_form_leads`, synced by `syncToAWS`), so that side needs
+no further change. `sdr-calling` needs `AND non_icp_blocked IS NOT TRUE` in
+**three** places, and all three so the campaign and the dashboard agree:
+
+```
+no-booking/sync-form-leads-campaign.js :: fetchFormLeads
+lib/population.js                      :: noBookingPopulation
+lib/workflow-stats.js                  :: formLeadsNoBookingRows
+```
+
+**Why it can wait:** only submit-time blocks are dialable — a step-1 block
+collects no phone, and No Booking requires one. That is the "personal email +
+brokerage website" shape: **12 of 84 historically, about 2 a month.** The
+failure is an awkward call, not a lost lead or a wrong charge.
+
+**Urgent if:** a blocked lead is actually dialled, or the rate rises above a
+couple a month.
+
+### 2. No health row for the warehouse dependency
+
+A warehouse outage **silently disables the block** — `nonIcpVerdict` fails open
+when the customer bypass cannot run, which is the correct direction and
+completely invisible. Nothing alerts, and there is no System Health row.
+
+Would go in `runHealthChecks` alongside the existing checks, and must follow the
+house rule that health checks fail LOUD: if it cannot verify the block is
+working it reports red, never green.
+
+**Urgent if:** you want to know the block is *on* as opposed to merely *enabled*.
+
+### 3. `non_icp_checked_at`
+
+Only the two specified columns shipped. "When was this decided" is answerable
+only from `updated_at`, which moves for unrelated reasons.
+
+**Urgent if:** you need to date a verdict independently of the row's last write
+— e.g. to tell a block made under one version of the list from one made under
+another.
+
+### 4. The `customer_deleted` webhook is the better primary
+
+PartnerStack emits one (`POST /v2/webhooks` to subscribe; payload carries `key`,
+`email`, `partner_key`). Event-driven would be instant and cost nothing per
+domain.
+
+What shipped instead is a **7-day poll** (`runPartnerStackConversionRecheck`),
+deliberately, because the webhook needs a public unauthenticated endpoint,
+signature verification and an out-of-repo subscription — and **delivery is
+best-effort**, so a missed POST leaves exactly the permanent desync the poll
+exists to prevent.
+
+**Add the webhook as the fast path and keep the poll underneath it.** Not as a
+replacement.
+
+### 5. 1.8% of Opportunities have no contact email — the gate refuses them
+
+The qualification gate is **email-only**: it fires only when the ticked
+Opportunity's primary contact email matches a referred lead. Measured over 180
+days of real Salesforce:
+
+| | Count | No contact email |
+|---|---|---|
+| All Opportunities | 6,134 | 695 (11.3%) |
+| **Form-sourced** | **1,833** | **33 (1.8%)** |
+
+So roughly **one legitimate qualification in fifty-five** cannot be matched and
+is refused. Accepted deliberately: a refusal goes through `recordFailure` to the
+PartnerStack health row, so a missed payout is a work item somebody can send by
+hand — and every fallback rule is a new way to pay the wrong partner on a shared
+domain.
+
+**A domain fallback was built and then removed.** Its evidence was a ticked
+Opportunity with no contact email that turned out to be hand-made test data. Do
+not reintroduce one without measuring first; a test asserts the gate has exactly
+one `fire: true` path.
+
+**Urgent if:** partner volume grows enough that 1.8% is a real number of missed
+payouts, or the `opportunity_has_no_contact_email` refusal starts appearing in
+the health row regularly.
+
+### 6. PartnerStack domain-keying over-claims on shared domains
+
+Full analysis in the FINDING section below. Short version: `customer_key` is our
+choice, not PartnerStack's model — their docs say it is any unique identifier —
+and keying on the domain means one partner referring one person at a large
+employer claims the whole domain.
+
+**Mostly closed by accident:** the six worst shared domains in our data
+(`allstate.com` 7 companies, `farmersagent.com`, `kw.com`, `statefarm.com` 5
+each, `exprealty.com`, `cbrealty.com`) are all on the block list now, and a
+blocked lead cannot convert. The tail is in-ICP franchise and advisor networks —
+`lpl.com`, `sandler.com`, `deleyorganizationglobelife.com`, 2–3 companies each.
+
+**Any change to the key format is one-way.** PartnerStack holds the old keys
+forever, so a re-key means new keys convert *alongside* old ones rather than
+replacing them.
+
+### 7. The LLM flagging layer — waiting on an API key from Punit
+
+The six-rule flagger is what V1 is a stopgap for. It reads the company's website
+with a model and covers all five rule-6 industries plus agencies, nonprofits,
+publishers and sub-$1,000 tickets.
+
+**Blocked on an API key from Punit.** Nothing to build here until that lands.
+
+When it does, two things from tonight carry into its scoping:
+
+- Scope the rules against **what the company is** (decision 3 above), not
+  against a brand list.
+- **Retire V1 rather than extending it.** A domain list that grows toward
+  "every realtor" accumulates `paycompass.com`-shaped mistakes.
+
+Note the doc's own status: rules 5 and 6 and the widened rule 1 currently flag
+**nobody**, because the 3,165 classified domains were read under the old
+questions. That is silence, not a clean bill of health — a fresh sweep over the
+cached page text is needed before any count from it means anything.
+
+---
+
+## WEEK ONE — what to watch
+
+Four things, in the order they will tell you something.
+
+**1. The Blocked tab, daily.** Every row is somebody we turned away. The
+question is not "how many" but **"does any of these look like a real
+prospect?"** The expandable panel carries the website, company and enrichment
+precisely so that is answerable in one glance. If one is wrong, the fix is one
+line in `NON_ICP_DOMAINS`.
+
+**2. The critical alert: "A blocked lead took a calendar slot."** This is the
+measurement for the unwarmed-verdict gap. It means somebody got past the
+client-side check, reached a calendar, and had their booking refused — and the
+slot still exists in Cal/RevenueHero, so **a human has to cancel it**.
+
+- Fires **once or twice in the week** → the gap is as small as predicted; leave
+  it.
+- Fires **more than that** → come back with the real count and we size a wait at
+  the step-2 click against data rather than guessing.
+
+**3. The count against the prediction: ~14 leads/month, ~10 bookings/month.**
+Overview card, or the Blocked tab count.
+
+- **Far above** → the list is catching more than brand-domain agents. Check the
+  matched domains for a false positive.
+- **Far below** → the block may not be reaching the browser. Check the console
+  banner reads `v5.11.0`, and re-run the page sweep.
+- **Zero after a few days** → suspect the Webflow pin or `NON_ICP_BLOCK`, not
+  the absence of realtors.
+
+**4. The email/website mismatch warning in Slack.** *"Their email is a brand
+domain but their website is not."* One or two is the expected shape of a captive
+agent with their own site. **A steady stream means decision 2 (OR logic) is
+worth revisiting** — that is exactly the signal it was made visible for.
+
+Also worth one look in week one: **the browser walkthrough has still never been
+done.** Everything server-side is driven over real HTTP and both Slack paths
+were fired for real, but no form file has been loaded in a real page. The
+checklist is in `cards/pr-non-icp-v1-block.md` §12 step 7.
 
 ---
 
