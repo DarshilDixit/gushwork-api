@@ -369,10 +369,9 @@ syncs them. **Necessary, not sufficient.**
 7. **`/thank-you` copy is unchanged**, per your instruction. A blocked realtor
    sees the same page as a successful booking. That will read as confusing to
    anyone who looks.
-8. **Partly tested in a browser now.** The `/demo` block path was walked end to
-   end on 11 Sept (v5.10.0) and passed. What remains is the Ads fork, the
-   normal-address control, and the `attendeeName` greeting from v5.11.0 —
-   that run predates the repin. Everything server-side is now driven
+8. **Browser walkthrough complete.** `/demo` block path, `/demo` normal-address
+   control (calendar still appears), and the Ads fork blocking with the
+   greeting rendered. No longer a weak point. Everything server-side is now driven
    over real HTTP (§11) and both Slack paths were fired for real, but the
    blur→cache→click sequence, the `/thank-you` redirect actually navigating,
    and the modal fork's behaviour have only ever been asserted from source.
@@ -489,7 +488,7 @@ evidence of nothing.
 | `slackNonIcpBlocked` | ✅ **CLOSED.** Fired for real via `tools/fire-non-icp-slack.js blocked` against production `SLACK_WEBHOOK_URL`. Slack returned **200 ok**. The message used the matched-on-email-but-not-website shape deliberately, so the mismatch warning rendered too. |
 | The booking-refusal critical | ✅ **CLOSED.** Fired via `tools/fire-non-icp-slack.js booking`. Slack **200**, and the alert email sent (`messageId cdc301c7-…@gushwork.ai`). New path, so it was fired under the same rule. |
 | `/non-icp-check` never served a request | ✅ **CLOSED.** `tests/test-non-icp-routes.js` boots the real app and drives it over actual HTTP — 47 assertions covering `/non-icp-check`, `/partial`, `/submit`, all three booking routes and both safety nets. |
-| No form file loaded in a browser | ⚠️ **HALF DONE.** Darshil ran the `/demo` block path end to end on 11 Sept (v5.10.0): reached step 2, landed on `/thank-you`, Slack post arrived, Blocked tab showed the row. **Still untested:** the Ads fork, the normal-address control, and the v5.11.0 `attendeeName` greeting — that run predates the repin. See the ticket's WEEK ONE section. |
+| No form file loaded in a browser | ✅ **CLOSED.** `/demo` block path end to end (11 Sept, v5.10.0); `/demo` normal-address control shows the calendar; the Ads fork blocks and lands on `/thank-you` with the greeting, covering both the fork and `attendeeName` on v5.11.0. |
 | The Blocked dashboard tab has not been rendered | ❌ **STILL OPEN.** The route is tested; the rendered page is not. |
 
 **NOT verified:**
