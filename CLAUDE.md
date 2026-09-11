@@ -1011,6 +1011,38 @@ A push is a production release.
 
 So: work on a branch, run the tests, and only merge when they pass.
 
+### The working agreement: branch, push, PR, WAIT
+
+**Never merge to `main` without being told to, in that message.** Not "the tests
+are green", not "the card is written", not "it's behind a flag". The merge is
+Darshil's call and it is made on a diff he has read.
+
+The flow, every time:
+
+1. Work on a branch.
+2. Run the full bar — `node tests/measure.js --check`, bare, never piped.
+3. **Push the BRANCH** (`git push -u origin <branch>`), never `main`.
+4. **Open a PR** (`gh pr create`), so there is a diff to review rather than a
+   description of one.
+5. Write the review card to `cards/` and say it is ready.
+6. **Stop.** Merge only when Darshil says merge, in words, in a later message.
+
+Two things this is guarding against, both of which have already happened here:
+
+- **A green bar is not a review.** PR 51 and PR 52 both merged with
+  `test-batch2.js` failing, because the bar was piped and nobody read it. A PR
+  gives a second surface where that is visible.
+- **A push to `main` deploys instantly.** There is no staging, so "merged but
+  not released" does not exist in this repo. The moment it lands on `main` it is
+  serving real leads, which is why the merge and the release are one decision
+  and one person's.
+
+**`Bash(git push *)` is allow-listed in `.claude/settings.local.json`**, so a
+push is not gated by a permission prompt — the discipline is the agreement, not
+the tooling. If a push is ever refused anyway, run it as a BARE command rather
+than chained after other git commands with `;`; a compound command does not
+match the allow rule cleanly and falls through to the classifier.
+
 ```bash
 node tests/test-batch1.js       # logic, no dependencies
 node tests/test-batch2.js       # logic, no dependencies
