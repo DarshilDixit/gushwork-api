@@ -289,16 +289,29 @@ const results7 = (async () => {
    call sits inside the branch it is supposed to.
    ============================================================ */
 {
-  // All THREE booking routes suppress Schedule. A fix on one is a fix on one third.
-  const scheduleGuards = (src.match(/Meta CAPI Schedule suppressed — non-ICP/g) || []).length;
-  eq('all THREE Schedule call sites are guarded', scheduleGuards, 3);
+  /* All THREE booking routes suppress Schedule. A fix on one is a fix on one
+     third.
+
+     ASSERTED AS CONDITION-ADJACENT-TO-ROUTE, not as "the log string exists".
+     The first version of this counted occurrences of the message and a
+     mutation replacing `if (fullLead.non_icp_blocked === true)` with
+     `if (false)` SURVIVED it -- the message is still in the file, the guard
+     just never fires. That is the reachability blind spot CLAUDE.md records
+     for ordering assertions, arriving here in a third form. The regex below
+     requires the real condition immediately before the route's own log line,
+     so neutering the condition fails the suite. */
   for (const tag of ['/booking-confirmed', '/cal-webhook', '/rh-webhook']) {
-    ok(`Schedule guard present on ${tag}`,
-       src.includes(`[${tag}] ⏭ Meta CAPI Schedule suppressed`));
+    const re = new RegExp(
+      'if \\(fullLead\\.non_icp_blocked === true\\) \\{ console\\.log\\(`\\['
+      + tag.replace(/\//g, '\\/')
+      + '\\] ⏭ Meta CAPI Schedule suppressed');
+    ok(`Schedule guard on ${tag} is live, not just present`, re.test(src));
   }
-  // The guard must read the ROW, not a local variable that may be stale.
-  ok('Schedule guard reads fullLead.non_icp_blocked',
-     src.includes('if (fullLead.non_icp_blocked === true)'));
+  const scheduleGuards = (src.match(/if \(fullLead\.non_icp_blocked === true\) \{ console\.log/g) || []).length;
+  eq('exactly THREE live Schedule guards', scheduleGuards, 3);
+  /* And each one must actually return, or it logs and fires anyway. */
+  const returning = (src.match(/if \(fullLead\.non_icp_blocked === true\) \{[\s\S]{0,220}?return; \}/g) || []).length;
+  eq('all three Schedule guards return', returning, 3);
   ok('SCHEDULE_LEAD_SQL selects the column',
      between('const SCHEDULE_LEAD_SQL', 'WHERE l.session_id').includes('l.non_icp_blocked'));
 
