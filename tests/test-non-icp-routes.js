@@ -255,8 +255,15 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     ]) {
       ok(`submit: the RENDERED blocked post carries the ${label}`, rendered.includes(needle), label);
     }
-    ok('submit: the rendered post labels the match explicitly',
-       /\*Matched:\*/.test(rendered), rendered.slice(0, 200));
+    /* The matched domain must be ON THE "Matched:" LINE, not merely somewhere
+       in the message. 'kw.com' is also this lead's website, so a substring
+       check over the whole payload passes even when the Matched line has been
+       emptied -- measured, that mutation survived twice before this assertion
+       was written. Pin the line itself. */
+    ok('submit: the MATCHED LINE names the domain',
+       /\*Matched:\*[^\\"]{0,40}kw\.com/.test(rendered), rendered.slice(0, 300));
+    ok('submit: the matched line names the brand',
+       /Keller Williams/.test(rendered));
   }
   {
     reset();
