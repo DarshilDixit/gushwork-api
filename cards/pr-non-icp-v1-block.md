@@ -398,57 +398,69 @@ syncs them. **Necessary, not sufficient.**
 
 **Run and passing:**
 
-- `node tests/measure.js --check` — **11 suites, 2,571 assertions, 0 failures.**
-  Run bare, not piped. Baseline updated 2,419 → 2,571.
-- `tests/test-non-icp.js` — **150 assertions**, new. Fixtures are **real
-  production rows**, including all five substring false positives.
-- Three pre-existing suites needed updating because this PR changes contracts
-  they encode: `test-partnerstack.js` (cache-warm now has two consumers;
-  `res.json` argument changed; `showTab` gained a tab; form version banner),
-  `test-batch2.js` (never-NULL mirror binds went from four to five),
-  `test-ads-parity.js` (version header). **None were loosened** — each now
-  asserts the new intended contract.
+- `node tests/measure.js --check` — **12 suites, 2,648 assertions, 0 failures.**
+  Run bare, never piped. Baseline 2,419 → 2,648 across this branch.
+- `tests/test-non-icp.js` — **177 assertions**, source-level. Fixtures are real
+  production rows, including all five substring false positives.
+- `tests/test-non-icp-routes.js` — **50 assertions**, NEW, boots the app and
+  drives it over real HTTP.
+- Three pre-existing suites were updated because this PR changes contracts they
+  encode. **None were loosened** — each asserts the new intended contract.
 
-**SQL was EXECUTED, not just asserted.** Per `CLAUDE.md`: built a temp schema
-from the real migrations on Railway inside a transaction, ran the real
-statements, and rolled back.
+**SQL was EXECUTED, not asserted.** Temp schema built from the real migrations
+on Railway, statements run inside a transaction, `ROLLBACK`. Re-run after every
+change on this branch.
 
 - `/partial` upsert, `/submit` upsert, `/monitor/blocked`, `/cron/send-partials`
-  — all four **executed successfully**.
-- **Stickiness proved by execution**, not assertion: inserted with
-  `non_icp_blocked = true`, ran the `/partial` upsert again with the verdict
-  `false`, and the row stayed `t / kw.com`. That is the
-  realtor-clicks-"actually-we're-B2B" scenario.
-- Confirmed afterwards: **0 test rows in production**, columns still absent
-  (they are created at boot by `db.js`).
-- Placeholder arithmetic checked by counting: `/partial` 42=42, `/submit` 41=41,
-  mirror 60=60.
+  — all four execute clean.
+- **The blur-then-edit case was executed, not reasoned about** — see §5c for the
+  output.
+- Afterwards: **0 test rows in production**, columns still absent (created at
+  boot by `db.js`).
+- Placeholder arithmetic: `/partial` 42=42, `/submit` 41=41, mirror 60=60.
 
-**Mutation testing — 13 mutations, via `tests/measure.js --mutation`:**
+**Mutation testing — 21 mutations across three passes.**
 
 | Mutation | Result |
 |---|---|
-| Sticky block → `= EXCLUDED` (realtor clears own block) | CAUGHT |
-| Substring matching reintroduced | CAUGHT |
+| Sticky block → `= EXCLUDED` | CAUGHT |
+| Substring matching reintroduced | CAUGHT ×2 suites |
 | Known-customer bypass removed | CAUGHT |
 | Warehouse failure blocks instead of failing open | CAUGHT |
-| `StartTrial` suppression removed | CAUGHT |
-| Blocked branch pushes to Salesforce anyway | CAUGHT |
+| `StartTrial` suppression removed | CAUGHT ×2 |
+| Blocked branch pushes to Salesforce | CAUGHT ×2 |
 | Recovery-cron exclusion removed | CAUGHT |
+| Env flag defaults ON | CAUGHT |
+| `statefarm.com` removed from the list | CAUGHT |
 | Step-2 check moved after RevenueHero | CAUGHT |
 | Client redirect never fires | CAUGHT |
-| Ads fork check removed (popup only) | CAUGHT |
-| `statefarm.com` removed from the list | CAUGHT |
-| Env flag defaults ON | CAUGHT |
-| **One `Schedule` guard neutered to `if (false)`** | **SURVIVED → fixed → CAUGHT** |
+| Ads fork: step-2 check removed from popup only | CAUGHT |
+| **Booking refusal removed** (`/booking-confirmed`) | CAUGHT ×2 |
+| **Refusal logs but does not return** (event suppressed, slot kept) | CAUGHT |
+| **Safety-net guard removed** (Cal) | CAUGHT ×2 |
+| **Step 2 awaits the network again** (timeout window reopens) | CAUGHT |
+| **Step-1 redirect reinstated** | CAUGHT |
+| One `Schedule` guard neutered → `if (false)` | **SURVIVED → fixed → CAUGHT** |
+| **Slack drops the matched domain** | **SURVIVED TWICE → fixed → CAUGHT** |
 
-**That survivor is worth your attention.** The first assertion counted
-occurrences of the log *message*, which stays in the file when the condition is
-replaced by `if (false)`. Third appearance of the reachability blind spot
-`CLAUDE.md` records for ordering assertions. Fixed in a follow-up commit
-(`Schedule guards: assert reachability, not just the log string`) — the
-assertion now requires the real condition adjacent to each route's own log line,
-plus that all three return.
+**Two survivors, and both are worth your attention** — they are the same class
+of mistake twice:
+
+1. **The `Schedule` guard.** The assertion counted occurrences of the log
+   *message*, which stays in the file when the condition becomes `if (false)`.
+   Fixed to require the real condition adjacent to each route's own log line.
+
+2. **The matched domain in Slack.** Harder, and it took two goes. The first
+   assertion checked the whole Slack payload — but `sendSlack` also writes a
+   plain-text fallback repeating the domain, so it passed with the visible
+   message gutted. The second checked `payload.blocks` — but `kw.com` is *also*
+   the test lead's website, so it passed again. Only pinning the `*Matched:*`
+   line itself caught it. **You said that field is how you catch a bad block;
+   it took three attempts to actually test it.**
+
+Both are the reachability blind spot `CLAUDE.md` records for ordering
+assertions, arriving in new disguises. Treat "the string is in the file" as
+evidence of nothing.
 
 **Previously untested paths — two of three now closed:**
 
@@ -544,6 +556,90 @@ code is gone. The mirror columns should be left alone regardless, since
 
 **The form half rolls back separately.** Re-pin Webflow to the previous SHA
 (`99597ed`) and republish. Reverting this repo does **not** revert the browser.
+
+---
+
+## 15. Webflow handover — `git push` does NOT ship the form half
+
+Both form files went to **v5.10.0** / **v5.10.0-ads**. Until the Webflow pin
+moves, every real visitor runs the old file and **nothing in this repo will tell
+you.** The tests pass, Railway redeploys, and the block silently does not exist
+in the browser.
+
+### The SHA
+
+Take it **after the merge commit lands on `main`**, not from this branch:
+
+```bash
+git checkout main && git pull && git rev-parse HEAD
+```
+
+The full 40 characters, never a short SHA — short SHAs are ambiguous as the repo
+grows and a collision resolves to the wrong file rather than erroring.
+
+**On this branch right now it is:**
+
+```
+9a20abae494baf96beb80f6e0a54778d25afb611
+```
+
+If you merge with a merge commit, that is **not** the SHA to pin — re-run the
+command above on `main` afterwards.
+
+### The two script tags
+
+Webflow → Project Settings → Custom Code. Replace **both**, with the same SHA,
+even though only these two files changed — pinning them together is the only
+thing that records that the pair was *tested* together.
+
+```html
+<script src="https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@9a20abae494baf96beb80f6e0a54778d25afb611/gushwork-form.js"></script>
+```
+
+```html
+<script src="https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@9a20abae494baf96beb80f6e0a54778d25afb611/gushwork-form-popup.js"></script>
+```
+
+Then **republish**.
+
+### Sweep every page — a Project-Settings republish does not reach a page-level tag
+
+Two pages were found stale on 10 Sept for exactly this reason. Run this after
+republishing; anything not on the SHA above is serving different code to real
+visitors, and a page with **no** `@sha` at all is worse than a stale one —
+jsDelivr then serves the default branch best-effort and it drifts on its own.
+
+```bash
+SHA=9a20abae494baf96beb80f6e0a54778d25afb611
+for p in /demo /start /start-now /ai-demo /meeting-booked /careers \
+         /consulting-lead-generation /manufacturing-lead-generation \
+         /financial-services-lead-generation /lead-gen /seo-leads \
+         /financial-services-seo /manufacturing-seo-services /consulting-seo-services; do
+  FOUND=$(curl -s "https://www.gushwork.ai$p" | grep -oE 'gushwork-api@[0-9a-f]{7,40}' | sort -u | tr '\n' ' ')
+  case "$FOUND" in
+    *"$SHA"*) echo "OK    $p" ;;
+    "")       echo "NO PIN $p   <-- serving the default branch, fix this first" ;;
+    *)        echo "STALE $p -> $FOUND" ;;
+  esac
+done
+```
+
+`/careers` and `/meeting-booked` should have had their tags removed on 10 Sept.
+If they still report a pin, that removal did not take.
+
+### The console banner — the only proof the swap took
+
+Load each page and read the console. If the version is not the one you just
+pinned, Webflow is still serving the old file and the deploy is **not done**,
+however green this repo looks.
+
+| Page | Expected banner |
+|---|---|
+| `/demo` and every SEO lander | `[GW] ✅ Form initialised v5.10.0 (/demo).` |
+| The Google Ads page | `[GW] ✅ Form initialised v5.10.0-ads (Google Ads).` |
+
+A page showing `v5.9.0` is the pre-block file: no redirect, no `/non-icp-check`
+call, and a realtor books normally.
 
 ---
 
