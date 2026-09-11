@@ -632,6 +632,26 @@ async function initDB() {
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_eligible BOOLEAN`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_ineligible_reason TEXT`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_checked_at TIMESTAMPTZ`,
+      /* ── Non-ICP block (V1, Sept 2026) ──────────────────────────────
+         DELIBERATELY NOT leads.disqualified. That column means exactly one
+         thing today -- the prospect told us they sell B2C or asked for the
+         waitlist -- and five things read it: runPartnerStackSignup, the
+         recovery cron, slackPartial, the SDR list and the stage ladder.
+         Folding our verdict into it would make every historical DQ count
+         two different things with no way to split them later.
+
+         It is also CLEARABLE. 2,389 of 5,123 leads (47%) reached step 2 via
+         the "actually we are B2B" button, which sets disqualified=false --
+         and 74 of the 84 known realtor/insurance leads took exactly that
+         path. A realtor must not be able to talk their way past a block, so
+         the block lives in a column nothing in the form can clear.
+
+         non_icp_reason holds the matched brand domain (e.g. 'kw.com'), not a
+         category. It is what Slack prints and it is how a bad block gets
+         spotted by a human. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS non_icp_blocked BOOLEAN DEFAULT FALSE`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS non_icp_reason TEXT`,
+      `CREATE INDEX IF NOT EXISTS leads_non_icp_blocked_idx ON leads (non_icp_blocked) WHERE non_icp_blocked IS TRUE`,
       /* One conversion per customer key, ever, is enforced by looking this up
          on every partner submit. Without the index that is a seq scan of leads
          on the critical path. */

@@ -1,7 +1,7 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.9.0-ads  (ADS PAGE VERSION)
+  GUSHWORK — MULTI-STEP FORM  v5.10.0-ads  (ADS PAGE VERSION)
 
-  Tracks /demo v5.9.0. Full feature parity with /demo, EXCEPT the
+  Tracks /demo v5.10.0. Full feature parity with /demo, EXCEPT the
   booking step, which keeps the Ads page's fullscreen modal
   presentation — opened after step 2 — instead of /demo's inline
   column render, AND the close affordances that modal needs (v5.7.2).
@@ -9,6 +9,14 @@
   port of gushwork-form.js and should be kept in step with it. A
   modal needs a way out and an inline column does not, so this
   section has no /demo counterpart to track.
+
+  v5.10.0-ads — NON-ICP BLOCK (real estate + insurance brand domains).
+    Ported from /demo v5.10.0, identical. Behind NON_ICP_BLOCK on
+    Railway, default off. A lead whose email domain or website is a
+    national brokerage or carrier brand is sent to /thank-you instead of
+    the calendar, and none of the three Meta events fire for them.
+    SECTION 4C. The LIST LIVES ON THE SERVER, not in this file.
+    Fails open everywhere.
 
   v5.7.2-ads — THE MODAL CAN BE CLOSED.
     It previously had no exit at all. Not a cross, not Escape, not a
@@ -1895,6 +1903,11 @@
           return; // never DNS-check a malformed domain
         }
         if (isTestEmail(getField('email'))) return;
+        /* Warm the non-ICP verdict for the email+website pair now, so the
+           step-2 Next click is a cache hit and the button does not stall on a
+           round trip. Shows nothing on blur -- see the prewarm note in
+           SECTION 4C. */
+        checkNonIcp(getField('email'), val).catch(() => {});
         const v = await checkWebsite(val);
         // Only show if the field still holds the value we checked
         if (!v.ok && el.value.trim() === val) {
@@ -1938,6 +1951,7 @@
       submit:      12000,  // the one call we most want to land
       session:     5000,
       booking:     8000,
+      nonIcp:      6000,  // pure string comparison server-side; only the WAN costs
     };
 
     async function fetchWithTimeout(url, options, timeoutMs) {
@@ -2187,6 +2201,11 @@
         if (current !== val.toLowerCase()) return;
         if (!v.valid) { hideEmailTypoHint(); showEmailVerdictError(v); return; }
         hideEmailSuggestion();
+        /* Warm the non-ICP verdict alongside enrichment so the Next click is
+           a cache hit, exactly like the ELV call above. Never surfaces
+           anything on blur -- the redirect only happens on an explicit
+           click, so nobody is thrown off the page mid-typing. */
+        checkNonIcp(val, '').catch(() => {});
         triggerEnrichment(val).catch(() => {});
       }).catch(() => {});
     }
@@ -2198,6 +2217,84 @@
       el.addEventListener('input', function () { hideEmailSuggestion(); hideEmailTypoHint(); });
     }
 
+
+    /* =======================================================
+    SECTION 4C — NON-ICP CHECK (real estate / insurance brands)
+
+    Asks the server whether this lead's email domain or website is a
+    national real-estate brokerage or insurance carrier. If it is, the
+    visitor goes to /thank-you instead of the calendar.
+
+    SAME SHAPE AS verifyEmail ABOVE, on purpose: cached, deduped,
+    prewarmed on blur, awaited on the Next click. No new pattern.
+
+    THE LIST LIVES ON THE SERVER, NOT HERE. This file and its Ads fork
+    already carry duplicated copies of three website-verdict lists and
+    they have drifted before -- the Ads file missed v5.6.0 and v5.7.x for
+    twelve days. A fourth copy of a list that decides whether a real
+    person can book would drift the same way, and the failure would be
+    invisible. One round trip is cheaper than that.
+
+    THIS IS NOT THE ENFORCEMENT. Anyone can skip it with devtools. The
+    server stamps non_icp_blocked in /partial and /submit and suppresses
+    Meta there regardless of what this file does; this only decides which
+    screen the visitor sees.
+
+    FAILS OPEN, LIKE EVERYTHING ELSE HERE. Timeout, non-200, no backend,
+    thrown error -- all of them mean "not blocked" and the lead carries on
+    to the calendar. A backend blip must never cost a real lead.
+    ======================================================= */
+    const NON_ICP_REDIRECT = '/thank-you';
+    const _nonIcpVerdicts = new Map(); // "email|website" -> verdict
+    const _nonIcpInFlight = new Map();
+
+    function nonIcpKey(email, website) {
+      return (email || '').trim().toLowerCase() + '|' + (website || '').trim().toLowerCase();
+    }
+
+    function checkNonIcp(email, website) {
+      if (!email && !website) return Promise.resolve({ blocked: false, status: 'empty' });
+      if (isTestEmail(email)) return Promise.resolve({ blocked: false, status: 'test_email' });
+      if (!isRailwayReady()) return Promise.resolve({ blocked: false, status: 'no_backend' });
+      const key = nonIcpKey(email, website);
+      if (_nonIcpVerdicts.has(key)) return Promise.resolve(_nonIcpVerdicts.get(key));
+      if (_nonIcpInFlight.has(key)) return _nonIcpInFlight.get(key);
+
+      const p = (async () => {
+        try {
+          const res = await fetchWithTimeout(`${RAILWAY_API_URL}/non-icp-check`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: email || '', website: website || '' }),
+          }, NET_TIMEOUT_MS.nonIcp);
+          if (!res.ok) return { blocked: false, status: 'backend_error' };
+          const data = await res.json();
+          return {
+            blocked:        data.blocked === true,
+            matched_domain: data.matched_domain || null,
+            status:         'ok',
+          };
+        } catch (err) {
+          const timedOut = err && err.name === 'AbortError';
+          console.warn('[GW] Non-ICP check ' + (timedOut ? 'timed out' : 'failed') + ' — allowing through:', err && err.message);
+          return { blocked: false, status: timedOut ? 'timeout' : 'fetch_error' };
+        }
+      })()
+        /* Only a real server answer is cached. A fail-open verdict must never
+           be remembered as a pass for the rest of the session -- the same rule
+           EMAIL_UNCACHEABLE encodes for ELV. */
+        .then((v) => { if (v.status === 'ok') _nonIcpVerdicts.set(key, v); return v; })
+        .finally(() => { _nonIcpInFlight.delete(key); });
+
+      _nonIcpInFlight.set(key, p);
+      return p;
+    }
+
+    function redirectNonIcp(v) {
+      console.log('[GW] Non-ICP — redirecting to ' + NON_ICP_REDIRECT
+        + (v && v.matched_domain ? ' (matched ' + v.matched_domain + ')' : ''));
+      window.location.href = NON_ICP_REDIRECT;
+    }
 
     /* =======================================================
     SECTION 5 — STEP NAVIGATION
@@ -2288,7 +2385,17 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(formState),
         }, NET_TIMEOUT_MS.submit);
-        return res.ok;
+        /* Returns the BODY now, not just res.ok, so handleStep2Next can act on
+           the server's non_icp_blocked verdict. Every caller that treated the
+           old boolean as "did it land" reads a truthy object here for the same
+           cases, and the two early returns above still return true. A parse
+           failure must not lose the lead, so it degrades to res.ok. */
+        try {
+          const body = await res.json();
+          return (body && typeof body === 'object') ? body : res.ok;
+        } catch (_) {
+          return res.ok;
+        }
       } catch (err) {
         console.warn('[GW] Submit failed:', err);
         return true;
@@ -2490,6 +2597,18 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
           formState.disqualified_reason = '';
         }
 
+        /* Non-ICP, on the email domain. Checked BEFORE enrichment so we do
+           not spend an Apollo credit on somebody we are about to turn away,
+           and savePartial still runs so the block is recorded server-side
+           and lands on the dashboard. Usually a cache hit from the blur
+           prewarm. */
+        const icp1 = await checkNonIcp(formState.email, '');
+        if (icp1.blocked) {
+          await savePartial(1);
+          redirectNonIcp(icp1);
+          return;
+        }
+
         setLoading('step-1-next', true, 'Loading...');
         await triggerEnrichment(formState.email);
         await savePartial(1);
@@ -2610,6 +2729,23 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
           formState.phone = phoneEl._iti && typeof intlTelInputUtils !== 'undefined' ? phoneEl._iti.getNumber(intlTelInputUtils.numberFormat.E164) : phoneEl.value.trim();
         }
 
+        /* Non-ICP on email AND website, and it has to be HERE -- before
+           RevenueHero. hero.submit() is what produces the booking widget, so
+           a check placed after it would hand a blocked lead a calendar and
+           then redirect them off it. This is the only place the website half
+           can be caught: 12 of the 84 known matches had a personal email and
+           a brokerage website, and nothing at step 1 can see those.
+
+           submitLead() still runs, so the lead is recorded, /submit stamps
+           the block, Slack gets the blocked-lead post, and Meta is suppressed
+           server-side. */
+        const icp2 = await checkNonIcp(formState.email, formState.website);
+        if (icp2.blocked) {
+          await submitLead();
+          redirectNonIcp(icp2);
+          return;
+        }
+
         // ── Fire Railway + RH in parallel ──────────────────
         // hero.submit() starts immediately alongside submitLead()
         // Both resolve concurrently — eliminates sequential lag
@@ -2625,7 +2761,19 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
           phone: formState.phone, // key matches RH Form Mapping field "phone"
         });
 
-        await submitLead();
+        const submitRes = await submitLead();
+
+        /* BACKSTOP. The client check above fails open, so a timeout on
+           /non-icp-check lets a blocked lead reach this line. The server
+           always has the real verdict -- it has already suppressed Meta and
+           posted the blocked-lead message -- so honour it here rather than
+           showing a calendar to somebody the server turned away. RevenueHero
+           has fired by now; the redirect gets them off the page before they
+           can pick a slot. */
+        if (submitRes && submitRes.non_icp_blocked === true) {
+          redirectNonIcp({ matched_domain: submitRes.non_icp_reason });
+          return;
+        }
 
         // GTM — Form Submitted
         if (!isTestEmail(formState.email)) {
@@ -2838,7 +2986,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.9.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.10.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

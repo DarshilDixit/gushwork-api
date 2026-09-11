@@ -225,6 +225,19 @@ async function initAWSTable() {
     const migrations = [
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS disqualified BOOLEAN DEFAULT FALSE`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS disqualified_reason TEXT`,
+      /* ── Non-ICP block, mirrored for the DIALER, not for us ──────────
+         Nothing in this repo reads these off the mirror. They exist because
+         sdr-calling's No Booking workflow selects form leads that completed
+         and never booked, which is EXACTLY what a submit-time block looks
+         like -- so without these columns an SDR rings somebody we turned
+         away at the calendar minutes earlier.
+
+         Adding them is necessary and NOT sufficient: sdr-calling still has
+         to add the WHERE clause. See docs/tickets/non-icp-v1-block.md.
+         A step-1 block cannot reach that workflow at all (no phone is
+         collected until step 2, and No Booking requires one). */
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS non_icp_blocked BOOLEAN DEFAULT FALSE`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS non_icp_reason TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ`,
       /* The cheapest possible fix for a misnamed column that external
          consumers read. A COMMENT is discoverable by anyone who inspects the
@@ -328,8 +341,11 @@ function syncToAWS(data) {
        step_reached, completed, submitted_at, loops_sent,
        ps_xid, ps_partner_key, ps_partner_name, ps_partner_email, ps_customer_key,
        ps_click_at, ps_click_history,
-       ps_signup_sent_at, ps_signup_verified_at, ps_qualified_sent_at, hear_about_us_raw, product, about_business, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,NOW())
+       ps_signup_sent_at, ps_signup_verified_at, ps_qualified_sent_at, hear_about_us_raw, product, about_business,
+       /* For the DIALER, not for us -- nothing in this repo reads these back
+          off the mirror. See the migration comment above. */
+       non_icp_blocked, non_icp_reason, updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,NOW())
     ON CONFLICT (session_id) DO UPDATE SET
       page_url                = COALESCE(EXCLUDED.page_url,                gw_form_leads.page_url),
       email                   = COALESCE(EXCLUDED.email,                   gw_form_leads.email),
@@ -412,6 +428,13 @@ function syncToAWS(data) {
       /* COALESCE: the textarea is a step-2 field, so /partial syncs a NULL
          first and /submit fills it. An overwrite would blank it back. */
       about_business          = COALESCE(EXCLUDED.about_business,          gw_form_leads.about_business),
+      /* STICKY on the mirror too, for the same reason it is sticky on
+         Railway: a later partial sync must not clear a block. Note this is
+         the OPPOSITE of the disqualified line near the top of this clause,
+         which assigns EXCLUDED unconditionally -- that asymmetry is why a
+         late single-field write must never come through syncToAWS. */
+      non_icp_blocked         = (gw_form_leads.non_icp_blocked IS TRUE OR EXCLUDED.non_icp_blocked IS TRUE),
+      non_icp_reason          = COALESCE(gw_form_leads.non_icp_reason,      EXCLUDED.non_icp_reason),
       updated_at              = NOW()
   `, [
     data.session_id,                        data.page_url                  || null,
@@ -453,7 +476,8 @@ function syncToAWS(data) {
     data.ps_click_history ? JSON.stringify(data.ps_click_history) : null,
     data.ps_signup_sent_at       || null,   data.ps_signup_verified_at     || null,
     data.ps_qualified_sent_at    || null,   data.hear_about_us_raw         || null,
-    data.product                 || null,   data.about_business            || null
+    data.product                 || null,   data.about_business            || null,
+    data.non_icp_blocked         ?? false,  data.non_icp_reason            || null
   ]).then(() => {
     console.log(`[AWS] ✅ Synced session ${data.session_id}`);
   }).catch(err => {
@@ -1350,6 +1374,45 @@ function slackTruncate(text, max = SLACK_ABOUT_MAX) {
   if (!t) return '';
   if (t.length <= max) return t;
   return t.slice(0, max - 1).trimEnd() + '\u2026';
+}
+
+/* ── The blocked-lead post ───────────────────────────────────────────
+   Same channel as every other lead, VISIBLY different, because this is the
+   only surface on which a wrong block gets caught. Nothing else tells anyone
+   that a real prospect was turned away: there is no Salesforce Lead, no Meta
+   event, and the dashboard tab has to be opened deliberately. This message
+   arrives whether or not anyone is looking for it.
+
+   The matched domain is the load-bearing field. "Non-ICP" alone is unfalsifiable
+   -- an SDR reading it can neither agree nor disagree. "Matched kw.com" can be
+   checked against the person's actual company in one glance, which is exactly
+   how paycompass.com would have been caught had substring matching shipped. */
+function slackNonIcpBlocked(d) {
+  const name = [d.first_name, d.last_name].filter(Boolean).join(' ');
+  const blocks = [];
+  blocks.push(bHeader('🚫 Lead Blocked — Non-ICP'));
+  blocks.push(bDivider());
+  blocks.push(bSection(
+    `*Matched domain:* \`${d.matched_domain || 'unknown'}\`` +
+    (d.matched_label ? ` — ${d.matched_label}` : '') +
+    `\n*Stopped at:* ${d.stage === 'partial' ? 'step 1 (email domain)' : 'submit (email + website)'}` +
+    '\n_They were sent to /thank-you and never reached the calendar. No Meta event fired. Not pushed to Salesforce._'
+  ));
+  const lf = bFields([
+    { label: '👤 Name',    value: name      },
+    { label: '📧 Email',   value: d.email   },
+    { label: '🏢 Company', value: d.company },
+    { label: '🌐 Website', value: d.website },
+    { label: '📞 Phone',   value: d.phone   },
+    { label: '🎯 Sells to',value: d.sell_to },
+  ]);
+  if (lf) blocks.push(lf);
+  blocks.push(bSection(
+    '*Wrong?* If this is a real prospect, the block is the domain list in ' +
+    '`NON_ICP_DOMAINS` (index.js). Turn the whole feature off with ' +
+    '`NON_ICP_BLOCK=false` on Railway — no deploy needed.'
+  ));
+  sendSlack(blocks, `🚫 Lead blocked (non-ICP): ${d.email || name || 'unknown'} — matched ${d.matched_domain || 'unknown'}`);
 }
 
 function slackSubmit(d) {
@@ -3092,6 +3155,44 @@ app.get('/monitor/filter-options', async (req, res) => {
    saw four rows and hit Export got the entire list. */
 const SDR_SEARCH_COLUMNS = ['email', 'company', 'first_name', 'enriched_industry'];
 
+/* ── /monitor/blocked ────────────────────────────────────────────────
+   Every lead the non-ICP list turned away, newest first.
+
+   NO stage filter and NO sell_to filter, deliberately. A blocked lead keeps
+   whatever stage it reached -- most are "Completed", and 88% of the known
+   population reached step 2 by clicking "actually we're B2B", so filtering on
+   sell_to would hide the majority of them. The only predicate is the block
+   itself.
+
+   Not deduped by email either: this tab is for auditing individual BLOCKS,
+   and the same person blocked on two sessions is two blocks somebody should
+   see. The people count is reported alongside so the two are never confused.
+
+   IS TRUE, never = true -- a row written before the column existed must land
+   outside this set rather than throwing. */
+app.get('/monitor/blocked', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const result = await pool.query(`
+      SELECT email, first_name, last_name, company, website, sell_to,
+             step_reached, booking_uid, non_icp_reason, created_at
+        FROM leads
+       WHERE non_icp_blocked IS TRUE
+       ORDER BY created_at DESC
+       LIMIT 500`);
+    res.json({
+      total: result.rows.length,
+      people: new Set(result.rows.map(r => (r.email || '').toLowerCase()).filter(Boolean)).size,
+      enabled: NON_ICP_BLOCK_ENABLED,
+      leads: result.rows,
+    });
+  } catch (err) {
+    console.error('[/monitor/blocked]', err.message);
+    res.status(500).json({ error: 'Blocked-leads query failed', detail: err.message });
+  }
+});
+
 app.get('/monitor/sdr', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
@@ -3304,6 +3405,7 @@ app.get('/monitor', (req, res) => {
   '<div class="tab" id="t-dupes" onclick="showTab(\'dupes\')" style="color:#aaa">Duplicates</div>' +
   '<div class="tab" id="t-lm" onclick="showTab(\'lm\')">Lead Magnet</div>' +
   '<div class="tab" id="t-partners" onclick="showTab(\'partners\')">Partners</div>' +
+  '<div class="tab" id="t-blocked" onclick="showTab(\'blocked\')">Blocked</div>' +
   '<div class="tab" id="t-health" onclick="showTab(\'health\')">System Health</div>' +
   '</div>' +
   '<div class="tp act" id="tp-overview">' +
@@ -3428,6 +3530,21 @@ app.get('/monitor', (req, res) => {
   '<th style="width:30px"></th><th>Email</th><th>Sessions</th><th>Booked?</th><th>Completed?</th><th>First Seen (ET)</th><th>Last Seen (ET)</th>' +
   '</tr></thead><tbody id="dupes-tbody"><tr><td colspan="7" class="nd">Loading...</td></tr></tbody></table></div></div>' +
   '</div>' +
+  '<div class="tp" id="tp-blocked">' +
+  '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
+  '<div><div class="sl" style="margin-bottom:2px">Blocked &#8212; Non-ICP</div>' +
+  '<div style="font-size:12px;color:#888">Leads stopped before the calendar by the real-estate / insurance brand-domain list. ' +
+  'INDEPENDENT of the stage filter and of sell_to &#8212; a blocked lead keeps whatever stage it reached, and most of them cleared the B2C step by clicking &quot;actually we&#39;re B2B&quot;.</div></div>' +
+  '<span id="blk-count" style="font-size:12px;color:#888"></span>' +
+  '</div>' +
+  '<div class="card" style="padding:12px 14px;margin-bottom:16px;font-size:12px;color:#666">' +
+  'Every row here is somebody we turned away. If one looks like a real prospect, the list is <code>NON_ICP_DOMAINS</code> in index.js; ' +
+  '<code>NON_ICP_BLOCK=false</code> on Railway turns the whole thing off without a deploy.' +
+  '</div>' +
+  '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
+  '<th>Matched domain</th><th>Email</th><th>Name</th><th>Company</th><th>Website</th><th>Sells to</th><th>Stage reached</th><th>Date (ET)</th>' +
+  '</tr></thead><tbody id="blk-tbody"><tr><td colspan="8" class="nd">Loading...</td></tr></tbody></table></div></div>' +
+  '</div>' +
   '<div class="tp" id="tp-health">' +
   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
   '<div class="sl" style="margin:0">Step health</div>' +
@@ -3526,7 +3643,15 @@ app.get('/monitor', (req, res) => {
   'var TZ="' + DASH_TZ + '";' +
   'var API=window.location.origin;' +
   'var lChart=null,curPage=1,stimer=null,curSort="created_at",curDir="desc",filterOptsLoaded=false;' +
-  'function showTab(n){["overview","leads","sdr","dupes","health","lm","partners"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="partners"&&document.getElementById("ptbody").textContent.indexOf("Loading")>=0)loadPartners();if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();if(n==="health")checkHealth();}' +
+  'function showTab(n){["overview","leads","sdr","dupes","health","lm","partners","blocked"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="partners"&&document.getElementById("ptbody").textContent.indexOf("Loading")>=0)loadPartners();if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();if(n==="blocked"&&document.getElementById("blk-tbody").textContent.indexOf("Loading")>=0)loadBlocked();if(n==="health")checkHealth();}' +
+  'async function loadBlocked(){try{' +
+  'var r=await fetch(API+"/monitor/blocked"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(15000)});' +
+  'var d=await r.json();var b=document.getElementById("blk-tbody");' +
+  'if(!d.leads||!d.leads.length){b.innerHTML="<tr><td colspan=\\"8\\" class=\\"nd\\">Nothing blocked. Either the flag is off or nobody has matched yet.</td></tr>";' +
+  'document.getElementById("blk-count").textContent="";return;}' +
+  'document.getElementById("blk-count").textContent=d.total+" blocked \\u00b7 "+d.people+" people";' +
+  'b.innerHTML=d.leads.map(function(l){return "<tr><td><code>"+esc(l.non_icp_reason||"")+"</code></td><td>"+esc(l.email||"")+"</td><td>"+esc([l.first_name,l.last_name].filter(Boolean).join(" "))+"</td><td>"+esc(l.company||"")+"</td><td>"+esc(l.website||"")+"</td><td>"+esc(l.sell_to||"")+"</td><td>Step "+(l.step_reached||1)+(l.booking_uid?" \\u00b7 BOOKED":"")+"</td><td>"+et(l.created_at)+"</td></tr>";}).join("");' +
+  '}catch(e){document.getElementById("blk-tbody").innerHTML="<tr><td colspan=\\"8\\" class=\\"nd\\">Could not load: "+esc(e.message)+"</td></tr>";}}' +
   'var WLBL={"nxdomain": "Domain doesn\'t exist \u2014 likely a typo", "no_dns_records": "Domain registered but nothing set up on it", "hosting_placeholder": "No website yet \u2014 domain points to a hosting setup page", "parked_confirmed": "Domain registered but no website on it", "parked": "Domain registered but no website on it", "parked_ns": "Domain registered but no website on it", "parked_suspect": "Looks like a parked domain \u2014 could not confirm", "for_sale_lander": "Domain is listed for sale", "marketplace_redirect": "Domain is for sale on a domain marketplace", "mailbox_domain": "Typed an email provider instead of their website", "brand_mismatch": "Typed a well-known brand\'s site, not their own", "social_profile_url": "Gave a social profile instead of a website", "thin_content": "Page looked mostly empty to us \u2014 worth a manual look", "thin_content_wildcard": "Page looked mostly empty to us \u2014 worth a manual look", "check_blocked": "Site blocked our check \u2014 the page itself looks fine", "dns_unresolved": "Could not look up the domain \u2014 DNS gave no answer", "forwarded_to_live_site": "Redirects to their live site \u2014 checked OK", "live_despite_dns_hint": "Live site (an early parking signal was overruled)", "mx_only": "Email-only company \u2014 no website, but mail works", "nxdomain_contradicted": "DNS blip \u2014 domain matches their verified email domain", "content_clean": "Live website", "resolved": "Domain resolves", "dns_indeterminate": "Could not reach the site to check it", "doh_error": "Could not reach the site to check it", "timeout": "Could not reach the site to check it", "unreachable": "Could not reach the site to check it", "non_html": "Address did not return a web page", "backend_error": "Our check errored \u2014 not the website\u2019s fault", "fetch_error": "Our check errored \u2014 not the website\u2019s fault", "skipped_no_backend": "Check was skipped", "skipped_unsafe_target": "Address pointed at an internal network \u2014 skipped", "test_email_skipped": "Internal test \u2014 check skipped", "ok": "Website checked OK"};' +
   'function wlabel(r){if(!r)return"Unknown";if(WLBL[r])return WLBL[r];if(String(r).indexOf("http_")===0){var c=String(r).slice(5);return ["999","403","401","429"].indexOf(c)>=0?("Site blocked our check ("+c+")"):("Site returned an error ("+c+")");}return String(r).replace(/_/g," ");}' +
   'function badge(id,text,cls){var el=document.getElementById(id);if(!el)return;el.textContent=text;el.className="badge "+cls;}' +
@@ -5052,6 +5177,42 @@ app.post('/verify-email', async (req, res) => {
   }
 });
 
+/* ── /non-icp-check ──────────────────────────────────────────────────
+   The verdict the FORM asks for, so it can redirect to /thank-you instead of
+   showing the calendar. Called twice: at step 1 with the email alone, and at
+   step 2 with email + website, both prewarmed on blur exactly like
+   /verify-email and the website check.
+
+   THIS ENDPOINT IS UX, NOT ENFORCEMENT. Anyone can skip it with devtools, and
+   a realtor who wants a demo is precisely the person who would. The
+   authoritative block is stamped server-side in /partial and /submit, which is
+   also where Meta suppression happens -- so bypassing this gets you a booking
+   page and still no conversion event, no Slack lead post in the normal format,
+   and a non_icp_blocked row.
+
+   NEW ENDPOINT, EXISTING PATTERN. It is deliberately not folded into
+   /verify-email: that route is the ELV credit path and is load-bearing on
+   every lead, and the website half of the check has no natural home there.
+   A 200 with { blocked: false } is the answer to every failure. */
+app.post('/non-icp-check', async (req, res) => {
+  const email   = (req.body.email   || '').toString().trim().slice(0, 254).toLowerCase();
+  const website = (req.body.website || '').toString().trim().slice(0, 500);
+  try {
+    const v = await nonIcpVerdict({ email, website });
+    if (v.blocked) console.log(`[non-ICP] 🚫 ${email || '(no email)'} — matched ${v.reason} (${v.label})`);
+    return res.json({
+      blocked:        v.blocked === true,
+      matched_domain: v.blocked ? v.reason : null,
+      label:          v.blocked ? v.label  : null,
+    });
+  } catch (err) {
+    /* Belt and braces -- nonIcpVerdict already swallows everything. If this
+       line is ever reached the lead still goes through. */
+    console.warn('[non-ICP] /non-icp-check errored — answering "not blocked":', err.message);
+    return res.json({ blocked: false, matched_domain: null, label: null });
+  }
+});
+
 // Live ELV health for the dashboard's System Health tab.
 app.get('/monitor/elv-health', (req, res) => {
   /* Was the only /monitor* route with no token check. It reports
@@ -6204,14 +6365,261 @@ function refreshPartnerStackCustomerCache(reason) {
 
 function startPartnerStackCacheWarm() {
   /* Nothing reads this cache while the eligibility check is off, and warming it
-     anyway is a pointless cross-WAN query every 30 minutes forever. */
-  if (!PS_ELIGIBILITY_ENABLED) {
-    console.log('[PartnerStack] Eligibility check disabled — customer cache not warmed');
+     anyway is a pointless cross-WAN query every 30 minutes forever.
+
+     TWO consumers now, not one. The non-ICP block uses the same cache for its
+     known-customer bypass, and it is on a different env flag — so the warm has
+     to run if EITHER is enabled. Gating it on PS_ELIGIBILITY_ENABLED alone (as
+     it did until Sept 2026) would leave the cache cold with the block on, and
+     the first blocked lead would pay for a cross-WAN fetch while waiting on
+     step 1. That is the exact cost this function exists to prevent. */
+  if (!PS_ELIGIBILITY_ENABLED && !NON_ICP_BLOCK_ENABLED) {
+    console.log('[PartnerStack] Eligibility check and non-ICP block both disabled — customer cache not warmed');
     return;
   }
   refreshPartnerStackCustomerCache('boot');
   const t = setInterval(() => refreshPartnerStackCustomerCache('scheduled'), PS_CUSTOMER_CACHE_TTL_MS);
   if (t.unref) t.unref();
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   NON-ICP BLOCK — V1
+   ═══════════════════════════════════════════════════════════════════
+
+   WHAT THIS IS. A hardcoded list of national real-estate brokerage and
+   insurance carrier brand domains. A lead whose EMAIL domain or WEBSITE host
+   matches one is stopped before the calendar and sent to /thank-you, and none
+   of its three upstream Meta events fire.
+
+   THIS IS THE FOURTH BLOCKING VERDICT IN THE CODEBASE AND THE FIRST ONE
+   DECIDED SERVER-SIDE. The other three (nxdomain, brand_mismatch,
+   mailbox_domain) live in the two form files and are currently non-blocking.
+   It is also the first thing that gates Meta on anything other than
+   isWebsiteVerified. Both of those were rules in CLAUDE.md; both were
+   explicitly overridden by Swapnil on 11 Sept 2026 after AEs reported State
+   Farm agents and realtors taking demo slots. CLAUDE.md has been updated in
+   the same commit -- if you are reading this and CLAUDE.md still says "the
+   score must not block", one of the two is stale and this comment is the
+   older one.
+
+   WHY A LIST AND NOT THE SIX-RULE LLM FLAGGER. The flagger reads a company's
+   website with a model. It covers six rules across five industries; this
+   covers two industries by brand domain, with no network call and no model.
+   V1 ships today because the AE complaint is today. See
+   docs/tickets/non-icp-v1-block.md for what the doc actually says, including
+   the two positions this reverses.
+
+   WHAT IS NOT HERE, DELIBERATELY:
+     - financial advisors (Edward Jones, LPL, Northwestern Mutual, Primerica,
+       Cetera), mortgage and lending. The Non-ICP doc keeps all of these in
+       ICP by name and nobody has reversed that. 65-odd such domains are in
+       our data; they are not blocked.
+     - independent local agencies and brokerages. ~30 independent insurance
+       agencies and ~40 local realtors are in our data. National brands only.
+     - the other four rule-6 industries (restaurants, spas/salons, home
+       services, print/sign). V1 cannot see them and they fire Meta normally.
+
+   MATCHING IS EXACT REGISTRABLE DOMAIN OR A PROPER SUBDOMAIN BOUNDARY.
+   Never substring. Measured against 5,123 production leads on 11 Sept 2026:
+   substring matching caught 116 leads where exact caught 110, and five of the
+   six extra were wrong -- paycompass.com (a payments company, contains
+   "compass.com"), charleslegalpl.com (a law firm, contains "lpl.com"),
+   theimagecreatornm.com (contains "nm.com"), krevera.com and
+   ceterainvestors.com (both contain "era.com"). tests/test-non-icp.js pins
+   all five as negatives. */
+
+const NON_ICP_BLOCK_ENABLED = process.env.NON_ICP_BLOCK === 'true';
+
+/* Brand domain -> the label an SDR reads in Slack. Lowercase, registrable
+   form, no scheme and no www. Adding one means adding it here and nowhere
+   else: the matcher, the dashboard, Slack and the tests all read this object.
+
+   Entries with zero hits in six months of production data are KEPT on
+   purpose. They cost one string comparison and they are the ones most likely
+   to arrive next; an empty-list-is-a-bug reading of "unused" is how a
+   blocklist rots. Hit counts as at 11 Sept 2026 are in the ticket, not here,
+   because a count in a comment goes stale. */
+const NON_ICP_DOMAINS = {
+  // ── Real estate: national brokerage brands ──
+  'kw.com':                'Keller Williams',
+  'kwrealty.com':          'Keller Williams',
+  'remax.com':             'RE/MAX',
+  'remax.net':             'RE/MAX',          // the email domain RE/MAX agents actually use
+  'compass.com':           'Compass',
+  'coldwellbanker.com':    'Coldwell Banker',
+  'cbrealty.com':          'Coldwell Banker Realty',  // the agent domain; coldwellbanker.com barely appears
+  'century21.com':         'Century 21',
+  'c21.com':               'Century 21',
+  'exprealty.com':         'eXp Realty',
+  'sothebysrealty.com':    "Sotheby's International Realty",
+  'elliman.com':           'Douglas Elliman',
+  'serhant.com':           'SERHANT.',
+  'atproperties.com':      '@properties',
+  'howardhanna.com':       'Howard Hanna',
+  'randrealty.com':        'Howard Hanna Rand Realty',
+  'weichert.com':          'Weichert',
+  'corcoran.com':          'Corcoran',
+  'realtyonegroup.com':    'Realty ONE Group',
+  'lptrealty.com':         'LPT Realty',
+  'mcgrawrealtors.com':    'McGraw Realtors',
+  // Berkshire Hathaway HomeServices trades under dozens of regional suffixes
+  // (bhhsamb, bhhsrmr, bhhscalifornia...). The bhhs* / berkshirehathaway*
+  // prefix rule below covers those; these are the two spellings seen in data.
+  'bhhs.com':              'Berkshire Hathaway HomeServices',
+  'foxroach.com':          'BHHS Fox & Roach',
+
+  // ── Insurance: national carrier and captive-agent brands ──
+  'statefarm.com':         'State Farm',
+  'allstate.com':          'Allstate',
+  'agents.allstate.com':   'Allstate',
+  'allstateagencies.com':  'Allstate',
+  'farmers.com':           'Farmers Insurance',
+  'agents.farmers.com':    'Farmers Insurance',
+  'farmersagent.com':      'Farmers Insurance',
+  'farmersagency.com':     'Farmers Insurance',
+  'amfam.com':             'American Family',
+  'goosehead.com':         'Goosehead Insurance',
+  'newyorklife.com':       'New York Life',
+  'ft.newyorklife.com':    'New York Life',   // the subdomain NYL agents use; nyl.com has never appeared
+  'nyl.com':               'New York Life',
+  'geico.com':             'GEICO',
+  'bankerslife.com':       'Bankers Life',
+  'healthmarkets.com':     'HealthMarkets',
+  'healthmarketsjax.com':  'HealthMarkets',
+  'ushadvisors.com':       'USHEALTH Advisors',
+  'goldencare.com':        'GoldenCare',
+};
+
+/* Regional franchise suffixes that cannot be enumerated. Matched as a LABEL
+   PREFIX on the registrable domain, never as a substring of the whole host --
+   'bhhs' as a substring would hit anything containing those four letters. */
+const NON_ICP_PREFIXES = [
+  { prefix: 'bhhs',               label: 'Berkshire Hathaway HomeServices' },
+  { prefix: 'berkshirehathaway',  label: 'Berkshire Hathaway HomeServices' },
+];
+
+/* Does `host` equal `target`, or sit strictly beneath it?
+   agents.farmers.com matches farmers.com. farmersagency.com does NOT --
+   the character before the match has to be a dot, which is the whole point. */
+function hostMatchesDomain(host, target) {
+  if (!host || !target) return false;
+  if (host === target) return true;
+  return host.length > target.length && host.endsWith('.' + target);
+}
+
+/* Strip a raw email / URL / bare domain down to a HOST, keeping subdomains.
+
+   partnerStackCustomerKey is still the gatekeeper -- it is what rejects free
+   mailboxes, IP literals and junk, and reusing it rather than writing a second
+   normaliser is deliberate: two normalisers disagreeing is how kw.com and
+   www.kw.com become two different companies. But it also calls
+   registrableDomain, which COLLAPSES agents.farmers.com to farmers.com. That
+   collapse is right for a PartnerStack customer key and wrong here: it would
+   make every subdomain entry on the list (agents.allstate.com,
+   agents.farmers.com, ft.newyorklife.com) permanently dead code that looks
+   live. So the full host is kept alongside the collapsed one and both are
+   matched. Caught by tests/test-non-icp.js section 2, not by reading. */
+function nonIcpHostForms(raw) {
+  const key = partnerStackCustomerKey(raw);
+  if (!key) return [];                       // free mailbox, IP, or unparseable
+  let h = String(raw || '').trim().toLowerCase();
+  if (h.includes('@')) h = h.slice(h.lastIndexOf('@') + 1);
+  h = h.replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
+       .replace(/^[^/@]*@/, '')
+       .split(/[/?#]/)[0]
+       .split(':')[0]
+       .replace(/^www\./, '')
+       .replace(/\.$/, '');
+  return h && h !== key ? [h, key] : [key];
+}
+
+/* The match. Returns { domain, label } or null. */
+/* MOST SPECIFIC WINS. agents.farmers.com and farmers.com are both on the list
+   and both match agents.farmers.com; without an order the answer would depend
+   on object key order, which is not something a reader should have to reason
+   about and not something an SDR should see change. Longest first, computed
+   once at module load rather than per lead. */
+const NON_ICP_DOMAINS_BY_SPECIFICITY = Object.keys(NON_ICP_DOMAINS)
+  .sort((a, b) => b.length - a.length || a.localeCompare(b));
+
+function nonIcpMatchHost(rawHostOrUrl) {
+  const hosts = nonIcpHostForms(rawHostOrUrl);
+  if (!hosts.length) return null;
+  for (const domain of NON_ICP_DOMAINS_BY_SPECIFICITY) {
+    for (const host of hosts) {
+      if (hostMatchesDomain(host, domain)) return { domain, label: NON_ICP_DOMAINS[domain] };
+    }
+  }
+  /* Prefix rule on the FIRST LABEL of the registrable domain only. bhhsrmr.com
+     matches; a host that merely contains "bhhs" further in does not, and a
+     subdomain like bhhs.someoneelse.com is judged on someoneelse. */
+  const key = hosts[hosts.length - 1];
+  const firstLabel = key.split('.')[0];
+  for (const p of NON_ICP_PREFIXES) {
+    if (firstLabel.startsWith(p.prefix)) return { domain: key, label: p.label };
+  }
+  return null;
+}
+
+/* The verdict, for one lead. Pure except for the customer-domain cache read.
+
+   FAILS OPEN, EVERYWHERE. A throw, a timeout, a cold cache, a missing pool --
+   every one of them returns { blocked: false, reason: 'check_failed' } and the
+   lead proceeds exactly as it does today. This is the opposite of the
+   PartnerStack eligibility check, which fails CLOSED, and the difference is
+   the point: eligibility decides whether an affiliate gets paid and touches no
+   lead; this one stands between a real person and a demo booking. When it
+   breaks, a realtor gets a call back. When it fails closed, a customer does
+   not. Those costs are not symmetric.
+
+   THE KNOWN-CUSTOMER BYPASS IS CHECKED BEFORE THE BLOCK, NOT AFTER. On 11
+   Sept 2026, one of the 84 matched leads in production -- nedjacobs@allstate.com,
+   "JACOBS FAMILY INSURANCE @Allstate" -- was an ACTIVE customer in
+   gist.customer_contract_terms. An Allstate-captive agency that bought from us.
+   Without this bypass the V1 email rule would have shut the door on a renewal
+   conversation. One in fifty-two matched domains; the asymmetry is why it is
+   checked first and why a failure to check it does not block. */
+const NON_ICP_CUSTOMER_TIMEOUT_MS = 2500;
+
+async function nonIcpVerdict({ email, website } = {}) {
+  if (!NON_ICP_BLOCK_ENABLED) return { blocked: false, reason: 'disabled' };
+  try {
+    /* Our own addresses and the test domains never get blocked -- the same
+       exclusion ELV health and PartnerStack already use. */
+    if (isPartnerStackTestEmail(email)) return { blocked: false, reason: 'test_email' };
+
+    const hit = nonIcpMatchHost(email) || nonIcpMatchHost(website);
+    if (!hit) return { blocked: false, reason: null };
+
+    /* Only now, and only for a lead we are about to block, do we go near the
+       warehouse. An ordinary lead never reaches this line, so the 99.7% of
+       traffic that is not a realtor pays nothing for the bypass. */
+    const key = partnerStackCustomerKey(website) || partnerStackCustomerKey(email);
+    if (key) {
+      let customers;
+      try {
+        customers = await withTimeout(
+          partnerStackCustomerDomains(), NON_ICP_CUSTOMER_TIMEOUT_MS, 'non-ICP customer bypass');
+      } catch (err) {
+        /* awsPool is max:3 with no statement_timeout, so an RDS instance that
+           accepts connections but answers slowly hangs forever without this.
+           Cannot tell "not a customer" from "could not ask" -- so do not
+           block. "We could not check" is never recorded as "we checked and it
+           is bad", pointed at the block instead of at a website verdict. */
+        console.warn(`[non-ICP] Customer bypass could not run for ${key} — NOT blocking:`, err.message);
+        return { blocked: false, reason: 'check_failed', matched_domain: hit.domain, detail: err.message };
+      }
+      if (customers && customers.has(key)) {
+        console.log(`[non-ICP] ✅ ${email} matches ${hit.domain} but ${key} is a known customer — NOT blocking`);
+        return { blocked: false, reason: 'known_customer', matched_domain: hit.domain };
+      }
+    }
+
+    return { blocked: true, reason: hit.domain, label: hit.label };
+  } catch (err) {
+    console.warn('[non-ICP] Verdict errored — NOT blocking (fail open):', err && err.message);
+    return { blocked: false, reason: 'check_failed', detail: err && err.message };
+  }
 }
 
 /* The verdict. Reason strings are stable identifiers — they are stored, and
@@ -9117,13 +9525,23 @@ app.post('/partial', async (req, res) => {
        table; no ELV call, nothing that can slow the form down. */
     const elv = await lookupElvStatus(email);
 
+    /* The AUTHORITATIVE non-ICP verdict. /non-icp-check told the browser
+       whether to redirect; this is the one that gets stored and the one that
+       gates Meta, so a lead that skipped the client check is still stamped.
+
+       Awaited on purpose, unlike almost everything else in this route. It has
+       to be: the StartTrial suppression below and the column write both need
+       the answer. The cost is a string comparison for every lead that is not
+       a realtor, and only a cache-warm Set lookup for one that is. */
+    const nonIcp = await nonIcpVerdict({ email, website });
+
     const upsert = await pool.query(`
       WITH prev AS (
         SELECT email, company, website, phone, first_name, last_name, sell_to, booking_uid, step_reached
           FROM leads WHERE session_id = $1
       )
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW(),$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40)
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business,non_icp_blocked,non_icp_reason)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW(),$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42)
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -9175,7 +9593,20 @@ app.post('/partial', async (req, res) => {
         product               = COALESCE(EXCLUDED.product,               leads.product),
         /* COALESCE for the same reason as product: the textarea is a step-2
            field, so /partial writes NULL and /submit fills it in. */
-        about_business        = COALESCE(EXCLUDED.about_business,        leads.about_business)
+        about_business        = COALESCE(EXCLUDED.about_business,        leads.about_business),
+        /* STICKY, and this is the load-bearing line of the whole feature.
+           OR, not EXCLUDED -- once a session is blocked it stays blocked no
+           matter what any later /partial says.
+
+           /partial fires repeatedly through step 1, and the "actually we are
+           B2B" button calls savePartial(1) again with disqualified flipped to
+           false. 74 of the 84 known realtor and insurance leads reached the
+           calendar through exactly that button. An EXCLUDED assignment here
+           would let a realtor clear their own block by clicking it, which is
+           the one thing this feature must not permit. Same reasoning as
+           hear_about_us_raw above: the first answer wins, permanently. */
+        non_icp_blocked       = (leads.non_icp_blocked IS TRUE OR EXCLUDED.non_icp_blocked IS TRUE),
+        non_icp_reason        = COALESCE(leads.non_icp_reason,           EXCLUDED.non_icp_reason)
       RETURNING
         (SELECT p.email      FROM prev p) AS prev_email,
         (SELECT p.company    FROM prev p) AS prev_company,
@@ -9188,14 +9619,14 @@ app.post('/partial', async (req, res) => {
         (SELECT p.step_reached FROM prev p) AS prev_step_reached,
         leads.email, leads.company, leads.website, leads.phone,
         leads.first_name, leads.last_name, leads.sell_to, leads.step_reached
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business]);
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business,nonIcp.blocked===true,nonIcp.blocked?nonIcp.reason:null]);
 
     /* After the write, off the response path. Never awaited. */
     recordLeadFieldChanges(session_id, upsert.rows[0], '/partial', { arrived_step: step_reached });
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/partial] Enrichment sync failed (non-blocking):', err.message));
 
-    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false,hear_about_us_raw:hear_about_us,product,about_business,...ps});
+    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false,hear_about_us_raw:hear_about_us,product,about_business,non_icp_blocked:nonIcp.blocked===true,non_icp_reason:nonIcp.blocked?nonIcp.reason:null,...ps});
 
     // StartTrial fires ONLY for qualified (B2B) leads on BUSINESS emails —
     // free-mailbox leads (gmail/yahoo/...) are skipped so Meta optimises
@@ -9207,13 +9638,22 @@ app.post('/partial', async (req, res) => {
     // this gate exists to prevent.
     const freeMatch = email ? freeEmailMatch(email.split('@')[1] || '') : null;
     const isBusinessEmail = !!email && !freeMatch;
-    if (!disqualified && isBusinessEmail) {
+    /* MetA SUPPRESSION, EVENT 1 OF 3 (StartTrial). Checked FIRST, so the
+       reason logged is the real one -- a realtor on a business email would
+       otherwise fall through to the free-email branch and log nothing.
+       Suppressing a conversion signal is a real cost to the ad algorithm and
+       is normally a decision to surface rather than take; here it is the
+       explicit instruction, because an audience optimised towards realtors is
+       what produced the complaint. */
+    if (nonIcp.blocked) {
+      console.log(`[/partial] ⏭ StartTrial suppressed — non-ICP (${nonIcp.reason}): ${email}`);
+    } else if (!disqualified && isBusinessEmail) {
       pushStartTrialToMeta({session_id,email,sell_to,page_url,fbc,fbp,landing_page}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => { console.warn('[/partial] Meta CAPI StartTrial failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (StartTrial)', err.message); });
     } else if (!disqualified) {
       console.log(`[/partial] ⏭ StartTrial skipped — ${freeMatch && !freeMatch.exact ? `likely typo of free provider ${freeMatch.domain}` : 'free email domain'}: ${email}`);
     }
 
-    console.log(`[/partial] ✅ Saved session ${session_id} | step ${step_reached} | disqualified: ${disqualified} | email ${email}`);
+    console.log(`[/partial] ✅ Saved session ${session_id} | step ${step_reached} | disqualified: ${disqualified} | non-ICP: ${nonIcp.blocked ? nonIcp.reason : 'no'} | email ${email}`);
     res.json({ ok: true });
   } catch (err) { console.error('[/partial]', err.message); res.status(500).json({ error: 'Partial save failed' }); }
 });
@@ -9304,13 +9744,19 @@ app.post('/submit', async (req, res) => {
        by a re-check after the response — see finaliseElvVerdict. */
     const elv = await lookupElvStatus(email);
 
+    /* The AUTHORITATIVE verdict at submit, now with the WEBSITE as well as the
+       email. This is the half that catches the realtor on a gmail address: 12
+       of the 84 known matches on 11 Sept 2026 had a personal email and a
+       brokerage website, and nothing before step 2 can see them. */
+    const nonIcp = await nonIcpVerdict({ email, website });
+
     const upsert = await pool.query(`
       WITH prev AS (
         SELECT email, company, website, phone, first_name, last_name, sell_to, booking_uid, step_reached
           FROM leads WHERE session_id = $1
       )
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW(),$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39)
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business,non_icp_blocked,non_icp_reason)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW(),$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41)
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -9365,7 +9811,13 @@ app.post('/submit', async (req, res) => {
         product               = COALESCE(EXCLUDED.product,               leads.product),
         /* COALESCE for the same reason as product, and a BLOCK comment for
            the same reason as the line above. */
-        about_business        = COALESCE(EXCLUDED.about_business,        leads.about_business)
+        about_business        = COALESCE(EXCLUDED.about_business,        leads.about_business),
+        /* STICKY, matching /partial. A block set at step 1 survives the
+           submit even if the website they eventually typed is clean, and a
+           block set here survives any later resubmit. Block comment, not //,
+           for the reason the two lines above give. */
+        non_icp_blocked       = (leads.non_icp_blocked IS TRUE OR EXCLUDED.non_icp_blocked IS TRUE),
+        non_icp_reason        = COALESCE(leads.non_icp_reason,           EXCLUDED.non_icp_reason)
       RETURNING
         (SELECT p.email      FROM prev p) AS prev_email,
         (SELECT p.company    FROM prev p) AS prev_company,
@@ -9377,8 +9829,14 @@ app.post('/submit', async (req, res) => {
         (SELECT p.booking_uid IS NOT NULL FROM prev p) AS prev_booked,
         (SELECT p.step_reached FROM prev p) AS prev_step_reached,
         leads.email, leads.company, leads.website, leads.phone,
-        leads.first_name, leads.last_name, leads.sell_to, leads.step_reached
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business]);
+        leads.first_name, leads.last_name, leads.sell_to, leads.step_reached,
+        /* The EFFECTIVE block, after the sticky OR above -- not the fresh
+           verdict. A lead blocked at step 1 who then edits their email to a
+           clean domain still has a blocked ROW, and everything downstream
+           (Meta, Slack, the response) must read the row rather than the
+           in-memory verdict or the block silently lifts itself. */
+        leads.non_icp_blocked, leads.non_icp_reason
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business,nonIcp.blocked===true,nonIcp.blocked?nonIcp.reason:null]);
 
     /* After the write, off the response path. Never awaited. */
     const identityDiff = diffLeadIdentityFields(upsert.rows[0], { arrived_step: 2 });
@@ -9386,9 +9844,29 @@ app.post('/submit', async (req, res) => {
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/submit] Enrichment sync failed (non-blocking):', err.message));
 
-    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true,hear_about_us_raw:hear_about_us,product,about_business,...ps});
+    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true,hear_about_us_raw:hear_about_us,product,about_business,non_icp_blocked:upsert.rows[0]?.non_icp_blocked===true,non_icp_reason:upsert.rows[0]?.non_icp_reason||null,...ps});
 
-    if (!alreadySubmitted) {
+    /* The EFFECTIVE block, read back from the row after the sticky OR --
+       never the in-memory verdict. See the RETURNING comment above. */
+    const nonIcpBlocked = upsert.rows[0]?.non_icp_blocked === true;
+    const nonIcpReason  = upsert.rows[0]?.non_icp_reason || null;
+
+    if (!alreadySubmitted && nonIcpBlocked) {
+      /* ONE post, in place of the normal lead post -- not both. Two messages
+         about one person is how a channel gets muted, and the normal post
+         would read as a lead somebody should call. */
+      slackNonIcpBlocked({ stage: 'submit', matched_domain: nonIcpReason,
+        matched_label: NON_ICP_DOMAINS[nonIcpReason] || null,
+        first_name, last_name, email, phone, company, website, sell_to });
+      /* Salesforce: deliberately NOT pushed. Swapnil, 11 Sept 2026 -- a
+         blocked lead is not a lead an AE should find in their queue. This is
+         the whole of "no Salesforce for blocked leads"; nothing was changed
+         inside salesforce.js. */
+      console.log(`[/submit] ⏭ Salesforce push skipped — non-ICP (${nonIcpReason}): ${email}`);
+      /* Meta suppression, event 2 of 3 (Lead). */
+      console.log(`[/submit] ⏭ Meta CAPI Lead suppressed — non-ICP (${nonIcpReason}): ${email}`);
+      console.log(`[/submit] 🚫 Lead blocked: ${email} | session: ${session_id} | matched: ${nonIcpReason}`);
+    } else if (!alreadySubmitted) {
       slackSubmit({identity_changes:identityDiff.changes,changed_after_booking:identityDiff.wasBooked,first_name,last_name,email,phone,company,website,sell_to,product,about_business,hear_about_us:hearAboutUsFinal,ps_partner_key:ps.ps_partner_key,ps_partner_name:(psIdentity||{}).name,ps_partner_email:(psIdentity||{}).email,ps_click_at:ps.ps_click_at,hear_about_us_raw:hear_about_us,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,elv_status:elv?.status||null,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
 
       pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,product,about_business,hear_about_us:hearAboutUsFinal,hear_about_us_raw:hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'form completed', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
@@ -9423,7 +9901,11 @@ app.post('/submit', async (req, res) => {
       }
       console.log(`[/submit] ⏭ Slack skipped — this session was already submitted: ${email} | session: ${session_id}`);
     }
-    res.json({ ok: true });
+    /* non_icp_blocked rides the response so the form can redirect even when
+       the client-side /non-icp-check never ran or failed open. The browser is
+       not trusted to enforce anything -- everything above has already been
+       suppressed server-side -- this only decides which screen they see. */
+    res.json({ ok: true, non_icp_blocked: nonIcpBlocked, non_icp_reason: nonIcpReason });
 
     // Off the critical path on purpose — the lead is no longer waiting.
     if (!elv && !alreadySubmitted) finaliseElvVerdict({ session_id, email, website_check_reason });
@@ -9463,6 +9945,11 @@ const SCHEDULE_LEAD_SQL = `
   SELECT l.session_id, l.email, l.phone, l.first_name, l.last_name,
          l.company, l.sell_to, l.page_url, l.landing_page, l.fbc, l.fbp,
          l.website_check_failed, l.website_check_reason,
+         /* Read so all THREE booking routes can suppress Schedule. Selected
+            here rather than re-queried per route because this statement is
+            the only thing the three share -- CLAUDE.md's "a fix on one is a
+            fix on one third" is about exactly this shape. */
+         l.non_icp_blocked, l.non_icp_reason,
          COALESCE(e.enriched_company_size,  l.enriched_company_size)  AS enriched_company_size,
          COALESCE(e.enriched_industry,      l.enriched_industry)      AS enriched_industry,
          COALESCE(e.enriched_seniority,     l.enriched_seniority)     AS enriched_seniority,
@@ -9503,6 +9990,11 @@ app.post('/booking-confirmed', async (req, res) => {
       }).catch(err => { console.warn('[/booking-confirmed] SF update failed (non-blocking):', err.message); alertOps('warning', 'Salesforce', 'Booking not recorded', { 'Session': session_id, 'Error': err.message, 'Impact': 'The lead exists in Salesforce but the booking is missing.' }); });
       pool.query(SCHEDULE_LEAD_SQL, [session_id]).then(r => {
         const fullLead = r.rows[0] || {};
+        /* Meta suppression, event 3 of 3 (Schedule). Guarded EXPLICITLY rather
+           than trusting that a blocked lead never reaches a calendar: a lead
+           blocked at /submit may already have had RevenueHero fired alongside
+           it, and this webhook does not care what the browser did. */
+        if (fullLead.non_icp_blocked === true) { console.log(`[/booking-confirmed] ⏭ Meta CAPI Schedule suppressed — non-ICP (${fullLead.non_icp_reason}): session ${fullLead.session_id}`); return; }
         if (!isWebsiteVerified(fullLead)) { console.log(`[/booking-confirmed] ⏭ Meta CAPI Schedule skipped — website not verified: session ${session_id}`); return; }
         return pushFormEventsToMeta({...fullLead, booking_uid}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''});
       }).catch(err => { console.warn('[/booking-confirmed] Meta CAPI failed (non-blocking):', err.message); recordFailure('Meta CAPI', session_id + ' (Schedule)', err.message); });
@@ -9576,6 +10068,11 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
         }).catch(err => { console.warn('[/cal-webhook] SF update failed (non-blocking):', err.message); alertOps('warning', 'Salesforce', 'Booking not recorded', { 'Email': email, 'Error': err.message, 'Impact': 'The lead exists in Salesforce but the booking is missing.' }); });
         pool.query(SCHEDULE_LEAD_SQL, [lead.session_id]).then(r => {
           const fullLead = r.rows[0] || {};
+          /* Meta suppression, event 3 of 3 (Schedule). Guarded EXPLICITLY rather
+             than trusting that a blocked lead never reaches a calendar: a lead
+             blocked at /submit may already have had RevenueHero fired alongside
+             it, and this webhook does not care what the browser did. */
+          if (fullLead.non_icp_blocked === true) { console.log(`[/cal-webhook] ⏭ Meta CAPI Schedule suppressed — non-ICP (${fullLead.non_icp_reason}): session ${fullLead.session_id}`); return; }
           if (!isWebsiteVerified(fullLead)) { console.log(`[/cal-webhook] ⏭ Meta CAPI Schedule skipped — website not verified: session ${lead.session_id}`); return; }
           return pushFormEventsToMeta({...fullLead, booking_uid: bookingUid}, {clientIpAddress:'',clientUserAgent:''});
         }).catch(err => { console.warn('[/cal-webhook] Meta CAPI failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (Schedule)', err.message); });
@@ -9665,6 +10162,11 @@ app.post('/cron/send-partials', async (req, res) => {
       FROM leads l
       WHERE l.email IS NOT NULL
         AND l.disqualified = false
+        /* A lead we turned away at the calendar must not then be emailed
+           "you didn't finish booking". IS NOT TRUE, not = false, so a row
+           predating the column lands in the population rather than
+           vanishing from it -- the same rule the stage ladder uses. */
+        AND l.non_icp_blocked IS NOT TRUE
         AND l.booking_uid IS NULL
         AND l.loops_sent = false
         AND l.created_at < NOW() - INTERVAL '2 hours'
@@ -9899,6 +10401,11 @@ if (rhRouter && !RH_ALLOWED_ROUTERS.some((r) => r.toLowerCase() === rhRouter)) {
 
         pool.query(SCHEDULE_LEAD_SQL, [lead.session_id]).then(r => {
           const fullLead = r.rows[0] || {};
+          /* Meta suppression, event 3 of 3 (Schedule). Guarded EXPLICITLY rather
+             than trusting that a blocked lead never reaches a calendar: a lead
+             blocked at /submit may already have had RevenueHero fired alongside
+             it, and this webhook does not care what the browser did. */
+          if (fullLead.non_icp_blocked === true) { console.log(`[/rh-webhook] ⏭ Meta CAPI Schedule suppressed — non-ICP (${fullLead.non_icp_reason}): session ${fullLead.session_id}`); return; }
           if (!isWebsiteVerified(fullLead)) { console.log(`[/rh-webhook] ⏭ Meta CAPI Schedule skipped — website not verified: session ${lead.session_id}`); return; }
           return pushFormEventsToMeta({...fullLead, booking_uid: bookingUid}, {clientIpAddress:'',clientUserAgent:''});
         }).catch(err => { console.warn('[/rh-webhook] ⚠ Meta CAPI failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (Schedule)', err.message); });

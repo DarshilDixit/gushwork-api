@@ -25,14 +25,46 @@ Three things follow from that, and they are not negotiable:
    not a thin page. A timeout is not a dead site. Each of these gets its own
    verdict that says what actually happened.
 
-2. **Blocking is the highest-risk action in the codebase.** Only three verdicts
-   block, all decided client-side in `gushwork-form.js`: `nxdomain`,
-   `brand_mismatch`, `mailbox_domain`. Do not add a fourth without asking. The
-   server-side checks never block — they inform.
+2. **Blocking is the highest-risk action in the codebase.** Three *website
+   verdicts* block, all decided client-side in `gushwork-form.js`: `nxdomain`,
+   `brand_mismatch`, `mailbox_domain`. Do not add a fourth without asking.
+
+   **There is now one server-side block as well, and it is the exception that
+   proves this rule rather than a loosening of it.** `NON_ICP_BLOCK` (default
+   OFF) stops leads whose email domain or website is a national real-estate
+   brokerage or insurance carrier brand, and sends them to `/thank-you`
+   instead of the calendar. Decided by `nonIcpVerdict` in `index.js`, stamped
+   on `leads.non_icp_blocked`, enforced in `/partial` and `/submit`.
+
+   It exists because AEs reported State Farm agents and realtors taking demo
+   slots, and because the measurement backed them: those leads book at 71%
+   against 64% overall and then attend only 47% of the time against 66%. It
+   was authorised explicitly by Swapnil on 11 Sept 2026, and it **reverses two
+   written positions in the Non-ICP doc** — see
+   `docs/tickets/non-icp-v1-block.md`, which is the record of that.
+
+   Everything else here still holds. The block **fails open** on any throw,
+   timeout or cold cache, it checks the warehouse customer tables first so a
+   paying customer is never blocked, and it is the only server-side check that
+   blocks. Every other server-side check still informs and never blocks.
 
 3. **Suppressing a Meta event is a real cost, not a safe default.** It removes a
    conversion signal from the ad algorithm. Treat "should this fire Meta?" as a
    business decision to surface, not a judgement call to make quietly.
+
+   **Two things gate Meta today, and both were surfaced as decisions rather
+   than taken quietly.** `isWebsiteVerified` is the older one. The second is
+   `non_icp_blocked`: a blocked lead fires none of `StartTrial`, `Lead` or
+   `Schedule`. That was the explicit point of the change — an ad audience
+   optimised toward realtors is what produced the complaint — and it was
+   authorised on 11 Sept 2026.
+
+   **`Schedule` fires from THREE call sites, so it needs three guards.** They
+   are `/booking-confirmed`, `/booking-confirmed-webhook` and
+   `/booking-confirmed-webhook-rh`, and all three read `non_icp_blocked` off
+   `SCHEDULE_LEAD_SQL`. Counting event *names* and concluding "three call
+   sites" is wrong and is how one leaks: there are six in the repo, five in
+   `index.js` plus `Contact` in `lead-magnet.js`.
 
 When a change would alter which leads get blocked or which fire Meta events, say so
 explicitly in your summary. Never let that happen as a side effect.
@@ -64,6 +96,8 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `tests/` | The test files described under Deploying, plus `crash-reporter.js` (required first by every suite), `measure.js` (the test bar and the mutation-testing rule) and the committed `.baseline.json` |
 | `docs/partnerstack.md` | PartnerStack handover: the two-step model, every ps_ column, env vars, test procedure, known gaps |
 | `docs/OPEN-ITEMS.md` | What is still open or deliberately decided in THIS repo, as of 9 Sept 2026. The meta-capi repo has its own; neither is complete alone |
+| `docs/tickets/non-icp-v1-block.md` | The non-ICP block: what the Non-ICP doc says, the two positions this reverses, the domain list with per-domain evidence, and the `sdr-calling` dependency |
+| `docs/Non-ICP-flagging-rules-*.pdf` | Swapnil's Non-ICP flagging rules, as exported. **A screenshot with no text layer** — it does not grep. The ticket above quotes the parts that matter |
 | `CLAUDE.md` | This file |
 
 **`gushwork-form.js` and `gushwork-form-popup.js` are in this repo, not a separate
@@ -422,6 +456,38 @@ can't verify, it must not be green.
 ---
 
 ## Things that will bite you
+
+**The non-ICP block has three traps, and two of them look like working code.**
+
+*One.* `partnerStackCustomerKey` **collapses subdomains** — it ends in
+`registrableDomain`, so `agents.farmers.com` becomes `farmers.com`. Matching
+only on its output makes every subdomain entry on `NON_ICP_DOMAINS`
+(`agents.allstate.com`, `ft.newyorklife.com`, `agents.farmers.com`) permanently
+dead while looking live. `nonIcpHostForms` keeps the full host alongside the
+collapsed one and both are matched. Caught by a test, not by reading.
+
+*Two.* **`non_icp_blocked` is STICKY in all three upserts**
+(`leads.non_icp_blocked IS TRUE OR EXCLUDED.non_icp_blocked IS TRUE`), and that
+is load-bearing rather than tidy. `/partial` fires repeatedly through step 1,
+and the "actually we're B2B" button calls `savePartial(1)` again — **74 of the
+84 known realtor and insurance leads reached the calendar through exactly that
+button**. An `= EXCLUDED` assignment lets a realtor clear their own block by
+clicking it. A test pins all three sites.
+
+*Three.* **Never match a brand domain by substring.** Measured on 5,123 real
+leads: substring caught 116 where exact-or-subdomain caught 110, and five of
+the six extra were wrong — `paycompass.com` (a payments company, contains
+`compass.com`), `charleslegalpl.com` (a law firm, contains `lpl.com`),
+`theimagecreatornm.com`, `krevera.com` and `ceterainvestors.com`. All five are
+pinned as negative fixtures in `tests/test-non-icp.js`.
+
+**And the scope is narrower than "non-ICP" sounds.** V1 is national real-estate
+brokerage and insurance carrier brands only. Financial advisors (Edward Jones,
+LPL, Northwestern Mutual, Primerica, Cetera), mortgage and lending are **in
+ICP by name in the Non-ICP doc** and are not blocked; nor are independent local
+agencies and brokerages, of which we have ~70. The other four rule-6 industries
+— restaurants, spas and salons, home services, print and sign shops — are not
+covered by V1 at all and fire Meta normally.
 
 **The three lists.** `WEBSITE_VERIFIED_REASONS` (line ~424), `RECHECK_WRITEABLE`
 (~3386) and `RECHECK_PROTECTED` (~3398) must stay in sync with `gushwork-form.js`

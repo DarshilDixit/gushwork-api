@@ -243,9 +243,13 @@ const R = (new Function(ruleSrc + `
       const neverNull = Array.from(
         values.matchAll(/data\.([a-z_]+)\s*(?:\|\||\?\?)\s*(?:false|true|1)\b/g)
       ).map((m) => m[1]);
-      ok('mirror: the never-NULL binds are still the four we know about',
+      /* FIVE as of Sept 2026: non_icp_blocked joined them with the non-ICP
+         block. Like the other four its bind can never be NULL, so the rule
+         below applies to it and its conflict clause is an OR, not a COALESCE
+         no-op -- a block must not be clearable by a later partial sync. */
+      ok('mirror: the never-NULL binds are still the five we know about',
          JSON.stringify(neverNull.slice().sort()) ===
-         JSON.stringify(['completed', 'disqualified', 'loops_sent', 'step_reached']),
+         JSON.stringify(['completed', 'disqualified', 'loops_sent', 'non_icp_blocked', 'step_reached']),
          neverNull.join(','));
 
       /* THE RULE. For a never-NULL bind, a plain

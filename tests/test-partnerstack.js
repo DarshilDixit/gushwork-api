@@ -460,8 +460,13 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
      !/PS_ELIGIBILITY_ENABLED\s*=\s*process\.env\.PS_ELIGIBILITY_ENABLED\s*(\|\||\?\?)/.test(src));
   ok('mvp: the eligibility runner returns early when the flag is off',
      /function runPartnerStackEligibility[\s\S]{0,300}?if \(!PS_ELIGIBILITY_ENABLED\) return;/.test(src));
-  ok('mvp: the customer cache is not warmed while the check is off',
-     /function startPartnerStackCacheWarm[\s\S]{0,400}?if \(!PS_ELIGIBILITY_ENABLED\)/.test(src));
+  /* TWO consumers as of Sept 2026: the eligibility check and the non-ICP
+     block, on separate env flags. The cache must be warmed if EITHER is on --
+     gating it on PS_ELIGIBILITY_ENABLED alone left it cold with the block
+     enabled, and the first blocked lead paid for a cross-WAN fetch. Still
+     asserts the original point: it is NOT warmed when nothing needs it. */
+  ok('mvp: the customer cache is not warmed while BOTH consumers are off',
+     /function startPartnerStackCacheWarm[\s\S]{0,900}?if \(!PS_ELIGIBILITY_ENABLED && !NON_ICP_BLOCK_ENABLED\)/.test(src));
   /* The conversion must NOT consult eligibility for the MVP. */
   {
     const fn = src.slice(src.indexOf('async function runPartnerStackSignup'),
@@ -580,7 +585,9 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   // Deferred, like everything else on this path.
   {
     const seg = src.slice(src.indexOf("app.post('/submit'"), src.indexOf("app.post('/booking-confirmed'"));
-    const resAt  = seg.indexOf('res.json({ ok: true })');
+    /* /submit's response carries non_icp_blocked as of Sept 2026, so the
+       literal '{ ok: true }' is gone. Anchor on the call, not its argument. */
+    const resAt  = seg.indexOf('res.json({ ok: true');
     const signAt = seg.indexOf('runPartnerStackSignup(');
     ok('conversion: runs in /submit', signAt !== -1);
     ok('conversion: runs AFTER res.json(), never before', resAt !== -1 && signAt > resAt,
@@ -856,8 +863,11 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
      /partners'[\s\S]{0,200}?req\.query\.token !== token/.test(src));
   ok('partners: it is a TAB, and Partner gaps stays on Overview',
      /id="t-partners"/.test(src) && /id="tp-partners"/.test(src) && /id="psgapbox"/.test(src));
+  /* "blocked" joined the list in Sept 2026. Asserted as "partners is in the
+     array" rather than as the whole literal, so adding a seventh tab does not
+     fail a PartnerStack assertion that is not about tabs. */
   ok('partners: the tab is registered in showTab',
-     /\["overview","leads","sdr","dupes","health","lm","partners"\]/.test(src));
+     /function showTab\(n\)\{\[[^\]]*"partners"[^\]]*\]/.test(src));
   ok('partners: it loads lazily on first open',
      /n==="partners"&&document\.getElementById\("ptbody"\)/.test(src));
   {
@@ -1972,7 +1982,11 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        so a fifth cannot be added interval-only. */
     for (const fn of ['startPartnerStackCacheWarm', 'startPartnerStackSfStateRefresh',
                       'startPartnerStackConversionRetry', 'startPartnerStackConversionVerify']) {
-      const body = src.slice(src.indexOf('function ' + fn), src.indexOf('function ' + fn) + 900);
+      /* 1600, not 900: startPartnerStackCacheWarm grew an explanatory comment
+         when the non-ICP block became its second consumer, which pushed
+         setInterval past a 900-char window. The window is a proximity heuristic,
+         not the contract -- both markers must still be inside the function. */
+      const body = src.slice(src.indexOf('function ' + fn), src.indexOf('function ' + fn) + 1600);
       /* Matches the ARGUMENT, not a particular wrapper name: cacheWarm calls
          refreshPartnerStackCustomerCache('boot') directly while the other
          three go through a local `run` helper. Both are boot-then-interval;
@@ -3506,7 +3520,9 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
      /refreshPartnerStackCustomerCache[\s\S]{0,400}?\.catch\(/.test(src));
   {
     const seg = src.slice(src.indexOf("app.post('/submit'"), src.indexOf("app.post('/booking-confirmed'"));
-    const resAt = seg.indexOf('res.json({ ok: true })');
+    /* See the note at the other res.json anchor: the argument now carries
+       non_icp_blocked. */
+    const resAt = seg.indexOf('res.json({ ok: true');
     const runAt = seg.indexOf('runPartnerStackEligibility(');
     ok('hazard: eligibility runs in /submit at all', runAt !== -1);
     ok('hazard: eligibility runs AFTER res.json(), never before',
@@ -3600,7 +3616,10 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     ok(`form(${name}): history is capped at 10 client-side too`, /slice\(0,\s*10\)/.test(f));
     ok(`form(${name}): a corrupt cookie cannot break the submit`,
        /JSON\.parse\(rawClicks\)/.test(f) && /catch \(err\)/.test(f));
-    ok(`form(${name}): version banner says v5.9.0`, /Form initialised v5\.9\.0/.test(f));
+    /* Pinned to the CURRENT version on purpose: this is what catches a form
+       file shipped without its version bumped, which is how the Webflow re-pin
+       silently ships half a fix. Bump both when you bump the files. */
+    ok(`form(${name}): version banner says v5.10.0`, /Form initialised v5\.10\.0/.test(f));
   }
 
   console.log('');
