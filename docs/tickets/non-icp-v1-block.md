@@ -416,6 +416,126 @@ that costs nothing going forward.
 
 ---
 
+## FINDING — domain-keying over-claims on shared corporate domains
+
+**Investigated 12 Sept 2026 at Darshil's request. Nothing fixed; this is the
+written-up finding.**
+
+### The worry, and it is correct
+
+> For a shared corporate domain like allstate.com — 54,000 people, thousands of
+> independent agencies — one partner referring one agent might claim every lead
+> from that domain, and any AE ticking any Opportunity on it pays them $50.
+
+**That is exactly what the code does.** `sendQualificationForDomain` claims the
+earliest converted lead on the domain
+(`ORDER BY ps_signup_sent_at ASC LIMIT 1`) and sends
+`{ target_type: 'customer', target_key: <domain> }`. PartnerStack then resolves
+the partner **from that customer's existing attribution** — i.e. from whoever's
+`xid` created it. Nothing in the path consults which *lead* was ticked.
+
+### It is already instantiated, on `allstate.com`
+
+| Lead | Partner? | Converted | Blocked | Booked |
+|---|---|---|---|---|
+| `brittanyvisin@allstate.com` | no | no | no | **yes — demo 11 Sept 20:00** |
+| `agent@allstate.com` | yes (`785ec78e…`) | **yes** | yes | no |
+
+Both carry `ps_customer_key = allstate.com`. **If an AE ticks Brittany's
+Opportunity, the poller matches `allstate.com`, claims the converted row, and
+pays a partner who had nothing to do with her.** She is a real lead with a real
+demo; the converted row is the blocked test one.
+
+### Answering the four questions
+
+**1. Does `partnerStackCustomerKey` already handle this? No.** It lowercases,
+strips scheme/www/path/port, collapses to the registrable domain, and rejects
+IP literals and free-email domains. It has no concept of a shared domain —
+`allstate.com` and a three-person agency's own domain are treated identically.
+
+Worth noting: **the mechanism already exists and is scoped too narrowly.**
+`if (isFreeEmailDomain(key)) return null;` *is* a shared-domain exclusion — it
+just only covers consumer mailboxes. Shared *corporate* domains are the
+unsolved half of the same idea.
+
+**2. Is domain-keying PartnerStack's design, or ours? Ours.** Their docs are
+explicit that `customer_key` is "a unique identifier for the customer, this is
+the ID you will use to reference the customer in our API" — any format the
+integrator chooses. PartnerStack enforces *uniqueness per key* and attaches the
+partner to it; **choosing the domain as that key is our decision.** CLAUDE.md's
+"keyed by DOMAIN, because that is the unit PartnerStack pays on" conflates the
+two: the uniqueness is theirs, the choice of domain is ours.
+
+**3. Has it happened in the data? Partly — and the integration is tiny.**
+
+| | |
+|---|---|
+| Partner leads, all time | **6** |
+| Distinct partners | **1** |
+| Conversions sent | **5** |
+| Qualifications sent | **2** |
+
+Four of the five conversions are test domains (`test.com`, `google.ai`,
+`hello.com`, `darshildixit.com`); the fifth is the accidental `allstate.com`.
+
+- **No domain has ever had two different partners.** The partner-vs-partner
+  double-claim has not happened.
+- **The partner-vs-nobody claim has now happened once**, on `allstate.com`.
+
+Measuring shared domains directly — domains used by more than one distinct
+company name:
+
+| Domain | Leads | Distinct companies | On the block list? |
+|---|---|---|---|
+| `allstate.com` | 17 | **7** | yes |
+| `farmersagent.com` | 8 | 5 | yes |
+| `kw.com` | 7 | 5 | yes |
+| `statefarm.com` | 5 | 5 | yes |
+| `exprealty.com` | 7 | 3 | yes |
+| `cbrealty.com` | 6 | 3 | yes |
+| `lpl.com` | 3 | 3 | **no — in ICP** |
+| `sandler.com` | 3 | 3 | **no** |
+| `deleyorganizationglobelife.com` | 3 | 2 | **no — in ICP** |
+
+**The non-ICP block closes most of this by accident.** The six worst shared
+domains are all now blocked, and a blocked lead cannot convert at all. What
+remains is the in-ICP tail — franchise and advisor networks like `lpl.com` and
+`deleyorganizationglobelife.com`, 2–3 companies each.
+
+**4. Bug, design limitation, or working as intended?**
+
+**A design limitation that is correct for the common case and wrong for shared
+domains.** For an ordinary SMB the domain *is* the company, and domain-keying is
+the thing that stops two spellings of one company paying an affiliate twice —
+that is a real problem it really solves. It over-claims only where one domain
+spans many independent buyers, which is precisely the franchise and captive-agent
+shape.
+
+So: not a bug in the sense of code doing something other than intended, and not
+"working as intended" either — the intent was never tested against a 54,000-person
+domain. **A limitation nobody had written down, now written down.**
+
+### If it is ever worth fixing
+
+Not tonight, and possibly never at this volume. The options, in increasing cost:
+
+1. **A shared-domain deny-list**, alongside `isFreeEmailDomain` in
+   `partnerStackCustomerKey` — a lead on one of those domains gets no customer
+   key, so it never converts. Smallest change; reuses the existing mechanism.
+   Costs the ability to ever convert a genuine referral from such a company.
+2. **Key on domain + something narrowing** (company name, or the lead's own
+   website where it differs from the email domain). Changes the key format, so
+   it must never be applied retroactively — existing keys are already claimed
+   in PartnerStack.
+3. **Key per lead.** Removes over-claiming entirely and reintroduces exactly the
+   double-payment the domain key exists to prevent. Not recommended.
+
+**Any change to the key format is one-way**: PartnerStack holds the old keys
+forever, so a re-key means new keys convert alongside old ones rather than
+replacing them.
+
+---
+
 ## The `sdr-calling` dependency
 
 **Not urgent, but real, and it is not fixed by this PR.**
