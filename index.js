@@ -7380,6 +7380,96 @@ const PS_VERIFY_INTERVAL_MS = 15 * 60 * 1000;
 const PS_VERIFY_BATCH       = 25;
 let _psVerifyRunning = false;
 
+/* ── C5: A VERIFIED CONVERSION IS RE-CHECKED ─────────────────────────
+   The verify sweep selects `ps_signup_verified_at IS NULL`, so the moment a
+   row verifies it is never looked at again. And the PartnerStack UI is the
+   ONLY place a conversion can be reversed -- this repo sends no negative, no
+   void and no delete. So the one supported way to undo a mistake left us
+   asserting a conversion that no longer exists, permanently, with nothing to
+   notice. Exactly that happened to allstate.com on 11 Sept 2026.
+
+   THERE IS A BETTER SHAPE AND THIS IS NOT IT. PartnerStack emits a
+   `customer_deleted` webhook (POST /v2/webhooks to subscribe). Event-driven
+   would be instant and cost nothing per domain. It is not built here because
+   it needs a public unauthenticated endpoint, signature verification and a
+   subscription managed outside this repo -- and because webhook delivery is
+   best-effort, so a missed POST would leave exactly the permanent desync this
+   exists to prevent. A slow poll is the correct BACKSTOP whether or not the
+   webhook is added later. Recommended as a follow-up, not a replacement.
+
+   CADENCE: 7 DAYS PER DOMAIN, on the existing 15-minute tick.
+     - A hand-cleanup is a rare, deliberate act. A week is soon enough for a
+       dashboard number and far too slow to matter for anything else.
+     - It is self-throttling: PS_VERIFY_BATCH caps each tick, so the cost
+       cannot spike with the domain count.
+     - Cost today: 4 verified domains, one call each per week -- under one
+       API call a day. At 1,000 verified domains it is ~143 calls a day,
+       roughly six of the 96 daily ticks.
+
+   IT DOES NOT RELEASE ANYTHING ITSELF, and that is the important part. On a
+   404 it only DEMOTES the row by clearing ps_signup_verified_at, which drops
+   it back into the original verify sweep's population. That sweep then
+   applies its own grace and, on a second definitive 404 fifteen minutes
+   later, releases the claim through the path that is already tested and
+   already alerts. Two independent 404s before anything is released -- the
+   11-minute read-after-write lag of 7 Sept is the reason a single 404 is
+   never enough to act on. */
+const PS_RECHECK_AFTER_DAYS = 7;
+let _psRecheckRunning = false;
+
+async function runPartnerStackConversionRecheck() {
+  if (_psRecheckRunning) return;
+  _psRecheckRunning = true;
+  try {
+    const { rows } = await pool.query(
+      `SELECT session_id, email, ps_customer_key
+         FROM leads
+        WHERE ps_signup_verified_at IS NOT NULL
+          AND ps_customer_key IS NOT NULL
+          AND (ps_signup_recheck_at IS NULL
+               OR ps_signup_recheck_at < NOW() - INTERVAL '${PS_RECHECK_AFTER_DAYS} days')
+        ORDER BY ps_signup_recheck_at NULLS FIRST
+        LIMIT ${PS_VERIFY_BATCH}`
+    );
+    if (!rows.length) return;
+    console.log(`[PartnerStack] Re-checking ${rows.length} verified conversion(s)`);
+
+    for (const r of rows) {
+      const out = await fetchCustomer(r.ps_customer_key);
+      if (!out.ok) {
+        /* Could not tell. Leave the row exactly as it is and try next week --
+           an outage must never look like a deletion. */
+        console.warn(`[PartnerStack] Could not re-check ${r.ps_customer_key} (${out.reason}) — leaving it alone`);
+        continue;
+      }
+      /* Stamped either way: the point of the column is "when did we last
+         LOOK", which is true whatever the answer was. */
+      await pool.query(
+        `UPDATE leads SET ps_signup_recheck_at = NOW(), updated_at = NOW() WHERE session_id = $1`,
+        [r.session_id]
+      ).catch(err => console.warn('[PartnerStack] Could not stamp re-check:', err.message));
+
+      if (out.exists) continue;
+
+      /* GONE. Demote, do not release. The original sweep owns the release. */
+      console.error(`[PartnerStack] ⛔ Previously verified customer has DISAPPEARED: ${r.ps_customer_key} — demoting for re-verification`);
+      await pool.query(
+        `UPDATE leads SET ps_signup_verified_at = NULL, updated_at = NOW() WHERE session_id = $1`,
+        [r.session_id]
+      ).catch(err => console.error('[PartnerStack] ⚠ Could not demote:', err.message));
+      await syncPartnerStackStampToAWS(r.session_id, 'ps_signup_verified_at', null);
+      recordFailure('PartnerStack', r.ps_customer_key + ' (customer disappeared)',
+        'A conversion that was verified no longer exists in PartnerStack. Someone deleted the customer, ' +
+        'or PartnerStack lost it. The claim is being re-verified and will be released if it is still gone.');
+    }
+  } catch (err) {
+    console.warn('[PartnerStack] Re-check sweep failed (non-blocking):', err.message);
+    recordFailure('PartnerStack', 'conversion recheck sweep', err.message);
+  } finally {
+    _psRecheckRunning = false;
+  }
+}
+
 async function runPartnerStackConversionVerify() {
   if (_psVerifyRunning) return;
   _psVerifyRunning = true;
@@ -7764,6 +7854,18 @@ function startPartnerStackConversionVerify() {
   const t = setInterval(() => run('scheduled'), PS_VERIFY_INTERVAL_MS);
   if (t.unref) t.unref();
   console.log(`[PartnerStack] Conversion read-back started (boot + every ${PS_VERIFY_INTERVAL_MS / 60000} min, ${PS_VERIFY_GRACE_MIN} min grace)`);
+}
+
+/* Same boot-then-interval shape as the other four partner jobs, riding the
+   same 15-minute tick. The CADENCE is per domain (7 days), not per tick --
+   the query is what throttles, not the timer. */
+function startPartnerStackConversionRecheck() {
+  const run = (why) => runPartnerStackConversionRecheck()
+    .catch((err) => console.warn(`[PartnerStack] Conversion re-check failed (${why}, non-blocking):`, err.message));
+  run('boot');
+  const t = setInterval(() => run('scheduled'), PS_VERIFY_INTERVAL_MS);
+  if (t.unref) t.unref();
+  console.log(`[PartnerStack] Conversion re-check started (boot + every ${PS_VERIFY_INTERVAL_MS / 60000} min, each domain re-checked every ${PS_RECHECK_AFTER_DAYS}d)`);
 }
 
 /* ── STEP 10: the qualification action ───────────────────────────────
@@ -10769,6 +10871,7 @@ async function start() {
       startPartnerStackCacheWarm();
       startPartnerStackQualificationPoll();
       startPartnerStackConversionVerify();
+      startPartnerStackConversionRecheck();
       startPartnerStackConversionRetry();
       startPartnerStackSfStateRefresh();
     });

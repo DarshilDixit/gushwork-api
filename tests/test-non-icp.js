@@ -647,6 +647,63 @@ const results10d = (async () => {
 }
 
 /* ============================================================
+   10e. A VERIFIED CONVERSION IS RE-CHECKED
+
+   The verify sweep selects `ps_signup_verified_at IS NULL`, so a verified
+   row was never looked at again -- and the PartnerStack UI is the only
+   place a conversion can be reversed. The one supported way to undo a
+   mistake desynced us permanently.
+   ============================================================ */
+{
+  const rc = between('async function runPartnerStackConversionRecheck', 'async function runPartnerStackConversionVerify');
+
+  ok('recheck: it selects VERIFIED rows, the ones the other sweep ignores',
+     rc.includes('ps_signup_verified_at IS NOT NULL'));
+  ok('recheck: it is paced per DOMAIN, not per tick',
+     /ps_signup_recheck_at < NOW\(\) - INTERVAL '\$\{PS_RECHECK_AFTER_DAYS\} days'/.test(rc)
+     || rc.includes("PS_RECHECK_AFTER_DAYS} days'"));
+  ok('recheck: a row never re-checked is picked up first',
+     rc.includes('ps_signup_recheck_at IS NULL') && rc.includes('NULLS FIRST'));
+  ok('recheck: it is batch-capped so cost cannot spike with domain count',
+     rc.includes('LIMIT ${PS_VERIFY_BATCH}'));
+
+  /* THE LOAD-BEARING PART. A 404 must DEMOTE, never release: the release
+     path has a grace period and an alert, and the 7 Sept lesson is that one
+     404 is never enough to act on. Two independent 404s, fifteen minutes
+     apart, before anything is released. */
+  ok('recheck: a 404 clears ONLY the verification stamp',
+     /ps_signup_verified_at = NULL/.test(rc));
+  ok('recheck: it does NOT release the claim itself',
+     !/ps_signup_sent_at\s*=\s*NULL/.test(rc),
+     'the re-check released a claim directly instead of demoting for a second opinion');
+  ok('recheck: it does not stamp a failure that would trigger the retry sweep',
+     !/ps_signup_failed_at/.test(rc));
+  ok('recheck: a disappearance is recorded, not just logged',
+     rc.includes("recordFailure('PartnerStack'") && rc.includes('customer disappeared'));
+  ok('recheck: the demotion is mirrored to AWS',
+     rc.includes("syncPartnerStackStampToAWS(r.session_id, 'ps_signup_verified_at', null)"));
+
+  /* "Could not tell" is never "gone" -- the rule the whole repo runs on. */
+  ok('recheck: a non-OK read leaves the row completely alone',
+     /if \(!out\.ok\) \{[\s\S]{0,400}?continue;/.test(rc));
+  ok('recheck: only a definitive answer demotes', rc.includes('if (out.exists) continue;'));
+
+  /* The recheck stamp is its own column, not an overload of the first one. */
+  ok('recheck: it uses a SEPARATE column from ps_signup_verified_at',
+     rc.includes('ps_signup_recheck_at = NOW()') && !/ps_signup_verified_at = NOW\(\)/.test(rc));
+  ok('recheck: db.js creates that column',
+     dbsrc.includes('ps_signup_recheck_at TIMESTAMPTZ'));
+
+  /* Scheduled like the other partner jobs. */
+  ok('recheck: boot-then-interval',
+     /function startPartnerStackConversionRecheck[\s\S]{0,700}?run\('boot'\)/.test(src)
+     && /function startPartnerStackConversionRecheck[\s\S]{0,700}?setInterval\(/.test(src));
+  ok('recheck: started from start()', src.includes('      startPartnerStackConversionRecheck();'));
+  ok('recheck: its boot run cannot throw out of start()',
+     /function startPartnerStackConversionRecheck[\s\S]{0,400}?\.catch\(/.test(src));
+}
+
+/* ============================================================
    11. Recovery cron excludes blocked leads
    ============================================================ */
 {
