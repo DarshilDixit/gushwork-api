@@ -313,6 +313,229 @@ most of the intended population untouched.
 
 ---
 
+## INCIDENT — a blocked lead fired a PartnerStack conversion, 11 Sept 2026
+
+Found by Darshil during the browser walkthrough, within an hour of the flag
+going on.
+
+```
+[/submit] 🚫 Lead blocked: agent@allstate.com
+[PartnerStack] ✅ Conversion sent: allstate.com | xid=M7wnDScN0rrUYH
+```
+
+`StartTrial`, the Meta `Lead` event and the Salesforce push were all correctly
+suppressed. `runPartnerStackSignup` was not, because it guards on
+`leads.disqualified` and the block deliberately lives in `non_icp_blocked`.
+
+### Why it was missed
+
+The turn-3 reasoning for keeping the columns separate included: *"a blocked
+lead can't book, so PartnerStack never applies."* **That was wrong, and it was
+wrong even before the redirect moved to step 2** — the conversion fires from the
+fire-and-forget tail of `/submit`, and a blocked lead has always called
+`/submit` in order to be recorded. The argument was about bookings; the
+conversion does not need one.
+
+`runPartnerStackSignup` was even named in the original PR card as one of the
+five `disqualified` consumers. It was listed and then not acted on, because the
+list was used to justify *not* touching `disqualified` rather than to audit what
+each consumer now missed.
+
+### The generalisable lesson
+
+**Introducing a second column that means "we rejected this lead" turns every
+existing guard on the first one into half a guard.** The audit is not "did I
+update the guard I was thinking about" — it is "which predicates on the old
+column now answer only half the question". Three did:
+
+| Consumer | What it did wrong | Cost |
+|---|---|---|
+| `runPartnerStackSignup` | sent a paid conversion | money |
+| `/monitor/sdr` | listed blocked leads for SDRs to ring | wasted calls |
+| `checkRecoveryHealth` | counted them permanently stuck | a red row nothing clears |
+
+Two more were checked and deliberately left alone: the stage ladder and the
+metrics counters still count blocked leads as leads, because they *are* leads
+and the Blocked tab is their surface; and `slackPartial` is only reachable
+through the recovery cron, which already excludes them.
+
+`tests/test-non-icp.js` §10b now derives every `disqualified` predicate in
+`index.js` and pins the count, so a new one cannot be added without somebody
+deciding what it does about a blocked lead.
+
+### What happened to the conversion — and what can be done about it
+
+**Nothing in this repo can reverse it.** `docs/partnerstack.md`:
+
+> There is no reversal call anywhere in this repo. `sendAction` is only ever
+> invoked with `value: 1`; nothing sends a negative, a void or a delete. […]
+> Anyone who wants a commission reversed has to do it in the PartnerStack UI —
+> this service cannot.
+
+**No money has moved.** A conversion creates a *customer record*; the $50 fires
+on the *qualification*, which requires an AE to tick `Qualified_Demo__c` on a
+Salesforce Opportunity for that domain. State at the time of writing:
+
+```
+agent@allstate.com | non_icp_blocked t | ps_customer_key allstate.com
+ps_signup_sent_at  2026-09-11 18:59:55
+ps_signup_verified_at  NULL      ps_qualified_sent_at  NULL
+```
+
+**But the payout path is real and is not closed by the code fix.** The blocked
+lead was never pushed to Salesforce, so *its* Opportunity does not exist — yet
+**three existing Opportunities already resolve to `allstate.com`**, from real
+Allstate-agent leads that predate the block:
+
+| Opportunity | Contact | `Qualified_Demo__c` |
+|---|---|---|
+| `006OX00000XvnKMYAZ` | tungle@allstate.com | false |
+| `006OX00000cQQ5rYAG` | b.sheffield@allstate.com | false |
+| `006OX00000cZiMrYAK` | dawnbeaulieu1@allstate.com | false |
+
+The step-10 poller keys on **domain**, not on lead. If an AE ticks any of those
+three, it will match `allstate.com`, find the stamped conversion, and fire the
+qualification — **$50 to partner `785ec78e1ee4688`, for a lead we turned away.**
+
+That is a live exposure and a decision for a human, not a code change. The
+options, none of them taken here:
+
+1. **Void it in the PartnerStack UI.** The only true reversal.
+2. **Stamp `ps_qualified_sent_at` on the row** to make the qualification
+   unreachable — the UNIQUE PARTIAL index and the `NOT EXISTS` check both read
+   it. Effective, but it writes a false observational stamp, which is exactly
+   what `docs/partnerstack.md` warns against for `first_ticked_at`.
+3. **Null the `ps_customer_key` on that row** so the poller cannot match it.
+   A data edit, but arguably honest: a blocked lead should never have held a
+   customer key.
+4. **Leave it and watch.** All three Opportunities are unticked today.
+
+Whatever is chosen, `allstate.com` is now burned as a PartnerStack customer key
+— one conversion per key, forever. Since `allstate.com` is on the block list
+that costs nothing going forward.
+
+---
+
+## FINDING — domain-keying over-claims on shared corporate domains
+
+**Investigated 12 Sept 2026 at Darshil's request. Nothing fixed; this is the
+written-up finding.**
+
+### The worry, and it is correct
+
+> For a shared corporate domain like allstate.com — 54,000 people, thousands of
+> independent agencies — one partner referring one agent might claim every lead
+> from that domain, and any AE ticking any Opportunity on it pays them $50.
+
+**That is exactly what the code does.** `sendQualificationForDomain` claims the
+earliest converted lead on the domain
+(`ORDER BY ps_signup_sent_at ASC LIMIT 1`) and sends
+`{ target_type: 'customer', target_key: <domain> }`. PartnerStack then resolves
+the partner **from that customer's existing attribution** — i.e. from whoever's
+`xid` created it. Nothing in the path consults which *lead* was ticked.
+
+### It is already instantiated, on `allstate.com`
+
+| Lead | Partner? | Converted | Blocked | Booked |
+|---|---|---|---|---|
+| `brittanyvisin@allstate.com` | no | no | no | **yes — demo 11 Sept 20:00** |
+| `agent@allstate.com` | yes (`785ec78e…`) | **yes** | yes | no |
+
+Both carry `ps_customer_key = allstate.com`. **If an AE ticks Brittany's
+Opportunity, the poller matches `allstate.com`, claims the converted row, and
+pays a partner who had nothing to do with her.** She is a real lead with a real
+demo; the converted row is the blocked test one.
+
+### Answering the four questions
+
+**1. Does `partnerStackCustomerKey` already handle this? No.** It lowercases,
+strips scheme/www/path/port, collapses to the registrable domain, and rejects
+IP literals and free-email domains. It has no concept of a shared domain —
+`allstate.com` and a three-person agency's own domain are treated identically.
+
+Worth noting: **the mechanism already exists and is scoped too narrowly.**
+`if (isFreeEmailDomain(key)) return null;` *is* a shared-domain exclusion — it
+just only covers consumer mailboxes. Shared *corporate* domains are the
+unsolved half of the same idea.
+
+**2. Is domain-keying PartnerStack's design, or ours? Ours.** Their docs are
+explicit that `customer_key` is "a unique identifier for the customer, this is
+the ID you will use to reference the customer in our API" — any format the
+integrator chooses. PartnerStack enforces *uniqueness per key* and attaches the
+partner to it; **choosing the domain as that key is our decision.** CLAUDE.md's
+"keyed by DOMAIN, because that is the unit PartnerStack pays on" conflates the
+two: the uniqueness is theirs, the choice of domain is ours.
+
+**3. Has it happened in the data? Partly — and the integration is tiny.**
+
+| | |
+|---|---|
+| Partner leads, all time | **6** |
+| Distinct partners | **1** |
+| Conversions sent | **5** |
+| Qualifications sent | **2** |
+
+Four of the five conversions are test domains (`test.com`, `google.ai`,
+`hello.com`, `darshildixit.com`); the fifth is the accidental `allstate.com`.
+
+- **No domain has ever had two different partners.** The partner-vs-partner
+  double-claim has not happened.
+- **The partner-vs-nobody claim has now happened once**, on `allstate.com`.
+
+Measuring shared domains directly — domains used by more than one distinct
+company name:
+
+| Domain | Leads | Distinct companies | On the block list? |
+|---|---|---|---|
+| `allstate.com` | 17 | **7** | yes |
+| `farmersagent.com` | 8 | 5 | yes |
+| `kw.com` | 7 | 5 | yes |
+| `statefarm.com` | 5 | 5 | yes |
+| `exprealty.com` | 7 | 3 | yes |
+| `cbrealty.com` | 6 | 3 | yes |
+| `lpl.com` | 3 | 3 | **no — in ICP** |
+| `sandler.com` | 3 | 3 | **no** |
+| `deleyorganizationglobelife.com` | 3 | 2 | **no — in ICP** |
+
+**The non-ICP block closes most of this by accident.** The six worst shared
+domains are all now blocked, and a blocked lead cannot convert at all. What
+remains is the in-ICP tail — franchise and advisor networks like `lpl.com` and
+`deleyorganizationglobelife.com`, 2–3 companies each.
+
+**4. Bug, design limitation, or working as intended?**
+
+**A design limitation that is correct for the common case and wrong for shared
+domains.** For an ordinary SMB the domain *is* the company, and domain-keying is
+the thing that stops two spellings of one company paying an affiliate twice —
+that is a real problem it really solves. It over-claims only where one domain
+spans many independent buyers, which is precisely the franchise and captive-agent
+shape.
+
+So: not a bug in the sense of code doing something other than intended, and not
+"working as intended" either — the intent was never tested against a 54,000-person
+domain. **A limitation nobody had written down, now written down.**
+
+### If it is ever worth fixing
+
+Not tonight, and possibly never at this volume. The options, in increasing cost:
+
+1. **A shared-domain deny-list**, alongside `isFreeEmailDomain` in
+   `partnerStackCustomerKey` — a lead on one of those domains gets no customer
+   key, so it never converts. Smallest change; reuses the existing mechanism.
+   Costs the ability to ever convert a genuine referral from such a company.
+2. **Key on domain + something narrowing** (company name, or the lead's own
+   website where it differs from the email domain). Changes the key format, so
+   it must never be applied retroactively — existing keys are already claimed
+   in PartnerStack.
+3. **Key per lead.** Removes over-claiming entirely and reintroduces exactly the
+   double-payment the domain key exists to prevent. Not recommended.
+
+**Any change to the key format is one-way**: PartnerStack holds the old keys
+forever, so a re-key means new keys convert alongside old ones rather than
+replacing them.
+
+---
+
 ## The `sdr-calling` dependency
 
 **Not urgent, but real, and it is not fixed by this PR.**

@@ -577,6 +577,76 @@ code is gone. The mirror columns should be left alone regardless, since
 
 ---
 
+## 13b. FOLLOW-UP PR — PartnerStack fired for a blocked lead
+
+**Branch `fix/non-icp-partnerstack-guard`. Found in production within an hour
+of the flag going on.**
+
+```
+[/submit] 🚫 Lead blocked: agent@allstate.com
+[PartnerStack] ✅ Conversion sent: allstate.com | xid=M7wnDScN0rrUYH
+```
+
+`StartTrial`, Meta `Lead` and the Salesforce push were all correctly
+suppressed. `runPartnerStackSignup` guards on `leads.disqualified`, and the
+block deliberately lives in `non_icp_blocked`.
+
+**This card is where the mistake is visible.** §3 listed
+`runPartnerStackSignup` as one of the five `disqualified` consumers, and §0 used
+that list to justify *not* touching `disqualified` — rather than to audit what
+each consumer would now miss. Listing a consumer is not checking it.
+
+**Three were wrong, not one:**
+
+| Consumer | Did | Cost |
+|---|---|---|
+| `runPartnerStackSignup` | sent a paid conversion | money |
+| `/monitor/sdr` | listed blocked leads for SDRs | wasted calls |
+| `checkRecoveryHealth` | counted them stuck forever | a red row nothing clears |
+
+Two checked and deliberately left: the stage ladder and metrics counters still
+count blocked leads as leads (they are); `slackPartial` is cron-only and the
+cron already excludes them.
+
+`tests/test-non-icp.js` §10b is now an **audit** — it derives every
+`disqualified` predicate in `index.js` and pins the count at 13 (comments
+stripped), so a new guard cannot be added without someone deciding what it does
+about a blocked lead.
+
+**Exposure: $50, conditional, not yet realised.** No money has moved — a
+conversion is a customer record; the payout needs an AE to tick
+`Qualified_Demo__c`. But **three existing Opportunities already resolve to
+`allstate.com`** (`tungle@`, `b.sheffield@`, `dawnbeaulieu1@`, all currently
+false). The step-10 poller keys on domain, so ticking any of them fires the
+qualification for a lead we turned away. Options are in the ticket; **none
+taken — that is a human decision.**
+
+Nothing in this repo can reverse a conversion: `sendAction` only ever sends
+`value: 1`, and `docs/partnerstack.md` says a reversal has to happen in the
+PartnerStack UI.
+
+### Mutation results for this fix
+
+| Mutation | Result |
+|---|---|
+| Conversion guard removed (the actual bug) | CAUGHT ×3 suites |
+| Guard reads a param instead of the row | CAUGHT ×3 |
+| Blocked leads back in the SDR list | CAUGHT ×2 |
+| Recovery row counts blocked leads again | CAUGHT |
+| Guard moved below the domain claim | **UNMEASURED — see below** |
+
+**The last one is not a pass and not a catch.** Two suites fail with exactly
+the intended assertions, but `test-partnerstack.js` *crashes*
+(`ReferenceError: session_id is not defined`) because it lifts and executes a
+slice of `runPartnerStackSignup`, and moving code out of that slice breaks its
+scope. Per this repo's own rule a crashed suite makes the run UNMEASURED, so it
+cannot be recorded as a catch. It is a harness artifact of an artificial
+mutation rather than a coverage gap — but it does mean **that suite would crash
+rather than fail cleanly if someone legitimately reorders that function.**
+Pre-existing brittleness, not introduced here, not fixed here.
+
+---
+
 ## 14b. Parked, deliberately — not in this PR
 
 All four were raised, considered and left out. None is a gap nobody noticed.
