@@ -34,7 +34,10 @@ brokerage or insurance carrier brand is:
 
 | | Blocked lead | Normal lead |
 |---|---|---|
-| Calendar | redirected to `/thank-you` | RevenueHero as usual |
+| Step 1 | detected, row stamped, **no redirect** | — |
+| Step 2 | fills the whole form | — |
+| Calendar | **redirected to `/thank-you` at submit, before RevenueHero** | RevenueHero as usual |
+| A booking that slips through | **refused outright**, critical alert raised | recorded |
 | Meta `StartTrial` | suppressed | fires |
 | Meta `Lead` | suppressed | fires |
 | Meta `Schedule` | suppressed (all 3 routes) | fires |
@@ -70,18 +73,38 @@ demos/month given up.
 | # | Where | Input | What it does | File |
 |---|---|---|---|---|
 | 1 | `POST /non-icp-check` | email, website | answers the browser | `index.js` |
-| 2 | `handleStep1Next` | email | redirects to `/thank-you` | both form files |
-| 3 | `handleStep2Next` | email + website | redirects, **before RevenueHero** | both form files |
+| 2 | `handleStep1Next` | email | **warms the verdict only — no redirect** | both form files |
+| 3 | `handleStep2Next` | email + website | redirects, **before RevenueHero**, **cache-only** | both form files |
 | 4 | `POST /partial` | email, website | **stamps the row**, suppresses `StartTrial` | `index.js` |
 | 5 | `POST /submit` | email, website | **stamps the row**, suppresses `Lead`, Slack, no Salesforce | `index.js` |
-| 6 | `/booking-confirmed` | row | suppresses `Schedule` | `index.js` |
-| 7 | `/booking-confirmed-webhook` | row | suppresses `Schedule` | `index.js` |
-| 8 | `/booking-confirmed-webhook-rh` | row | suppresses `Schedule` | `index.js` |
-| 9 | `/cron/send-partials` | row | excludes from recovery email | `index.js` |
+| 6 | `/booking-confirmed` | row | **refuses the booking** + suppresses `Schedule` | `index.js` |
+| 7 | `/booking-confirmed-webhook` | row | **refuses** + suppresses `Schedule` | `index.js` |
+| 8 | `/booking-confirmed-webhook-rh` | row | **refuses** + suppresses `Schedule` | `index.js` |
+| 9 | Cal webhook **safety net** | email | **refuses**, creates no lead row | `index.js` |
+| 10 | RH webhook **safety net** | email | **refuses**, creates no lead row | `index.js` |
+| 11 | `/cron/send-partials` | row | excludes from recovery email | `index.js` |
 
 **2 and 3 are UX only.** Anyone can skip them with devtools. **4 and 5 are the
 enforcement** — they stamp the column and suppress Meta regardless of what the
-browser did.
+browser did. **6–10 are the last line**: they refuse the booking itself, so even
+a lead who bypasses the browser entirely does not end up on an AE's calendar.
+
+### Why step 2 reads cache only
+
+The step-2 click makes **no network call and has no timeout it can fall
+through**. A lead who slips past because our own request was slow is a realtor
+on an AE's diary. Both halves are warmed on blur — the email at step 1, an
+entire step earlier — and the click reads `nonIcpCached()`, which never fetches.
+A null verdict means "not warmed yet" and does **not** block; that lead is
+caught by the server backstop on the `/submit` response, and if they still reach
+a slot, the booking routes refuse it.
+
+### The safety-net paths were a real hole
+
+Both webhooks create a lead from scratch when no session matches — the one route
+that bypasses the form entirely, and **ten such rows exist in production** (all
+`rh_webhook`). There is no row to read a block off, so the verdict is computed
+from the email there. Found while writing the route tests, not by review.
 
 ### ⚠ There are SIX Meta CAPI call sites in this repo, not three
 
@@ -142,6 +165,10 @@ keeps all of these **in ICP by name** and nobody reversed that.
 | `nonIcpVerdict` throws | caught, `check_failed` | yes | fires |
 | `/non-icp-check` non-200 | client reads `blocked:false` | yes | server still decides |
 | `/non-icp-check` times out (6s) | client fails open | yes | **server still suppresses** |
+| Verdict not warmed by the step-2 click | `nonIcpCached` returns null — **does not block** | yes, briefly | **server still suppresses, and the booking is refused** |
+| Blocked lead reaches a booking route | booking **refused**, critical alert | no | suppressed |
+| Booking route cannot read the lead row | **allows the booking** (fails open) | yes | suppressed only if the row says so |
+| Blocked lead books with no form row at all | safety net **refuses**, no lead created | no | none fired |
 | `awsPool` not configured | `partnerStackCustomerDomains` throws → `check_failed` | yes | fires |
 | Lead IS a known customer | bypassed, not blocked | yes | fires |
 | Internal/test address | never blocked | yes | as today |
@@ -154,6 +181,63 @@ here should cost us a realtor's call-back, not a customer.
 **Consequence worth naming: a warehouse outage disables the block entirely.**
 That is the correct direction, but it means the feature is silently off during
 one. Nothing alerts on that today — see §10.
+
+---
+
+## 5b. Confirmed decisions (Swapnil, 11 Sept) — do not re-litigate
+
+**Redirect at step 2, not step 1.** Detection and Meta suppression stay at step
+1; only the redirect moved. A blocked lead fills the whole form so we capture
+website, company and phone. Four of the 84 matched leads are not agents at all —
+a claims employee at a carrier, a retired address, a tax preparer on a carrier
+address, a dance instructor on a brokerage address — and every one was
+identifiable *only* from step-2 fields. Redirecting at step 1 would have hidden
+all four.
+
+**A matched EMAIL blocks regardless of the website.** OR logic stays.
+Reasoning: open the site and it is company-owned anyway. This is the decision
+most likely to produce a wrong block, so it is made reviewable rather than
+invisible — the Slack post prints the matched domain and the website **together**
+and, when the email matched but the website did not, says so in words:
+"⚠️ Their email is a brand domain but their website is not. Blocked on the
+email, by design — worth a look if this shape keeps appearing." **If that line
+starts appearing often, the decision is worth revisiting.**
+
+**Scope is the business type, not "agents under national brands".** Doc-only,
+no code. V1 matches domains so it cannot reach the ~70 independent agencies and
+realtors doing the same job. Recorded in the ticket so the LLM rules get scoped
+against what the company *is*, and so V1 gets **retired rather than extended** —
+growing a domain list toward "every realtor" is the wrong shape and each
+addition is another chance at a `paycompass.com`.
+
+---
+
+## 5c. Your question: blur `@kw.com`, then edit to gmail
+
+Two different answers depending on whether they clicked Next in between.
+**Both verified** — the client half by reading the cache key, the server half by
+executing the real upsert twice against Postgres.
+
+**They only blurred, never clicked Next.** The verdict *is* recomputed: the
+cache is keyed on `email|website`, so `a@kw.com|` and `a@gmail.com|` are
+different entries and the second blur fetches a fresh verdict. `/partial` is
+only ever called by the Next click, so the server never saw `@kw.com` and
+**the row is not blocked**. Correct — they never submitted that address.
+
+**They clicked Next with `@kw.com` first, then went back and edited.** The row
+was stamped on that first `/partial`. The second `/partial` carries gmail and a
+`false` verdict, and **the row stays blocked**. Executed against real Postgres:
+
+```
+--- 1st /partial: a@kw.com, verdict BLOCKED ---
+ a@kw.com    | t | kw.com
+--- 2nd /partial: SAME session, email edited to gmail, verdict NOT blocked ---
+ a@gmail.com | t | kw.com      <-- email changed, block held
+```
+
+That is the sticky `IS TRUE OR EXCLUDED IS TRUE` doing its job, and it is the
+same defence that stops the "actually we're B2B" button clearing a block. The
+email change is separately recorded in `lead_field_changes`.
 
 ---
 
@@ -285,9 +369,28 @@ syncs them. **Necessary, not sufficient.**
 7. **`/thank-you` copy is unchanged**, per your instruction. A blocked realtor
    sees the same page as a successful booking. That will read as confusing to
    anyone who looks.
-8. **Untested in a browser.** No form file has been loaded in a real page. The
-   step-1 and step-2 paths are asserted by source and by the executed server
-   statements, not by a click-through.
+8. **Still untested in a browser — the one thing I could not close.** No form
+   file has been loaded in a real page. Everything server-side is now driven
+   over real HTTP (§11) and both Slack paths were fired for real, but the
+   blur→cache→click sequence, the `/thank-you` redirect actually navigating,
+   and the modal fork's behaviour have only ever been asserted from source.
+   **This is the highest-value thing for you to check by hand after the
+   Webflow re-pin** (§12, step 7).
+9. **Cache-only at step 2 trades certainty for speed.** If neither blur had
+   time to resolve, the click does not block and the lead sees a calendar until
+   `/submit` answers. The booking routes refuse it, so they cannot actually
+   take a slot — but they will see the widget. This is the deliberate
+   consequence of "no network call at the moment of decision".
+10. **Refusing a booking does not cancel it.** The slot lives in Cal or
+   RevenueHero and nothing in this repo can delete it. The refusal raises a
+   *critical* naming the booking id and start time precisely because a human
+   has to go and cancel it. If nobody watches that alert, the AE still loses
+   the slot — the refusal only stops it counting as a lead.
+11. **A step-1-only block produces no Slack post.** Someone detected at step 1
+   who abandons before submitting appears on the Blocked tab and nowhere else.
+   Deliberate — the post carries website, company and phone, none of which
+   exist yet — but it means the dashboard is the only record for that
+   population.
 
 ---
 
@@ -347,14 +450,22 @@ replaced by `if (false)`. Third appearance of the reachability blind spot
 assertion now requires the real condition adjacent to each route's own log line,
 plus that all three return.
 
+**Previously untested paths — two of three now closed:**
+
+| Path | Status |
+|---|---|
+| `slackNonIcpBlocked` | ✅ **CLOSED.** Fired for real via `tools/fire-non-icp-slack.js blocked` against production `SLACK_WEBHOOK_URL`. Slack returned **200 ok**. The message used the matched-on-email-but-not-website shape deliberately, so the mismatch warning rendered too. |
+| The booking-refusal critical | ✅ **CLOSED.** Fired via `tools/fire-non-icp-slack.js booking`. Slack **200**, and the alert email sent (`messageId cdc301c7-…@gushwork.ai`). New path, so it was fired under the same rule. |
+| `/non-icp-check` never served a request | ✅ **CLOSED.** `tests/test-non-icp-routes.js` boots the real app and drives it over actual HTTP — 47 assertions covering `/non-icp-check`, `/partial`, `/submit`, all three booking routes and both safety nets. |
+| No form file loaded in a browser | ❌ **STILL OPEN.** No browser automation here. See §10.8. |
+| The Blocked dashboard tab has not been rendered | ❌ **STILL OPEN.** The route is tested; the rendered page is not. |
+
 **NOT verified:**
 
-- No form file loaded in a browser. No real block observed end to end.
-- No real Slack message sent. `slackNonIcpBlocked` has **never executed**;
-  `tools/fire-alert.js` does not cover it. Per the repo's own rule ("we asserted
-  it alerts" ≠ "we watched it alert") **this is an untested alert path.**
-- The Blocked dashboard tab has not been rendered.
-- `/non-icp-check` has never served a real request.
+- The two form files in a real browser — the redirect, the blur/cache timing,
+  the Ads modal fork.
+- The Blocked tab rendered in a browser.
+- No production lead has ever actually been blocked (the flag is off).
 
 ---
 
@@ -397,15 +508,21 @@ curl -s -X POST https://gushwork-api-production.up.railway.app/non-icp-check \
 open "https://gushwork-api-production.up.railway.app/monitor?token=$MONITOR_TOKEN"   # Blocked tab
 ```
 
-**Then the Webflow half, which `git push` does NOT do.** Take
-`git rev-parse HEAD`, update **both** script tags in Webflow → Project Settings
-→ Custom Code, republish, and **sweep every page** with the loop in `CLAUDE.md`.
-Confirm the console banner reads `Form initialised v5.10.0` on `/demo` and
-`v5.10.0-ads` on the Ads page. Until that is done, **the form half of this PR is
-not live** however green the repo looks.
+**7. The browser check — the one thing nobody has done.** After the Webflow
+re-pin (§15), on a real page:
 
-**Finally, watch one real block arrive in Slack.** Submit the form with a
-`@kw.com` address from a browser. Nobody has seen this message.
+1. `/demo` → type `agent@kw.com`, tab out of the field, pick B2B, click Next.
+   **You should reach step 2 normally.** If you are redirected here, step 1 is
+   still redirecting and the fix did not ship.
+2. Fill step 2 with any website and click Next. **You should land on
+   `/thank-you` and never see a calendar.**
+3. Check the console for `[GW] Non-ICP — redirecting to /thank-you (matched kw.com)`.
+4. Check Slack for the `🚫 Lead Blocked — Non-ICP` post, and that it carries
+   website, company and phone.
+5. Repeat the whole thing on the Google Ads page — it is a **fork**, and it has
+   silently missed releases before.
+6. Then do it once with an ordinary address and confirm the calendar still
+   appears.
 
 ---
 

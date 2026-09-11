@@ -238,14 +238,25 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     ok('submit: it is the BLOCKED message, not the normal one',
        posts.some((p) => /Lead Blocked/.test(p)) && !posts.some((p) => /Lead Form Completed/.test(p)),
        posts.join(' | ').slice(0, 300));
-    /* The full record the reviewer asked for. */
-    const blockedPost = posts.find((p) => /Lead Blocked/.test(p)) || '';
+    /* The full record the reviewer asked for.
+
+       Asserted against the BLOCKS, not the whole payload. sendSlack also sets a
+       plain-text `text` fallback that repeats the matched domain, so a check
+       against JSON.stringify(payload) passes even when the visible message has
+       lost the field entirely -- measured: a mutation that stripped the matched
+       domain from the rendered block SURVIVED exactly that way. The blocks are
+       what a human actually reads. */
+    const blockedPayload = S.slackPayloads.find((p) => /Lead Blocked/.test(JSON.stringify(p.blocks || [])));
+    ok('submit: the blocked post has rendered blocks', !!blockedPayload);
+    const rendered = JSON.stringify((blockedPayload || {}).blocks || []);
     for (const [label, needle] of [
       ['matched domain', 'kw.com'], ['email', 'agent@kw.com'],
       ['website', 'kw.com'], ['company', 'Keller Williams'], ['phone', '15550001111'],
     ]) {
-      ok(`submit: the blocked post carries the ${label}`, blockedPost.includes(needle), label);
+      ok(`submit: the RENDERED blocked post carries the ${label}`, rendered.includes(needle), label);
     }
+    ok('submit: the rendered post labels the match explicitly',
+       /\*Matched:\*/.test(rendered), rendered.slice(0, 200));
   }
   {
     reset();

@@ -236,6 +236,83 @@ not catch her anyway: gmail address, own domain.)
 
 ---
 
+## Confirmed decisions, 11 September 2026
+
+Three questions were put to Swapnil during the build. All three are answered;
+recorded here so they are not re-litigated as bugs.
+
+### 1. The redirect happens at STEP 2, not step 1
+
+**Detection and Meta suppression stay at step 1.** The moment a carrier or
+brokerage email matches, `/partial` stamps `non_icp_blocked` and `StartTrial`
+is suppressed. What does *not* happen at step 1 is the redirect.
+
+**A blocked lead completes the whole form and is turned away at submit**, so we
+capture their website, company and phone.
+
+**Why:** four of the 84 matched leads in the 11 Sept sample are not agents at
+all — a claims employee at a carrier, a retired address, a tax preparer using a
+carrier address, and a dance instructor on a brokerage address. Every one of
+those was identifiable *only* from the website and company typed at step 2.
+Redirecting at step 1 would have hidden all four, and with them the evidence
+that the list needs narrowing.
+
+The cost is that a blocked lead spends another thirty seconds on a form that
+will not book them. That was judged worth it against a blocklist nobody can
+audit.
+
+### 2. A matched EMAIL blocks regardless of the website — OR logic stays
+
+This came up because the two can disagree: `mayra@menchacaagency.com` with
+website `allstate.com`, and the mirror shape, `nedjacobs@allstate.com` with
+website `jacobsfamilyinsurance.net`.
+
+**Swapnil's reasoning: open the site and it is company-owned anyway.** A captive
+agent's website is the carrier's brand whatever the domain says, so a matched
+email is sufficient on its own.
+
+**This is a confirmed decision, not an oversight.** It is also the decision most
+likely to produce a wrong block, so it is made reviewable rather than invisible:
+the Slack post prints the matched domain and the website **together**, and when
+the email matched but the website did not it says so in words —
+
+> ⚠️ *Their email is a brand domain but their website is not. Blocked on the
+> email, by design — worth a look if this shape keeps appearing.*
+
+If that line starts appearing often, the decision is worth revisiting. Until
+then it is working as intended.
+
+### 3. Scope is the BUSINESS TYPE, not "agents under national brands"
+
+**No code change tonight.** Recorded because it scopes the LLM rules later.
+
+The intent is to exclude **real estate and insurance as business types**, not
+merely people employed by a national brand. V1 cannot express that: it matches
+domains, so it reaches captive agents on `statefarm.com` and misses the
+independent agency on `garyrockwellinsurance.com` doing exactly the same job.
+
+That gap is **structural to a domain list**, not a bug in this one:
+
+| Population | Reachable by V1? | Roughly, in our data |
+|---|---|---|
+| Captive agents on a brand domain | yes | 84 leads |
+| Independent insurance agencies | **no** | ~30 domains |
+| Independent realtors and brokerages | **no** | ~40 domains |
+| Agent on a personal-brand domain (e.g. `movewithkw.com`) | **no** | seen, unquantified |
+
+**So when the six-rule LLM flagger is scoped, rule 6's real-estate row and a new
+insurance row should be written against what the company IS, in the doc's own
+phrasing — "fires on what the company *is*, never on who it sells to" — and not
+against a brand list.** V1 should then be retired rather than extended: growing
+a domain list toward "every realtor" is the wrong shape, and each addition costs
+another chance at a `paycompass.com`.
+
+**This means V1 is deliberately partial and everyone should know it.** It stops
+the specific complaint the AEs raised (national-brand agents), and it leaves
+most of the intended population untouched.
+
+---
+
 ## The `sdr-calling` dependency
 
 **Not urgent, but real, and it is not fixed by this PR.**
