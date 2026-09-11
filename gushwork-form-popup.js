@@ -1,7 +1,7 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.10.0-ads  (ADS PAGE VERSION)
+  GUSHWORK — MULTI-STEP FORM  v5.11.0-ads  (ADS PAGE VERSION)
 
-  Tracks /demo v5.10.0. Full feature parity with /demo, EXCEPT the
+  Tracks /demo v5.11.0. Full feature parity with /demo, EXCEPT the
   booking step, which keeps the Ads page's fullscreen modal
   presentation — opened after step 2 — instead of /demo's inline
   column render, AND the close affordances that modal needs (v5.7.2).
@@ -9,6 +9,9 @@
   port of gushwork-form.js and should be kept in step with it. A
   modal needs a way out and an inline column does not, so this
   section has no /demo counterpart to track.
+
+  v5.11.0-ads — /thank-you greets blocked leads by name. Ported from
+    /demo v5.11.0, identical.
 
   v5.10.0-ads — NON-ICP BLOCK (real estate + insurance brand domains).
     Ported from /demo v5.10.0, identical. Behind NON_ICP_BLOCK on
@@ -2314,10 +2317,30 @@
       return nonIcpCached(email, '');
     }
 
+    /* /thank-you greets the visitor by name from an attendeeName query
+       parameter. The booking flow supplies it; this redirect did not, so every
+       blocked lead read "Thank you, !" with a blank where their name goes.
+
+       Appended ONLY when there is a name to append -- an empty attendeeName
+       renders exactly the same blank, so sending one would fix nothing and
+       just make the URL look right. By the time this runs the step-2 fields
+       are populated (they are read above, before the check), so in practice
+       the name is always there.
+
+       First name alone, matching how the page reads: "Thank you, Dawn!". */
+    function nonIcpAttendeeName() {
+      var first = (formState.first_name || '').trim();
+      var last  = (formState.last_name  || '').trim();
+      return first || last || '';
+    }
+
     function redirectNonIcp(v) {
-      console.log('[GW] Non-ICP — redirecting to ' + NON_ICP_REDIRECT
+      var name = nonIcpAttendeeName();
+      var url  = NON_ICP_REDIRECT
+        + (name ? '?attendeeName=' + encodeURIComponent(name) : '');
+      console.log('[GW] Non-ICP — redirecting to ' + url
         + (v && v.matched_domain ? ' (matched ' + v.matched_domain + ')' : ''));
-      window.location.href = NON_ICP_REDIRECT;
+      window.location.href = url;
     }
 
     /* =======================================================
@@ -3033,7 +3056,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.10.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.11.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

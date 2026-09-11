@@ -446,6 +446,23 @@ const results7 = (async () => {
   const rec = between('async function checkRecoveryHealth', 'function safeCheck(id, fn)');
   ok('HEALTH: the recovery row excludes blocked leads', rec.includes('l.non_icp_blocked IS NOT TRUE'));
 
+  /* THE FOURTH, and the one that undoes a manual cleanup. A customer deleted
+     in the PartnerStack UI makes the verify sweep 404; the 404 releases
+     ps_signup_sent_at AND stamps ps_signup_failed_at, which is exactly this
+     sweep's selection criteria. Unguarded, hand-deleting a wrongly created
+     customer re-creates it within fifteen minutes. */
+  const retry = between('async function runPartnerStackConversionRetry', 'const claim = await pool.query');
+  ok('MONEY: the conversion RETRY sweep excludes blocked leads',
+     retry.includes('l.non_icp_blocked IS NOT TRUE'));
+  ok('MONEY: retry guards on both columns, not just disqualified',
+     retry.includes('l.disqualified IS NOT TRUE') && retry.includes('l.non_icp_blocked IS NOT TRUE'));
+
+  /* EVERY money path, named. Counting predicates is not the same as checking
+     them -- the count passed while the retry sweep was still unguarded. */
+  for (const [what, seg] of [['submit conversion', signup], ['retry sweep', retry]]) {
+    ok(`MONEY: ${what} cannot send for a blocked lead`, seg.includes('non_icp_blocked'));
+  }
+
   /* THE AUDIT. Every SQL predicate on `disqualified` and every JS read of
      it, each one either paired with a non_icp decision or listed here as
      deliberately unpaired. If this count moves, a new guard was added and
@@ -469,6 +486,64 @@ const results7 = (async () => {
 }
 
 /* ============================================================
+   10c. THE DASHBOARD MUST STILL RECONCILE
+
+   A blocked lead is still a lead. Hiding it from All Leads would make
+   the tab stop agreeing with the Overview cards and with itself, which
+   is the class of bug the Definitions section of CLAUDE.md exists to
+   prevent. It is MARKED, not removed.
+   ============================================================ */
+{
+  const leadsRoute = between("app.get('/monitor/leads'", "app.get('/monitor/sdr'");
+
+  /* The filter exists in both directions... */
+  ok('dash: /monitor/leads can filter to blocked only',   leadsRoute.includes("nonIcp === 'only'"));
+  ok('dash: /monitor/leads can exclude blocked',          leadsRoute.includes("nonIcp === 'exclude'"));
+  /* ...and NEITHER is the default. This is the reconciliation guarantee:
+     no unconditional non_icp predicate anywhere in the route. */
+  /* THE RECONCILIATION GUARANTEE, stated as: every non_icp predicate in this
+     route is gated on the nonIcp parameter. If one ever appears ungated, All
+     Leads has started hiding rows and its totals stop matching Overview. */
+  {
+    const pushes = leadsRoute.split('\n').filter((ln) => /conditions\.push\([^)]*non_icp_blocked/.test(ln));
+    eq('dash: exactly two non_icp predicates in /monitor/leads', pushes.length, 2);
+    ok('dash: blocked leads are INCLUDED by default (every predicate is gated)',
+       pushes.every((ln) => /if \(nonIcp === '(only|exclude)'\)/.test(ln)), pushes.join(' | '));
+  }
+  ok('dash: the client default is "included"',
+     src.includes('<option value="">Blocked: included</option>'));
+  ok('dash: the row carries the columns it needs to mark',
+     leadsRoute.includes('l.non_icp_blocked, l.non_icp_reason'));
+  ok('dash: the CSV export carries them too',
+     leadsRoute.includes("'disqualified','non_icp_blocked','non_icp_reason','step_reached'"));
+
+  /* ONE row builder, both tabs -- the Blocked tab gets the expandable
+     panel for free and cannot drift from All Leads. */
+  ok('dash: there is a single shared row builder', src.includes("'function leadRowsHtml(leads){"));
+  eq('dash: both tabs render through it',
+     (src.match(/leadRowsHtml\(d\.leads\)/g) || []).length, 2);
+  ok('dash: the Blocked tab reuses /monitor/leads rather than its own route',
+     src.includes('"/monitor/leads"+(TP||"?")+(TP?"&":"")+"nonicp=only'));
+  ok('dash: the dead /monitor/blocked route is gone', !src.includes("app.get('/monitor/blocked'"));
+  ok('dash: the Blocked tab keeps the expandable panel',
+     src.includes('<tbody id="blk-tbody"><tr><td colspan="11"'));
+
+  /* The row marker, and the Overview card. */
+  ok('dash: a blocked row is visibly marked in place',
+     /l\.non_icp_blocked\?"<span title=[\s\S]{0,40}Blocked/.test(src));
+  ok('dash: the Overview card exists',                 src.includes('id="m-nonicp"'));
+  ok('dash: the Overview card links to the tab',
+     /showTab\(\\?'blocked\\?'\)"><div class="ml">Blocked/.test(src));
+  ok('dash: metrics count blocked leads',              src.includes("COUNT(*) FILTER (WHERE non_icp_blocked IS TRUE)"));
+  ok('dash: metrics expose both a session and a people count',
+     src.includes('nonIcpBlocked, peopleNonIcp'));
+  /* The card says so in words, because a number that is counted twice
+     across two cards is exactly what the Definitions section forbids. */
+  ok('dash: the card says blocked leads are still in every total',
+     src.includes('still counted in every total'));
+}
+
+/* ============================================================
    11. Recovery cron excludes blocked leads
    ============================================================ */
 {
@@ -485,6 +560,13 @@ const results7 = (async () => {
     ok(`${name}: has the non-ICP check`,        s.includes('function checkNonIcp('));
     ok(`${name}: fails open on a non-200`,      s.includes("return { blocked: false, status: 'backend_error' };"));
     ok(`${name}: redirects to /thank-you`,      s.includes("const NON_ICP_REDIRECT = '/thank-you';"));
+    /* /thank-you greets the visitor from attendeeName. Without it a blocked
+       lead reads "Thank you, !". */
+    ok(`${name}: the redirect carries attendeeName`,
+       s.includes("'?attendeeName=' + encodeURIComponent(name)"));
+    ok(`${name}: attendeeName is omitted when there is no name`,
+       /var url  = NON_ICP_REDIRECT\s*\+ \(name \? '\?attendeeName='/.test(s));
+    ok(`${name}: the name is URL-encoded`, s.includes('encodeURIComponent(name)'));
     /* STEP 1 DETECTS BUT MUST NOT REDIRECT (changed 11 Sept 2026). The lead
        completes the form so we capture website, company and phone -- four of
        the 84 matched leads were not agents and only their step-2 fields show

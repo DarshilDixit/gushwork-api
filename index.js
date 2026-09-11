@@ -2379,6 +2379,7 @@ app.get('/monitor/metrics', async (req, res) => {
           COUNT(*) FILTER (WHERE completed = true)                          AS completed,
           COUNT(*) FILTER (WHERE booking_uid IS NOT NULL)                   AS booked,
           COUNT(*) FILTER (WHERE disqualified = true)                       AS disqualified,
+          COUNT(*) FILTER (WHERE non_icp_blocked IS TRUE)                    AS non_icp,
           COUNT(*) FILTER (WHERE loops_sent = true)                         AS loops_sent,
           COUNT(*) FILTER (WHERE completed = true AND booking_uid IS NULL)  AS completed_no_booking_sessions
         FROM leads
@@ -2388,7 +2389,8 @@ app.get('/monitor/metrics', async (req, res) => {
           COUNT(DISTINCT LOWER(email))                                        AS people_total,
           COUNT(DISTINCT LOWER(email)) FILTER (WHERE completed = true)        AS people_completed,
           COUNT(DISTINCT LOWER(email)) FILTER (WHERE booking_uid IS NOT NULL) AS people_booked,
-          COUNT(DISTINCT LOWER(email)) FILTER (WHERE disqualified = true)     AS people_disqualified
+          COUNT(DISTINCT LOWER(email)) FILTER (WHERE disqualified = true)     AS people_disqualified,
+          COUNT(DISTINCT LOWER(email)) FILTER (WHERE non_icp_blocked IS TRUE)  AS people_non_icp
         FROM leads
         WHERE email IS NOT NULL
       `),
@@ -2546,6 +2548,8 @@ app.get('/monitor/metrics', async (req, res) => {
     const completed    = parseInt(t.completed) || 0;
     const booked       = parseInt(t.booked) || 0;
     const disqualified = parseInt(t.disqualified) || 0;
+    const nonIcpBlocked = parseInt(t.non_icp) || 0;
+    const peopleNonIcp  = parseInt(p.people_non_icp) || 0;
     const loopsSent    = parseInt(t.loops_sent) || 0;
     const completedNoBookingSessions = parseInt(t.completed_no_booking_sessions) || 0;
 
@@ -2597,7 +2601,7 @@ app.get('/monitor/metrics', async (req, res) => {
     const locPct     = ecTotal ? Math.round(parseInt(ec.has_location) / ecTotal * 100) : 0;
 
     res.json({
-      total, completed, booked, disqualified, enriched, loopsSent,
+      total, completed, booked, disqualified, nonIcpBlocked, peopleNonIcp, enriched, loopsSent,
       pendingPartials: pending, noBookingUid, todayCount, awsSynced: !!awsPool,
       enrichTitlePct: titlePct, enrichFundingPct: fundingPct, enrichLocationPct: locPct,
       completedNoBookingSessions,
@@ -2915,6 +2919,11 @@ app.get('/monitor/leads', async (req, res) => {
   const utmSource  = req.query.utmSource  || null;
   const hearAbout  = req.query.hearAbout  || null;
   const enrichment = req.query.enrichment || null;
+  /* 'only' powers the Blocked tab, 'exclude' hides them from All Leads.
+     Default is NEITHER: blocked leads stay in All Leads and in every total,
+     because hiding them would make the tab totals stop reconciling with the
+     Overview counts and with each other. They are marked, not removed. */
+  const nonIcp     = req.query.nonicp     || null;
   const websiteCheck = req.query.websiteCheck || 'all';
   const repeatAttempts = req.query.repeatAttempts || 'all';
   const partner      = req.query.partner      || null;
@@ -2958,6 +2967,9 @@ app.get('/monitor/leads', async (req, res) => {
   if (stage === 'disqualified') conditions.push('l.booking_uid IS NULL AND l.disqualified IS TRUE');
   if (stage === 'completed')    conditions.push('l.booking_uid IS NULL AND l.disqualified IS NOT TRUE AND l.completed IS TRUE');
   if (stage === 'step1')        conditions.push('l.booking_uid IS NULL AND l.disqualified IS NOT TRUE AND l.completed IS NOT TRUE');
+
+  if (nonIcp === 'only')    conditions.push('l.non_icp_blocked IS TRUE');
+  if (nonIcp === 'exclude') conditions.push('l.non_icp_blocked IS NOT TRUE');
 
   if (sellTo === '__clarified') {
     // any lead that flipped B2C/Mixed -> B2B at the disqualified step
@@ -3024,6 +3036,7 @@ app.get('/monitor/leads', async (req, res) => {
       l.product, l.about_business,
       l.completed, l.booking_uid, l.booked_at, l.start_time, l.end_time,
       l.disqualified, l.disqualified_reason, l.step_reached,
+      l.non_icp_blocked, l.non_icp_reason,
       l.loops_sent, l.created_at, l.submitted_at, l.page_url,
       l.landing_page, l.previous_page, l.website_check_failed, l.website_check_reason,
       l.elv_status, l.elv_checked_at,
@@ -3067,7 +3080,7 @@ app.get('/monitor/leads', async (req, res) => {
       const allRows = await pool.query(baseSelect + ` ${orderBy}`, params);
       const cols = [
         'email','first_name','last_name','company','website','phone','sell_to','product','about_business','hear_about_us','hear_about_us_raw',
-        'completed','booking_uid','disqualified','step_reached','created_at','submitted_at','booked_at',
+        'completed','booking_uid','disqualified','non_icp_blocked','non_icp_reason','step_reached','created_at','submitted_at','booked_at',
         'utm_source','utm_medium','utm_campaign','utm_term','referrer','prefill_source',
         'landing_page','previous_page','page_url','website_check_failed','website_check_reason','prior_attempts','prior_disqualified',
         'elv_status','unverifiable_pair',
@@ -3188,44 +3201,6 @@ app.get('/monitor/filter-options', async (req, res) => {
    exportSDR sent format=csv and nothing else, so someone who searched "acme",
    saw four rows and hit Export got the entire list. */
 const SDR_SEARCH_COLUMNS = ['email', 'company', 'first_name', 'enriched_industry'];
-
-/* ── /monitor/blocked ────────────────────────────────────────────────
-   Every lead the non-ICP list turned away, newest first.
-
-   NO stage filter and NO sell_to filter, deliberately. A blocked lead keeps
-   whatever stage it reached -- most are "Completed", and 88% of the known
-   population reached step 2 by clicking "actually we're B2B", so filtering on
-   sell_to would hide the majority of them. The only predicate is the block
-   itself.
-
-   Not deduped by email either: this tab is for auditing individual BLOCKS,
-   and the same person blocked on two sessions is two blocks somebody should
-   see. The people count is reported alongside so the two are never confused.
-
-   IS TRUE, never = true -- a row written before the column existed must land
-   outside this set rather than throwing. */
-app.get('/monitor/blocked', async (req, res) => {
-  const token = process.env.MONITOR_TOKEN;
-  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
-  try {
-    const result = await pool.query(`
-      SELECT email, first_name, last_name, company, website, sell_to,
-             step_reached, booking_uid, non_icp_reason, created_at
-        FROM leads
-       WHERE non_icp_blocked IS TRUE
-       ORDER BY created_at DESC
-       LIMIT 500`);
-    res.json({
-      total: result.rows.length,
-      people: new Set(result.rows.map(r => (r.email || '').toLowerCase()).filter(Boolean)).size,
-      enabled: NON_ICP_BLOCK_ENABLED,
-      leads: result.rows,
-    });
-  } catch (err) {
-    console.error('[/monitor/blocked]', err.message);
-    res.status(500).json({ error: 'Blocked-leads query failed', detail: err.message });
-  }
-});
 
 app.get('/monitor/sdr', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
@@ -3453,6 +3428,7 @@ app.get('/monitor', (req, res) => {
   '<div class="mc" title="People whose form reached Step 2 (completed) on at least one of their sessions."><div class="ml">People completed</div><div class="mv" id="m-comp">&#8212;</div><div class="ms" id="m-cpct">&#8212;</div></div>' +
   '<div class="mc" title="People with a booking on at least one of their sessions."><div class="ml">People booked</div><div class="mv" id="m-book">&#8212;</div><div class="ms" id="m-bpct">&#8212;</div></div>' +
   '<div class="mc" title="People marked disqualified (B2C / Mixed) on at least one session."><div class="ml">Disqualified</div><div class="mv" id="m-disq">&#8212;</div><div class="ms" id="m-dsq">B2C / Mixed</div></div>' +
+  '<div class="mc" title="Leads stopped before the calendar by the real-estate / insurance brand-domain list. These are NOT removed from any other number on this page &#8212; they are still leads and still counted in Total, Completed and the stages. Click through to the Blocked tab to see them." style="cursor:pointer" onclick="showTab(\'blocked\')"><div class="ml">Blocked &#8212; Non-ICP</div><div class="mv" id="m-nonicp">&#8212;</div><div class="ms" id="m-nonicp-sub">still counted in every total</div></div>' +
   '</div>' +
   /* Same three measures as the cards above, same unit (people, deduped by
      lower(email)), split by product. Deliberately a thin row rather than a
@@ -3486,6 +3462,10 @@ app.get('/monitor', (req, res) => {
   '<div class="filters">' +
   '<input type="text" id="fsearch" placeholder="Search email, company..." oninput="debounce()">' +
   '<select id="fstage" onchange="loadLeads(1)"><option value="all">All stages</option><option value="booked">Booked</option><option value="completed">Completed (not booked, not disqualified)</option><option value="step1">Step 1 only</option><option value="disqualified">Disqualified (not booked)</option></select>' +
+  /* A FILTER, not a default. Blocked leads are included in All Leads unless
+     you ask otherwise, so every total on this tab still reconciles with the
+     Overview cards. */
+  '<select id="fnonicp" onchange="loadLeads(1)" title="Blocked leads are INCLUDED by default and marked with a red sign. Filtering is opt-in so the totals keep reconciling."><option value="">Blocked: included</option><option value="only">Blocked only</option><option value="exclude">Hide blocked</option></select>' +
   '<select id="fsellto" onchange="loadLeads(1)"><option value="all">All sell-to</option><option value="B2B">B2B</option><option value="B2B (clarified from B2C)">B2B (clarified from B2C)</option><option value="B2B (clarified from Mixed)">B2B (clarified from Mixed)</option><option value="B2C">B2C</option><option value="Mixed">Mixed</option><option value="__clarified">Clarified (any)</option></select>' +
   '<select id="fproduct" onchange="loadLeads(1)"><option value="all">All products</option><option value="aeo">AEO</option><option value="crm">CRM</option><option value="__none">Untagged</option></select>' +
   '<select id="fsource" onchange="loadLeads(1)"><option value="all">All sources</option></select>' +
@@ -3572,16 +3552,20 @@ app.get('/monitor', (req, res) => {
   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
   '<div><div class="sl" style="margin-bottom:2px">Blocked &#8212; Non-ICP</div>' +
   '<div style="font-size:12px;color:#888">Leads stopped before the calendar by the real-estate / insurance brand-domain list. ' +
-  'INDEPENDENT of the stage filter and of sell_to &#8212; a blocked lead keeps whatever stage it reached, and most of them cleared the B2C step by clicking &quot;actually we&#39;re B2B&quot;.</div></div>' +
+  'INDEPENDENT of the stage and sell_to filters &#8212; a blocked lead keeps whatever stage it reached, and most cleared the B2C step by clicking &quot;actually we&#39;re B2B&quot;.</div></div>' +
   '<span id="blk-count" style="font-size:12px;color:#888"></span>' +
   '</div>' +
   '<div class="card" style="padding:12px 14px;margin-bottom:16px;font-size:12px;color:#666">' +
-  'Every row here is somebody we turned away. If one looks like a real prospect, the list is <code>NON_ICP_DOMAINS</code> in index.js; ' +
-  '<code>NON_ICP_BLOCK=false</code> on Railway turns the whole thing off without a deploy.' +
+  'Every row here is somebody we turned away, and every one is <b>also still in All Leads</b> and in every Overview total &#8212; marked, not removed, so the numbers reconcile. ' +
+  'If one looks like a real prospect, the list is <code>NON_ICP_DOMAINS</code> in index.js; <code>NON_ICP_BLOCK=false</code> on Railway turns the whole thing off without a deploy.' +
   '</div>' +
-  '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
-  '<th>Matched domain</th><th>Email</th><th>Name</th><th>Company</th><th>Website</th><th>Sells to</th><th>Stage reached</th><th>Date (ET)</th>' +
-  '</tr></thead><tbody id="blk-tbody"><tr><td colspan="8" class="nd">Loading...</td></tr></tbody></table></div></div>' +
+  /* THE SAME TABLE AS ALL LEADS, rendered by the same leadRowsHtml. A
+     summary of its own would drift, and the expandable panel is exactly
+     what you need to judge whether a block was wrong. */
+  '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table class="lt"><thead><tr>' +
+  '<th style="width:30px"></th><th>Email</th><th>Name</th><th>Company</th><th>Sells to</th><th>Product</th><th>Stage</th><th>Booked</th><th>Enriched</th><th>Date (ET)</th><th>Source</th>' +
+  '</tr></thead><tbody id="blk-tbody"><tr><td colspan="11" class="nd">Loading...</td></tr></tbody></table></div></div>' +
+  '<div class="pag" id="blkpag"></div>' +
   '</div>' +
   '<div class="tp" id="tp-health">' +
   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
@@ -3682,14 +3666,19 @@ app.get('/monitor', (req, res) => {
   'var API=window.location.origin;' +
   'var lChart=null,curPage=1,stimer=null,curSort="created_at",curDir="desc",filterOptsLoaded=false;' +
   'function showTab(n){["overview","leads","sdr","dupes","health","lm","partners","blocked"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="partners"&&document.getElementById("ptbody").textContent.indexOf("Loading")>=0)loadPartners();if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();if(n==="blocked"&&document.getElementById("blk-tbody").textContent.indexOf("Loading")>=0)loadBlocked();if(n==="health")checkHealth();}' +
-  'async function loadBlocked(){try{' +
-  'var r=await fetch(API+"/monitor/blocked"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(15000)});' +
-  'var d=await r.json();var b=document.getElementById("blk-tbody");' +
-  'if(!d.leads||!d.leads.length){b.innerHTML="<tr><td colspan=\\"8\\" class=\\"nd\\">Nothing blocked. Either the flag is off or nobody has matched yet.</td></tr>";' +
-  'document.getElementById("blk-count").textContent="";return;}' +
-  'document.getElementById("blk-count").textContent=d.total+" blocked \\u00b7 "+d.people+" people";' +
-  'b.innerHTML=d.leads.map(function(l){return "<tr><td><code>"+esc(l.non_icp_reason||"")+"</code></td><td>"+esc(l.email||"")+"</td><td>"+esc([l.first_name,l.last_name].filter(Boolean).join(" "))+"</td><td>"+esc(l.company||"")+"</td><td>"+esc(l.website||"")+"</td><td>"+esc(l.sell_to||"")+"</td><td>Step "+(l.step_reached||1)+(l.booking_uid?" \\u00b7 BOOKED":"")+"</td><td>"+et(l.created_at)+"</td></tr>";}).join("");' +
-  '}catch(e){document.getElementById("blk-tbody").innerHTML="<tr><td colspan=\\"8\\" class=\\"nd\\">Could not load: "+esc(e.message)+"</td></tr>";}}' +
+  /* Hits /monitor/leads with nonicp=only rather than a route of its own, so
+     the row shape, the panel and the change log are the same objects All
+     Leads uses. One query, one contract, nothing to drift. */
+  'var blkPage=1;' +
+  'async function loadBlocked(pg){blkPage=pg||1;' +
+  'document.getElementById("blk-tbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\">Loading...</td></tr>";' +
+  'try{var r=await fetch(API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"nonicp=only&page="+blkPage+"&stage=all&sort=created_at&dir=desc",{signal:AbortSignal.timeout(12000)});' +
+  'if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
+  'if(!d.leads||!d.leads.length){document.getElementById("blk-tbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\">Nothing blocked. Either the flag is off or nobody has matched yet.</td></tr>";document.getElementById("blk-count").textContent="";document.getElementById("blkpag").innerHTML="";return;}' +
+  'document.getElementById("blk-count").textContent=d.total+" blocked";' +
+  'document.getElementById("blk-tbody").innerHTML=leadRowsHtml(d.leads);' +
+  'var h="";if(d.pages>1){for(var i=1;i<=d.pages;i++)h+="<button class=\\"pb"+(i===d.page?" act":"")+"\\" onclick=\\"loadBlocked("+i+")\\">"+i+"</button>";}document.getElementById("blkpag").innerHTML=h;' +
+  '}catch(e){document.getElementById("blk-tbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</td></tr>";}}' +
   'var WLBL={"nxdomain": "Domain doesn\'t exist \u2014 likely a typo", "no_dns_records": "Domain registered but nothing set up on it", "hosting_placeholder": "No website yet \u2014 domain points to a hosting setup page", "parked_confirmed": "Domain registered but no website on it", "parked": "Domain registered but no website on it", "parked_ns": "Domain registered but no website on it", "parked_suspect": "Looks like a parked domain \u2014 could not confirm", "for_sale_lander": "Domain is listed for sale", "marketplace_redirect": "Domain is for sale on a domain marketplace", "mailbox_domain": "Typed an email provider instead of their website", "brand_mismatch": "Typed a well-known brand\'s site, not their own", "social_profile_url": "Gave a social profile instead of a website", "thin_content": "Page looked mostly empty to us \u2014 worth a manual look", "thin_content_wildcard": "Page looked mostly empty to us \u2014 worth a manual look", "check_blocked": "Site blocked our check \u2014 the page itself looks fine", "dns_unresolved": "Could not look up the domain \u2014 DNS gave no answer", "forwarded_to_live_site": "Redirects to their live site \u2014 checked OK", "live_despite_dns_hint": "Live site (an early parking signal was overruled)", "mx_only": "Email-only company \u2014 no website, but mail works", "nxdomain_contradicted": "DNS blip \u2014 domain matches their verified email domain", "content_clean": "Live website", "resolved": "Domain resolves", "dns_indeterminate": "Could not reach the site to check it", "doh_error": "Could not reach the site to check it", "timeout": "Could not reach the site to check it", "unreachable": "Could not reach the site to check it", "non_html": "Address did not return a web page", "backend_error": "Our check errored \u2014 not the website\u2019s fault", "fetch_error": "Our check errored \u2014 not the website\u2019s fault", "skipped_no_backend": "Check was skipped", "skipped_unsafe_target": "Address pointed at an internal network \u2014 skipped", "test_email_skipped": "Internal test \u2014 check skipped", "ok": "Website checked OK"};' +
   'function wlabel(r){if(!r)return"Unknown";if(WLBL[r])return WLBL[r];if(String(r).indexOf("http_")===0){var c=String(r).slice(5);return ["999","403","401","429"].indexOf(c)>=0?("Site blocked our check ("+c+")"):("Site returned an error ("+c+")");}return String(r).replace(/_/g," ");}' +
   'function badge(id,text,cls){var el=document.getElementById(id);if(!el)return;el.textContent=text;el.className="badge "+cls;}' +
@@ -4191,12 +4180,12 @@ app.get('/monitor', (req, res) => {
   'if(!has){var o=document.createElement("option");o.value=key;o.textContent="Partner: "+key;sel.appendChild(o);}' +
   'sel.value=key;}loadLeads(1);}' +
   'function debounce(){clearTimeout(stimer);stimer=setTimeout(function(){loadLeads(1);},400);}' +
-  'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("fsellto").value="all";document.getElementById("fproduct").value="all";document.getElementById("fsource").value="all";document.getElementById("fenrich").value="all";document.getElementById("fwebsitecheck").value="all";document.getElementById("frepeat").value="all";document.getElementById("fpartner").value="all";document.getElementById("fhear").value="";document.getElementById("fpreset").value="";document.getElementById("ffrom").value="";document.getElementById("fto").value="";curSort="created_at";curDir="desc";renderSortArrows();loadLeads(1);}' +
+  'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("fsellto").value="all";document.getElementById("fproduct").value="all";document.getElementById("fsource").value="all";document.getElementById("fenrich").value="all";document.getElementById("fwebsitecheck").value="all";document.getElementById("frepeat").value="all";document.getElementById("fpartner").value="all";document.getElementById("fnonicp").value="";document.getElementById("fhear").value="";document.getElementById("fpreset").value="";document.getElementById("ffrom").value="";document.getElementById("fto").value="";curSort="created_at";curDir="desc";renderSortArrows();loadLeads(1);}' +
   'function renderSortArrows(){["email","name","company","sell_to","created_at"].forEach(function(c){var el=document.getElementById("sar-"+c);if(el)el.textContent=(curSort===c)?(curDir==="asc"?"\\u25B2":"\\u25BC"):"";});}' +
   'function sortBy(c){if(curSort===c){curDir=(curDir==="asc")?"desc":"asc";}else{curSort=c;curDir=(c==="created_at")?"desc":"asc";}renderSortArrows();loadLeads(1);}' +
   'function datePreset(v){var ff=document.getElementById("ffrom"),ft=document.getElementById("fto");if(!v){loadLeads(1);return;}var to=etDayShift(0),from=to;if(v==="7d")from=etDayShift(-6);else if(v==="30d")from=etDayShift(-29);ff.value=from;ft.value=to;loadLeads(1);}' +
   'function dateManual(){var p=document.getElementById("fpreset");if(p)p.value="";loadLeads(1);}' +
-  'function exportLeads(){var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,product=document.getElementById("fproduct").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"format=csv&stage="+stage+"&sort="+curSort+"&dir="+curDir;if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(product&&product!=="all")url+="&product="+encodeURIComponent(product);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;window.location.href=url;}' +
+  'function exportLeads(){var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,product=document.getElementById("fproduct").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"format=csv&stage="+stage+"&sort="+curSort+"&dir="+curDir;if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(product&&product!=="all")url+="&product="+encodeURIComponent(product);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;var ni=document.getElementById("fnonicp").value;if(ni)url+="&nonicp="+encodeURIComponent(ni);window.location.href=url;}' +
   'async function loadFilterOptions(){if(filterOptsLoaded)return;try{var r=await fetch(API+"/monitor/filter-options"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(10000)});if(!r.ok)return;var d=await r.json();var sel=document.getElementById("fsource");if(sel&&d.utmSource){d.utmSource.forEach(function(v){var o=document.createElement("option");o.value=v;o.textContent=v;sel.appendChild(o);});}var ps=document.getElementById("fpartner");if(ps&&d.partners){d.partners.forEach(function(p){var o=document.createElement("option");o.value=p.key;o.textContent="Partner: "+(p.name||p.key)+(p.email?" <"+p.email+">":"");ps.appendChild(o);});}var dl=document.getElementById("hearlist");if(dl&&d.hearAbout){dl.innerHTML=d.hearAbout.map(function(v){return"<option value=\\""+esc(v)+"\\"></option>";}).join("");}filterOptsLoaded=true;}catch(e){}}' +
   'function toggleRow(sid){var row=document.getElementById("er-"+sid);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=row.previousElementSibling&&row.previousElementSibling.querySelector(".xbtn");if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";if(!vis)loadChanges(sid);}' +
   /* Lazily fetched, once per row, on first expand. lead_field_changes is
@@ -4243,15 +4232,19 @@ app.get('/monitor', (req, res) => {
   'return b.length?"<div style=\\"color:#999;font-size:10px\\">"+esc(b.join(" \\u00b7 "))+"</div>":"";}' +
   'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,product=document.getElementById("fproduct").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
   'var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"page="+curPage+"&stage="+stage+"&sort="+curSort+"&dir="+curDir;' +
-  'if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(product&&product!=="all")url+="&product="+encodeURIComponent(product);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;' +
+  'if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(product&&product!=="all")url+="&product="+encodeURIComponent(product);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;var ni=document.getElementById("fnonicp").value;if(ni)url+="&nonicp="+encodeURIComponent(ni);' +
   'document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\">Loading...</td></tr>";' +
   'try{var r=await fetch(url,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
   'set("lcount",d.total+" lead"+(d.total!==1?"s":"")+" found");' +
   'if(!d.leads.length){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\">No leads match your filters.</td></tr>";document.getElementById("lpag").innerHTML="";return;}' +
-  'var html=d.leads.map(function(l){var sid=esc(l.session_id),name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\\u2014",src=l.utm_source?esc(l.utm_source)+(l.utm_medium?" / "+esc(l.utm_medium):""):(l.referrer?"referral":"\\u2014");' +
-  'return"<tr><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+esc(l.product||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
-  '"<tr class=\\"erow\\" id=\\"er-"+sid+"\\" style=\\"display:none\\"><td></td><td colspan=\\"10\\">"+enrichPanel(l)+"<div id=\\"lc-"+sid+"\\"></div></td></tr>";}).join("");' +
-  'document.getElementById("ltbody").innerHTML=html;renderPag(d.page,d.pages);}catch(e){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
+  /* ONE row builder, two tabs. The Blocked tab renders through this same
+     function rather than a summary of its own, so the expandable panel, the
+     enrichment badges and the change log all come for free and cannot drift
+     from All Leads the way a second copy would. */
+  'function leadRowsHtml(leads){return leads.map(function(l){var sid=esc(l.session_id),name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\\u2014",src=l.utm_source?esc(l.utm_source)+(l.utm_medium?" / "+esc(l.utm_medium):""):(l.referrer?"referral":"\\u2014");' +
+  'return"<tr"+(l.non_icp_blocked?" style=\\"background:#fff7ed\\"":"")+"><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.non_icp_blocked?"<span title=\\"Blocked \\u2014 non-ICP ("+esc(l.non_icp_reason||"")+"). Still counted in every total.\\" style=\\"color:#c2410c\\">&#128683; </span>":"")+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+esc(l.product||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
+  '"<tr class=\\"erow\\" id=\\"er-"+sid+"\\" style=\\"display:none\\"><td></td><td colspan=\\"10\\">"+enrichPanel(l)+"<div id=\\"lc-"+sid+"\\"></div></td></tr>";}).join("");}' +
+  'document.getElementById("ltbody").innerHTML=leadRowsHtml(d.leads);renderPag(d.page,d.pages);}catch(e){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function renderPag(pg,pages){if(pages<=1){document.getElementById("lpag").innerHTML="";return;}var h="";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg-1)+")\\""+(pg<=1?" disabled":"")+">&larr;</button>";var s=Math.max(1,pg-2),e=Math.min(pages,pg+2);if(s>1)h+="<button class=\\"pb\\" onclick=\\"loadLeads(1)\\">1</button>"+(s>2?"<span class=\\"pi\\">&#8230;</span>":"");for(var i=s;i<=e;i++)h+="<button class=\\"pb"+(i===pg?" act":"")+ "\\" onclick=\\"loadLeads("+i+")\\" >"+i+"</button>";if(e<pages)h+=(e<pages-1?"<span class=\\"pi\\">&#8230;</span>":"")+"<button class=\\"pb\\" onclick=\\"loadLeads("+pages+")\\" >"+pages+"</button>";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg+1)+")\\"" +(pg>=pages?" disabled":"")+">&rarr;</button><span class=\\"pi\\">Page "+pg+" of "+pages+"</span>";document.getElementById("lpag").innerHTML=h;}' +
   'var lmLeads=[],lmChart=null,lmFilter="all";' +
   'var lmPillDefs=[["all","All"],["awaiting","Awaiting send"],["sent","Sent"],["abandoned","Abandoned"],["internal","Internal tests"]];' +
@@ -4411,6 +4404,7 @@ app.get('/monitor', (req, res) => {
   'set("m-comp",d.peopleCompleted);set("m-cpct",pct(d.peopleCompleted,d.peopleTotal)+" of people \\u00B7 "+d.completed+" sessions");' +
   'set("m-book",d.peopleBooked);set("m-bpct",pct(d.peopleBooked,d.peopleCompleted)+" of completed \\u00B7 "+d.booked+" sessions");' +
   'set("m-disq",d.peopleDisqualified);set("m-dsq","B2C / Mixed \\u00B7 "+d.disqualified+" sessions");' +
+  'set("m-nonicp",d.nonIcpBlocked);set("m-nonicp-sub",(d.peopleNonIcp||0)+" people \\u00B7 still counted in every total");' +
   'renderProductRow(d.productBreakdown);' +
   'set("m-nb",d.peopleNoBooking);set("m-nbs",d.completedNoBookingSessions+" completed sessions w/o booking");' +
   'set("m-rec",d.recoveredBookings);set("m-pend",d.pendingPartials);set("m-mail",d.loopsSent);' +
@@ -7526,6 +7520,19 @@ async function runPartnerStackConversionRetry() {
              it wrong here is paying an affiliate $50 for a B2C waitlist
              signup, and this is a new path into the same send. */
           AND l.disqualified IS NOT TRUE
+          /* AND THE SAME FOR A NON-ICP BLOCK. This is the FOURTH half-guard the
+             11 Sept incident turned up and the one that matters most here,
+             because it is the path that UNDOES a manual cleanup.
+
+             Deleting a customer in the PartnerStack UI makes the verify sweep
+             404 on its next pass; the 404 releases ps_signup_sent_at AND
+             stamps ps_signup_failed_at, which is precisely this query's
+             selection criteria. Without this line, hand-deleting a wrongly
+             created customer causes us to re-create it within fifteen minutes
+             and fire a spurious failure alert on the way. CLAUDE.md already
+             records that happening once; this is the guard that stops it
+             happening to a blocked lead. */
+          AND l.non_icp_blocked IS NOT TRUE
           /* THE COLLISION GUARD. ps_signup_sent_at is once per DOMAIN, enforced
              by leads_ps_signup_once_idx. If any other lead on this domain has
              already converted, stamping this row would violate that index —

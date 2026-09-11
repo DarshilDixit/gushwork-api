@@ -1,5 +1,11 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.10.0  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.11.0  (/demo PAGE VERSION - thru github/jsdlivr)
+
+  v5.11.0 — /thank-you greets blocked leads by name.
+    The non-ICP redirect now appends attendeeName, which the page reads.
+    Without it every blocked lead saw "Thank you, !" with a blank. Only
+    appended when there IS a name, since an empty one renders the same
+    blank. First name, matching how the page reads it.
 
   v5.10.0 — NON-ICP BLOCK (real estate + insurance brand domains).
     Behind NON_ICP_BLOCK on Railway, default off. A lead whose email
@@ -1928,10 +1934,30 @@
       return nonIcpCached(email, '');
     }
 
+    /* /thank-you greets the visitor by name from an attendeeName query
+       parameter. The booking flow supplies it; this redirect did not, so every
+       blocked lead read "Thank you, !" with a blank where their name goes.
+
+       Appended ONLY when there is a name to append -- an empty attendeeName
+       renders exactly the same blank, so sending one would fix nothing and
+       just make the URL look right. By the time this runs the step-2 fields
+       are populated (they are read above, before the check), so in practice
+       the name is always there.
+
+       First name alone, matching how the page reads: "Thank you, Dawn!". */
+    function nonIcpAttendeeName() {
+      var first = (formState.first_name || '').trim();
+      var last  = (formState.last_name  || '').trim();
+      return first || last || '';
+    }
+
     function redirectNonIcp(v) {
-      console.log('[GW] Non-ICP — redirecting to ' + NON_ICP_REDIRECT
+      var name = nonIcpAttendeeName();
+      var url  = NON_ICP_REDIRECT
+        + (name ? '?attendeeName=' + encodeURIComponent(name) : '');
+      console.log('[GW] Non-ICP — redirecting to ' + url
         + (v && v.matched_domain ? ' (matched ' + v.matched_domain + ')' : ''));
-      window.location.href = NON_ICP_REDIRECT;
+      window.location.href = url;
     }
 
     /* =======================================================
@@ -2604,7 +2630,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.10.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.11.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
