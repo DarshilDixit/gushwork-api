@@ -376,11 +376,29 @@ syncs them. **Necessary, not sufficient.**
    and the modal fork's behaviour have only ever been asserted from source.
    **This is the highest-value thing for you to check by hand after the
    Webflow re-pin** (§12, step 7).
-9. **Cache-only at step 2 trades certainty for speed.** If neither blur had
-   time to resolve, the click does not block and the lead sees a calendar until
-   `/submit` answers. The booking routes refuse it, so they cannot actually
-   take a slot — but they will see the widget. This is the deliberate
-   consequence of "no network call at the moment of decision".
+9. **Cache-only at step 2 trades certainty for speed — SHIPPED AS IS, ON
+   PURPOSE.** If neither blur had time to resolve, the click does not block and
+   the lead sees a calendar until `/submit` answers. The booking routes refuse
+   it, so they cannot actually take a slot, but they will see the widget.
+
+   **This is a deliberate decision, not an oversight.** Darshil, 11 Sept, at
+   merge time. The reasoning, recorded so nobody "fixes" it blind:
+
+   - The **email check fires a step earlier** and covers most of it. A matched
+     email blocks on its own, and it is warmed at step 1 — an entire screen
+     before the click that needs it. Only the website-only shape (personal
+     email + brokerage site, 12 of 84 historically) depends on a step-2 blur
+     resolving in time.
+   - The **flag makes it reversible**: `NON_ICP_BLOCK=false` turns the whole
+     feature off from the Railway env with no deploy.
+   - The **critical alert tells us if it ever actually happens.** A lead who
+     slips through to a slot fires *"A blocked lead took a calendar slot"* with
+     the booking id. That is the measurement.
+
+   **The review point: if that alert fires more than once or twice in the first
+   week, come back with the real numbers.** The fix would be a short awaited
+   wait at the click, and choosing its length without data is guessing. Do not
+   pick a timeout from first principles — wait for the alert count.
 10. **Refusing a booking does not cancel it.** The slot lives in Cal or
    RevenueHero and nothing in this repo can delete it. The refusal raises a
    *critical* naming the booking id and start time precisely because a human
@@ -556,6 +574,19 @@ code is gone. The mirror columns should be left alone regardless, since
 
 **The form half rolls back separately.** Re-pin Webflow to the previous SHA
 (`99597ed`) and republish. Reverting this repo does **not** revert the browser.
+
+---
+
+## 14b. Parked, deliberately — not in this PR
+
+All four were raised, considered and left out. None is a gap nobody noticed.
+
+| Parked | Why it can wait | What would reopen it |
+|---|---|---|
+| **`sdr-calling` No Booking exclusion** | Only submit-time blocks are dialable (a step-1 block has no phone, and that workflow requires one) — **~2 leads/month**. The failure is an awkward call, not a lost lead or a wrong charge. The mirror columns ship here, so that repo's fix is one `WHERE` clause when someone picks it up. | A blocked lead actually being dialled, or the rate rising above a couple a month. |
+| **Health row for the warehouse dependency** | A warehouse outage silently disables the block. Correct direction — we would rather let a realtor through than block a customer — but nothing alerts on it today. | Wanting to know the block is *on*, as opposed to merely enabled. |
+| **`non_icp_checked_at`** | Only the two specified columns ship. "When was this decided" is answerable from `updated_at` for now. | Needing to date a verdict independently of the row's last write. |
+| **RevenueHero cancellation API** | Unknown whether one exists. The refusal stops the booking counting and pages a human; actually freeing the diary is manual. | The critical alert firing often enough that manual cancellation becomes a chore. |
 
 ---
 
