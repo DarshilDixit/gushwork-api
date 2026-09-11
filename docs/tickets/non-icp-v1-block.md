@@ -536,6 +536,51 @@ replacing them.
 
 ---
 
+## The Partners tab is stale on `allstate.com`, and why
+
+Checked 12 Sept after the customer was deleted from PartnerStack. The tab reads
+**our stamps**, not PartnerStack, so three numbers are now wrong:
+
+| Shown | Reality |
+|---|---|
+| `totals.conversions = 5` | 4. `allstate.com`'s customer was deleted. |
+| `allstate.com  state=converted` | There is no conversion. `GET /v2/customers/allstate.com` → 404. |
+| `allstate.com  signup_verified=true` | Verified at **19:23**, deleted at **20:0x**. True then, false now. |
+| `allstate.com  sf=exists_unticked` → "waiting on an AE" | Reads as an action item. It is not one. |
+
+### The general problem, not just this row
+
+**`ps_signup_verified_at` is a once-only observation and nothing re-checks it.**
+The verify sweep selects `WHERE ps_signup_verified_at IS NULL`, so the moment a
+row verifies it is never looked at again. A customer deleted in the PartnerStack
+UI *after* verification leaves our row permanently asserting a conversion that
+does not exist, and **no sweep, alert or health row will ever notice.**
+
+That is not specific to tonight — it applies to any hand-cleanup anyone ever
+does in the PartnerStack UI, which is the only place a conversion *can* be
+reversed. The one documented way to undo a mistake silently desynchronises the
+dashboard from reality.
+
+Not fixed here. If it is ever worth fixing, the cheap version is to let the
+verify sweep re-check verified rows on a long cadence (daily, not 15-minutely)
+and clear the stamp on a definitive 404 — but note that clearing it also makes
+the row eligible for the retry sweep again, so it must be paired with the
+`non_icp_blocked` guard that already exists and with something for the general
+case.
+
+### What it cannot do any more
+
+**It cannot pay.** The qualification gate added in the same PR refuses
+`allstate.com`: `brittanyvisin@allstate.com` carries no partner key, so the
+domain is ambiguous and a tick on her Opportunity is refused rather than paid.
+The tab entry is now cosmetically wrong rather than financially dangerous.
+
+The row itself is untouched — clearing `ps_signup_sent_at` and
+`ps_signup_verified_at` on it would make the tab correct, and is a production
+data edit nobody has authorised.
+
+---
+
 ## The `sdr-calling` dependency
 
 **Not urgent, but real, and it is not fixed by this PR.**

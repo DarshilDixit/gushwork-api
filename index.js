@@ -4239,13 +4239,6 @@ app.get('/monitor', (req, res) => {
   'if(c.back_navigation===true)b.push("came back from step "+c.prev_step);' +
   'if(c.hit_no!=null&&c.hit_no>1)b.push("page load "+c.hit_no);' +
   'return b.length?"<div style=\\"color:#999;font-size:10px\\">"+esc(b.join(" \\u00b7 "))+"</div>":"";}' +
-  'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,product=document.getElementById("fproduct").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
-  'var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"page="+curPage+"&stage="+stage+"&sort="+curSort+"&dir="+curDir;' +
-  'if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(product&&product!=="all")url+="&product="+encodeURIComponent(product);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;var ni=document.getElementById("fnonicp").value;if(ni)url+="&nonicp="+encodeURIComponent(ni);' +
-  'document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\">Loading...</td></tr>";' +
-  'try{var r=await fetch(url,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
-  'set("lcount",d.total+" lead"+(d.total!==1?"s":"")+" found");' +
-  'if(!d.leads.length){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\">No leads match your filters.</td></tr>";document.getElementById("lpag").innerHTML="";return;}' +
   /* ONE row builder, two tabs. The Blocked tab renders through this same
      function rather than a summary of its own, so the expandable panel, the
      enrichment badges and the change log all come for free and cannot drift
@@ -4253,6 +4246,13 @@ app.get('/monitor', (req, res) => {
   'function leadRowsHtml(leads){return leads.map(function(l){var sid=esc(l.session_id),name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\\u2014",src=l.utm_source?esc(l.utm_source)+(l.utm_medium?" / "+esc(l.utm_medium):""):(l.referrer?"referral":"\\u2014");' +
   'return"<tr"+(l.non_icp_blocked?" style=\\"background:#fff7ed\\"":"")+"><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.non_icp_blocked?"<span title=\\"Blocked \\u2014 non-ICP ("+esc(l.non_icp_reason||"")+"). Still counted in every total.\\" style=\\"color:#c2410c\\">&#128683; </span>":"")+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+esc(l.product||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
   '"<tr class=\\"erow\\" id=\\"er-"+sid+"\\" style=\\"display:none\\"><td></td><td colspan=\\"10\\">"+enrichPanel(l)+"<div id=\\"lc-"+sid+"\\"></div></td></tr>";}).join("");}' +
+  'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,product=document.getElementById("fproduct").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
+  'var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"page="+curPage+"&stage="+stage+"&sort="+curSort+"&dir="+curDir;' +
+  'if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(product&&product!=="all")url+="&product="+encodeURIComponent(product);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;var ni=document.getElementById("fnonicp").value;if(ni)url+="&nonicp="+encodeURIComponent(ni);' +
+  'document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\">Loading...</td></tr>";' +
+  'try{var r=await fetch(url,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
+  'set("lcount",d.total+" lead"+(d.total!==1?"s":"")+" found");' +
+  'if(!d.leads.length){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\">No leads match your filters.</td></tr>";document.getElementById("lpag").innerHTML="";return;}' +
   'document.getElementById("ltbody").innerHTML=leadRowsHtml(d.leads);renderPag(d.page,d.pages);}catch(e){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function renderPag(pg,pages){if(pages<=1){document.getElementById("lpag").innerHTML="";return;}var h="";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg-1)+")\\""+(pg<=1?" disabled":"")+">&larr;</button>";var s=Math.max(1,pg-2),e=Math.min(pages,pg+2);if(s>1)h+="<button class=\\"pb\\" onclick=\\"loadLeads(1)\\">1</button>"+(s>2?"<span class=\\"pi\\">&#8230;</span>":"");for(var i=s;i<=e;i++)h+="<button class=\\"pb"+(i===pg?" act":"")+ "\\" onclick=\\"loadLeads("+i+")\\" >"+i+"</button>";if(e<pages)h+=(e<pages-1?"<span class=\\"pi\\">&#8230;</span>":"")+"<button class=\\"pb\\" onclick=\\"loadLeads("+pages+")\\" >"+pages+"</button>";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg+1)+")\\"" +(pg>=pages?" disabled":"")+">&rarr;</button><span class=\\"pi\\">Page "+pg+" of "+pages+"</span>";document.getElementById("lpag").innerHTML=h;}' +
   'var lmLeads=[],lmChart=null,lmFilter="all";' +
@@ -7918,7 +7918,33 @@ async function runPartnerStackQualificationPoll() {
     if (!eligible.length) return;
 
     for (const r of eligible) {
-      await sendQualificationForDomain(r.ps_customer_key);
+      /* byKey holds the ticked Opportunity this domain came from, so the gate
+         can ask about the LEAD rather than only the domain. */
+      const opp = byKey.get(r.ps_customer_key) || {};
+      let gate;
+      try {
+        gate = await qualificationTargetCheck(r.ps_customer_key, opp.contactEmail);
+      } catch (err) {
+        /* Cannot tell -> do not pay. Fails closed, and says so loudly enough
+           to be chased, because the cost here is an affiliate not credited. */
+        console.warn(`[PartnerStack] Could not resolve the ticked lead for ${r.ps_customer_key} — NOT qualifying:`, err.message);
+        recordFailure('PartnerStack', r.ps_customer_key + ' (qualify target)', err.message);
+        continue;
+      }
+      if (!gate.fire) {
+        console.warn(`[PartnerStack] ⏭ Qualification REFUSED for ${r.ps_customer_key} — ${gate.reason}` +
+          (gate.others ? ` (unattributed leads on this domain: ${gate.others.join(', ')})` : ''));
+        /* Visible, not silent. A refusal here may be a payout somebody has to
+           make by hand, so it reaches the health row like every other
+           PartnerStack failure rather than living in a log line. */
+        recordFailure('PartnerStack', r.ps_customer_key + ' (qualification refused)',
+          `Ticked Opportunity could not be tied to the referred lead (${gate.reason}). ` +
+          'The affiliate is NOT being credited automatically — check whether this demo was theirs.');
+        continue;
+      }
+      console.log(`[PartnerStack] Qualification allowed for ${r.ps_customer_key} — ${gate.reason}` +
+        (gate.matched_email ? ` (${gate.matched_email})` : ''));
+      await sendQualificationForDomain(r.ps_customer_key, gate.matched_email);
     }
   } catch (err) {
     console.warn('[PartnerStack] Qualification poll failed (non-blocking):', err.message);
@@ -7928,23 +7954,98 @@ async function runPartnerStackQualificationPoll() {
   }
 }
 
-async function sendQualificationForDomain(customerKey) {
+/* ── WHICH LEAD WAS TICKED ───────────────────────────────────────────
+   The qualification used to fire on the DOMAIN alone: any ticked
+   Opportunity resolving to a partner domain paid that domain's partner,
+   whoever the Opportunity was actually about. On a shared corporate domain
+   that is wrong -- allstate.com carries a partner-referred lead AND an
+   unreferred booked lead, and ticking the unreferred one would have paid a
+   partner with no connection to her.
+
+   THE OBVIOUS FIX IS WRONG ON ITS OWN. Matching the Opportunity's primary
+   contact email to the referred lead's email sounds exact and silently stops
+   paying people who earned it: measured 12 Sept 2026 against the two ticked
+   Opportunities in production, ONE HAD NO CONTACT EMAIL AT ALL
+   (google.ai, Opportunity 006OX00000d48YPYAY). findOpportunityDomains already
+   prefers Account.Website for exactly that reason. Email-only matching would
+   have blocked a legitimate payout.
+
+   So it is email first, domain second, and the domain fallback only runs when
+   the domain cannot be ambiguous:
+
+     unambiguous  every lead on the domain carries the SAME partner key as the
+                  converted row. Then domain-matching IS lead-matching and the
+                  fallback is safe -- which is the ordinary single-company case
+                  and covers google.ai.
+     ambiguous    any lead on the domain has a different partner key, or none
+                  at all. Then a ticked Opportunity might be about somebody the
+                  partner never referred, and we refuse.
+
+   FAILS CLOSED, like the eligibility check and unlike everything on the lead
+   path: this decides whether an affiliate is PAID, and it touches no lead. A
+   refusal is logged and stamped so a genuinely missed payout is auditable and
+   can be sent by hand, which is the same argument the conversion skip makes.
+
+   Returns { fire, reason, matched_email }. */
+async function qualificationTargetCheck(customerKey, contactEmail) {
+  const email = String(contactEmail || '').trim().toLowerCase();
+  const { rows } = await pool.query(
+    `SELECT lower(email) AS email, ps_partner_key, ps_xid IS NOT NULL AS referred,
+            ps_signup_sent_at IS NOT NULL AS converted
+       FROM leads
+      WHERE ps_customer_key = $1 AND email IS NOT NULL`,
+    [customerKey]
+  );
+  if (!rows.length) return { fire: false, reason: 'no_leads_on_domain' };
+
+  const converted = rows.find((r) => r.converted);
+  if (!converted) return { fire: false, reason: 'no_converted_lead' };
+
+  /* 1. The precise answer: the ticked Opportunity names a contact who IS the
+        referred lead. Nothing else needs to be true. */
+  if (email && rows.some((r) => r.referred && r.email === email)) {
+    return { fire: true, reason: 'lead_match', matched_email: email };
+  }
+
+  /* 2. The fallback, gated on the domain being unattributable to anyone else.
+        A lead with no partner key is as disqualifying as one with a different
+        partner key -- Brittany Visin has no partner key, and she is exactly
+        the person this refuses to pay for. */
+  const key = converted.ps_partner_key;
+  const allSamePartner = rows.every((r) => r.ps_partner_key && r.ps_partner_key === key);
+  if (allSamePartner) {
+    return { fire: true, reason: rows.length === 1 ? 'sole_lead_on_domain' : 'domain_single_partner' };
+  }
+
+  const others = rows.filter((r) => !r.ps_partner_key || r.ps_partner_key !== key).map((r) => r.email);
+  return { fire: false, reason: 'ambiguous_domain', others };
+}
+
+async function sendQualificationForDomain(customerKey, matchedEmail) {
   let claimedSession = null;
   try {
-    // Claim before sending — see the note above runPartnerStackSignup.
+    /* Claim before sending — see the note above runPartnerStackSignup.
+
+       PREFER THE MATCHED LEAD'S ROW. When the gate tied the ticked
+       Opportunity to a specific referred lead, the stamp belongs on that
+       lead, not on whichever row happened to convert first: otherwise the
+       dashboard shows the qualification against a person who was not the one
+       an AE actually met. Falls back to the earliest converted row when there
+       is no email match, which is the domain-fallback case. */
     const claim = await pool.query(
       `UPDATE leads
           SET ps_qualified_sent_at = NOW(), updated_at = NOW()
         WHERE session_id = (
               SELECT session_id FROM leads
                WHERE ps_customer_key = $1 AND ps_signup_sent_at IS NOT NULL
-               ORDER BY ps_signup_sent_at ASC LIMIT 1)
+               ORDER BY (lower(email) IS NOT DISTINCT FROM $2) DESC, ps_signup_sent_at ASC
+               LIMIT 1)
           AND ps_qualified_sent_at IS NULL
           AND NOT EXISTS (
                 SELECT 1 FROM leads o
                  WHERE o.ps_customer_key = $1 AND o.ps_qualified_sent_at IS NOT NULL)
         RETURNING session_id`,
-      [customerKey]
+      [customerKey, matchedEmail ? String(matchedEmail).toLowerCase() : null]
     );
     if (claim.rowCount === 0) return;                 // already qualified, or nothing to claim
     claimedSession = claim.rows[0].session_id;
