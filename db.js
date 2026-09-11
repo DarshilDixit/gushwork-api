@@ -649,6 +649,13 @@ async function initDB() {
          non_icp_reason holds the matched brand domain (e.g. 'kw.com'), not a
          category. It is what Slack prints and it is how a bad block gets
          spotted by a human. */
+      /* When the conversion was last RE-checked against PartnerStack, as
+         opposed to ps_signup_verified_at which is when it was FIRST seen to
+         exist. Two different observations, so two columns: overloading the
+         first would turn "we saw this land" into "we looked recently", and
+         the next person would read a rolling timestamp as the landing time.
+         Same reasoning as first_ticked_at vs sf_state. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ps_signup_recheck_at TIMESTAMPTZ`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS non_icp_blocked BOOLEAN DEFAULT FALSE`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS non_icp_reason TEXT`,
       `CREATE INDEX IF NOT EXISTS leads_non_icp_blocked_idx ON leads (non_icp_blocked) WHERE non_icp_blocked IS TRUE`,
