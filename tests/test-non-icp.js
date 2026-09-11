@@ -544,6 +544,109 @@ const results7 = (async () => {
 }
 
 /* ============================================================
+   10d. THE QUALIFICATION MUST BE ABOUT THE REFERRED LEAD
+
+   The poller collapses ticked Opportunities to a DOMAIN, so any tick on
+   a shared corporate domain paid that domain's partner. allstate.com
+   carries a referred lead and an unreferred BOOKED lead; ticking hers
+   would have paid a partner with no connection to her.
+
+   Executed, not read: the gate is lifted and driven against controlled
+   row sets, because "the function mentions email" is not the claim
+   worth making.
+   ============================================================ */
+const results10d = (async () => {
+  const out = [];
+  const gateSrc = between('async function qualificationTargetCheck', '\nasync function sendQualificationForDomain');
+  const build = (rows) => (new Function('pool', gateSrc + '\n return qualificationTargetCheck;'))(
+    { query: async () => ({ rows }) });
+
+  const L = (email, partner, referred, converted) =>
+    ({ email, ps_partner_key: partner, referred, converted });
+
+  /* THE ONE WAY IT FIRES: the ticked Opportunity names the referred lead. */
+  {
+    const g = await build([L('agent@kw.com', 'P1', true, true)])('kw.com', 'agent@kw.com');
+    out.push(['qual: fires on an exact lead match', g.fire === true, JSON.stringify(g)]);
+    out.push(['qual: reports the match', g.reason === 'lead_match' && g.matched_email === 'agent@kw.com', JSON.stringify(g)]);
+    out.push(['qual: email match is case-insensitive',
+      (await build([L('agent@kw.com', 'P1', true, true)])('kw.com', 'Agent@KW.com')).fire === true]);
+  }
+
+  /* THE allstate.com SHAPE -- referred lead plus an unreferred BOOKED lead,
+     and the tick is about the unreferred one. */
+  {
+    const rows = [L('agent@allstate.com', 'P1', true, true), L('brittanyvisin@allstate.com', null, false, false)];
+    const g = await build(rows)('allstate.com', 'brittanyvisin@allstate.com');
+    out.push(['qual: REFUSES a tick about an unreferred lead', g.fire === false, JSON.stringify(g)]);
+    out.push(['qual: says the Opportunity names nobody we referred', g.reason === 'no_lead_match', g.reason]);
+  }
+
+  /* NO DOMAIN FALLBACK. This is the whole point of the email-only design:
+     a sole referred lead on a domain does NOT get paid when the ticked
+     Opportunity names nobody. 1.8% of form-sourced Opportunities, measured.
+     If this ever starts firing, a fallback has been reintroduced. */
+  {
+    const g = await build([L('swapnilsinha07@gmail.com', 'P1', true, true)])('google.ai', '');
+    out.push(['qual: NO domain fallback — a sole referred lead with no contact email is refused',
+      g.fire === false, JSON.stringify(g)]);
+    out.push(['qual: names the missing contact email as the reason',
+      g.reason === 'opportunity_has_no_contact_email', g.reason]);
+  }
+  {
+    const rows = [L('a@acme.com', 'P1', true, true), L('b@acme.com', 'P1', true, false)];
+    const g = await build(rows)('acme.com', '');
+    out.push(['qual: no fallback even when every lead is the same partner', g.fire === false, JSON.stringify(g)]);
+  }
+
+  /* Two partners on one domain: only an exact match resolves it. */
+  {
+    const rows = [L('a@acme.com', 'P1', true, true), L('b@acme.com', 'P2', true, false)];
+    out.push(['qual: two partners, no contact email -> refuse',
+      (await build(rows)('acme.com', '')).fire === false]);
+    out.push(['qual: two partners, exact match -> fire',
+      (await build(rows)('acme.com', 'a@acme.com')).fire === true]);
+  }
+
+  /* An unreferred lead can never trigger a payout, even alone on its domain. */
+  {
+    const g = await build([L('someone@acme.com', null, false, true)])('acme.com', 'someone@acme.com');
+    out.push(['qual: an unreferred lead never fires', g.fire === false, JSON.stringify(g)]);
+  }
+
+  /* Degenerate inputs. */
+  {
+    out.push(['qual: no leads -> no fire', (await build([])('x.com', 'a@x.com')).fire === false]);
+    const g = await build([L('a@x.com', 'P1', true, false)])('x.com', 'a@x.com');
+    out.push(['qual: a lead that never converted -> no fire', g.fire === false, JSON.stringify(g)]);
+  }
+  return out;
+})();
+
+/* ── Wiring: the gate must actually be consulted, and refusals visible ── */
+{
+  const poll = between('const sf = await findQualifiedDemoOpportunities();', 'async function qualificationTargetCheck');
+  ok('qual: the poll consults the gate',        poll.includes('await qualificationTargetCheck('));
+  ok('qual: the gate runs BEFORE the send',
+     poll.indexOf('qualificationTargetCheck(') < poll.indexOf('sendQualificationForDomain('));
+  ok('qual: a refusal skips the send',          /if \(!gate\.fire\) \{[\s\S]{0,1200}?continue;/.test(poll));
+  ok('qual: a refusal is recorded, not just logged',
+     /if \(!gate\.fire\)[\s\S]{0,700}?recordFailure\('PartnerStack'/.test(poll));
+  ok('qual: a gate ERROR also refuses (fails closed on payment)',
+     /catch \(err\)[\s\S]{0,400}?qualify target[\s\S]{0,200}?continue;/.test(poll));
+  ok('qual: the ticked Opportunity is what gets passed in', poll.includes('opp.contactEmail'));
+  /* The stamp lands on the matched lead, not blindly the earliest. */
+  const send = between('async function sendQualificationForDomain', 'const result = await sendAction');
+  ok('qual: the claim prefers the matched lead row',
+     send.includes('ORDER BY (lower(email) IS NOT DISTINCT FROM $2) DESC, ps_signup_sent_at ASC'));
+  /* No domain fallback anywhere in the gate. */
+  const gate = between('async function qualificationTargetCheck', '\nasync function sendQualificationForDomain');
+  ok('qual: the gate has no all-same-partner fallback', !/allSamePartner/.test(gate));
+  ok('qual: the gate fires on exactly one condition',
+     (gate.match(/fire: true/g) || []).length === 1, String((gate.match(/fire: true/g) || []).length));
+}
+
+/* ============================================================
    11. Recovery cron excludes blocked leads
    ============================================================ */
 {
@@ -625,6 +728,7 @@ const results7 = (async () => {
 
 /* ============================================================ */
 results7
+  .then((rows) => { for (const [n, c, x] of rows) ok(n, c, x); return results10d; })
   .then((rows) => { for (const [n, c, x] of rows) ok(n, c, x); })
   .catch((err) => { ok('non-icp: section 7 completed', false, err && err.message); })
   .then(() => {

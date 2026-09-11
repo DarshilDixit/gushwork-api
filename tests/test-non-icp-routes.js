@@ -475,6 +475,187 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     }
   }
 
+  /* ========================================================
+     8. EVERY MONITOR TAB — ROUTE AND RENDER
+
+     Two live dashboard breaks in one night, both invisible to the
+     suite and both a different flavour of the same thing:
+
+       /monitor/metrics  a temporal dead zone  -> 500, blank Overview
+       Blocked tab       leadRowsHtml declared inside loadLeads
+                         -> "leadRowsHtml is not defined" on open
+
+     Neither is a syntax error, so node --check passes. Neither is
+     visible in source text, so every assertion in test-non-icp.js
+     passes. The first needed the ROUTE driven; the second needs the
+     browser JS EVALUATED and the tab loader actually CALLED, because
+     the function is defined and reachable -- just not from there.
+
+     So this section does both:
+       a) drives every /monitor/* route over HTTP for a 200
+       b) evaluates the dashboard's inline script in a stubbed DOM and
+          invokes every tab loader, failing on any ReferenceError
+     ======================================================== */
+  {
+    reset();
+    const TABS = [
+      ['/monitor/metrics',      'Overview'],
+      ['/monitor/leads?page=1', 'All Leads'],
+      ['/monitor/sdr',          'SDR List'],
+      ['/monitor/duplicates',   'Duplicates'],
+      ['/monitor/lm-metrics',   'Lead Magnet'],
+      ['/monitor/partners',     'Partners'],
+      ['/monitor/leads?nonicp=only&page=1', 'Blocked'],
+      ['/monitor/health',       'System Health'],
+    ];
+    for (const [path, label] of TABS) {
+      const sep = path.includes('?') ? '&' : '?';
+      let r, body = null;
+      try {
+        r = await realFetch(BASE + path + sep + 'token=stub', { signal: AbortSignal.timeout(20000) });
+        try { body = await r.json(); } catch (_) {}
+      } catch (err) { r = { status: 0 }; body = { error: err.message }; }
+      ok(`tab route ${label} (${path}) answers 200`, r.status === 200,
+         String(r.status) + ' ' + JSON.stringify(body).slice(0, 160));
+      ok(`tab route ${label} has no error in the body`, !(body && body.error),
+         body && body.error);
+    }
+  }
+
+  /* ---- the browser half ---- */
+  {
+    const page = await realFetch(BASE + '/monitor?token=stub', { signal: AbortSignal.timeout(20000) });
+    const html = await page.text();
+    ok('dashboard: /monitor renders', page.status === 200 && html.length > 5000, String(page.status));
+
+    /* The inline script is the LAST <script> block on the page; the first
+       is the Chart.js CDN tag. */
+    const open = html.lastIndexOf('<script>');
+    const close = html.indexOf('</script>', open);
+    const js = (open !== -1 && close !== -1) ? html.slice(open + 8, close) : '';
+    ok('dashboard: the inline script was extracted', js.length > 5000, String(js.length));
+
+    /* A DOM stub that is permissive rather than faithful: every element
+       answers every property, so the only thing that can throw is a real
+       scope or reference error -- which is the whole point. */
+    /* Records what each element's innerHTML was set to, keyed by id. That is
+       what turns this from "did it throw" into "what did the user see" --
+       loadBlocked CAUGHT its own ReferenceError and rendered
+       "Could not load: leadRowsHtml is not defined" into the table, which is
+       exactly the production symptom and is invisible to a try/catch probe. */
+    const painted = {};
+    const mkEl = (id) => new Proxy({}, {
+      get(t, k) {
+        if (k === 'value' || k === 'textContent') return '';
+        if (k === 'innerHTML') return painted[id] || '';
+        if (k === 'style' || k === 'dataset') return {};
+        if (k === 'classList') return { toggle() {}, add() {}, remove() {}, contains() { return false; } };
+        if (k === 'checked' || k === 'disabled') return false;
+        if (k === Symbol.toPrimitive || k === 'toString') return () => '';
+        return typeof k === 'string' ? (() => mkEl(id)) : undefined;
+      },
+      set(t, k, v) { if (k === 'innerHTML' || k === 'textContent') painted[id] = String(v); return true; },
+    });
+    const el = mkEl('_generic');
+    const doc = {
+      getElementById: (id) => mkEl(id), querySelector: () => el, querySelectorAll: () => [],
+      createElement: () => el, addEventListener() {}, body: el, documentElement: el,
+    };
+    const errs = [];
+    const sandbox = {
+      document: doc, window: { location: { href: '', search: '' }, addEventListener() {} },
+      location: { href: '', search: '' },
+      localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+      setInterval: () => 0, clearInterval() {}, setTimeout: (f) => 0, clearTimeout() {},
+      Chart: function () { return { destroy() {}, update() {} }; },
+      AbortSignal: { timeout: () => undefined },
+      console: { log() {}, warn() {}, error() {} },
+      /* Every loader ends up here. Returning a plausible shape for each
+         means each render path actually RUNS rather than bailing early --
+         a loader that never reaches its renderer cannot catch a scope
+         error in that renderer. */
+      fetch: async () => ({
+        ok: true, status: 200, text: async () => '{}',
+        json: async () => ({
+          total: 1, page: 1, pages: 1,
+          leads: [{ session_id: '00000000-0000-4000-8000-00000000000a', email: 'a@b.com',
+                    first_name: 'A', last_name: 'B', company: 'C', sell_to: 'B2B',
+                    product: 'aeo', created_at: new Date().toISOString(),
+                    non_icp_blocked: true, non_icp_reason: 'kw.com', step_reached: 2 }],
+          rows: [], partners: [], domains: [], checks: [], sessions: [],
+          duplicates: [], people: 1, byDay: [], funnel: [],
+        }),
+      }),
+    };
+    let evalErr = null;
+    let scope = null;
+    try {
+      scope = new Function(...Object.keys(sandbox),
+        js + '\n; return { leadRowsHtml: typeof leadRowsHtml === "function" ? leadRowsHtml : null,'
+           + ' loadLeads: typeof loadLeads === "function" ? loadLeads : null,'
+           + ' loadBlocked: typeof loadBlocked === "function" ? loadBlocked : null,'
+           + ' loadSDR: typeof loadSDR === "function" ? loadSDR : null,'
+           + ' loadDupes: typeof loadDupes === "function" ? loadDupes : null,'
+           + ' loadLM: typeof loadLM === "function" ? loadLM : null,'
+           + ' loadPartners: typeof loadPartners === "function" ? loadPartners : null,'
+           + ' checkHealth: typeof checkHealth === "function" ? checkHealth : null,'
+           + ' showTab: typeof showTab === "function" ? showTab : null,'
+           + ' esc: typeof esc === "function" ? esc : null,'
+           + ' et: typeof et === "function" ? et : null,'
+           + ' enrichPanel: typeof enrichPanel === "function" ? enrichPanel : null,'
+           + ' stageBadge: typeof stageBadge === "function" ? stageBadge : null };'
+      )(...Object.values(sandbox));
+    } catch (err) { evalErr = err; }
+    ok('dashboard: the inline script evaluates without throwing', !evalErr, evalErr && evalErr.message);
+
+    if (scope) {
+      /* THE SCOPE CHECK. leadRowsHtml was declared INSIDE loadLeads, so it
+         was reachable from All Leads and undefined from Blocked. A name
+         that is not visible at top level cannot be shared between tabs. */
+      for (const nm of ['leadRowsHtml', 'esc', 'et', 'enrichPanel', 'stageBadge',
+                        'showTab', 'loadLeads', 'loadBlocked', 'loadSDR',
+                        'loadDupes', 'loadLM', 'loadPartners', 'checkHealth']) {
+        ok(`dashboard: ${nm} is defined at TOP LEVEL`, typeof scope[nm] === 'function',
+           'declared inside another function, so other tabs cannot see it');
+      }
+
+      /* And CALL every loader. A name being visible is not the same as its
+         render path running -- this is what actually reproduces the
+         Blocked tab break. */
+      for (const nm of ['loadLeads', 'loadBlocked', 'loadSDR', 'loadDupes',
+                        'loadLM', 'loadPartners', 'checkHealth']) {
+        let thrown = null;
+        try { await scope[nm](1); } catch (err) { thrown = err; }
+        ok(`dashboard: ${nm}() runs without a ReferenceError`,
+           !(thrown && thrown instanceof ReferenceError), thrown && thrown.message);
+      }
+
+      /* WHAT THE USER ACTUALLY SEES. Every loader wraps its render in a
+         try/catch that paints the error into the table, so a scope error
+         reads as a tidy "Could not load:" message rather than a crash.
+         Probing for a thrown error misses it entirely. */
+      const painted_ = Object.entries(painted);
+      for (const [id, html] of painted_) {
+        if (!/tbody|-tbody$/.test(id)) continue;
+        ok(`dashboard: ${id} rendered content, not an error`,
+           !/Could not load|Failed:|is not defined|is not a function/i.test(html),
+           id + ' -> ' + String(html).slice(0, 140));
+      }
+      ok('dashboard: at least one table actually painted',
+         painted_.some(([id, h]) => /tbody/.test(id) && h && h.length > 20),
+         Object.keys(painted).join(','));
+      /* leadRowsHtml itself, on a real row shape. */
+      let rowsErr = null, rowsHtml = '';
+      try {
+        rowsHtml = scope.leadRowsHtml([{ session_id: 's1', email: 'a@kw.com', first_name: 'A',
+          last_name: 'B', company: 'KW', sell_to: 'B2B', product: 'aeo',
+          created_at: new Date().toISOString(), non_icp_blocked: true, non_icp_reason: 'kw.com' }]);
+      } catch (err) { rowsErr = err; }
+      ok('dashboard: leadRowsHtml renders a row', !rowsErr && rowsHtml.includes('<tr'), rowsErr && rowsErr.message);
+      ok('dashboard: a blocked row is marked in the rendered HTML', /kw\.com/.test(rowsHtml));
+    }
+  }
+
   loud();
   console.log('');
   console.log(`  passed: ${pass}`);
