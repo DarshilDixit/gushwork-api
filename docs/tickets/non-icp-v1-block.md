@@ -31,6 +31,7 @@ report six weeks later. Anyone who reads `Non-ICP-flagging-rules` and then reads
 | **Slack** | `🚫 Lead Blocked — Non-ICP` in the leads channel, carrying email, website, company, phone and the matched domain. |
 | **Dashboard** | Overview card, dedicated **Blocked** tab with the full expandable panel, row marker and opt-in filter in All Leads. |
 | **Off switch** | `NON_ICP_BLOCK=false` on Railway. No deploy needed. |
+| **Human-verified** | The `/demo` block path, end to end, 11 Sept — on v5.10.0. The Ads fork, the normal-address control and the v5.11.0 `attendeeName` greeting are **not** yet. See WEEK ONE. |
 
 ### Turning it off, fastest first
 
@@ -847,10 +848,39 @@ domain but their website is not."* One or two is the expected shape of a captive
 agent with their own site. **A steady stream means decision 2 (OR logic) is
 worth revisiting** — that is exactly the signal it was made visible for.
 
-Also worth one look in week one: **the browser walkthrough has still never been
-done.** Everything server-side is driven over real HTTP and both Slack paths
-were fired for real, but no form file has been loaded in a real page. The
-checklist is in `cards/pr-non-icp-v1-block.md` §12 step 7.
+### The browser walkthrough is HALF DONE — do not re-run the done half
+
+Darshil ran it on **`/demo`** on 11 Sept, and it passed end to end:
+
+- typed `agent@allstate.com`, **reached step 2** (so step 1 correctly does not
+  redirect)
+- completed step 2 and **landed on `/thank-you`**, never seeing a calendar
+- the **Slack post arrived**
+- the **Blocked tab showed the row**
+
+That is the whole happy path for the `/demo` file, confirmed by a human. It is
+also what produced `agent@allstate.com`, the row this ticket keeps referring to.
+
+**What is still untested, and why it is not a formality:**
+
+| Untested | Why it matters |
+|---|---|
+| **The Google Ads page** | `gushwork-form-popup.js` is a **fork**, not a sibling. It silently missed v5.6.0 and v5.7.x for twelve days once. Byte-identical handlers and a passing parity suite are not the same as a human watching the modal behave. |
+| **The normal-address control** | Nobody has confirmed an ordinary lead still reaches the calendar. Every check so far proves the block fires; none proves it does not fire on everyone. **This is the one that would hide a total outage.** |
+| **Anything from v5.11.0** | The run was on `a6acdf2` / **v5.10.0**, before the `attendeeName` repin. So `/thank-you` showed "Thank you, !" — which is exactly the bug that prompted v5.11.0, and is *expected* for that run rather than a finding. **The greeting has never been seen working.** |
+
+So the week-one check is three steps, not seven. On the current pin
+(`4b419c3`, v5.11.0 / v5.11.0-ads):
+
+1. **Ads page**, blocked address → reaches step 2, lands on `/thank-you`,
+   console reads `Form initialised v5.11.0-ads (Google Ads)`.
+2. **`/demo`, ordinary address** → calendar still appears, normal Slack post,
+   no redirect.
+3. **Either page, blocked address** → `/thank-you` greets them **by name**, not
+   "Thank you, !". That is the only v5.11.0-specific behaviour.
+
+Full checklist for reference in `cards/pr-non-icp-v1-block.md` §12 step 7 —
+but steps 1–5 of it are already done on `/demo`.
 
 ---
 
