@@ -564,63 +564,57 @@ const results10d = (async () => {
   const L = (email, partner, referred, converted) =>
     ({ email, ps_partner_key: partner, referred, converted });
 
-  /* 1. The precise case: the ticked Opportunity names the referred lead. */
+  /* THE ONE WAY IT FIRES: the ticked Opportunity names the referred lead. */
   {
     const g = await build([L('agent@kw.com', 'P1', true, true)])('kw.com', 'agent@kw.com');
     out.push(['qual: fires on an exact lead match', g.fire === true, JSON.stringify(g)]);
-    out.push(['qual: says it was a lead match', g.reason === 'lead_match', g.reason]);
+    out.push(['qual: reports the match', g.reason === 'lead_match' && g.matched_email === 'agent@kw.com', JSON.stringify(g)]);
+    out.push(['qual: email match is case-insensitive',
+      (await build([L('agent@kw.com', 'P1', true, true)])('kw.com', 'Agent@KW.com')).fire === true]);
   }
 
-  /* 2. THE allstate.com SHAPE -- a referred lead and an unreferred booked
-        lead on one domain, and the tick is about the unreferred one. */
+  /* THE allstate.com SHAPE -- referred lead plus an unreferred BOOKED lead,
+     and the tick is about the unreferred one. */
   {
     const rows = [L('agent@allstate.com', 'P1', true, true), L('brittanyvisin@allstate.com', null, false, false)];
     const g = await build(rows)('allstate.com', 'brittanyvisin@allstate.com');
-    out.push(['qual: REFUSES when the tick is about an unreferred lead', g.fire === false, JSON.stringify(g)]);
-    out.push(['qual: names the reason', g.reason === 'ambiguous_domain', g.reason]);
-    out.push(['qual: names who made it ambiguous',
-      Array.isArray(g.others) && g.others.includes('brittanyvisin@allstate.com'), JSON.stringify(g.others)]);
-  }
-  /* ...and refuses even with NO contact email, which is the dangerous shape:
-     the old code fell straight through to the domain. */
-  {
-    const rows = [L('agent@allstate.com', 'P1', true, true), L('brittanyvisin@allstate.com', null, false, false)];
-    const g = await build(rows)('allstate.com', '');
-    out.push(['qual: REFUSES an ambiguous domain when the Opportunity has no contact email',
-      g.fire === false, JSON.stringify(g)]);
+    out.push(['qual: REFUSES a tick about an unreferred lead', g.fire === false, JSON.stringify(g)]);
+    out.push(['qual: says the Opportunity names nobody we referred', g.reason === 'no_lead_match', g.reason]);
   }
 
-  /* 3. THE google.ai SHAPE -- one referred lead, Opportunity has NO contact
-        email. Pure email-matching would block this legitimate payout; the
-        unambiguous-domain fallback must let it through. */
+  /* NO DOMAIN FALLBACK. This is the whole point of the email-only design:
+     a sole referred lead on a domain does NOT get paid when the ticked
+     Opportunity names nobody. 1.8% of form-sourced Opportunities, measured.
+     If this ever starts firing, a fallback has been reintroduced. */
   {
     const g = await build([L('swapnilsinha07@gmail.com', 'P1', true, true)])('google.ai', '');
-    out.push(['qual: still fires for a sole referred lead with no contact email', g.fire === true, JSON.stringify(g)]);
-    out.push(['qual: says it was the sole lead', g.reason === 'sole_lead_on_domain', g.reason]);
+    out.push(['qual: NO domain fallback — a sole referred lead with no contact email is refused',
+      g.fire === false, JSON.stringify(g)]);
+    out.push(['qual: names the missing contact email as the reason',
+      g.reason === 'opportunity_has_no_contact_email', g.reason]);
   }
-
-  /* 4. Several leads, all the SAME partner -> still unambiguous. */
   {
     const rows = [L('a@acme.com', 'P1', true, true), L('b@acme.com', 'P1', true, false)];
     const g = await build(rows)('acme.com', '');
-    out.push(['qual: fires when every lead on the domain is the same partner', g.fire === true, JSON.stringify(g)]);
-    out.push(['qual: says why', g.reason === 'domain_single_partner', g.reason]);
+    out.push(['qual: no fallback even when every lead is the same partner', g.fire === false, JSON.stringify(g)]);
   }
 
-  /* 5. TWO DIFFERENT PARTNERS on one domain -> never guess. */
+  /* Two partners on one domain: only an exact match resolves it. */
   {
     const rows = [L('a@acme.com', 'P1', true, true), L('b@acme.com', 'P2', true, false)];
-    const g = await build(rows)('acme.com', '');
-    out.push(['qual: REFUSES when two partners share a domain', g.fire === false, JSON.stringify(g)]);
-  }
-  /* ...unless the tick names one of them exactly. */
-  {
-    const rows = [L('a@acme.com', 'P1', true, true), L('b@acme.com', 'P2', true, false)];
-    const g = await build(rows)('acme.com', 'a@acme.com');
-    out.push(['qual: an exact match still wins over an ambiguous domain', g.fire === true, g.reason]);
+    out.push(['qual: two partners, no contact email -> refuse',
+      (await build(rows)('acme.com', '')).fire === false]);
+    out.push(['qual: two partners, exact match -> fire',
+      (await build(rows)('acme.com', 'a@acme.com')).fire === true]);
   }
 
-  /* 6. Degenerate inputs never fire. */
+  /* An unreferred lead can never trigger a payout, even alone on its domain. */
+  {
+    const g = await build([L('someone@acme.com', null, false, true)])('acme.com', 'someone@acme.com');
+    out.push(['qual: an unreferred lead never fires', g.fire === false, JSON.stringify(g)]);
+  }
+
+  /* Degenerate inputs. */
   {
     out.push(['qual: no leads -> no fire', (await build([])('x.com', 'a@x.com')).fire === false]);
     const g = await build([L('a@x.com', 'P1', true, false)])('x.com', 'a@x.com');
@@ -645,6 +639,11 @@ const results10d = (async () => {
   const send = between('async function sendQualificationForDomain', 'const result = await sendAction');
   ok('qual: the claim prefers the matched lead row',
      send.includes('ORDER BY (lower(email) IS NOT DISTINCT FROM $2) DESC, ps_signup_sent_at ASC'));
+  /* No domain fallback anywhere in the gate. */
+  const gate = between('async function qualificationTargetCheck', '\nasync function sendQualificationForDomain');
+  ok('qual: the gate has no all-same-partner fallback', !/allSamePartner/.test(gate));
+  ok('qual: the gate fires on exactly one condition',
+     (gate.match(/fire: true/g) || []).length === 1, String((gate.match(/fire: true/g) || []).length));
 }
 
 /* ============================================================

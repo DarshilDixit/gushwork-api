@@ -7962,29 +7962,33 @@ async function runPartnerStackQualificationPoll() {
    unreferred booked lead, and ticking the unreferred one would have paid a
    partner with no connection to her.
 
-   THE OBVIOUS FIX IS WRONG ON ITS OWN. Matching the Opportunity's primary
-   contact email to the referred lead's email sounds exact and silently stops
-   paying people who earned it: measured 12 Sept 2026 against the two ticked
-   Opportunities in production, ONE HAD NO CONTACT EMAIL AT ALL
-   (google.ai, Opportunity 006OX00000d48YPYAY). findOpportunityDomains already
-   prefers Account.Website for exactly that reason. Email-only matching would
-   have blocked a legitimate payout.
+   SO IT MATCHES THE LEAD, BY EMAIL, AND NOTHING ELSE.
 
-   So it is email first, domain second, and the domain fallback only runs when
-   the domain cannot be ambiguous:
+   A domain fallback was built first, on the strength of a ticked Opportunity
+   with no contact email. That Opportunity turned out to be hand-made test
+   data, so it was evidence of nothing. Measured properly against 180 days of
+   real Salesforce, 12 Sept 2026:
 
-     unambiguous  every lead on the domain carries the SAME partner key as the
-                  converted row. Then domain-matching IS lead-matching and the
-                  fallback is safe -- which is the ordinary single-company case
-                  and covers google.ai.
-     ambiguous    any lead on the domain has a different partner key, or none
-                  at all. Then a ticked Opportunity might be about somebody the
-                  partner never referred, and we refuse.
+     6,134 Opportunities total, 695 with no contact email  (11.3%)
+     1,833 FORM-SOURCED, of which 1,800 have one           (98.2%)
+        33 form-sourced with no contact email               (1.8%)
+
+   1.8% is small but not zero, so this is a real trade and not a free win:
+   roughly one legitimate qualification in fifty-five cannot be matched and
+   will be REFUSED. That is accepted deliberately, because
+
+     - a refusal is not silent. It goes through recordFailure to the
+       PartnerStack health row, so a missed payout is a work item somebody
+       can send by hand -- the same argument the conversion skip makes.
+     - the alternative costs more. A fallback has to reason about whether a
+       domain is "ambiguous enough", and every such rule is a new way to pay
+       the wrong partner on a shared domain. Refusing to guess is cheaper
+       than guessing carefully.
+     - at today's scale the expected number of affected payouts is under one
+       (six partner domains, ever).
 
    FAILS CLOSED, like the eligibility check and unlike everything on the lead
-   path: this decides whether an affiliate is PAID, and it touches no lead. A
-   refusal is logged and stamped so a genuinely missed payout is auditable and
-   can be sent by hand, which is the same argument the conversion skip makes.
+   path: this decides whether an affiliate is PAID and it touches no lead.
 
    Returns { fire, reason, matched_email }. */
 async function qualificationTargetCheck(customerKey, contactEmail) {
@@ -7996,29 +8000,19 @@ async function qualificationTargetCheck(customerKey, contactEmail) {
       WHERE ps_customer_key = $1 AND email IS NOT NULL`,
     [customerKey]
   );
-  if (!rows.length) return { fire: false, reason: 'no_leads_on_domain' };
+  if (!rows.length)                    return { fire: false, reason: 'no_leads_on_domain' };
+  if (!rows.some((r) => r.converted))  return { fire: false, reason: 'no_converted_lead' };
 
-  const converted = rows.find((r) => r.converted);
-  if (!converted) return { fire: false, reason: 'no_converted_lead' };
+  /* Separated from no_lead_match on purpose: "the Opportunity names nobody"
+     and "it names somebody we never referred" are different problems and the
+     person chasing the refusal needs to know which. 1.8% of form-sourced
+     Opportunities are the first kind. */
+  if (!email)                          return { fire: false, reason: 'opportunity_has_no_contact_email' };
 
-  /* 1. The precise answer: the ticked Opportunity names a contact who IS the
-        referred lead. Nothing else needs to be true. */
-  if (email && rows.some((r) => r.referred && r.email === email)) {
+  if (rows.some((r) => r.referred && r.email === email)) {
     return { fire: true, reason: 'lead_match', matched_email: email };
   }
-
-  /* 2. The fallback, gated on the domain being unattributable to anyone else.
-        A lead with no partner key is as disqualifying as one with a different
-        partner key -- Brittany Visin has no partner key, and she is exactly
-        the person this refuses to pay for. */
-  const key = converted.ps_partner_key;
-  const allSamePartner = rows.every((r) => r.ps_partner_key && r.ps_partner_key === key);
-  if (allSamePartner) {
-    return { fire: true, reason: rows.length === 1 ? 'sole_lead_on_domain' : 'domain_single_partner' };
-  }
-
-  const others = rows.filter((r) => !r.ps_partner_key || r.ps_partner_key !== key).map((r) => r.email);
-  return { fire: false, reason: 'ambiguous_domain', others };
+  return { fire: false, reason: 'no_lead_match', contact_email: email };
 }
 
 async function sendQualificationForDomain(customerKey, matchedEmail) {
