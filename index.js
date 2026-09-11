@@ -2187,6 +2187,10 @@ async function checkRecoveryHealth(db) {
         (SELECT COUNT(*) FROM leads l
            WHERE l.email IS NOT NULL
              AND l.disqualified = false
+             /* Must match the cron's population exactly. The cron excludes
+                blocked leads, so counting them here would report them as
+                permanently stuck and redden a row nothing can ever clear. */
+             AND l.non_icp_blocked IS NOT TRUE
              AND l.booking_uid IS NULL
              AND l.loops_sent = false
              AND l.created_at < NOW() - INTERVAL '${HEALTH_RECOVERY_STUCK_H} hours'
@@ -3288,6 +3292,10 @@ app.get('/monitor/sdr', async (req, res) => {
         LEFT JOIN enrichment_data e ON e.session_id = l.session_id
         WHERE l.email IS NOT NULL
           AND l.disqualified = false
+          /* A lead we turned away at the calendar must not then be handed to
+             an SDR to ring. Same omission as the PartnerStack guard above --
+             disqualified is only half the question now. */
+          AND l.non_icp_blocked IS NOT TRUE
           AND l.sell_to ILIKE 'B2B%'
           AND ${noBookingAnywhereSql('l.email')}
         ORDER BY LOWER(l.email), l.created_at DESC
@@ -7186,6 +7194,35 @@ async function runPartnerStackSignup({ session_id, email, website, company, phon
   if (disqualified) {
     console.log(`[PartnerStack] Skipped conversion — lead is disqualified: ${email}`);
     await recordPartnerStackSkip(session_id, 'disqualified');
+    return;
+  }
+
+  /* NON-ICP LEADS MUST NEVER PAY AN AFFILIATE EITHER, and this one is a fix,
+     not a precaution — it fired in production on 11 Sept 2026.
+
+     agent@allstate.com was blocked at /submit: StartTrial, Meta Lead and the
+     Salesforce push were all correctly suppressed, and then this function sent
+     a real conversion for customer_key allstate.com against a real xid. The
+     block lives in non_icp_blocked and this guard only ever read disqualified,
+     so it saw nothing.
+
+     THE SHAPE OF THE MISTAKE MATTERS MORE THAN THE LINE. The two columns are
+     deliberately separate -- disqualified means "the prospect said B2C", ours
+     means "we turned them away" -- and separating them means every existing
+     `disqualified` guard is now HALF a guard. This was one of three:
+     /monitor/sdr put blocked leads in front of an SDR, and checkRecoveryHealth
+     counted them as stuck forever. Adding a third meaning to this column would
+     have avoided all three and cost the ability to ever tell them apart, which
+     is why it is still two columns and why the guards are audited instead.
+
+     Read off the ROW, not from a parameter, so it cannot be forgotten at a
+     call site the way it was: this function already runs after res.json() and
+     one extra primary-key lookup on a partner submit is free. */
+  const blockRow = await pool.query(
+    'SELECT non_icp_blocked, non_icp_reason FROM leads WHERE session_id = $1', [session_id]);
+  if (blockRow.rows[0]?.non_icp_blocked === true) {
+    console.log(`[PartnerStack] Skipped conversion — lead is non-ICP (${blockRow.rows[0].non_icp_reason}): ${email}`);
+    await recordPartnerStackSkip(session_id, 'non_icp_blocked');
     return;
   }
 

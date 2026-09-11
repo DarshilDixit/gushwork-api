@@ -43,7 +43,7 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* Scenario state, reset between runs. */
-const S = { fetches: [], slackPayloads: [], leadRow: null, writes: [] };
+const S = { fetches: [], slackPayloads: [], leadRow: null, writes: [], psBlocked: false };
 
 /* ── stub pg ──────────────────────────────────────────────────────
    Both pools (Railway and the AWS warehouse) come through here.
@@ -78,6 +78,13 @@ function stubQuery(q, params) {
       : { rows: [], rowCount: 0 };
   }
   if (/^SELECT booking_uid FROM leads/.test(flat))  return { rows: [{ booking_uid: null }], rowCount: 1 };
+  /* What runPartnerStackSignup reads to see the block. */
+  if (/^SELECT non_icp_blocked, non_icp_reason FROM leads WHERE session_id = \$1$/.test(flat)) {
+    return { rows: [{ non_icp_blocked: S.psBlocked, non_icp_reason: S.psBlocked ? 'allstate.com' : null }], rowCount: 1 };
+  }
+  /* The conditional claim: reporting a winning row is what lets the
+     conversion actually be attempted, so a missing guard really does send. */
+  if (/UPDATE leads SET ps_signup_sent_at = NOW/.test(flat)) return { rows: [{ session_id: 'x' }], rowCount: 1 };
   return { rows: [], rowCount: 0 };
 }
 class StubClient { async query(q, p) { return stubQuery(q, p); } release() {} }
@@ -109,6 +116,7 @@ global.fetch = async function (url, opts) {
   if (/oauth2\/token/.test(u))        return j({ access_token: 'stub', instance_url: 'https://stub.my.salesforce.com' });
   if (/salesforce\.com/.test(u))      return j({ id: '00Qstub', success: true });
   if (/graph\.facebook\.com/.test(u)) return j({ events_received: 1 });
+  if (/partnerlinks\.io/.test(u))     return { ok: true, status: 200, text: async () => '', json: async () => ({}) };
   return j({});
 };
 
@@ -126,6 +134,10 @@ Object.assign(process.env, {
   SF_CLIENT_ID: 'stub', SF_CLIENT_SECRET: 'stub', SF_REFRESH_TOKEN: 'stub',
   META_ACCESS_TOKEN: 'stub', META_PIXEL_ID: '1234567890',
   ELV_API_KEY: 'stub',
+  /* Without this the conversion stops inside sendConversion with 'no_token'
+     and the CONTROL below passes for the wrong reason -- it would look like
+     the guard worked when nothing had been sent by anyone. */
+  PARTNERSTACK_TRACKING_TOKEN: 'stub',
   ALLOWED_ORIGIN: 'https://www.gushwork.ai',
   MONITOR_TOKEN: 'stub',
 });
@@ -145,7 +157,7 @@ const post = async (p, body) => {
   let j = null; try { j = await r.json(); } catch (_) {}
   return { status: r.status, body: j };
 };
-const reset = () => { S.fetches = []; S.slackPayloads = []; S.writes = []; S.leadRow = null; };
+const reset = () => { S.fetches = []; S.slackPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; };
 const metaFired      = () => S.fetches.some((u) => /graph\.facebook\.com/.test(u));
 const salesforceHit  = () => S.fetches.some((u) => /\/sobjects\//.test(u));
 const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') || true);
@@ -380,6 +392,58 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
        r.body && r.body.action !== 'refused_non_icp_safety_net', JSON.stringify(r.body));
     ok('safety net: a clean lead row IS created',
        S.writes.some((w) => /INSERT INTO leads \(/.test(w.flat)));
+  }
+
+  /* ========================================================
+     6. PARTNERSTACK MUST NOT PAY FOR A BLOCKED LEAD
+
+     This fired in production on 11 Sept: agent@allstate.com was blocked,
+     Meta and Salesforce were correctly suppressed, and a real conversion
+     went out for customer_key allstate.com. The guard read only
+     `disqualified`, and the block lives in its own column.
+
+     Driven over HTTP rather than asserted, because the call sits in the
+     fire-and-forget tail AFTER res.json() -- exactly the position a source
+     assertion cannot tell you is reachable.
+     ======================================================== */
+  {
+    reset();
+    S.psBlocked = true;
+    await post('/submit', {
+      session_id: '00000000-0000-4000-8000-000000000008',
+      email: 'agent@allstate.com', website: 'www.allstate.com', sell_to: 'B2B',
+      first_name: 'A', last_name: 'Gent', company: 'Allstate', phone: '+15550003333',
+      page_url: 'https://www.gushwork.ai/demo',
+      ps_xid: 'M7wnDScN0rrUYH',
+    });
+    await sleep(900);
+    ok('MONEY: no conversion was sent for a blocked lead',
+       !S.fetches.some((u) => /partnerlinks\.io/.test(u)),
+       S.fetches.filter((u) => /partnerlinks/.test(u)).join(','));
+    ok('MONEY: the skip was recorded as non_icp_blocked',
+       S.writes.some((w) => /ps_signup_skipped_reason/.test(w.flat)
+                         && (w.params || []).includes('non_icp_blocked')),
+       'no skip row written');
+    ok('MONEY: the domain was never even claimed',
+       !S.writes.some((w) => /UPDATE leads SET ps_signup_sent_at = NOW/.test(w.flat)),
+       'the claim ran for a lead that must never convert');
+  }
+  {
+    /* The control: a partner lead that is NOT blocked still converts.
+       Without this, deleting the whole conversion path would pass. */
+    reset();
+    S.psBlocked = false;
+    await post('/submit', {
+      session_id: '00000000-0000-4000-8000-000000000009',
+      email: 'buyer@acme.com', website: 'acme.com', sell_to: 'B2B',
+      first_name: 'Real', last_name: 'Buyer', company: 'Acme', phone: '+15550004444',
+      page_url: 'https://www.gushwork.ai/demo',
+      ps_xid: 'M7wnDScN0rrUYH',
+    });
+    await sleep(900);
+    ok('MONEY: a clean partner lead DOES still convert',
+       S.fetches.some((u) => /partnerlinks\.io/.test(u)),
+       'the conversion path is dead for everyone, not just blocked leads');
   }
 
   loud();

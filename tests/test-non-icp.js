@@ -410,6 +410,65 @@ const results7 = (async () => {
 }
 
 /* ============================================================
+   10b. EVERY `disqualified` GUARD IS NOW HALF A GUARD
+
+   The block lives in its own column on purpose, which means every
+   pre-existing guard that reads `disqualified` answers only half the
+   question. One of them sent a real PartnerStack conversion for
+   agent@allstate.com on 11 Sept 2026 -- StartTrial, Meta Lead and the
+   Salesforce push were all correctly suppressed and this one was not.
+
+   This section is an AUDIT, not three spot checks: it derives every
+   place `disqualified` is used as a predicate and requires each to have
+   been considered. A new one added without a non_icp decision fails here
+   rather than in production.
+   ============================================================ */
+{
+  /* The three that MUST also exclude blocked leads -- they spend money,
+     take SDR time, or report a population that can never clear. */
+  const signup = between('async function runPartnerStackSignup', 'async function sendQualificationForDomain');
+  ok('MONEY: the conversion guard reads non_icp_blocked',
+     signup.includes('non_icp_blocked'));
+  ok('MONEY: it reads the ROW, not a parameter that a call site can forget',
+     /SELECT non_icp_blocked, non_icp_reason FROM leads WHERE session_id = \$1/.test(signup));
+  ok('MONEY: it returns before sending',
+     /non_icp_blocked === true\) \{[\s\S]{0,320}?return;/.test(signup));
+  ok('MONEY: it records why it skipped',
+     signup.includes("recordPartnerStackSkip(session_id, 'non_icp_blocked')"));
+  /* Ordering: the block guard must sit ABOVE the domain and test-email
+     checks, so a blocked lead never even claims the domain. */
+  ok('MONEY: the block guard precedes the customer-key claim',
+     signup.indexOf('non_icp_blocked === true') < signup.indexOf("recordPartnerStackSkip(session_id, 'no_customer_key')"));
+
+  const sdr = between("app.get('/monitor/sdr'", 'const leads = result.rows;');
+  ok('SDR TIME: the SDR list excludes blocked leads', sdr.includes('l.non_icp_blocked IS NOT TRUE'));
+
+  const rec = between('async function checkRecoveryHealth', 'function safeCheck(id, fn)');
+  ok('HEALTH: the recovery row excludes blocked leads', rec.includes('l.non_icp_blocked IS NOT TRUE'));
+
+  /* THE AUDIT. Every SQL predicate on `disqualified` and every JS read of
+     it, each one either paired with a non_icp decision or listed here as
+     deliberately unpaired. If this count moves, a new guard was added and
+     nobody decided what it should do about a blocked lead. */
+  /* Comments stripped first -- the stage-ladder comment quotes two of these
+     expressions in prose, and a tripwire that counts prose moves when someone
+     rewords a comment. */
+  const codeOnly = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const sqlPreds = (codeOnly.match(/\b(l\.|pa\.|booked\.)?disqualified\s*(=\s*(true|false)|IS (NOT )?TRUE)/g) || []);
+  eq('the number of disqualified predicates is known', sqlPreds.length, 13);
+  /* Deliberately NOT paired, and why:
+       - the stage ladder and the metrics counters: a blocked lead is still a
+         lead and still belongs in a stage. The Blocked tab is its own surface.
+       - slackPartial: only ever called from the recovery cron, which already
+         excludes blocked leads, so it is unreachable for them. */
+  ok('stage ladder still counts blocked leads as leads',
+     src.includes("if (stage === 'completed')    conditions.push('l.booking_uid IS NULL AND l.disqualified IS NOT TRUE AND l.completed IS TRUE')")
+     && !between("if (stage === 'completed')", "if (stage === 'step1')").includes('non_icp'));
+  ok('slackPartial is reached only through the cron',
+     (src.match(/slackPartial\(/g) || []).length === 2);
+}
+
+/* ============================================================
    11. Recovery cron excludes blocked leads
    ============================================================ */
 {
