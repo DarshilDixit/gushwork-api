@@ -2479,6 +2479,11 @@ app.get('/monitor/metrics', async (req, res) => {
         FROM leads l
         WHERE l.email IS NOT NULL
           AND l.disqualified = false
+          /* The cron excludes blocked leads, so this card must too. It read 1
+             on 11 Sept for agent@allstate.com -- a lead the cron would never
+             email. A card that counts a population the cron will not act on
+             is not "roughly right", it is a work queue with a phantom in it. */
+          AND l.non_icp_blocked IS NOT TRUE
           AND l.booking_uid IS NULL
           AND l.loops_sent = false
           AND l.created_at < NOW() - INTERVAL '2 hours'
@@ -2496,6 +2501,10 @@ app.get('/monitor/metrics', async (req, res) => {
           WHERE completed = true
             AND booking_uid IS NULL
             AND disqualified = false
+            /* Matches /monitor/sdr, which this card is the count of. A blocked
+               lead is not an SDR target, so it must not be in the number that
+               tells an SDR how much work there is. */
+            AND non_icp_blocked IS NOT TRUE
             AND sell_to ILIKE 'B2B%'
             AND ${noBookingAnywhereSql('leads.email')}
           ORDER BY LOWER(email), created_at DESC
@@ -8264,6 +8273,12 @@ async function partnerRevenueGaps() {
        AND ps_customer_key IS NOT NULL
        AND booking_uid IS NOT NULL
        AND disqualified IS NOT TRUE
+    /* A blocked lead is a conversion we deliberately did NOT send, which is
+       the opposite of a revenue gap. Listing it here would put a permanent
+       non-payment in the one queue whose entries are all supposed to be
+       fixable -- the exact failure mode the "booked but no qualification"
+       version of this check was rejected for. */
+    AND non_icp_blocked IS NOT TRUE
      GROUP BY ps_customer_key
     HAVING COUNT(ps_qualified_sent_at) = 0
        AND MIN(CASE WHEN start_time ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'

@@ -463,24 +463,71 @@ const results7 = (async () => {
     ok(`MONEY: ${what} cannot send for a blocked lead`, seg.includes('non_icp_blocked'));
   }
 
-  /* THE AUDIT. Every SQL predicate on `disqualified` and every JS read of
-     it, each one either paired with a non_icp decision or listed here as
-     deliberately unpaired. If this count moves, a new guard was added and
-     nobody decided what it should do about a blocked lead. */
-  /* Comments stripped first -- the stage-ladder comment quotes two of these
-     expressions in prose, and a tripwire that counts prose moves when someone
-     rewords a comment. */
-  const codeOnly = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-  const sqlPreds = (codeOnly.match(/\b(l\.|pa\.|booked\.)?disqualified\s*(=\s*(true|false)|IS (NOT )?TRUE)/g) || []);
-  eq('the number of disqualified predicates is known', sqlPreds.length, 13);
-  /* Deliberately NOT paired, and why:
-       - the stage ladder and the metrics counters: a blocked lead is still a
-         lead and still belongs in a stage. The Blocked tab is its own surface.
-       - slackPartial: only ever called from the recovery cron, which already
-         excludes blocked leads, so it is unreachable for them. */
-  ok('stage ladder still counts blocked leads as leads',
-     src.includes("if (stage === 'completed')    conditions.push('l.booking_uid IS NULL AND l.disqualified IS NOT TRUE AND l.completed IS TRUE')")
-     && !between("if (stage === 'completed')", "if (stage === 'step1')").includes('non_icp'));
+  /* THE AUDIT -- AND IT IS A CHECK, NOT A COUNT.
+
+     The first version pinned the NUMBER of `disqualified` predicates at 13.
+     That number was correct and it let two real bugs through on 12 Sept:
+     the Overview's "Pending recovery" card and its "No booking yet" card
+     both counted blocked leads, because counting predicates says nothing
+     about whether each one was decided.
+
+     This version resolves every predicate to its enclosing route/function
+     and requires each to be EITHER guarded by a non_icp predicate in the
+     same query OR named below with a reason. A new guard cannot be added
+     without somebody deciding which. */
+  {
+    const noComments = src.replace(/\/\*[\s\S]*?\*\//g, (m) => ' '.repeat(m.length));
+    const re = /\b(l\.|pa\.|booked\.|leads\.)?disqualified\s*(=\s*(true|false)|IS (NOT )?TRUE)/g;
+
+    /* Deliberately unguarded, each with the reason it is correct. */
+    const DELIBERATE = {
+      '/monitor/metrics': 'the two disqualified COUNTERS -- they count disqualified leads, which is unrelated',
+      '/monitor/leads':   'the stage ladder (a blocked lead is still a lead and belongs in a stage) and prior_disqualified (per-email history)',
+    };
+
+    const sites = [];
+    let m;
+    while ((m = re.exec(noComments))) {
+      const before = noComments.slice(0, m.index);
+      const enc = [...before.matchAll(/(?:^app\.(?:get|post)\('([^']+)'|^(?:async )?function (\w+))/gm)].pop();
+      const name = enc ? (enc[1] || enc[2]) : '(top level)';
+      /* The enclosing QUERY, not a byte window: from the nearest template
+         literal opening before the predicate to the next one after it. */
+      const bt = String.fromCharCode(96);
+      const qStart = noComments.lastIndexOf(bt, m.index);
+      const qEnd = noComments.indexOf(bt, m.index);
+      const query = (qStart !== -1 && qEnd !== -1) ? noComments.slice(qStart, qEnd) : '';
+      sites.push({ name, guarded: /non_icp_blocked/.test(query) });
+    }
+
+    ok('audit: disqualified predicates were found at all', sites.length >= 10, String(sites.length));
+    const unresolved = sites.filter((x) => !x.guarded && !DELIBERATE[x.name]);
+    ok('audit: EVERY disqualified predicate is guarded or explicitly exempted',
+       unresolved.length === 0,
+       'undecided: ' + [...new Set(unresolved.map((x) => x.name))].join(', '));
+
+    /* The specific money/attention paths, named so a rename cannot silently
+       drop one out of the audit above. */
+    for (const fn of ['runPartnerStackSignup', 'runPartnerStackConversionRetry',
+                      'checkRecoveryHealth', 'partnerRevenueGaps']) {
+      /* Anchored on the DEFINITION, not the first mention -- these names
+         appear in comments long before they are declared. */
+      const at = src.indexOf('function ' + fn);
+      const seg = src.slice(at, at + 6000);
+      ok(`audit: ${fn} excludes blocked leads`, at !== -1 && /non_icp_blocked/.test(seg));
+    }
+    for (const route of ["app.get('/monitor/sdr'", "app.post('/cron/send-partials'"]) {
+      const seg = src.slice(src.indexOf(route), src.indexOf(route) + 6000);
+      ok(`audit: ${route.slice(9)} excludes blocked leads`, /non_icp_blocked IS NOT TRUE/.test(seg));
+    }
+    /* The two Overview cards that were wrong. */
+    const metrics = between("app.get('/monitor/metrics'", "app.get('/monitor/funnel'");
+    ok('audit: the Pending recovery card excludes blocked leads',
+       /pendingPartials[\s\S]{0,900}?non_icp_blocked IS NOT TRUE/.test(metrics));
+    ok('audit: the No booking yet card excludes blocked leads',
+       /noBooking[\s\S]{0,900}?non_icp_blocked IS NOT TRUE/.test(metrics));
+  }
+
   ok('slackPartial is reached only through the cron',
      (src.match(/slackPartial\(/g) || []).length === 2);
 }
