@@ -2549,7 +2549,6 @@ app.get('/monitor/metrics', async (req, res) => {
     const booked       = parseInt(t.booked) || 0;
     const disqualified = parseInt(t.disqualified) || 0;
     const nonIcpBlocked = parseInt(t.non_icp) || 0;
-    const peopleNonIcp  = parseInt(p.people_non_icp) || 0;
     const loopsSent    = parseInt(t.loops_sent) || 0;
     const completedNoBookingSessions = parseInt(t.completed_no_booking_sessions) || 0;
 
@@ -2558,6 +2557,16 @@ app.get('/monitor/metrics', async (req, res) => {
     const peopleCompleted    = parseInt(p.people_completed) || 0;
     const peopleBooked       = parseInt(p.people_booked) || 0;
     const peopleDisqualified = parseInt(p.people_disqualified) || 0;
+    /* Reads `p`, so it MUST live below `const p = people.rows[0]`. It was
+       first written up with the `t.` counters, which put it in the temporal
+       dead zone: `Cannot access 'p' before initialization` 500'd the route
+       and blanked the whole Overview tab in production.
+
+       node --check passes on it -- a TDZ violation is a runtime error, not a
+       syntax one -- and every assertion on this route reads source text, so
+       nothing in the suite could see it. tests/test-non-icp-routes.js §7 now
+       drives the route and asserts a 200. */
+    const peopleNonIcp = parseInt(p.people_non_icp) || 0;
 
     /* Ordered by volume, so aeo leads and a new product appears underneath
        rather than being buried. */
