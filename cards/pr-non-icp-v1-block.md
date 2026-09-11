@@ -566,41 +566,32 @@ moves, every real visitor runs the old file and **nothing in this repo will tell
 you.** The tests pass, Railway redeploys, and the block silently does not exist
 in the browser.
 
-### The SHA
+### The SHA, and the two tags — generated, not transcribed
 
-Take it **after the merge commit lands on `main`**, not from this branch:
+**Do not copy a SHA out of a document.** Run this on `main` *after* the merge
+lands and paste the two lines it prints straight into Webflow. A SHA written
+down by hand is a SHA that goes stale the moment anything else merges — which
+is how a handover ships half a fix.
 
 ```bash
-git checkout main && git pull && git rev-parse HEAD
+git checkout main && git pull --ff-only
+SHA=$(git rev-parse HEAD)
+printf '<script src="https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@%s/gushwork-form.js"></script>\n' "$SHA"
+printf '<script src="https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@%s/gushwork-form-popup.js"></script>\n' "$SHA"
 ```
 
-The full 40 characters, never a short SHA — short SHAs are ambiguous as the repo
-grows and a collision resolves to the wrong file rather than erroring.
+Three things that are not negotiable:
 
-**On this branch right now it is:**
+- **The full 40 characters.** Short SHAs work today but are ambiguous as the
+  repo grows, and a collision resolves to the wrong file rather than erroring.
+- **Both tags, same SHA**, even though a commit SHA names a snapshot of the
+  whole repo so an untouched file returns identical bytes. Pinning them together
+  is the only thing that records the pair was *tested* together.
+- **Never `@main`.** jsDelivr treats a SHA as immutable and caches it
+  permanently; `@main` is a mutable ref served best-effort that needs a cache
+  purge, and purges do not reliably take.
 
-```
-9a20abae494baf96beb80f6e0a54778d25afb611
-```
-
-If you merge with a merge commit, that is **not** the SHA to pin — re-run the
-command above on `main` afterwards.
-
-### The two script tags
-
-Webflow → Project Settings → Custom Code. Replace **both**, with the same SHA,
-even though only these two files changed — pinning them together is the only
-thing that records that the pair was *tested* together.
-
-```html
-<script src="https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@9a20abae494baf96beb80f6e0a54778d25afb611/gushwork-form.js"></script>
-```
-
-```html
-<script src="https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@9a20abae494baf96beb80f6e0a54778d25afb611/gushwork-form-popup.js"></script>
-```
-
-Then **republish**.
+Then **republish** in Webflow.
 
 ### Sweep every page — a Project-Settings republish does not reach a page-level tag
 
@@ -610,7 +601,7 @@ visitors, and a page with **no** `@sha` at all is worse than a stale one —
 jsDelivr then serves the default branch best-effort and it drifts on its own.
 
 ```bash
-SHA=9a20abae494baf96beb80f6e0a54778d25afb611
+SHA=$SHA
 for p in /demo /start /start-now /ai-demo /meeting-booked /careers \
          /consulting-lead-generation /manufacturing-lead-generation \
          /financial-services-lead-generation /lead-gen /seo-leads \
