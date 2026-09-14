@@ -411,7 +411,7 @@ function liftClientJs(startMarker, endMarker) {
     return { checkPartialHealth, checkSubmitHealth, checkApolloHealth, checkBookingHealth,
              checkCronHealth, checkAwsHealth, checkRecoveryHealth,
              evaluateHealthAlerts, runHealthChecks, withTimeout, fmtAge,
-             HEALTH_SEVERITY, HEALTH_MIN_SAMPLE, HEALTH_SUBMIT_MIN_STEP1,
+             HEALTH_SEVERITY, HEALTH_ALERT_META, HEALTH_MIN_SAMPLE, HEALTH_SUBMIT_MIN_STEP1,
              HEALTH_BOOKING_MIN_COMPLETED, HEALTH_RECOVERY_STUCK_H, HEALTH_AWS_TIMEOUT_MS };`
   ))(
     null, null, '(bot|crawl)', 3 * 60 * 60 * 1000,
@@ -582,8 +582,17 @@ function liftClientJs(startMarker, endMarker) {
     ok('health/recovery: mirrors the cron predicate exactly',
        /disqualified = false/.test(recFn) && /loops_sent = false/.test(recFn)
        && /booked\.booked_at >= l\.created_at/.test(recFn), recFn);
-    ok('health/recovery: does NOT widen the cron predicate to IS NOT TRUE',
-       !/IS NOT TRUE/.test(recFn));
+    /* NARROWED, 14 Sept 2026. This read `!/IS NOT TRUE/` against the whole
+       function, which was right when disqualified was the only flag in it.
+       PR #62 then added `non_icp_blocked IS NOT TRUE` -- correctly, because
+       the cron excludes blocked leads and this row must count the same
+       population -- and the assertion has been failing on main ever since.
+       The intent was never "no IS NOT TRUE anywhere": it was "do not widen
+       the DISQUALIFIED predicate", because widening that one makes a row
+       the cron never selects sit red here forever. That is what it asks
+       now. */
+    ok('health/recovery: does NOT widen the disqualified predicate to IS NOT TRUE',
+       !/disqualified IS NOT TRUE/.test(recFn) && /disqualified = false/.test(recFn), recFn);
     ok('health/recovery: stuck is measured past the cron staleness window, not at 2h',
        H.HEALTH_RECOVERY_STUCK_H === 5);
 
@@ -702,8 +711,17 @@ function liftClientJs(startMarker, endMarker) {
 
     eq('health/ui: grey renders grey, never the green class', CB.HCLS.insufficient_data, 'bx');
     eq('health/ui: red renders red', CB.HCLS.red, 'br');
-    eq('health/ui: every check id maps to a row', Object.keys(CB.HIDS).sort(),
-       ['apollo', 'aws', 'booking', 'cron', 'partial', 'partnerstack', 'recovery', 'submit']);
+    /* DERIVED FROM BOTH SIDES, not from a literal. The literal version of
+       this went stale the moment a ninth check was added: the server grew
+       an id, the client grew a row, and the assertion failed for neither
+       reason -- it failed because somebody had typed eight names into a
+       test. CLAUDE.md's rule for this pair is that a check with no HIDS
+       entry renders nowhere and a row id with no check paints "No result",
+       so the only assertion worth having is that the two SETS are equal. */
+    eq('health/ui: every check id maps to a row',
+       Object.keys(CB.HIDS).sort(), Object.keys(H.HEALTH_SEVERITY).sort());
+    eq('health/ui: every check id has alert copy',
+       Object.keys(H.HEALTH_ALERT_META).sort(), Object.keys(H.HEALTH_SEVERITY).sort());
 
     CB.paintHealth({ checks: {
       partial: { state: 'green', text: 'ok', detail: 'why' },

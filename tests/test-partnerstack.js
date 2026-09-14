@@ -1391,8 +1391,17 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     /* Scoped to the poll function ONLY. Slicing to the scheduler constant ran
        through refreshPartnerDomainSfState's own definition, so the name was
        always present and the assertion could never fail. */
-    const poll = src.slice(src.indexOf('async function runPartnerStackQualificationPoll'),
-                           src.indexOf('async function sendQualificationForDomain'));
+    /* SLICED TO THE FUNCTION'S OWN CLOSING BRACE, not to whatever function
+       happens to be declared next. This boundary has now gone stale TWICE:
+       first it ran to the scheduler constant and swept up
+       refreshPartnerDomainSfState's definition, and then, once
+       qualificationTargetCheck was inserted between the poll and
+       sendQualificationForDomain, it swept up THAT -- whose body contains an
+       `await pool.query`, so the assertion below started failing on main for
+       a function it was never about. A neighbour-name boundary is only ever
+       correct until somebody adds a neighbour. */
+    const pollStart = src.indexOf('async function runPartnerStackQualificationPoll');
+    const poll = src.slice(pollStart, src.indexOf('\n}\n', pollStart) + 3);
     ok('sfC: the refresh is NOT chained onto the qualification poll',
        !/refreshPartnerDomainSfState/.test(poll));
     /* The pattern itself, so it cannot come back: nothing meaningful may sit
@@ -3619,7 +3628,11 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     /* Pinned to the CURRENT version on purpose: this is what catches a form
        file shipped without its version bumped, which is how the Webflow re-pin
        silently ships half a fix. Bump both when you bump the files. */
-    ok(`form(${name}): version banner says v5.10.0`, /Form initialised v5\.10\.0/.test(f));
+    /* v5.11.0 since 11 Sept. This assertion sat on v5.10.0 and has been
+       failing on main ever since that PR bumped both form files and not the
+       test -- which is precisely the shape the comment above describes,
+       arriving as a red bar nobody read rather than as a caught bug. */
+    ok(`form(${name}): version banner says v5.11.0`, /Form initialised v5\.11\.0/.test(f));
   }
 
   console.log('');
