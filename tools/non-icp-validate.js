@@ -118,8 +118,14 @@ async function scrape() {
   console.error('scrape status:', JSON.stringify(by));
 }
 
-/* ── Phase 2: classify from the cached page, one model at a time ──── */
-async function classify(modelId) {
+/* ── Phase 2: classify from the cached page, one model at a time ────
+   TAKES AN OPTIONAL GROUP FILTER. G1, G2 and G3 carry the whole of the
+   evidence -- the proven false positives, the probable ones, and the recall
+   check against the mechanism we already trust. G4 has no label and yields
+   only a count, so it is run last and its absence would not change a
+   decision. Ordering the work that way means a run that has to be cut short
+   is cut short in the only place where it costs nothing. */
+async function classify(modelId, onlyGroups) {
   const pages = new Map(jsonl(SP + '/pages.jsonl').map((r) => [r.domain, r]));
   const M = liftClassifier(modelId);
   /* THE REBIND. Everything else in nonIcpClassifyDomain is production
@@ -132,10 +138,21 @@ async function classify(modelId) {
   });
   const outFile = `${SP}/verdicts.${modelId}.jsonl`;
   const seen = new Set(jsonl(outFile).map((r) => r.domain));
-  const todo = [...pages.keys()].filter((d) => !seen.has(d));
-  console.error(`${modelId}: classifying ${todo.length} of ${pages.size}`);
+  let keys = [...pages.keys()];
+  if (onlyGroups) {
+    const { groups } = JSON.parse(fs.readFileSync(SP + '/groups.json', 'utf8'));
+    const want = new Set();
+    for (const g of onlyGroups) for (const r of groups[g]) want.add(r.key);
+    keys = keys.filter((d) => want.has(d));
+  }
+  /* SCRAPEABLE DOMAINS FIRST. An unreadable page never reaches the API, so
+     sorting them last means the expensive work starts immediately and a
+     progress number means something. */
+  keys.sort((a, b) => (pages.get(b).status === 'ok') - (pages.get(a).status === 'ok'));
+  const todo = keys.filter((d) => !seen.has(d));
+  console.error(`${modelId}: classifying ${todo.length}${onlyGroups ? ' in ' + onlyGroups.join('+') : ''} of ${pages.size}`);
   const fh = fs.openSync(outFile, 'a');
-  await pool(todo, 10, async (domain) => {
+  await pool(todo, Number(process.env.CONCURRENCY || 10), async (domain) => {
     const v = await M.nonIcpClassifyDomain(domain);
     fs.writeSync(fh, JSON.stringify(v) + '\n');
     return true;
@@ -143,50 +160,189 @@ async function classify(modelId) {
   fs.closeSync(fh);
 }
 
-/* ── Phase 3: score ──────────────────────────────────────────────── */
+/* ── Phase 3: score ──────────────────────────────────────────────
+   PRECISION AND THE ACTUAL ROWS. A percentage is not reviewable -- the
+   whole point of scoring against history rather than running a shadow mode
+   is that somebody reads the false positives and decides. So every flag in
+   the two groups that matter is printed in full.
+
+   G1 and G2 are the labels. G3 measures recall against the mechanism we
+   already trust. G4 has no label at all and is reported as a count only,
+   because a flag there costs nothing and proves nothing. */
 function score() {
-  const { groups } = JSON.parse(fs.readFileSync(SP + '/groups.json', 'utf8'));
+  const { groups, g3all } = JSON.parse(fs.readFileSync(SP + '/groups.json', 'utf8'));
   const byKey = new Map();
   for (const g of ['G1', 'G2', 'G3', 'G4']) for (const r of groups[g]) byKey.set(r.key, r);
+  const listSet = new Set(g3all);
 
-  const report = { models: {} };
+  /* THE CUSTOMER BYPASS, AS PRODUCTION ACTUALLY COMPUTES IT.
+
+     Scoring the classifier alone overstates the risk, and by a lot. A flag
+     is not a block: nonIcpVerdict checks the warehouse customer tables
+     BEFORE blocking, and that check reads three tables where the G1 label
+     here was built from one. So every flag is scored twice — once as the
+     model saw it, and once as the system would have acted on it.
+
+     Both numbers are reported on purpose. The bypass FAILS OPEN on a
+     warehouse timeout, so the classifier-level number is the real exposure
+     during an outage, and quoting only the system-level one would hide
+     that. */
+  const bypass = new Set(fs.existsSync(SP + '/bypass.json')
+    ? JSON.parse(fs.readFileSync(SP + '/bypass.json', 'utf8')) : []);
+
+  const L = [];
+  const say = (s = '') => { L.push(s); console.log(s); };
+
+  const pages = new Map(jsonl(SP + '/pages.jsonl').map((r) => [r.domain, r]));
+
+  say('# Non-ICP model layer — validation against history');
+  say('');
+  say(`Domains scored: **${byKey.size}**. Page scraped ONCE and replayed to all three models, so the`);
+  say('comparison is on identical bytes.');
+  say('');
+  const ps = {};
+  for (const p of pages.values()) ps[p.status] = (ps[p.status] || 0) + 1;
+  say('| scrape | domains |');
+  say('|---|---|');
+  for (const [k, v] of Object.entries(ps).sort((a, b) => b[1] - a[1])) say(`| ${k} | ${v} |`);
+  say('');
+  say(`**${ps.ok || 0} of ${pages.size} domains could be read at all** — ${Math.round(100 * (ps.ok || 0) / pages.size)}%.`);
+  say('Everything else gets no verdict and blocks nobody.');
+  say('');
+
+  const summary = [];
+  const detail = {};
   for (const m of MODELS) {
     const rows = jsonl(`${SP}/verdicts.${m}.jsonl`);
     if (!rows.length) continue;
-    const g = { G1: [], G2: [], G3: [], G4: [] };
-    const counts = { G1: 0, G2: 0, G3: 0, G4: 0 };
-    let scraped = 0, errored = 0;
+    const flag = { G1: [], G2: [], G3: [], G4: [] };
+    const cnt  = { G1: 0, G2: 0, G3: 0, G4: 0 };
+    const seen = { G1: 0, G2: 0, G3: 0, G4: 0 };   // domains that got a real verdict
+    let classified = 0;
+    const listCaught = [], listMissed = [];
     for (const v of rows) {
       const rec = byKey.get(v.domain);
       if (!rec) continue;
-      counts[rec.group]++;
-      if (v.source === 'llm') scraped++; else errored++;
-      if (v.blocking === true) g[rec.group].push({ ...v, rec });
+      cnt[rec.group]++;
+      if (v.source === 'llm') { classified++; seen[rec.group]++; }
+      if (v.blocking === true) flag[rec.group].push({ ...v, rec, bypassed: bypass.has(v.domain) });
+      if (listSet.has(v.domain)) (v.blocking === true ? listCaught : listMissed).push(v);
     }
-    report.models[m] = {
-      total: rows.length, classified: scraped, no_verdict: errored,
-      counts,
-      flagged: { G1: g.G1.length, G2: g.G2.length, G3: g.G3.length, G4: g.G4.length },
-      rows: g,
-    };
+    const blocks = (g) => flag[g].filter((x) => !x.bypassed).length;
+    summary.push({ m, classified, total: rows.length, cnt, seen,
+                   flagged: { G1: flag.G1.length, G2: flag.G2.length, G3: flag.G3.length, G4: flag.G4.length },
+                   blocked: { G1: blocks('G1'), G2: blocks('G2'), G3: blocks('G3'), G4: blocks('G4') },
+                   listCaught: listCaught.length, listMissed: listMissed.length });
+    detail[m] = { flag, listCaught, listMissed };
   }
-  fs.writeFileSync(SP + '/report.json', JSON.stringify(report, null, 1));
 
-  for (const [m, r] of Object.entries(report.models)) {
-    console.log('\n══════ ' + m + ' ══════');
-    console.log(`classified ${r.classified} / ${r.total}  (no verdict: ${r.no_verdict})`);
-    for (const grp of ['G1', 'G2', 'G3', 'G4']) {
-      const label = { G1: 'PAYING CUSTOMERS', G2: 'booked and showed', G3: 'domain-list matches', G4: 'everything else' }[grp];
-      console.log(`  ${grp} ${label.padEnd(22)} ${String(r.flagged[grp]).padStart(4)} flagged of ${r.counts[grp]}`);
-    }
+  say('## The headline');
+  say('');
+  say('**What the MODEL flagged** — before the customer bypass runs.');
+  say('');
+  say('| model | classified | **G1** (paying customers) | G2 (booked+showed) | G3 (list matches) | G4 (everything else) |');
+  say('|---|---|---|---|---|---|');
+  for (const s of summary) {
+    say(`| ${s.m} | ${s.classified} | **${s.flagged.G1}** of ${s.seen.G1} | ${s.flagged.G2} of ${s.seen.G2} | ${s.flagged.G3} of ${s.seen.G3} | ${s.flagged.G4} of ${s.seen.G4} |`);
   }
-  console.log('\nfull rows in ' + SP + '/report.json');
+  say('');
+  say('**What would actually have been BLOCKED** — after the known-customer bypass, which reads the');
+  say(`same three warehouse tables production reads (${bypass.size} domains).`);
+  say('');
+  say('| model | **G1 blocked** | G2 blocked | G3 blocked | G4 blocked |');
+  say('|---|---|---|---|---|');
+  for (const s of summary) {
+    say(`| ${s.m} | **${s.blocked.G1}** | ${s.blocked.G2} | ${s.blocked.G3} | ${s.blocked.G4} |`);
+  }
+  say('');
+  say('G1 is the gold standard: a flag there is a **proven** false positive, because the company paid us.');
+  say('The bypass **fails open** on a warehouse timeout, so the first table is the real exposure during');
+  say('an outage and the second is the exposure on a normal day. Neither replaces the other.');
+  say('');
+
+  say('## Recall against the mechanism we already trust');
+  say('');
+  say(`The brand-domain list matches **${listSet.size}** domains in our history. How many does the model`);
+  say('find on its own?');
+  say('');
+  say('| model | caught | missed | recall |');
+  say('|---|---|---|---|');
+  for (const s of summary) {
+    const t = s.listCaught + s.listMissed;
+    say(`| ${s.m} | ${s.listCaught} | ${s.listMissed} | ${t ? Math.round(100 * s.listCaught / t) : 0}% |`);
+  }
+  say('');
+
+  for (const s of summary) {
+    const d = detail[s.m];
+    say(`## ${s.m} — the rows`);
+    say('');
+    for (const [grp, label] of [['G1', 'PAYING CUSTOMERS — every row here is a proven false positive'],
+                                ['G2', 'BOOKED AND SHOWED UP — read these, most are probably wrong']]) {
+      say(`### ${grp}: ${label}`);
+      say('');
+      if (!d.flag[grp].length) { say('_None._'); say(''); continue; }
+      say('| domain | judged | conf | company | emails | evidence |');
+      say('|---|---|---|---|---|---|');
+      for (const v of d.flag[grp].sort((a, b) => (b.confidence || 0) - (a.confidence || 0))) {
+        const mark = v.bypassed ? ' _(bypassed — known customer)_' : '';
+        say(`| \`${v.domain}\`${mark} | ${v.business_type} | ${v.confidence} | ${(v.rec.companies || []).join(' / ') || '—'} | ${(v.rec.emails || []).slice(0, 2).join(' ')} | ${String(v.evidence_quote || '').replace(/\|/g, '/').slice(0, 110)} |`);
+      }
+      say('');
+    }
+    /* The misses are where the brand list is load-bearing. */
+    say('### Domain-list matches the model did NOT flag');
+    say('');
+    if (!d.listMissed.length) { say('_None._'); }
+    else {
+      say('| domain | why no flag | judged |');
+      say('|---|---|---|');
+      for (const v of d.listMissed) {
+        const why = v.source === 'llm' ? 'read the site, judged otherwise' : (v.scrape_status || v.error || v.source);
+        say(`| \`${v.domain}\` | ${why} | ${v.business_type || '—'}${v.confidence != null ? ' @' + v.confidence : ''} |`);
+      }
+    }
+    say('');
+  }
+
+  /* Where the three models DISAGREE is the most useful page in the report:
+     it is the shortlist a human has to arbitrate, and its size is the real
+     measure of how non-deterministic this layer is in practice. */
+  if (summary.length > 1) {
+    const all = {};
+    for (const m of MODELS) {
+      for (const v of jsonl(`${SP}/verdicts.${m}.jsonl`)) {
+        (all[v.domain] = all[v.domain] || {})[m] = v;
+      }
+    }
+    const disagree = Object.entries(all).filter(([, byM]) => {
+      const vals = MODELS.map((m) => byM[m] && byM[m].blocking === true);
+      return vals.some((x) => x === true) && vals.some((x) => x === false);
+    });
+    say('## Where the three models disagree about BLOCKING');
+    say('');
+    say(`**${disagree.length} domains.** This is the practical size of the non-determinism, measured on`);
+    say('identical input rather than argued about.');
+    say('');
+    say('| domain | ' + MODELS.join(' | ') + ' | group |');
+    say('|---|---|---|---|---|');
+    for (const [dom, byM] of disagree.slice(0, 80)) {
+      const rec = byKey.get(dom);
+      say(`| \`${dom}\` | ` + MODELS.map((m) => byM[m] ? `${byM[m].blocking ? '**FLAG**' : 'keep'} ${byM[m].business_type || ''}` : '—').join(' | ') + ` | ${rec ? rec.group : '?'} |`);
+    }
+    if (disagree.length > 80) say(`\n_…and ${disagree.length - 80} more._`);
+    say('');
+  }
+
+  fs.writeFileSync(SP + '/report.md', L.join('\n'));
+  fs.writeFileSync(SP + '/report.json', JSON.stringify({ summary, detail }, null, 1));
+  console.error('\nwritten: ' + SP + '/report.md');
 }
 
 const cmd = process.argv[2];
 (async () => {
   if (cmd === 'scrape')        await scrape();
-  else if (cmd === 'classify') await classify(process.argv[3]);
+  else if (cmd === 'classify') await classify(process.argv[3], process.argv[4] ? process.argv[4].split(',') : null);
   else if (cmd === 'score')    score();
   else { console.error('usage: scrape | classify <model> | score'); process.exit(1); }
 })().catch((err) => { console.error(err); process.exit(1); });
