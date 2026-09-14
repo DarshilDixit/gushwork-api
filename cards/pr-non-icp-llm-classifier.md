@@ -603,3 +603,156 @@ The brand-affiliated 27 are the recognisable ones: State Farm agents (×6),
 Coldwell Banker (×3), Berkshire Hathaway (×2), Compass, Century 21, eXp, RE/MAX,
 Sotheby's, Howard Hanna, McGraw, HealthMarkets (×2), Bankers Life, GEICO, Globe
 Life, New York Life, Farmers.
+
+---
+
+# ADDENDUM 2, 15 Sept 2026 — the retention check. It cannot be run.
+
+Swapnil's 11 Sept reasoning, supplied after Addendum 1: *"they will churn within
+a few months because they won't see value."* So closing was never his objection —
+he knows they buy. The claim is retention, and the Non-ICP doc says the same
+thing: rules 5 and 6 are built on retention and refund rate, and the doc states
+outright that the flagged group may close perfectly well.
+
+That makes Addendum 1's **$5,000/month figure a claim about revenue that is
+still there, and I did not check that it is. Corrected below.**
+
+## 1. Three of the four things asked for do not exist
+
+| asked for | available? | why |
+|---|---|---|
+| Current status — active / churned / refunded / paused | **partially** | see §2 |
+| Churn date | **no** | no populated `End_Date`, no churn-date column anywhere, and Salesforce keeps **no field history** on `Customer_Status__c` |
+| Months retained before churning | **no** | follows from the above |
+| Total revenue actually collected | **no** | see below |
+| Refunds | **no** | same source, same problem |
+
+**On collected revenue.** The warehouse does hold invoice-level Stripe data —
+`gist.gist_invoicesstripedata`, 3,915 invoices, $56.5M collected. **It is not
+ours.** Its two `source_account` values are *Regents* and *Delfin*, it ends
+**2025-09-22**, and it matches **25 of 469** rows in `customer_contract_terms`
+by `stripe_customer_id` and **3** by email. The $56.5M against contracts
+averaging $835/month is the giveaway. Same for refunds: 29 rows on Regents, 1 on
+Delfin, wrong entity and wrong period.
+
+`public.subscriptions` has **zero rows with a future billing date** (max
+2026-06-19), so it is stale too. `gist_accountsmaster` is stale to Dec 2025 and
+contains **none** of the 28. `biz_health_Customer_Master_` is 49 rows ending
+Dec 2025.
+
+CLAUDE.md's line that *"nothing in `gw_prod` can date a churn"* is still
+correct. It named three tables; the reason is broader — **there is no ingestion
+of our own billing into this warehouse at all.**
+
+## 2. The one real source, and where it stops
+
+**Salesforce `Account.Customer_Status__c`** is the only genuine retention state:
+Active 240, Post-Onboarding Drop Off 16, Pre-Onboarding Drop Off 17, Churned 1,
+To Be Onboarded 15.
+
+**It is maintained through April 2026, partially in May (29 of 110 accounts),
+and not at all from June onward:**
+
+| onboarding month | accounts | with a status |
+|---|---|---|
+| 2026-03 | 79 | 79 |
+| 2026-04 | 75 | 75 |
+| 2026-05 | 110 | **29** |
+| 2026-06 | 155 | **0** |
+| 2026-07 | 115 | **0** |
+| 2026-08 | 50 | **0** |
+
+**Every customer Addendum 1's argument rests on sits in the unmaintained
+window.** Of the eight RE/insurance customers who came through the form, exactly
+**one** (`nomadgroup.io`, onboarded 27 Apr) has a status. The other seven — the
+ones carrying the $5,000 — have none, and never will unless somebody backfills
+the field.
+
+This is a CS process gap, not an engineering one. Nothing in this repo writes
+that field.
+
+## 3. What the measurable slice says — and why it decides nothing
+
+Every account with a decided status, age-matched by construction:
+
+| | n | active | dropped | drop-off rate |
+|---|---|---|---|---|
+| **RE/insurance** | **7** | 7 | **0** | **0.0%** |
+| everyone else | 255 | 233 | 22 | **8.6%** |
+
+The seven: `truecostgroup.us`, `aloriinternationalholdings.com`,
+`somainsure.com`, `dealerre.com`, `warranty-re.com`, `nomadgroup.io`,
+`acsbonding.com`. All Active, onboarded Jan–May 2026, so 4–8 months in.
+
+**This is not evidence that they retain better. It is not evidence of
+anything.** At the base rate, the chance of seeing zero drop-offs in seven
+accounts is **53%** — zero is the single most likely outcome even if retention
+is identical. The 95% interval on 0/7 runs from **0% to 34.8%**, against a base
+of 8.6%. It cannot distinguish "much better" from "four times worse."
+
+To have 84% power to see even one drop-off at the base rate you would need
+**n=20**. We have 7.
+
+## 4. Contract structure — available, and it points the other way
+
+This one is fully measurable across all 469 contracts:
+
+| | n | avg monthly | avg lock-in | avg upfront |
+|---|---|---|---|---|
+| **RE/insurance** | 14 | **$869** | **3.21 months** | **$651** |
+| everyone else | 462 | $835 | 2.73 months | $276 |
+
+They sign slightly larger contracts, slightly longer lock-ins, and **more than
+double the upfront payment**. In the Jan–Apr cohort the gap is wider: $1,040/mo
+against $719. That is not the shape of a group expected to leave in a few
+months — but it is a proxy for commitment at signing, not for retention, and
+n=14.
+
+## 5. Correcting Addendum 1
+
+**"$5,000/month of MRR would have been turned away" overstated what I checked.**
+What is actually supportable:
+
+> Five companies with **$5,000/month of contracted MRR at signature**, all
+> reading `Active` in a `customer_contract_terms` snapshot **loaded 13 July
+> 2026** — between two weeks and two and a half months after they onboarded.
+> There is no data after 13 July. Whether that revenue survived is unknown.
+
+The direction of the argument stands: the bypass cannot protect a first-time
+buyer, and these five were flagged at a moment when they were not yet customers.
+The **size** of it does not.
+
+## 6. The part that matters most: the test cannot be run yet
+
+Even if `Customer_Status__c` were backfilled tomorrow, **the answer would still
+not exist.** The eight form-arriving RE/insurance customers onboarded between
+**19 May and 16 July 2026** — they are two to four months old. Swapnil's claim is
+that this group churns *within a few months*. The cohort has not aged past the
+window his claim is about.
+
+So the honest position on both sides:
+
+- **Swapnil's claim is not falsified.** Nothing here contradicts it.
+- **Swapnil's claim is not supported either**, and neither is the Non-ICP doc's
+  retention-and-refund premise. There is no refund data and no churn dating in
+  this warehouse at all, so the doc's stated basis has never been measured here.
+- **My Addendum 1 argument is weaker than I presented it**, for the reason he
+  identified.
+
+**No recommendation, per the instruction, because the numbers do not exist.**
+
+### What would make it answerable, in order of cost
+
+1. **Backfill `Customer_Status__c` for June 2026 onward.** No engineering. It is
+   the only field anywhere that carries this, and 320+ accounts are missing it.
+2. **Add a churn DATE and turn on field history** for that field. Without a
+   date, "months retained" is permanently uncomputable even once status exists.
+3. **Ingest our own Stripe** into the warehouse. Collected revenue and refunds —
+   the doc's actual stated basis for rules 5 and 6 — cannot be measured until
+   this exists.
+4. **Then wait.** The earliest honest read on the May–July 2026 cohort is around
+   **December 2026 to March 2027**.
+
+Until at least (1), this decision is being made on Swapnil's judgement rather
+than on a measurement, which is a legitimate way to make it — it just should not
+be described as evidence-backed in either direction.
