@@ -43,7 +43,7 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* Scenario state, reset between runs. */
-const S = { fetches: [], slackPayloads: [], leadRow: null, writes: [], psBlocked: false };
+const S = { fetches: [], slackPayloads: [], leadRow: null, writes: [], psBlocked: false, verdict: null };
 
 /* ── stub pg ──────────────────────────────────────────────────────
    Both pools (Railway and the AWS warehouse) come through here.
@@ -86,6 +86,13 @@ function stubQuery(q, params) {
       prev_booked: false, step_reached: 2,
     }], rowCount: 1 };
   }
+  /* The model layer's verdict cache. S.verdict is the row the classifier
+     would have written; null means a cold cache, which must block nobody. */
+  if (/^SELECT domain, business_type, blocking/.test(flat)) {
+    const v = S.verdict && S.verdict.domain === (params || [])[0] ? [S.verdict] : [];
+    return { rows: v, rowCount: v.length };
+  }
+  if (/^INSERT INTO non_icp_domain_verdicts/.test(flat)) return { rows: [], rowCount: 1 };
   /* What rejectBookingIfNonIcp reads. */
   if (/^SELECT email, company, website, phone, non_icp_blocked, non_icp_reason FROM leads/.test(flat)) {
     return { rows: S.leadRow ? [S.leadRow] : [], rowCount: S.leadRow ? 1 : 0 };
@@ -153,6 +160,13 @@ Object.assign(process.env, {
   AWS_PG_HOST: 'stub', AWS_PG_PORT: '5432', AWS_PG_DATABASE: 'stub',
   AWS_PG_USER: 'stub', AWS_PG_PASSWORD: 'stub',
   NON_ICP_BLOCK: 'true',
+  /* The model layer, fully on. Everything below that exercises the LLM
+     path is therefore driving the SAME configuration production runs,
+     not a source assertion about it. */
+  NON_ICP_LLM_ENABLED: 'true',
+  NON_ICP_LLM_META:    'true',
+  NON_ICP_LLM_BLOCK:   'true',
+  ANTHROPIC_API_KEY:   'sk-stub',
   SLACK_WEBHOOK_URL: 'https://hooks.slack.com/services/STUB',
   SLACK_ALERTS_WEBHOOK_URL: 'https://hooks.slack.com/services/STUB-ALERTS',
   SF_CLIENT_ID: 'stub', SF_CLIENT_SECRET: 'stub', SF_REFRESH_TOKEN: 'stub',
@@ -181,7 +195,7 @@ const post = async (p, body) => {
   let j = null; try { j = await r.json(); } catch (_) {}
   return { status: r.status, body: j };
 };
-const reset = () => { S.fetches = []; S.slackPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; };
+const reset = () => { S.fetches = []; S.slackPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; };
 const metaFired      = () => S.fetches.some((u) => /graph\.facebook\.com/.test(u));
 const salesforceHit  = () => S.fetches.some((u) => /\/sobjects\//.test(u));
 const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') || true);
@@ -680,6 +694,182 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
       ok('dashboard: leadRowsHtml renders a row', !rowsErr && rowsHtml.includes('<tr'), rowsErr && rowsErr.message);
       ok('dashboard: a blocked row is marked in the rendered HTML', /kw\.com/.test(rowsHtml));
     }
+  }
+
+  /* ========================================================
+     THE MODEL PATH, DRIVEN. Gate 3.
+
+     Everything above exercises the brand-domain list. This section
+     proves the LLM path reaches EXACTLY the same enforcement -- the
+     redirect, the refused booking, and every Meta call site -- using a
+     domain no list could ever match.
+     ======================================================== */
+  const VROW = (o = {}) => ({ domain: 'garyrockwellinsurance.test', business_type: 'insurance',
+    blocking: true, confidence: 0.95, evidence_quote: 'independent insurance agency serving Ohio',
+    reason: 'independent agency', source: 'llm', model_id: 'claude-opus-5',
+    prompt_version: 'v1-2026-09-14', scrape_status: 'ok', error: null,
+    checked_at: new Date().toISOString(), ...o });
+
+  {
+    reset();
+    S.verdict = VROW();
+    const r = await post('/non-icp-check', { email: 'gary@garyrockwellinsurance.test', website: 'garyrockwellinsurance.test' });
+    ok('LLM: /non-icp-check blocks on a model verdict alone', r.body && r.body.blocked === true, JSON.stringify(r.body));
+    ok('LLM: …and names the domain it judged', r.body && r.body.matched_domain === 'garyrockwellinsurance.test');
+    /* The control that matters: the same domain with a COLD cache must
+       not block. Otherwise the assertion above could be passing on the
+       brand list or on some unrelated default. */
+    reset();
+    const cold = await post('/non-icp-check', { email: 'gary@garyrockwellinsurance.test', website: 'garyrockwellinsurance.test' });
+    ok('LLM: a cold cache blocks nobody', cold.body && cold.body.blocked === false, JSON.stringify(cold.body));
+  }
+
+  {
+    reset();
+    S.verdict = VROW();
+    await post('/partial', { session_id: '00000000-0000-4000-8000-0000000000a1',
+      email: 'gary@garyrockwellinsurance.test', website: 'garyrockwellinsurance.test',
+      sell_to: 'B2B', step_reached: 1, page_url: 'https://www.gushwork.ai/demo' });
+    await sleep(400);
+    const ins = S.writes.find((w) => /INSERT INTO leads \(/.test(w.flat));
+    const np = ins ? ins.params.slice(-5) : [];
+    ok('LLM/partial: stamped non_icp_blocked', np[0] === true, String(np[0]));
+    ok('LLM/partial: source says llm, not domain_list', np[2] === 'llm', String(np[2]));
+    ok('LLM/partial: stamped the model flag', np[4] === true, String(np[4]));
+    ok('LLM/partial: StartTrial did NOT fire', !metaFired(),
+       S.fetches.filter((u) => /facebook/.test(u)).join(','));
+  }
+
+  {
+    reset();
+    S.verdict = VROW();
+    const r = await post('/submit', { session_id: '00000000-0000-4000-8000-0000000000a2',
+      email: 'gary@garyrockwellinsurance.test', website: 'garyrockwellinsurance.test',
+      first_name: 'Gary', last_name: 'Rockwell', company: 'Gary Rockwell Insurance',
+      phone: '+15551234567', sell_to: 'B2B', page_url: 'https://www.gushwork.ai/demo' });
+    await sleep(700);
+    /* THE REDIRECT. This is the field the form reads to send them to
+       /thank-you instead of rendering the calendar. */
+    ok('LLM/submit: response tells the form to redirect', r.body && r.body.non_icp_blocked === true, JSON.stringify(r.body));
+    ok('LLM/submit: response names the judged domain', r.body && r.body.non_icp_reason === 'garyrockwellinsurance.test');
+    ok('LLM/submit: Meta Lead did NOT fire', !metaFired(),
+       S.fetches.filter((u) => /facebook/.test(u)).join(','));
+    ok('LLM/submit: Salesforce was NOT called', !salesforceHit(),
+       S.fetches.filter((u) => /sobjects/.test(u)).join(','));
+    const post0 = S.slackPayloads[0] || {};
+    const txt = JSON.stringify(post0);
+    ok('LLM/submit: it is the BLOCKED message, not the normal lead post',
+       /Lead Blocked/.test(txt) && !/Lead Form Completed/.test(txt), txt.slice(0, 160));
+    /* The three things that make a model block auditable in Slack. */
+    ok('LLM/slack: carries the business type', /Insurance/i.test(txt), txt.slice(0, 200));
+    ok('LLM/slack: carries the confidence', /95%/.test(txt), txt.slice(0, 200));
+    ok('LLM/slack: carries the evidence quote', /independent insurance agency serving Ohio/.test(txt));
+    ok('LLM/slack: names the model and prompt version', /claude-opus-5/.test(txt) && /v1-2026-09-14/.test(txt));
+    ok('LLM/slack: points at the RIGHT off switch', /NON_ICP_LLM_BLOCK=false/.test(txt));
+    /* THE MONEY PATH. An LLM block sets non_icp_blocked, which is the column
+       runPartnerStackSignup already guards on -- but "already guards on" is
+       exactly the assumption that cost a real conversion on 11 Sept. Driven. */
+    ok('LLM/submit: NO PartnerStack conversion was sent',
+       !S.fetches.some((u) => /partnerlinks\.io/.test(u)),
+       S.fetches.filter((u) => /partnerlinks/.test(u)).join(','));
+  }
+
+  /* All three booking routes must REFUSE, not merely suppress Schedule.
+     A suppressed Schedule event still leaves a real slot on a real AE's
+     calendar. Each route is asserted on ITS OWN refusal shape -- a
+     status-or-status check would pass for almost any response. */
+  const LEADROW = () => ({ email: 'gary@garyrockwellinsurance.test', company: 'Gary Rockwell Insurance',
+    website: 'garyrockwellinsurance.test', phone: '+15551234567',
+    non_icp_blocked: true, non_icp_reason: 'garyrockwellinsurance.test' });
+  const bookingWritten = () => S.writes.some((w) => /UPDATE leads SET booking_uid/.test(w.flat));
+  {
+    reset(); S.verdict = VROW(); S.leadRow = LEADROW();
+    const r = await post('/booking-confirmed', { session_id: '00000000-0000-4000-8000-0000000000a3',
+      booking_uid: 'llm-uid-1', start_time: '2026-10-01T10:00:00.000Z' });
+    await sleep(500);
+    ok('LLM/booking: /booking-confirmed returns 403', r.status === 403, String(r.status));
+    ok('LLM/booking: …and says why', r.body && r.body.error === 'non_icp_blocked', JSON.stringify(r.body));
+    ok('LLM/booking: NO booking_uid was written', !bookingWritten());
+    ok('LLM/booking: Schedule did NOT fire', !metaFired());
+    /* NOT asserted here. alertOps carries a 3-hour cooldown keyed on
+       severity:source:title, and the V1 booking section above fires this
+       exact alert earlier in the same process -- so a second assertion
+       would be testing the cooldown, not the guard. The alert itself is
+       covered there; what is new here is that the MODEL path reaches the
+       same refusal, which the four assertions around this one prove. */
+  }
+  {
+    reset(); S.verdict = VROW(); S.leadRow = LEADROW();
+    const r = await post('/booking-confirmed-webhook', { triggerEvent: 'BOOKING_CREATED',
+      payload: { uid: 'llm-uid-2', startTime: '2026-10-01T10:00:00.000Z',
+                 attendees: [{ email: 'gary@garyrockwellinsurance.test' }] } });
+    await sleep(500);
+    ok('LLM/booking: the Cal webhook refuses',
+       r.body && r.body.action === 'refused_non_icp', JSON.stringify(r.body));
+    ok('LLM/booking: Cal wrote no booking_uid', !bookingWritten());
+    ok('LLM/booking: Cal fired no Schedule', !metaFired());
+  }
+  {
+    reset(); S.verdict = VROW(); S.leadRow = LEADROW();
+    /* The REAL RevenueHero payload shape: { id, prospect: { email }, ... }.
+       The first draft of this test used a guessed {event,data:{guest}} shape,
+       got {ok:true,skipped:true} back, and would have passed a loose
+       status-code assertion while never reaching the guard at all. */
+    const r = await post('/booking-confirmed-webhook-rh', {
+      id: 'llm-uid-3', status: 'booked', start_time: '2026-10-01T10:00:00.000Z',
+      prospect: { email: 'gary@garyrockwellinsurance.test', name: 'Gary Rockwell' } });
+    await sleep(500);
+    ok('LLM/booking: the RevenueHero webhook refuses',
+       r.body && /refused_non_icp/.test(JSON.stringify(r.body)), JSON.stringify(r.body));
+    ok('LLM/booking: RH wrote no booking_uid', !bookingWritten());
+    ok('LLM/booking: RH fired no Schedule', !metaFired());
+  }
+
+  /* ── The META-ONLY path: four industries suppress Meta and must NOT
+        block. If these two ever agree, blocking has silently widened. ── */
+  {
+    reset();
+    S.verdict = VROW({ domain: 'joesdiner.test', business_type: 'restaurant_food',
+      blocking: false, confidence: 0.95, evidence_quote: 'family restaurant since 1994' });
+    const chk = await post('/non-icp-check', { email: 'joe@joesdiner.test', website: 'joesdiner.test' });
+    ok('META-ONLY: a restaurant is NOT blocked', chk.body && chk.body.blocked === false, JSON.stringify(chk.body));
+
+    reset();
+    S.verdict = VROW({ domain: 'joesdiner.test', business_type: 'restaurant_food',
+      blocking: false, confidence: 0.95, evidence_quote: 'family restaurant since 1994' });
+    await post('/partial', { session_id: '00000000-0000-4000-8000-0000000000a4',
+      email: 'joe@joesdiner.test', website: 'joesdiner.test', sell_to: 'B2B',
+      step_reached: 1, page_url: 'https://www.gushwork.ai/demo' });
+    await sleep(400);
+    const ins = S.writes.find((w) => /INSERT INTO leads \(/.test(w.flat));
+    const np = ins ? ins.params.slice(-5) : [];
+    ok('META-ONLY: NOT stamped as blocked', np[0] === false, String(np[0]));
+    ok('META-ONLY: IS stamped as model-flagged', np[4] === true, String(np[4]));
+    ok('META-ONLY: StartTrial still suppressed', !metaFired(),
+       S.fetches.filter((u) => /facebook/.test(u)).join(','));
+
+    reset();
+    S.verdict = VROW({ domain: 'joesdiner.test', business_type: 'restaurant_food',
+      blocking: false, confidence: 0.95, evidence_quote: 'family restaurant since 1994' });
+    const sub = await post('/submit', { session_id: '00000000-0000-4000-8000-0000000000a5',
+      email: 'joe@joesdiner.test', website: 'joesdiner.test', first_name: 'Joe', last_name: 'D',
+      company: "Joe's Diner", phone: '+15550000000', sell_to: 'B2B',
+      page_url: 'https://www.gushwork.ai/demo' });
+    await sleep(700);
+    /* The calendar MUST render for these people. */
+    ok('META-ONLY: the form is NOT told to redirect', sub.body && sub.body.non_icp_blocked === false, JSON.stringify(sub.body));
+    ok('META-ONLY: Meta Lead suppressed', !metaFired());
+    ok('META-ONLY: Salesforce IS still called', salesforceHit(),
+       'a Meta-only lead must still reach an AE');
+    /* The fourth state's whole risk: a flagged-not-blocked lead must not be
+       treated as a rejection by anything except Meta. If PartnerStack or
+       Salesforce started excluding these, turning on Meta suppression would
+       silently stop paying affiliates for restaurants. */
+    ok('META-ONLY: the lead row is NOT marked blocked',
+       sub.body && sub.body.non_icp_blocked === false);
+    const txt = JSON.stringify(S.slackPayloads);
+    ok('META-ONLY: Slack says Meta was withheld, NOT that it would have blocked',
+       /Meta events withheld/.test(txt) && !/Would have been blocked/.test(txt), txt.slice(0, 200));
   }
 
   loud();

@@ -85,7 +85,9 @@ const lifted = new Function('require', [
   liftDecl('const SLACK_ABOUT_MAX'),
   liftDecl('function slackTruncate'),
   liftDecl('function slackNonIcpBlocked'),
-  'return { alertOps, slackNonIcpBlocked };',
+  liftDecl('function slackNonIcpLlmFlagged'),
+  liftDecl('const NON_ICP_BUSINESS_TYPES'),
+  'return { alertOps, slackNonIcpBlocked, slackNonIcpLlmFlagged };',
 ].join('\n'))(require);
 
 const TEST_NOTE = 'DELIBERATE TEST fired by hand via tools/fire-non-icp-slack.js — not a real blocked prospect';
@@ -111,6 +113,54 @@ const FIRES = {
     sell_to: 'B2B (clarified from B2C)',
     hear_about_us: 'Fired by hand to prove this message path executes',
     about_business: TEST_NOTE,
+  }),
+
+  /* ── V2, the MODEL paths. Neither had ever executed when this was
+        written, which by this repo's own rule makes them untested alert
+        paths -- and the blocked post is the only way a wrong model block
+        becomes visible to a human. Fired before the flags go on. ── */
+
+  /* A model BLOCK. Deliberately uses a domain no list could ever match,
+     because that is the whole point of the layer, and carries the three
+     fields that make a model verdict falsifiable at a glance: what it
+     judged, how confident it was, and the sentence it decided on. */
+  'llm-blocked': () => lifted.slackNonIcpBlocked({
+    stage: 'submit',
+    source: 'llm',
+    matched_domain: 'deliberate-non-icp-test.invalid',
+    business_type: 'insurance',
+    business_type_label: 'Insurance',
+    confidence: 0.95,
+    evidence_quote: 'We are an independent insurance agency serving families across Ohio with auto, home, life and commercial insurance.',
+    model_id: 'claude-opus-5',
+    prompt_version: 'v1-2026-09-14',
+    first_name: 'Deliberate',
+    last_name: 'Test',
+    email: 'non-icp-llm-test@deliberate-non-icp-test.invalid',
+    phone: '+15550000000',
+    company: `TEST — ${TEST_NOTE}`,
+    website: 'deliberate-non-icp-test.invalid',
+    sell_to: 'B2B',
+    hear_about_us: 'Fired by hand to prove the MODEL block message path executes',
+    about_business: TEST_NOTE,
+  }),
+
+  /* A Meta-only flag: one of the four industries that suppress Meta and
+     never block. Different message on purpose -- calling this one "would
+     have been blocked" would be false, and false in the one channel that
+     exists to catch mistakes is worse than silent. */
+  'llm-meta': () => lifted.slackNonIcpLlmFlagged({
+    action: 'meta',
+    matched_domain: 'deliberate-non-icp-test.invalid',
+    business_type: 'restaurant_food',
+    business_type_label: 'Restaurant / food service',
+    confidence: 0.95,
+    evidence_quote: 'A family-run restaurant serving the neighbourhood since 1994.',
+    first_name: 'Deliberate',
+    last_name: 'Test',
+    email: 'non-icp-meta-test@deliberate-non-icp-test.invalid',
+    company: `TEST — ${TEST_NOTE}`,
+    website: 'deliberate-non-icp-test.invalid',
   }),
 
   /* The critical. Payload shape copied from rejectBookingIfNonIcp(). */

@@ -580,6 +580,91 @@ const results7 = (async () => {
 }
 
 /* ============================================================
+   10f. THE THIRD REJECTION COLUMN — audit every consumer again
+
+   CLAUDE.md, learned the hard way three times in one night: "a second
+   column that means 'we rejected this lead' is not additive. It silently
+   re-scopes every consumer of the first one."
+
+   non_icp_llm_flagged is the THIRD such column, and it is a different
+   shape from the first two. disqualified and non_icp_blocked both mean
+   "reject". This one does NOT: a flagged-not-blocked lead is one of the
+   four industries that suppress Meta and never block, and it must reach
+   the calendar, Salesforce, PartnerStack and the dialer exactly like any
+   other lead.
+
+   So the audit runs in BOTH directions:
+     (a) every consumer that excludes a rejected lead must cover an LLM
+         block -- satisfied by reading non_icp_blocked, which an LLM block
+         sets, and enumerated here so a future consumer cannot miss it
+     (b) NOTHING may exclude a lead merely for being llm_flagged, or
+         turning on Meta suppression would quietly stop paying affiliates
+         and stop AEs seeing restaurants
+   ============================================================ */
+{
+  const consumers = [
+    ['Salesforce push',       "console.log(`[/submit] ⏭ Salesforce push skipped — non-ICP"],
+    ['PartnerStack signup',   'SELECT non_icp_blocked, non_icp_reason FROM leads WHERE session_id = $1'],
+    ['PartnerStack retry',    'AND non_icp_blocked IS NOT TRUE'],
+    ['recovery cron',         'AND l.non_icp_blocked IS NOT TRUE'],
+    ['recovery health row',   'AND l.non_icp_blocked IS NOT TRUE'],
+    ['SDR list',              'AND l.non_icp_blocked IS NOT TRUE'],
+    ['AWS mirror upsert',     'non_icp_blocked         = (gw_form_leads.non_icp_blocked IS TRUE OR EXCLUDED.non_icp_blocked IS TRUE)'],
+  ];
+  for (const [name, needle] of consumers) {
+    ok(`10f: ${name} reads non_icp_blocked, so an LLM block is covered`, src.includes(needle), name);
+  }
+
+  /* (b) THE DIRECTION THAT IS NEW. Every use of the flag column, and what
+     it is allowed to be. It may drive Meta and Slack and it may be stored
+     and mirrored — it may never gate money, Salesforce, the SDR list or
+     the recovery cron. */
+  const flagUses = [...src.matchAll(/non_icp_llm_flagged/g)].map((m) => {
+    const line = src.slice(0, m.index).split('\n').length;
+    const ctx  = src.slice(Math.max(0, m.index - 260), m.index + 160);
+    return { line, ctx };
+  });
+  ok('10f: the flag column is actually used somewhere', flagUses.length > 0);
+
+  /* No SQL predicate anywhere may filter a population on the flag. The
+     ONLY legal SQL uses are the upsert assignment, the RETURNING, the
+     SELECT list, and the index/migration in db.js. */
+  const flagPredicates = [...src.matchAll(/non_icp_llm_flagged\s+IS\s+(NOT\s+)?TRUE/g)]
+    .filter((m) => {
+      /* The sticky upsert assignment legitimately contains IS TRUE twice. */
+      const before = src.slice(Math.max(0, m.index - 120), m.index);
+      return !/non_icp_llm_flagged\s+=\s+\(leads\./.test(before);
+    });
+  eq('10f: NO query filters a population on the flag column', flagPredicates.length, 0);
+
+  /* And specifically: the five consumers above must not mention it. */
+  const mustNotSee = [
+    ['PartnerStack signup', between('async function runPartnerStackSignup', 'async function sendQualificationForDomain')],
+    ['recovery health',     between('async function checkRecoveryHealth', 'The model layer')],
+    ['SDR list',            between("app.get('/monitor/sdr'", "app.get('/monitor'")],
+  ];
+  for (const [name, body] of mustNotSee) {
+    ok(`10f: ${name} does NOT gate on the flag column`, !body.includes('non_icp_llm_flagged'), name);
+  }
+
+  /* The flag IS allowed to drive Meta, and must. */
+  ok('10f: the flag drives Schedule suppression',
+     between('function nonIcpScheduleSuppressed(fullLead, routeTag)', 'const SCHEDULE_LEAD_SQL')
+       .includes('non_icp_llm_flagged'));
+
+  /* THE MIRROR. The flag is deliberately NOT synced to gw_form_leads:
+     a flagged-not-blocked lead should still be dialled, so shipping the
+     column before a consumer exists would be premature. An LLM BLOCK is
+     mirrored, because it sets non_icp_blocked, which already syncs. */
+  const awsCols = between('CREATE TABLE IF NOT EXISTS gw_form_leads', 'ALTER TABLE gw_form_leads');
+  ok('10f: the mirror carries non_icp_blocked, so a model block reaches the dialer',
+     src.includes('ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS non_icp_blocked'));
+  ok('10f: the mirror deliberately does NOT carry the flag column',
+     !src.includes('ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS non_icp_llm_flagged'),
+     'if this is added, decide what sdr-calling should do with a flagged-not-blocked lead first');
+}
+
+/* ============================================================
    10c. THE DASHBOARD MUST STILL RECONCILE
 
    A blocked lead is still a lead. Hiding it from All Leads would make
