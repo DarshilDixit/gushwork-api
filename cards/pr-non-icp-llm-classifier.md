@@ -482,3 +482,174 @@ eight-name literal. It now derives both sides, so it cannot go stale again.
 5. **`business_type` has no dashboard surface.** A flagged lead's type,
    confidence and evidence quote live in `non_icp_domain_verdicts` and in the
    Slack post, and nowhere on the monitor.
+
+---
+
+# LIVE — 15 Sept 2026, 01:15 IST. Runbook.
+
+**All four variables are set on `gushwork-api`.** `NON_ICP_LLM_ENABLED=true`,
+`NON_ICP_LLM_META=true`, `NON_ICP_LLM_BLOCK=true`, `NON_ICP_LLM_MODEL=claude-opus-5`.
+Shipped in PR #68. `NON_ICP_BLOCK=true` (V1) unchanged — both mechanisms run,
+list first.
+
+## Verified live, not asserted
+
+```
+POST /non-icp-check  garyrockwellinsurance.com
+  call 1 (cold)  → {"blocked":false}                     ← fails open
+  call 2 (warm)  → {"blocked":true,"label":"Insurance"}  ← an independent agency
+                                                            no domain list can match
+```
+
+Production verdict rows, read back:
+
+| domain | type | blocking | conf | evidence |
+|---|---|---|---|---|
+| `garyrockwellinsurance.com` | insurance | **true** | 0.98 | "Because I'm an independent insurance agent and I don't work for…" |
+| `rocketairhvac.com` | home_services | false | 0.97 | "We specialize in AC repair, maintenance, and replacement" |
+| `stripe.com` | software_technology | false | 0.95 | — |
+| `joesdiner.com` | other | false | 0.60 | "There is no diner. There never was." |
+
+The third and fourth are the controls: a real B2B company untouched, and a
+parked joke domain correctly given low confidence and no action.
+
+Health row: **`nonicpllm  green  4 classified in 24h`**.
+
+## 1. Every table, column and row the classifier writes
+
+### Railway — `non_icp_domain_verdicts` (new table, one row per DOMAIN)
+
+Written by the warm path only, on a cache miss. Never at the moment of decision.
+
+| column | what it holds |
+|---|---|
+| `domain` | PK, registrable domain via `partnerStackCustomerKey` |
+| `business_type` | one of 20 enum values, or NULL if no verdict |
+| `blocking` | true only for real_estate / insurance at ≥0.75 confidence |
+| `confidence` | 0–1, the model's own |
+| `evidence_quote` | verbatim from the page, ≤500 chars |
+| `reason` | the model's one-line justification |
+| `source` | `llm` \| `llm_unreachable` \| `llm_error` |
+| `model_id`, `prompt_version` | `claude-opus-5`, `v1-2026-09-14` |
+| `page_text_sha256`, `page_url_used`, `page_text_chars` | exactly which bytes were judged |
+| `scrape_status` | `ok` \| `unreachable` \| `thin` \| `blocked_by_site` \| `private_host` |
+| `error`, `checked_at` | |
+
+Volume: **~28–35 new rows/day.** TTL 180 days for a real verdict, 6 hours for a
+failure row.
+
+### Railway — `leads` (5 columns, per lead)
+
+`non_icp_blocked` (sticky), `non_icp_reason` (the domain judged), `non_icp_source`
+(`llm` or `domain_list` — first write wins), `non_icp_checked_at`,
+`non_icp_llm_flagged` (sticky).
+
+### AWS mirror — `gw_form_leads`
+
+**Only `non_icp_blocked` and `non_icp_reason`.** A model block reaches the dialer
+because it sets `non_icp_blocked`, which already syncs. `non_icp_llm_flagged`,
+`non_icp_source` and `non_icp_checked_at` are **deliberately not mirrored** —
+a flagged-not-blocked lead should still be dialled, so shipping the column before
+`sdr-calling` has a consumer would be premature.
+
+**Nothing is written to `gist.icp_domains`.** Read-only, never touched.
+
+## 2. What the Slack post looks like
+
+Fired for real tonight, both paths, Slack 200 on each. Verbatim:
+
+```
+🚫 Lead Blocked — Non-ICP
+─────────────────────────
+Read their website and judged: Insurance  (confidence 95%)
+Domain judged: `deliberate-non-icp-test.invalid`
+Their website: deliberate-non-icp-test.invalid
+What it said: "We are an independent insurance agency serving families
+               across Ohio with auto, home, life and commercial insurance."
+Stopped at: submit (email + website)
+
+  👤 Name · 📧 Email · 🏢 Company · 📞 Phone · 🎯 Sells to · 💬 Heard about us
+  📝 About their business
+
+They filled the whole form, were sent to /thank-you and never reached the
+calendar. No Meta event fired. Not pushed to Salesforce.
+
+Wrong? NON_ICP_LLM_BLOCK=false on Railway stops the model layer blocking
+without touching the brand-domain list or needing a deploy.
+Decided by claude-opus-5, prompt v1-2026-09-14.
+```
+
+The Meta-only industries get a **different** post — `📉 Meta events withheld —
+non-ICP industry (model)` — because calling those "would have been blocked"
+would be false in the one channel that exists to catch mistakes.
+
+## 3. If a verdict is wrong
+
+**How you find out.** Every submit-time block posts to the leads channel with
+the business type, the confidence and the verbatim sentence it decided on. That
+is the whole review surface, and it is why gate 1 existed.
+
+**How fast.** At submit, in real time. A **step-1-only** block posts nothing —
+that lead appears on the Blocked tab and nowhere else, unchanged from V1.
+
+**Reversing it — narrowest first.**
+
+```bash
+# 1. ONE wrong verdict. Deletes the cached row; re-warms on the next blur.
+#    If it re-classifies the same way, use 2 or 3.
+railway run -s Postgres bash -c \
+  "psql \"\$DATABASE_PUBLIC_URL\" -c \"DELETE FROM non_icp_domain_verdicts WHERE domain='example.com'\""
+
+# 2. Stop the model layer BLOCKING. Meta suppression and classification continue.
+railway variable set --service gushwork-api NON_ICP_LLM_BLOCK=false
+
+# 3. Stop Meta suppression too. Classification continues, nothing acts on it.
+railway variable set --service gushwork-api NON_ICP_LLM_META=false
+
+# 4. Stop the whole layer. V1's brand-domain list keeps working.
+railway variable set --service gushwork-api NON_ICP_LLM_ENABLED=false
+
+# 5. Un-block leads already stamped tonight (does NOT un-send Meta).
+railway run -s Postgres bash -c \
+  "psql \"\$DATABASE_PUBLIC_URL\" -c \"UPDATE leads SET non_icp_blocked=false \
+   WHERE non_icp_source='llm' AND created_at > NOW() - INTERVAL '24 hours'\""
+```
+
+Each takes effect on the **next request** — no deploy. Anything at level 2 or
+above leaves V1 untouched and still blocking.
+
+**What reversal cannot undo:** a suppressed Meta event. There is no replay.
+
+## 4. What I am uneasy about, shipping this unwatched
+
+1. **A blocked lead can still take a calendar slot.** The unwarmed-verdict gap,
+   unchanged from V1: if the warm has not finished when `/submit` runs, the
+   verdict fails open, the calendar renders, and the booking routes then refuse
+   it with a **critical alert**. Overnight nobody cancels that slot. Measured
+   end-to-end warm is median 3.8s but **max 6.1s — 1 in 12 over six seconds**, and
+   the scrape can take up to 8s. The email blur at step 1 normally buys 30–60s,
+   so this should be rare; V1 has fired the alert zero times in four days. But
+   V1 never had to scrape and call a model first.
+
+2. **One lead in ten stops firing Meta.** 6.2% blocked plus 4.2% Meta-only.
+   That is a far bigger change to the ad signal than V1 made, it starts tonight,
+   and it cannot be un-sent. Authorised — but it is the single largest-blast-radius
+   thing here.
+
+3. **The cache is cold.** Four rows. Every domain tomorrow is a first-time
+   classification, so tonight's behaviour depends on warm timing rather than on
+   the 271 domains already validated. I have **4,701 Opus verdicts on disk** from
+   the validation run and did **not** load them, because that is a 4,701-row
+   production write nobody authorised. Say the word and it is one command — it
+   would make tomorrow deterministic and match exactly the analysis you have read.
+
+4. **`home_services` is the biggest Meta-only group by far** — 156 of the 220
+   domains in the other four industries. If one industry is going to be wrong at
+   scale, it is that one, and plumbers and HVAC firms are plausible ICP. Worth
+   reading those posts specifically.
+
+5. **`Opus 5` at effort low is untested at volume in this path.** 25 calls
+   measured, zero failures. It has never run a full day.
+
+6. **Nothing tells you the cost.** There is no spend alarm. At ~30 domains/day
+   this is ~$18/month, but a scraper loop or a retry storm has no ceiling.
