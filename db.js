@@ -659,6 +659,77 @@ async function initDB() {
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS non_icp_blocked BOOLEAN DEFAULT FALSE`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS non_icp_reason TEXT`,
       `CREATE INDEX IF NOT EXISTS leads_non_icp_blocked_idx ON leads (non_icp_blocked) WHERE non_icp_blocked IS TRUE`,
+
+      /* ── Non-ICP V2: the model layer's three columns on leads ────────
+         WHICH MECHANISM DECIDED IS NOT DERIVABLE FROM non_icp_reason.
+         Both mechanisms write a domain into that column -- the brand
+         domain for the list, the classified domain for the model -- so
+         without a provenance column a reader cannot tell a string
+         comparison anyone can re-derive from a model verdict nobody can.
+         That distinction is the whole reason this layer needed a ticket.
+
+         non_icp_checked_at closes OPEN ITEM #3 in the V1 ticket. It was
+         optional while the only mechanism was a hardcoded list that
+         changes when somebody edits index.js; it stops being optional the
+         moment a prompt version and a model id can move underneath a
+         verdict. "When was this decided" must not be answerable only from
+         updated_at, which moves for unrelated reasons. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS non_icp_source TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS non_icp_checked_at TIMESTAMPTZ`,
+      /* FLAGGED IS NOT BLOCKED, and the two are separate columns on
+         purpose. The model can flag with NON_ICP_LLM_BLOCK off, which is
+         the "flag and watch" mode -- those leads reach the calendar, fire
+         Meta and are dialled exactly as today. Folding a flag into
+         non_icp_blocked would make every existing guard on that column
+         start refusing leads nobody decided to refuse. Same lesson as the
+         V1 incident, arriving one column earlier. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS non_icp_llm_flagged BOOLEAN DEFAULT FALSE`,
+      `CREATE INDEX IF NOT EXISTS leads_non_icp_llm_flagged_idx ON leads (non_icp_llm_flagged) WHERE non_icp_llm_flagged IS TRUE`,
+
+      /* ── The model verdict cache — one row per registrable domain ────
+         THE MODEL IS NEVER ASKED AT REQUEST TIME. /submit reads this table
+         and nothing else; a miss is "we could not check", which fails open
+         exactly like every other lead-path checker. The row is written by
+         the warm path (step-1 and step-2 blur, via /non-icp-check), by the
+         backfill tool, and by nothing else.
+
+         Caching per DOMAIN rather than per lead is what makes the block
+         deterministic. A model asked twice about one page can answer twice
+         differently -- temperature is not available to pin on current
+         models, it is rejected -- so the verdict is decided once, written
+         here, and read back forever after. Two leads from one domain get
+         the same answer by construction rather than by hoping.
+
+         KEYED THROUGH partnerStackCustomerKey like everything else that
+         turns a domain into an identity here. A second normaliser is how
+         kw.com and www.kw.com become two companies.
+
+         EVERY COLUMN BELOW EXISTS TO MAKE ONE BLOCK AUDITABLE AFTER THE
+         FACT. A V1 block is re-derivable by reading a list; this one is
+         not, so the row has to carry its own evidence: which model, which
+         prompt, which bytes it read, and the sentence it decided on. */
+      `CREATE TABLE IF NOT EXISTS non_icp_domain_verdicts (
+         domain            TEXT PRIMARY KEY,
+         business_type     TEXT,
+         blocking          BOOLEAN NOT NULL DEFAULT FALSE,
+         confidence        NUMERIC,
+         evidence_quote    TEXT,
+         reason            TEXT,
+         source            TEXT NOT NULL,
+         model_id          TEXT,
+         prompt_version    TEXT,
+         page_text_sha256  TEXT,
+         page_url_used     TEXT,
+         page_text_chars   INTEGER,
+         scrape_status     TEXT,
+         error             TEXT,
+         checked_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+       )`,
+      /* The health row asks "has anything classified successfully lately",
+         which is a scan over checked_at restricted to the rows that
+         actually reached the model. */
+      `CREATE INDEX IF NOT EXISTS non_icp_verdicts_checked_at_idx ON non_icp_domain_verdicts (checked_at)`,
+      `CREATE INDEX IF NOT EXISTS non_icp_verdicts_blocking_idx ON non_icp_domain_verdicts (blocking) WHERE blocking IS TRUE`,
       /* One conversion per customer key, ever, is enforced by looking this up
          on every partner submit. Without the index that is a seq scan of leads
          on the critical path. */

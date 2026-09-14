@@ -55,15 +55,34 @@ function stubQuery(q, params) {
   const flat = (typeof q === 'string' ? q : (q && q.text) || '').replace(/\s+/g, ' ').trim();
   S.writes.push({ flat, params });
 
-  /* The two leads upserts. Echo back what was bound for the last two
-     placeholders -- they are non_icp_blocked and non_icp_reason, appended in
-     that order at both call sites -- so the route reads the same effective
-     block a real Postgres would have returned after the sticky OR. */
+  /* The two leads upserts. Echo back what was bound for the FIVE non-ICP
+     placeholders, which are appended in this order at both call sites:
+
+        non_icp_blocked, non_icp_reason, non_icp_source,
+        non_icp_checked_at, non_icp_llm_flagged
+
+     so the route reads the same effective block a real Postgres would have
+     returned after the sticky OR.
+
+     COUNTED FROM THE END, AND THAT IS A KNOWN FRAGILITY. It broke once
+     already, when the V2 columns were appended and this stub silently
+     started reading non_icp_checked_at as non_icp_blocked -- a Date, which
+     is truthy, so it did not even fail the way you would expect. The names
+     are asserted below rather than only the offsets, so the next append
+     fails loudly here instead of somewhere downstream. */
   if (/INSERT INTO leads \(/.test(flat)) {
     const p = params || [];
+    const cols = (flat.match(/INSERT INTO leads \(([^)]*)\)/) || [])[1] || '';
+    const tail = cols.split(',').slice(-5).map(s => s.trim());
+    if (tail.join(',') !== 'non_icp_blocked,non_icp_reason,non_icp_source,non_icp_checked_at,non_icp_llm_flagged') {
+      throw new Error('leads upsert column tail moved — this stub decodes by position: ' + tail.join(','));
+    }
     return { rows: [{
-      non_icp_blocked: p[p.length - 2] === true,
-      non_icp_reason:  p[p.length - 1] || null,
+      non_icp_blocked:     p[p.length - 5] === true,
+      non_icp_reason:      p[p.length - 4] || null,
+      non_icp_source:      p[p.length - 3] || null,
+      non_icp_checked_at:  p[p.length - 2] || null,
+      non_icp_llm_flagged: p[p.length - 1] === true,
       prev_booked: false, step_reached: 2,
     }], rowCount: 1 };
   }
@@ -210,10 +229,17 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     ok('partial: responds ok', r.status === 200, String(r.status));
     const ins = S.writes.find((w) => /INSERT INTO leads \(/.test(w.flat));
     ok('partial: wrote the lead row', !!ins);
-    ok('partial: stamped non_icp_blocked = true',
-       !!ins && ins.params[ins.params.length - 2] === true, ins && String(ins.params[ins.params.length - 2]));
-    ok('partial: stamped the matched domain',
-       !!ins && ins.params[ins.params.length - 1] === 'kw.com', ins && String(ins.params[ins.params.length - 1]));
+    /* The five non-ICP placeholders, counted off the end in the order the
+       column tail declares them. See the decoding note in stubQuery. */
+    const np = ins ? ins.params.slice(-5) : [];
+    ok('partial: stamped non_icp_blocked = true', np[0] === true, String(np[0]));
+    ok('partial: stamped the matched domain',    np[1] === 'kw.com', String(np[1]));
+    /* PROVENANCE. A domain-list block must say so, because the two
+       mechanisms are checked in completely different ways and a reader who
+       cannot tell them apart cannot audit either. */
+    ok('partial: stamped source = domain_list',  np[2] === 'domain_list', String(np[2]));
+    ok('partial: stamped a checked_at',          np[3] instanceof Date, String(np[3]));
+    ok('partial: did NOT set the model flag',    np[4] === false, String(np[4]));
     ok('partial: StartTrial did NOT fire for a blocked lead', !metaFired(),
        S.fetches.filter((u) => /facebook/.test(u)).join(','));
   }
