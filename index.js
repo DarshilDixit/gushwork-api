@@ -2387,7 +2387,19 @@ async function checkNonIcpLlmHealth(db) {
         'Last error: ' + (S.lastError || 'unknown') + '. Rate limiting and a spent balance both look like this.');
     }
 
-    if (okCount > 0 || S.ok > 0) {
+    /* GREEN REQUIRES A SUCCESS IN THIS PROCESS. Not a row in the table.
+
+       Caught within minutes of shipping the counters, by the fix's own
+       author, on the fix itself: 2,937 verdicts were bulk-loaded with
+       checked_at = NOW(), the table count jumped to 2,939, and the row went
+       GREEN reading "2939 classified in 24h" — in a process that had
+       classified nothing and could not have known whether the API worked.
+       A backfill is not evidence that anything works now.
+
+       "A green badge means verified working, just now. If it cannot verify,
+       it must not be green." The table can colour the TEXT; only an
+       in-process success can license the badge. */
+    if (S.ok > 0) {
       /* Unreachable sites are NORMAL and are reported, never alerted on.
          8.9% of domains refuse a scraper -- the national carriers most of
          all -- and that is the measured reason the brand-domain list is
@@ -2402,6 +2414,12 @@ async function checkNonIcpLlmHealth(db) {
       return hc('nonicpllm', 'green', (okCount || S.ok) + ' classified in ' + HEALTH_NON_ICP_LLM_LOOKBACK_H + 'h',
         (extra ? extra + '. ' : '') + 'Last success ' +
         (row.last_ok ? etStamp(new Date(row.last_ok)) : (S.lastOkAt ? etStamp(new Date(S.lastOkAt)) : 'unknown')) + '.' + warmMs + hitRate);
+    }
+    /* Rows in the table but nothing verified here. Grey, with the count
+       shown so it does not read as an absence of data. */
+    if (okCount > 0) {
+      return hc('nonicpllm', 'insufficient_data', okCount + ' verdicts in the table, none from this process',
+        'Nothing has needed classifying since this process started, so nothing has been verified. Not a fault, and not green.');
     }
     if (unreachable > 0 || S.unreachable > 0) {
       return hc('nonicpllm', 'insufficient_data', (unreachable || S.unreachable) + ' sites unreadable, nothing classified',

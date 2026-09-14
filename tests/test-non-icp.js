@@ -1330,6 +1330,15 @@ results13 = (async () => {
     out.push(['health: an occasional error alongside plenty of successes is GREEN',
               h.state === 'green', h.state + ' / ' + h.text]);
 
+    /* A FULL TABLE AND AN IDLE PROCESS MUST NOT BE GREEN. Found on the live
+       row minutes after shipping: 2,937 verdicts were bulk-loaded with
+       checked_at = NOW() and the row went green in a process that had
+       classified nothing. A backfill is not evidence anything works now. */
+    h = await mkH(zero(), ENV_ON, { ok: '2939' });
+    out.push(['health: a full table with no in-process success is GREY, not green',
+              h.state === 'insufficient_data' && /none from this process/.test(h.text),
+              h.state + ' / ' + h.text]);
+
     /* THE STATE WHERE EVERYTHING LOOKS FINE AND NOTHING IS BLOCKED.
        Classifying happily, writing happily, and the customer bypass cannot
        run — so every block fails open. Green on every other signal. */
