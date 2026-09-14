@@ -2387,7 +2387,19 @@ async function checkNonIcpLlmHealth(db) {
         'Last error: ' + (S.lastError || 'unknown') + '. Rate limiting and a spent balance both look like this.');
     }
 
-    if (okCount > 0 || S.ok > 0) {
+    /* GREEN REQUIRES A SUCCESS IN THIS PROCESS. Not a row in the table.
+
+       Caught within minutes of shipping the counters, by the fix's own
+       author, on the fix itself: 2,937 verdicts were bulk-loaded with
+       checked_at = NOW(), the table count jumped to 2,939, and the row went
+       GREEN reading "2939 classified in 24h" — in a process that had
+       classified nothing and could not have known whether the API worked.
+       A backfill is not evidence that anything works now.
+
+       "A green badge means verified working, just now. If it cannot verify,
+       it must not be green." The table can colour the TEXT; only an
+       in-process success can license the badge. */
+    if (S.ok > 0) {
       /* Unreachable sites are NORMAL and are reported, never alerted on.
          8.9% of domains refuse a scraper -- the national carriers most of
          all -- and that is the measured reason the brand-domain list is
@@ -2402,6 +2414,12 @@ async function checkNonIcpLlmHealth(db) {
       return hc('nonicpllm', 'green', (okCount || S.ok) + ' classified in ' + HEALTH_NON_ICP_LLM_LOOKBACK_H + 'h',
         (extra ? extra + '. ' : '') + 'Last success ' +
         (row.last_ok ? etStamp(new Date(row.last_ok)) : (S.lastOkAt ? etStamp(new Date(S.lastOkAt)) : 'unknown')) + '.' + warmMs + hitRate);
+    }
+    /* Rows in the table but nothing verified here. Grey, with the count
+       shown so it does not read as an absence of data. */
+    if (okCount > 0) {
+      return hc('nonicpllm', 'insufficient_data', okCount + ' verdicts in the table, none from this process',
+        'Nothing has needed classifying since this process started, so nothing has been verified. Not a fault, and not green.');
     }
     if (unreachable > 0 || S.unreachable > 0) {
       return hc('nonicpllm', 'insufficient_data', (unreachable || S.unreachable) + ' sites unreadable, nothing classified',
@@ -6971,8 +6989,22 @@ function nonIcpStamp(v) {
    verdict too: we cannot tell "not a customer" from "could not ask", and
    "we could not check" is never recorded as "we checked and it is bad". */
 async function nonIcpCustomerBypass({ email, website, matched_domain }) {
-  const key = partnerStackCustomerKey(website) || partnerStackCustomerKey(email);
-  if (!key) return null;
+  /* BOTH KEYS, NOT ONE. This read
+       partnerStackCustomerKey(website) || partnerStackCustomerKey(email)
+     until 15 Sept 2026, which checks the EMAIL only when the website is
+     missing or unparseable. Blocking matches on both sides; the bypass
+     did not, so the two were asymmetric in the one direction that costs
+     money: a customer whose CONTRACT domain is their email domain, who
+     types some other site in the website box -- a landing page, a
+     microsite, a personal domain -- was checked against the wrong domain
+     and blocked.
+
+     The 11 Sept case that motivated the bypass was the mirror image
+     (nedjacobs@allstate.com, website jacobsfamilyinsurance.net) and was
+     saved by the website, which is exactly why the gap went unnoticed. */
+  const keys = [partnerStackCustomerKey(website), partnerStackCustomerKey(email)]
+    .filter((k, i, a) => k && a.indexOf(k) === i);
+  if (!keys.length) return null;
   let customers;
   try {
     customers = await withTimeout(
@@ -6992,12 +7024,13 @@ async function nonIcpCustomerBypass({ email, website, matched_domain }) {
     _nonIcpLlmStats.bypassFailed++;
     _nonIcpLlmStats.lastErrorAt = Date.now();
     _nonIcpLlmStats.lastError = 'customer bypass: ' + (err && err.message);
-    console.warn(`[non-ICP] Customer bypass could not run for ${key} — NOT blocking:`, err.message);
+    console.warn(`[non-ICP] Customer bypass could not run for ${keys.join('/')} — NOT blocking:`, err.message);
     return { blocked: false, reason: 'check_failed', matched_domain, detail: err.message };
   }
-  if (customers && customers.has(key)) {
-    console.log(`[non-ICP] ✅ ${email} matches ${matched_domain} but ${key} is a known customer — NOT blocking`);
-    return { blocked: false, reason: 'known_customer', matched_domain };
+  const hit = keys.find((k) => customers && customers.has(k));
+  if (hit) {
+    console.log(`[non-ICP] ✅ ${email} matches ${matched_domain} but ${hit} is a known customer — NOT blocking`);
+    return { blocked: false, reason: 'known_customer', matched_domain, customer_key: hit };
   }
   return null;
 }
@@ -7572,6 +7605,20 @@ function nonIcpLlmHealthSnapshot() { return { ..._nonIcpLlmStats }; }
 function warmNonIcpLlm({ email, website } = {}) {
   if (!NON_ICP_LLM_ENABLED) return;
   if (isPartnerStackTestEmail(email)) return;
+  /* A BRAND-DOMAIN HIT ALREADY DECIDES THE LEAD, so classifying it is
+     wasted work on the worst possible sites.
+
+     The list is checked FIRST in nonIcpVerdict and a hit returns before the
+     model verdict is ever read -- so a verdict for kw.com can never change
+     an outcome while NON_ICP_BLOCK is on. Warming it anyway cost the most
+     expensive scrapes we have: measured, 10 of the 30 national brand
+     domains refuse a scraper, so each one burns up to three 8-second
+     timeouts to produce a row nothing will read.
+
+     DID NOT SHORT-CIRCUIT UNTIL 15 Sept 2026. The warm is called before
+     nonIcpVerdict at all three call sites, so it never saw the V1 hit. It
+     matched here instead, against the same function the verdict uses. */
+  if (NON_ICP_BLOCK_ENABLED && (nonIcpMatchHost(email) || nonIcpMatchHost(website))) return;
   for (const domain of nonIcpCandidateDomains({ email, website })) {
     if (_nonIcpLlmInFlight.has(domain)) continue;
     const p = (async () => {
