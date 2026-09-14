@@ -56,9 +56,17 @@ report six weeks later. Anyone who reads `Non-ICP-flagging-rules` and then reads
 3. **Scope is the BUSINESS TYPE, not "agents under national brands."** V1 can
    only reach brand domains, so it misses the ~70 independent agencies and
    realtors doing the same job. **When the LLM rules are scoped, write them
-   against what the company *is* — and retire V1 rather than extending it.**
+   against what the company *is*.**
    Growing a domain list toward "every realtor" is the wrong shape and each
    addition is another chance at a `paycompass.com`.
+
+   **CORRECTED 14 Sept 2026 — "retire V1" was never Swapnil's.** This bullet
+   used to end "and retire V1 rather than extending it", and three other
+   passages in this file repeated it as though it were a decision he had
+   made. It was not. What he said was **block real estate and insurance**,
+   and **block** to the niche question. The retirement framing was ours, it
+   was attributed to him by proximity, and it was wrong on the measurement
+   as well — see the correction section below.
 
 ### Deliberate choices, so nobody "fixes" them
 
@@ -374,9 +382,13 @@ That gap is **structural to a domain list**, not a bug in this one:
 **So when the six-rule LLM flagger is scoped, rule 6's real-estate row and a new
 insurance row should be written against what the company IS, in the doc's own
 phrasing — "fires on what the company *is*, never on who it sells to" — and not
-against a brand list.** V1 should then be retired rather than extended: growing
-a domain list toward "every realtor" is the wrong shape, and each addition costs
+against a brand list.** V1 should not be *extended* toward "every realtor":
+growing a domain list that way is the wrong shape, and each addition costs
 another chance at a `paycompass.com`.
+
+**It should not be retired either.** Not extended and not retired are different
+things, and the first draft of this file collapsed them. See the correction
+section at the end.
 
 **This means V1 is deliberately partial and everyone should know it.** It stops
 the specific complaint the AEs raised (national-brand agents), and it leaves
@@ -803,8 +815,10 @@ When it does, two things from tonight carry into its scoping:
 
 - Scope the rules against **what the company is** (decision 3 above), not
   against a brand list.
-- **Retire V1 rather than extending it.** A domain list that grows toward
-  "every realtor" accumulates `paycompass.com`-shaped mistakes.
+- **Do not extend V1.** A domain list that grows toward "every realtor"
+  accumulates `paycompass.com`-shaped mistakes. It is frozen, not retired —
+  see the correction section at the end for why the two mechanisms now run
+  together permanently.
 
 Note the doc's own status: rules 5 and 6 and the widened rule 1 currently flag
 **nobody**, because the 3,165 classified domains were read under the old
@@ -880,6 +894,76 @@ The doc's own status note, as at 11 Sept:
 > are simply absent and the new rules return false on every one of them. That is
 > silence, not a clean bill of health.
 
-So the flagger cannot do this job today even where it is built. V1 is the
-stopgap, and it should be retired — not extended — when the flagger can see the
-industry field.
+So the flagger cannot do this job today even where it is built. V1 is not a
+stopgap that gets thrown away when the model layer lands: it is the half of the
+answer that still works when a website will not load, which is the half the
+model can never cover. **The two run together, permanently.** The correction
+section below has the measurement.
+
+---
+
+## CORRECTION, 14 September 2026 — "retire V1" was ours, and it was wrong
+
+This file said four times that V1 should be **retired** when the model layer
+landed, in language that read as one of Swapnil's decisions. It was not one.
+Corrected in all four places; this section is the record of what was wrong and
+what replaced it, because a correction that silently edits the text leaves the
+next reader unable to tell which version they remember.
+
+### What was actually said
+
+Swapnil, 11 September: **block real estate and insurance**, and **block** to
+the niche question. That is the whole of it. He ruled on the *scope* of the
+rules — the business type rather than the employer's brand — and said nothing
+about what happens to the brand-domain list afterwards.
+
+The retirement was a conclusion drawn in this file, attributed to him by sitting
+in the same numbered bullet, and then repeated three more times until it read
+like settled policy. **Decision 3 is his. The sentence after it was ours.**
+
+### And the measurement says the opposite
+
+Three days of the block live, 11–14 September. Four real leads blocked, and
+**three of them are `farmersagent.com` with `farmers.com` as the website.** Both
+of those domains, in the warehouse classifier that reads company websites:
+
+```
+farmersagent.com   scrape_status=failed   "site unreachable"   icp_fit=UNKNOWN
+farmers.com        scrape_status=failed   "site unreachable"   icp_fit=UNKNOWN
+```
+
+Neither can be read by a scraper, so neither can be classified by a model that
+works by reading the page. **Retiring V1 the day the model layer shipped would
+have un-blocked three of the first four blocks.** It is not a coincidence:
+national carriers and brokerages are precisely the sites with bot protection,
+and 8.9% of the 7,051 domains in `gist.icp_domains` fail to scrape at all.
+
+The two mechanisms fail in opposite places:
+
+| | brand-domain list | model layer |
+|---|---|---|
+| National brand on its own domain | **exact** | often unreadable |
+| Independent agency, own domain | blind | **covers it** |
+| Realtor on a personal-brand domain | blind | **covers it** |
+| Site refuses a scraper | **still works** | no verdict |
+| Re-derivable by a human | yes, read the list | no |
+
+### What is true instead
+
+**Both mechanisms run, permanently, and the list is checked FIRST.** It is
+cheap, deterministic, auditable by reading, and it is the half that survives an
+unreadable site. The model handles the long tail it structurally cannot reach.
+
+V1 is **frozen, not retired**: it should not grow toward "every realtor" —
+that part of the original reasoning stands, and each addition is another chance
+at a `paycompass.com` — but the 41 entries it has stay, and stay first in the
+order.
+
+### The generalisable bit
+
+**A decision and the reasoning written next to it are not the same artefact, and
+this file exists precisely to stop that confusion.** It was written to record
+that V1 contradicts a dated document, so the next reader would not have to guess
+which was current. It then did the same thing one layer up: put an inference in
+the same bullet as a ruling and left no way to tell them apart. Attribute the
+sentence, not the paragraph.

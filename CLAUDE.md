@@ -29,12 +29,28 @@ Three things follow from that, and they are not negotiable:
    verdicts* block, all decided client-side in `gushwork-form.js`: `nxdomain`,
    `brand_mismatch`, `mailbox_domain`. Do not add a fourth without asking.
 
-   **There is now one server-side block as well, and it is the exception that
-   proves this rule rather than a loosening of it.** `NON_ICP_BLOCK` (default
-   OFF) stops leads whose email domain or website is a national real-estate
-   brokerage or insurance carrier brand, and sends them to `/thank-you`
-   instead of the calendar. Decided by `nonIcpVerdict` in `index.js`, stamped
-   on `leads.non_icp_blocked`, enforced in `/partial` and `/submit`.
+   **There are now TWO server-side blocking mechanisms, and they are the
+   exception that proves this rule rather than a loosening of it.** Both are
+   decided by `nonIcpVerdict` in `index.js`, stamped on
+   `leads.non_icp_blocked`, and enforced in `/partial` and `/submit`.
+
+   1. `NON_ICP_BLOCK` (default OFF) — the **brand-domain list**. A pure
+      string comparison against 41 national real-estate brokerage and
+      insurance carrier domains. **Checked FIRST**, because it is
+      deterministic, re-derivable by reading a list, and it still works when
+      a site refuses a scraper.
+   2. `NON_ICP_LLM_BLOCK` (default OFF) — the **model layer**. Reads the
+      company's own website and classifies it into one enumerated
+      `business_type`; exactly two of those block, `real_estate` and
+      `insurance`. Stamped with `non_icp_source='llm'`.
+
+   **NEITHER REPLACES THE OTHER AND THE LIST IS NOT BEING RETIRED.** An
+   earlier version of the V1 ticket said it would be, attributed to Swapnil.
+   It was not his, and it is wrong on the measurement: `farmers.com` and
+   `farmersagent.com` both read `scrape_status=failed` in the warehouse
+   classifier and are three of the first four real blocks. National brands
+   are exactly the sites a scraper cannot read. See the CORRECTION section
+   at the end of `docs/tickets/non-icp-v1-block.md`.
 
    It exists because AEs reported State Farm agents and realtors taking demo
    slots, and because the measurement backed them: those leads book at 71%
@@ -52,19 +68,41 @@ Three things follow from that, and they are not negotiable:
    conversion signal from the ad algorithm. Treat "should this fire Meta?" as a
    business decision to surface, not a judgement call to make quietly.
 
-   **Two things gate Meta today, and both were surfaced as decisions rather
-   than taken quietly.** `isWebsiteVerified` is the older one. The second is
-   `non_icp_blocked`: a blocked lead fires none of `StartTrial`, `Lead` or
+   **THREE things gate Meta today, and every one was surfaced as a decision
+   rather than taken quietly.** `isWebsiteVerified` is the oldest. The second
+   is `non_icp_blocked`: a blocked lead fires none of `StartTrial`, `Lead` or
    `Schedule`. That was the explicit point of the change — an ad audience
    optimised toward realtors is what produced the complaint — and it was
    authorised on 11 Sept 2026.
 
+   **The third is `NON_ICP_LLM_META`, and it is a SEPARATE FLAG from
+   `NON_ICP_LLM_BLOCK` on purpose.** The model layer can run in flag-only
+   mode: it stamps `non_icp_llm_flagged`, the lead reaches the calendar and
+   goes to Salesforce exactly as today, and Meta is untouched. Switching on
+   observation must never reshape an ad audience as a side effect — that is
+   this rule, applied to the switch itself. `NON_ICP_LLM_BLOCK` implies
+   `NON_ICP_LLM_META`, because a lead we turn away that still feeds the
+   algorithm a conversion is incoherent.
+
+   **Read `suppress_meta` off the verdict, never `blocked`.** A flagged
+   lead is not blocked and still has to stop firing Meta when META is on.
+   Three call sites read it: `/partial` (StartTrial), `/submit` (Lead), and
+   `nonIcpScheduleSuppressed` (Schedule, for all three booking routes).
+
    **`Schedule` fires from THREE call sites, so it needs three guards.** They
    are `/booking-confirmed`, `/booking-confirmed-webhook` and
-   `/booking-confirmed-webhook-rh`, and all three read `non_icp_blocked` off
-   `SCHEDULE_LEAD_SQL`. Counting event *names* and concluding "three call
-   sites" is wrong and is how one leaks: there are six in the repo, five in
-   `index.js` plus `Contact` in `lead-magnet.js`.
+   `/booking-confirmed-webhook-rh`. Counting event *names* and concluding
+   "three call sites" is wrong and is how one leaks: there are six in the
+   repo, five in `index.js` plus `Contact` in `lead-magnet.js`.
+
+   **The three guards are now ONE function, `nonIcpScheduleSuppressed`,
+   called three times.** They were three copies reading `non_icp_blocked`
+   off `SCHEDULE_LEAD_SQL`, and they stayed in step by luck. Adding the
+   second condition (the model flag) to a guard that exists in triplicate is
+   exactly when the third copy gets missed, so the condition moved into one
+   place. `tests/test-non-icp.js` section 8 both asserts the three call
+   sites and **executes** the function, which is what closes the
+   reachability hole an `if (false)` inside it would otherwise leave.
 
 When a change would alter which leads get blocked or which fire Meta events, say so
 explicitly in your summary. Never let that happen as a side effect.
@@ -86,6 +124,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `partnerstack.js` | PartnerStack API. TWO hosts and TWO auth schemes: `partnerlinks.io` conversion (Bearer tracking token) and `api.partnerstack.com` v2 partnerships + actions (Basic public:secret) |
 | `lead-magnet.js` | `/lm/*` routes. Separate table, deliberately not joined to `leads` |
 | `backfill-sf.js` | Manual recovery tool for re-syncing leads to Salesforce after a broken connection or outage. Not mounted by default — see below |
+| `tools/non-icp-validate.js` | Scores the model layer against history — scrapes every lead domain once, replays the same bytes to three models, joins to paying customers and showed-up bookings. LIFTS the real classifier out of `index.js` rather than copying it. Not mounted, run by hand |
 | `tools/fire-non-icp-slack.js` | Fires the TWO non-ICP Slack paths for real — the blocked-lead post and the booking-refusal critical. Lifts them out of `index.js` like `fire-alert.js`. Not mounted, not called |
 | `tools/fire-alert.js` | Fires ONE real alert on purpose, to satisfy the fire-every-alert-path-once rule. Sends for real (Slack + email on a critical). Lifts `alertOps` out of `index.js` rather than reimplementing it, so what arrives is what production sends. Not mounted, not called by anything |
 | `gushwork-form.js` | The `/demo` form frontend. Lives here and is served live by jsDelivr — see below |
@@ -199,6 +238,27 @@ delete the file.
   Leads. The dedicated surface is the **Blocked** tab. Mirrored to
   `gw_form_leads` for the dialer, which does not yet read them (see
   `docs/tickets/non-icp-v1-block.md` OPEN ITEMS #1).
+- **`non_icp_domain_verdicts`** — the model layer's cache. One row per
+  registrable domain, keyed through `partnerStackCustomerKey` like
+  everything else here. **The model is never asked at request time**:
+  `/submit` reads this table and nothing else, and a miss is "we could not
+  check", which fails open. Caching per domain is also what makes the block
+  deterministic — a model asked twice can answer twice differently, and
+  `temperature` cannot be pinned on current models (it is rejected). **Two
+  TTLs**: a real verdict lasts 180 days, a failure row six hours, so a brief
+  outage cannot pin a domain to "could not check" until spring.
+- **`leads.non_icp_source` / `non_icp_checked_at` / `non_icp_llm_flagged`** —
+  provenance for the block. `non_icp_reason` holds a domain for **both**
+  mechanisms, so without `non_icp_source` a reader cannot tell a string
+  comparison they can re-derive from a model verdict they cannot.
+  `non_icp_checked_at` closes OPEN ITEM #3 and is **only stamped when
+  something was actually decided** — never for `check_failed` or `disabled`,
+  because an inferred timestamp in an observational column reads as a
+  measurement to the next person. **`non_icp_llm_flagged` is NOT
+  `non_icp_blocked`**: a flagged lead in flag-only mode books, goes to
+  Salesforce and gets dialled exactly as today. Folding the two together
+  would make every existing guard on `non_icp_blocked` start refusing leads
+  nobody decided to refuse — the V1 incident, arriving one column earlier.
 - **`leads.ps_signup_recheck_at`** — when a verified PartnerStack conversion
   was last RE-checked, as opposed to `ps_signup_verified_at` which is when it
   was first seen to exist. Two observations, two columns.
@@ -524,6 +584,42 @@ that reaches all fourteen sites.
 is not additive.** It silently re-scopes every consumer of the first one. The
 work is not "update the guard I am thinking about", it is "enumerate which
 predicates on the old column now answer only half the question".
+
+**THE MODEL LAYER'S OWN TRAPS.** Four, and the first is the one that
+decides whether this feature is safe at all.
+
+*One.* **Blocking is decided in CODE from the enum, never by the model.**
+The model is only ever asked what the company *is*; `NON_ICP_BUSINESS_TYPES`
+in `index.js` says which types block, and exactly two do. If the model could
+return its own verdict, a page could talk its way out of a block in one
+sentence — and, worse, talk somebody else into one. The output schema does
+not even offer a `blocking` field, and a test asserts that a model-supplied
+one is ignored.
+
+*Two.* **Never key a block on the free-text `category`.** The warehouse
+classifier's `category` column holds **65 distinct spellings** of real
+estate and insurance — `Real Estate Tech`, `Real Estate / PropTech`,
+`Software / Insurance Tech`. A block on `category ILIKE '%real estate%'`
+turns a proptech SaaS company into a blocked lead. That is `paycompass.com`
+one layer up, and it is why `business_type` is a closed enum declared to the
+API as a structured output.
+
+*Three.* **The page text is untrusted and the schema is not the defence.**
+It goes in a user message inside `<untrusted_page_text>` delimiters, never
+in the system prompt, markup stripped and capped at 12k chars. What actually
+bounds the damage is the *direction* of the error: an injection that makes
+us **not** block is the status quo, and the costly direction — a wrong block
+of a real prospect — is one an attacker has no reason to aim at. So the
+guardrails point at accidental false blocks: the confidence floor, the
+known-customer bypass checked **before** any block, and a Slack post
+carrying the verbatim evidence quote so a wrong block is visible in minutes.
+
+*Four.* **The verdict is a CACHE READ at the moment of decision.** No
+scrape, no model call, no network, and deliberately no timeout to fall
+through — a lead who reaches the calendar because our own request was slow
+is the failure this shape exists to prevent. Warming happens on blur, via
+the `/non-icp-check` calls `gushwork-form.js` **already makes** for V1,
+which is why **neither form file changes** and the Ads fork needs no port.
 
 **The non-ICP block has three traps, and two of them look like working code.**
 
@@ -1122,7 +1218,9 @@ node tests/test-submit-gate.js       # BOOTS /submit and watches all five announ
 node tests/test-session-payload.js   # EXECUTES the real form-file functions, both files
 node tests/test-session-page-views.js # BOOTS /session, incl. what happens when the write fails
 node tests/test-lead-field-changes.js # BOOTS /partial + /submit, and parses the dashboard JS
-node tests/test-non-icp.js           # the non-ICP block: list, matcher, guards, the disqualified AUDIT
+node tests/test-non-icp.js           # the non-ICP block: list, matcher, guards, the disqualified AUDIT,
+                                    #   and section 13, which EXECUTES the model classifier against a
+                                    #   stubbed fetch — fail-open, the enum, injection handling
 node tests/test-non-icp-routes.js    # BOOTS every /monitor route AND evaluates the dashboard JS
 
 node tests/measure.js --check   # or just this: runs all twelve and checks the totals
