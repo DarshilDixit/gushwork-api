@@ -147,7 +147,7 @@ than my laptop's throughput):
 | | |
 |---|---|
 | Readable at all | **37 of 65** |
-| Caught when readable | **36 of 37 — 97%** (identical on Haiku and Sonnet) |
+| Caught when readable | **36 of 37 — 97%**, identical on all three models |
 | Overall recall | **36 of 65 — 55%** |
 
 **The entire gap is the scraper, not the judgement.** The 28 unreadable domains
