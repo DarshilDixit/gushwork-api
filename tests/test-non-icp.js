@@ -1384,6 +1384,7 @@ results13 = (async () => {
       const scope = (new Function('process', '_nonIcpLlmStats', 'nonIcpReadVerdictRow',
         'nonIcpWriteVerdictRow', 'nonIcpClassifyDomain', 'recordFailure', 'recordSuccess',
         'nonIcpCandidateDomains', 'isPartnerStackTestEmail', 'NON_ICP_LLM_ENABLED', 'console',
+        'NON_ICP_BLOCK_ENABLED', 'nonIcpMatchHost',
         'const _nonIcpLlmInFlight = new Map();\n' + warmLift +
         '\nreturn { warmNonIcpLlm, _nonIcpLlmInFlight };'))(
         { env: {} }, stats,
@@ -1392,7 +1393,8 @@ results13 = (async () => {
         async () => classifyResult,
         (src2, id, err) => calls.failures.push({ src: src2, id, err }),
         (src2) => calls.successes.push(src2),
-        () => ['x.test'], () => false, true, { log() {}, warn() {} });
+        () => ['x.test'], () => false, true, { log() {}, warn() {} },
+        opts.v1Hit === true, () => (opts.v1Hit ? { domain: 'kw.com' } : null));
       return { scope, calls, stats };
     };
     const wait = () => new Promise((r) => setTimeout(r, 30));
@@ -1437,6 +1439,17 @@ results13 = (async () => {
               w.stats.ok === 1, 'the attempt happened; losing it would hide the failure']);
     out.push(['warm: a failed write does not take the process down',
               w.scope._nonIcpLlmInFlight.size === 0, 'the in-flight entry must still be cleared']);
+
+    /* A V1 BRAND-DOMAIN HIT MUST NOT CLASSIFY AT ALL. The list decides the
+       lead before the model verdict is ever read, so a verdict for kw.com
+       can never change an outcome — and these are the most expensive
+       scrapes we have: 10 of the 30 national brand domains refuse a
+       scraper, each burning up to three 8-second timeouts. */
+    w = mkW({ source: 'llm', business_type: 'insurance', blocking: true, confidence: 0.9 }, { v1Hit: true });
+    w.scope.warmNonIcpLlm({ email: 'agent@kw.com', website: 'kw.com' }); await wait();
+    out.push(['warm: a V1 domain-list hit short-circuits before any scrape',
+              w.stats.cacheMisses === 0 && w.stats.ok === 0 && w.calls.written.length === 0,
+              JSON.stringify(w.stats)]);
 
     /* A CACHE HIT does no work at all. */
     w = mkW({ source: 'llm' }, { cached: true });
@@ -1495,7 +1508,13 @@ results13 = (async () => {
               /_nonIcpLlmStats\.bypassFailed\+\+/.test(bypassFn),
               'when this throws every block fails open — all of them, not one lead']);
     out.push(['V2: the bypass fails OPEN when the warehouse cannot be reached',
-              /catch \(err\)[\s\S]{0,400}?blocked: false, reason: 'check_failed'/.test(bypassFn)]);
+              /catch \(err\)[\s\S]{0,1400}?blocked: false, reason: 'check_failed'/.test(bypassFn)]);
+    /* BOTH SIDES. It read website-or-email until 15 Sept, which checks the
+       email only when the website is missing — so a customer whose contract
+       domain is their email domain, typing any other website, was blocked. */
+    out.push(['V2: the bypass checks BOTH the website and the email domain',
+              /partnerStackCustomerKey\(website\), partnerStackCustomerKey\(email\)/.test(bypassFn)
+              && /keys\.find/.test(bypassFn), bypassFn.slice(0, 200)]);
     out.push(['V2: the bypass is bounded by a timeout',
               /withTimeout\(\s*partnerStackCustomerDomains\(\), NON_ICP_CUSTOMER_TIMEOUT_MS/.test(bypassFn)]);
 
@@ -1575,7 +1594,7 @@ results13 = (async () => {
     out.push(['V2: health reads in-process counters, not only the table',
               healthFn.includes('_nonIcpLlmStats')]);
     out.push(['V2: the counters are consulted BEFORE the table counts decide',
-              healthFn.indexOf('const S = _nonIcpLlmStats') < healthFn.indexOf('okCount > 0 || S.ok > 0')]);
+              healthFn.indexOf('const S = _nonIcpLlmStats') < healthFn.indexOf('if (S.ok > 0)')]);
     out.push(['V2: an all-failed process is RED even with an empty table',
               /S\.errored > 0 && S\.ok === 0[\s\S]{0,240}?'red'/.test(healthFn)]);
     out.push(['V2: a high failure RATE is RED even alongside successes',

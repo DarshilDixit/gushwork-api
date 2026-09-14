@@ -1,9 +1,9 @@
 {
-  "savedAt": "2026-09-14T20:52:45.165Z",
-  "grandTotal": 3060,
+  "savedAt": "2026-09-14T20:57:59.607Z",
+  "grandTotal": 3063,
   "suites": {
     "test-batch1.js": 109,
-    "test-batch2.js": 604,
+    "test-batch2.js": 605,
     "test-batch-a.js": 316,
     "test-ads-parity.js": 172,
     "test-partnerstack.js": 991,
@@ -12,7 +12,7 @@
     "test-session-payload.js": 21,
     "test-session-page-views.js": 23,
     "test-lead-field-changes.js": 103,
-    "test-non-icp.js": 486,
+    "test-non-icp.js": 488,
     "test-non-icp-routes.js": 151
   }
 }

@@ -886,7 +886,16 @@ function finish() {
   const monBlock = src.slice(src.indexOf('const FAILURE_MONITORS'),
                              src.indexOf('\n};', src.indexOf('const FAILURE_MONITORS')));
   const configured = new Set(
-    Array.from(monBlock.matchAll(/^\s*'?([A-Za-z][A-Za-z ]*?)'?\s*:\s*\{\s*alertAfter/gm))
+    /* WIDENED 15 Sept 2026. The class was [A-Za-z][A-Za-z ]*? — letters and
+       spaces only — so a HYPHENATED source name was invisible to it and
+       this check reported a correctly-registered source as a silent no-op.
+       'Non-ICP model' was registered, worked, and failed here anyway.
+
+       The direction of the error is what made it worth fixing rather than
+       silencing: a derivation that cannot see a key will always claim the
+       alert is dead, which is the false positive that gets a real check
+       ignored. Matches any quoted key now. */
+    Array.from(monBlock.matchAll(/^\s*'([^']+)'\s*:\s*\{\s*alertAfter/gm))
          .map((m) => m[1]));
   ok('failmon: the monitor table was parsed at all', configured.size >= 5, [...configured].join(','));
 
