@@ -2387,9 +2387,13 @@ async function checkNonIcpLlmHealth(db) {
          and would train people to ignore it. */
       const extra = [errored ? errored + ' API errors' : null,
                      unreachable ? unreachable + ' sites unreadable' : null].filter(Boolean).join(', ');
+      const warmMs = S.cacheMisses
+        ? ` Warm: ${Math.round(S.totalMs / S.cacheMisses)}ms avg, ${S.maxMs}ms worst.` : '';
+      const hitRate = (S.cacheHits + S.cacheMisses)
+        ? ` Cache hits ${Math.round(100 * S.cacheHits / (S.cacheHits + S.cacheMisses))}% (${S.cacheHits} of ${S.cacheHits + S.cacheMisses}).` : '';
       return hc('nonicpllm', 'green', (okCount || S.ok) + ' classified in ' + HEALTH_NON_ICP_LLM_LOOKBACK_H + 'h',
         (extra ? extra + '. ' : '') + 'Last success ' +
-        (row.last_ok ? etStamp(new Date(row.last_ok)) : (S.lastOkAt ? etStamp(new Date(S.lastOkAt)) : 'unknown')) + '.');
+        (row.last_ok ? etStamp(new Date(row.last_ok)) : (S.lastOkAt ? etStamp(new Date(S.lastOkAt)) : 'unknown')) + '.' + warmMs + hitRate);
     }
     if (unreachable > 0 || S.unreachable > 0) {
       return hc('nonicpllm', 'insufficient_data', (unreachable || S.unreachable) + ' sites unreadable, nothing classified',
@@ -7539,6 +7543,7 @@ const _nonIcpLlmInFlight = new Map();
    should report "nothing yet" rather than inherit a stale verdict about
    its own health. */
 const _nonIcpLlmStats = { ok: 0, errored: 0, unreachable: 0, writeFailed: 0,
+                          cacheHits: 0, cacheMisses: 0, totalMs: 0, maxMs: 0,
                           lastOkAt: null, lastErrorAt: null, lastError: null,
                           since: Date.now() };
 
@@ -7551,8 +7556,18 @@ function warmNonIcpLlm({ email, website } = {}) {
     if (_nonIcpLlmInFlight.has(domain)) continue;
     const p = (async () => {
       const cached = await nonIcpReadVerdictRow(domain);
-      if (cached) return;                       // fresh enough, nothing to do
+      if (cached) { _nonIcpLlmStats.cacheHits++; return; }   // fresh enough, nothing to do
+      /* CACHE HIT RATE AND WARM DURATION are the two numbers that say
+         whether this layer is fast enough on real traffic, and neither was
+         recorded on the night it went live -- so the honest answer to "how
+         long does the warm take on real leads" was "not instrumented".
+         Both are counted here and both reach /monitor/health. */
+      _nonIcpLlmStats.cacheMisses++;
+      const startedAt = Date.now();
       const v = await nonIcpClassifyDomain(domain);
+      const tookMs = Date.now() - startedAt;
+      _nonIcpLlmStats.totalMs += tookMs;
+      if (tookMs > _nonIcpLlmStats.maxMs) _nonIcpLlmStats.maxMs = tookMs;
 
       /* COUNT THE OUTCOME BEFORE THE WRITE. If the write throws, the
          attempt still happened and the health row must know about it --
@@ -7595,9 +7610,9 @@ function warmNonIcpLlm({ email, website } = {}) {
 
       if (v.source === 'llm') {
         console.log(`[non-ICP/llm] ${domain} → ${v.business_type} (${v.confidence}) ` +
-                    `${v.blocking ? 'FLAG' : 'keep'} | ${v.model_id}`);
+                    `${v.blocking ? 'FLAG' : 'keep'} | ${v.model_id} | ${tookMs}ms`);
       } else {
-        console.log(`[non-ICP/llm] ${domain} → no verdict (${v.source}: ${v.error || v.scrape_status})`);
+        console.log(`[non-ICP/llm] ${domain} → no verdict (${v.source}: ${v.error || v.scrape_status}) | ${tookMs}ms`);
       }
     })()
       /* Fire and forget means the catch is not optional. An unhandled

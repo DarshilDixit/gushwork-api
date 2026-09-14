@@ -1350,6 +1350,100 @@ results13 = (async () => {
               h.state === 'green', h.state + ' / ' + h.text]);
   }
 
+  /* ── 13g4. warmNonIcpLlm, EXECUTED — the counters must actually move
+     Added because a mutation SURVIVED: swapping `_nonIcpLlmStats.errored++`
+     for `.ok++` left every assertion passing. The section above proved the
+     counters EXIST and that recordFailure is mentioned; neither proves an
+     error is counted as an error. Drive it. */
+  {
+    /* Sliced to START at the stats declaration's end, because the block
+       declares _nonIcpLlmStats itself and it is injected here instead. */
+    const warmLift = between('function nonIcpLlmHealthSnapshot()', '/* ── The read at the moment of decision ──');
+    const mkW = (classifyResult, opts = {}) => {
+      const calls = { failures: [], successes: [], written: [] };
+      const stats = { ok: 0, errored: 0, unreachable: 0, writeFailed: 0, cacheHits: 0,
+                      cacheMisses: 0, totalMs: 0, maxMs: 0, lastOkAt: null, lastErrorAt: null, lastError: null };
+      const scope = (new Function('process', '_nonIcpLlmStats', 'nonIcpReadVerdictRow',
+        'nonIcpWriteVerdictRow', 'nonIcpClassifyDomain', 'recordFailure', 'recordSuccess',
+        'nonIcpCandidateDomains', 'isPartnerStackTestEmail', 'NON_ICP_LLM_ENABLED', 'console',
+        'const _nonIcpLlmInFlight = new Map();\n' + warmLift +
+        '\nreturn { warmNonIcpLlm, _nonIcpLlmInFlight };'))(
+        { env: {} }, stats,
+        async () => (opts.cached ? { domain: 'x.test', blocking: false } : null),
+        async (v) => { if (opts.writeThrows) throw new Error('db down'); calls.written.push(v); },
+        async () => classifyResult,
+        (src2, id, err) => calls.failures.push({ src: src2, id, err }),
+        (src2) => calls.successes.push(src2),
+        () => ['x.test'], () => false, true, { log() {}, warn() {} });
+      return { scope, calls, stats };
+    };
+    const wait = () => new Promise((r) => setTimeout(r, 30));
+
+    /* A landed verdict. */
+    let w = mkW({ source: 'llm', business_type: 'insurance', blocking: true, confidence: 0.9, model_id: 'm' });
+    w.scope.warmNonIcpLlm({ email: 'a@x.test' }); await wait();
+    out.push(['warm: a landed verdict increments ok', w.stats.ok === 1 && w.stats.errored === 0, JSON.stringify(w.stats)]);
+    out.push(['warm: …and calls recordSuccess so the streak resets',
+              w.calls.successes.includes('Non-ICP model'), JSON.stringify(w.calls.successes)]);
+    out.push(['warm: …and calls recordFailure NOT at all', w.calls.failures.length === 0]);
+    out.push(['warm: …and writes the row', w.calls.written.length === 1]);
+    out.push(['warm: …and counts a cache MISS', w.stats.cacheMisses === 1 && w.stats.cacheHits === 0]);
+    out.push(['warm: …and records how long it took', w.stats.totalMs >= 0 && w.stats.maxMs >= 0]);
+
+    /* AN API ERROR. This is the case the surviving mutation proved was
+       untested: it must increment `errored`, never `ok`. */
+    w = mkW({ source: 'llm_error', error: 'HTTP 401', blocking: false });
+    w.scope.warmNonIcpLlm({ email: 'a@x.test' }); await wait();
+    out.push(['warm: an API error increments errored, NOT ok',
+              w.stats.errored === 1 && w.stats.ok === 0, JSON.stringify(w.stats)]);
+    out.push(['warm: …and calls recordFailure with the source and the error',
+              w.calls.failures.length === 1 && w.calls.failures[0].src === 'Non-ICP model'
+              && /401/.test(w.calls.failures[0].err), JSON.stringify(w.calls.failures)]);
+    out.push(['warm: …and does NOT call recordSuccess', w.calls.successes.length === 0]);
+    out.push(['warm: …and records the error text for the health row', /401/.test(w.stats.lastError || '')]);
+
+    /* AN UNREADABLE SITE. Normal at 8.9%; counted, never alerted. */
+    w = mkW({ source: 'llm_unreachable', scrape_status: 'unreachable', blocking: false });
+    w.scope.warmNonIcpLlm({ email: 'a@x.test' }); await wait();
+    out.push(['warm: an unreadable site increments unreachable only',
+              w.stats.unreachable === 1 && w.stats.errored === 0 && w.stats.ok === 0, JSON.stringify(w.stats)]);
+    out.push(['warm: …and raises NO alert', w.calls.failures.length === 0,
+              'alerting on this would be permanently red at 8.9% of domains']);
+
+    /* A FAILED WRITE. The verdict was produced and paid for and dropped. */
+    w = mkW({ source: 'llm', business_type: 'insurance', blocking: true, confidence: 0.9 }, { writeThrows: true });
+    w.scope.warmNonIcpLlm({ email: 'a@x.test' }); await wait();
+    out.push(['warm: a failed WRITE is counted', w.stats.writeFailed === 1, JSON.stringify(w.stats)]);
+    out.push(['warm: …and alerts', w.calls.failures.some((f) => /write failed/.test(f.err)), JSON.stringify(w.calls.failures)]);
+    out.push(['warm: …and the successful classification is still counted',
+              w.stats.ok === 1, 'the attempt happened; losing it would hide the failure']);
+    out.push(['warm: a failed write does not take the process down',
+              w.scope._nonIcpLlmInFlight.size === 0, 'the in-flight entry must still be cleared']);
+
+    /* A CACHE HIT does no work at all. */
+    w = mkW({ source: 'llm' }, { cached: true });
+    w.scope.warmNonIcpLlm({ email: 'a@x.test' }); await wait();
+    out.push(['warm: a cache hit counts as a hit and classifies nothing',
+              w.stats.cacheHits === 1 && w.stats.cacheMisses === 0 && w.calls.written.length === 0,
+              JSON.stringify(w.stats)]);
+
+    /* THE SURVIVING MUTATIONS, pinned. Two mutations survived the first
+       version of this section — `_nonIcpLlmStats.errored++` swapped for
+       `.ok++`, and the recordFailure call deleted outright — because every
+       assertion was about the SOURCE containing those tokens. Source
+       assertions cannot see which counter moved. These can. */
+    w = mkW({ source: 'llm_error', error: 'boom' });
+    w.scope.warmNonIcpLlm({ email: 'a@x.test' }); await wait();
+    out.push(['warm/mutation: an error must NEVER land in the ok counter',
+              w.stats.ok === 0, 'errors counted as successes would make the health row green through an outage']);
+    out.push(['warm/mutation: an error must ALWAYS reach recordFailure',
+              w.calls.failures.length === 1, 'without this the outage is console-only']);
+    w = mkW({ source: 'llm', business_type: 'insurance', blocking: false, confidence: 0.9 });
+    w.scope.warmNonIcpLlm({ email: 'a@x.test' }); await wait();
+    out.push(['warm/mutation: a success must NEVER reach recordFailure', w.calls.failures.length === 0]);
+    out.push(['warm/mutation: a success must ALWAYS reach recordSuccess', w.calls.successes.length === 1]);
+  }
+
   /* ── 13h. WIRING — the parts an execution test cannot reach ──────── */
   {
     const verdictFn = between('async function nonIcpVerdict({ email, website } = {})', 'function nonIcpStamp(v)');
