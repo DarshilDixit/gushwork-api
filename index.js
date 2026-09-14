@@ -2361,6 +2361,14 @@ async function checkNonIcpLlmHealth(db) {
     const S = _nonIcpLlmStats;
     const tried = S.ok + S.errored;
 
+    /* EVERY BLOCK FAILING OPEN. Checked before anything else because it is
+       the only state here where the layer looks perfectly healthy —
+       classifying, writing, green on every other signal — and blocks
+       nobody at all. */
+    if (S.bypassFailed > 0) {
+      return hc('nonicpllm', 'red', S.bypassFailed + ' blocks failed open — the customer bypass could not run',
+        'Every block is being skipped while the warehouse cannot answer, by design, because we cannot tell "not a customer" from "could not ask". Last error: ' + (S.lastError || 'unknown') + '.');
+    }
     if (S.writeFailed > 0) {
       return hc('nonicpllm', 'red', S.writeFailed + ' verdicts could not be saved',
         'The model answered and the row could not be written, so those domains are re-classified on every visit and paid for again. Check the Railway database.');
@@ -6972,6 +6980,18 @@ async function nonIcpCustomerBypass({ email, website, matched_domain }) {
   } catch (err) {
     /* awsPool is max:3 with no statement_timeout, so an RDS instance that
        accepts connections but answers slowly hangs forever without this. */
+    /* SILENT UNTIL 15 Sept 2026, and the most consequential of the lot:
+       when this throws, EVERY block fails open. Not one lead — all of them,
+       for as long as the warehouse is slow. It was console-only.
+
+       checkAwsHealth does probe awsPool and goes RED when the mirror is
+       unreachable, so a full outage was already visible. What was not: a
+       warehouse that answers the mirror query and times out on the bigger
+       customer query. That reads green on the AWS row and silently
+       disables blocking entirely. Counted here so the model row sees it. */
+    _nonIcpLlmStats.bypassFailed++;
+    _nonIcpLlmStats.lastErrorAt = Date.now();
+    _nonIcpLlmStats.lastError = 'customer bypass: ' + (err && err.message);
     console.warn(`[non-ICP] Customer bypass could not run for ${key} — NOT blocking:`, err.message);
     return { blocked: false, reason: 'check_failed', matched_domain, detail: err.message };
   }
@@ -7543,7 +7563,7 @@ const _nonIcpLlmInFlight = new Map();
    should report "nothing yet" rather than inherit a stale verdict about
    its own health. */
 const _nonIcpLlmStats = { ok: 0, errored: 0, unreachable: 0, writeFailed: 0,
-                          cacheHits: 0, cacheMisses: 0, totalMs: 0, maxMs: 0,
+                          cacheHits: 0, cacheMisses: 0, totalMs: 0, maxMs: 0, bypassFailed: 0,
                           lastOkAt: null, lastErrorAt: null, lastError: null,
                           since: Date.now() };
 

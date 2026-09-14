@@ -1304,7 +1304,9 @@ results13 = (async () => {
       (id, state, text, detail) => ({ id, state, text, detail }),
       () => 'STAMP', env.NON_ICP_LLM_ENABLED === 'true')({ query: async () => ({ rows: [tableRow || {}] }) });
     const ENV_ON = { NON_ICP_LLM_ENABLED: 'true', ANTHROPIC_API_KEY: 'sk-x' };
-    const zero = () => ({ ok: 0, errored: 0, unreachable: 0, writeFailed: 0, lastOkAt: null, lastErrorAt: null, lastError: null });
+    const zero = () => ({ ok: 0, errored: 0, unreachable: 0, writeFailed: 0, bypassFailed: 0,
+                          cacheHits: 0, cacheMisses: 0, totalMs: 0, maxMs: 0,
+                          lastOkAt: null, lastErrorAt: null, lastError: null });
 
     let h = await mkH(zero(), { NON_ICP_LLM_ENABLED: 'false' });
     out.push(['health: the layer switched off is GREY, never green', h.state === 'insufficient_data', h.state + ' / ' + h.text]);
@@ -1327,6 +1329,13 @@ results13 = (async () => {
     h = await mkH({ ...zero(), ok: 40, errored: 1 }, ENV_ON, { ok: '40' });
     out.push(['health: an occasional error alongside plenty of successes is GREEN',
               h.state === 'green', h.state + ' / ' + h.text]);
+
+    /* THE STATE WHERE EVERYTHING LOOKS FINE AND NOTHING IS BLOCKED.
+       Classifying happily, writing happily, and the customer bypass cannot
+       run — so every block fails open. Green on every other signal. */
+    h = await mkH({ ...zero(), ok: 40, bypassFailed: 3, lastError: 'customer bypass: timed out' }, ENV_ON, { ok: '40' });
+    out.push(['health: blocks failing open because the bypass is down is RED',
+              h.state === 'red' && /failed open/.test(h.text), h.state + ' / ' + h.text]);
 
     h = await mkH({ ...zero(), ok: 5, writeFailed: 2 }, ENV_ON, { ok: '5' });
     out.push(['health: a verdict that cannot be SAVED is RED even while classifying fine',
@@ -1473,6 +1482,9 @@ results13 = (async () => {
     out.push(['V2: the bypass short-circuits both times',
               (verdictFn.match(/if \(bypass\) return bypass;/g) || []).length === 2]);
     const bypassFn = between('async function nonIcpCustomerBypass({ email, website, matched_domain })', 'NON-ICP V2 — THE MODEL LAYER');
+    out.push(['V2: a bypass failure is COUNTED, not just logged',
+              /_nonIcpLlmStats\.bypassFailed\+\+/.test(bypassFn),
+              'when this throws every block fails open — all of them, not one lead']);
     out.push(['V2: the bypass fails OPEN when the warehouse cannot be reached',
               /catch \(err\)[\s\S]{0,400}?blocked: false, reason: 'check_failed'/.test(bypassFn)]);
     out.push(['V2: the bypass is bounded by a timeout',
