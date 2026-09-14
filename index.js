@@ -988,6 +988,16 @@ const FAILURE_MONITORS = {
      alertOps DIRECTLY and bypasses this table entirely. The health row is also
      independent — it runs its own query against `leads`. So the money path's
      two headline failures always did alert; everything around them did not. */
+  /* ADDED 15 Sept 2026, the night the block went on, because every failure
+     inside nonIcpClassifyDomain was console-only. The layer FAILS OPEN by
+     design, so an outage costs no lead and produces no symptom anybody can
+     see -- which is precisely the shape that hid 21 PartnerStack call sites.
+
+     Registered for llm_error ONLY. An unreadable website (llm_unreachable)
+     is NORMAL -- measured at 8.9% of domains, and the national brands
+     deliberately 403 -- so alerting on it would be permanently red and
+     train people to ignore the row. */
+  'Non-ICP model': { alertAfter: 3, impact: 'Websites are not being classified, so the model layer is blocking and Meta-suppressing nobody. No lead is lost — but the long tail of realtors and agencies is getting through as it did before September.' },
   'PartnerStack': { alertAfter: 3, impact: 'An affiliate is not being credited, or the money path cannot be verified. Claims are released, so most of these retry — but nothing retries a conversion whose attempts are exhausted.' },
 };
 const FAILURE_BUFFER_TTL_MS = 6 * 60 * 60 * 1000; // stale failures expire, so a slow trickle never accumulates
@@ -1074,6 +1084,7 @@ const AUTH_FAILURE_GUIDANCE = {
   'Loops':      'Loops rejected the API key. Check LOOPS_API_KEY. Lead-magnet contacts are not reaching the mailing list.',
   'Salesforce': 'Salesforce rejected the session. The refresh token may be dead — check SF_REFRESH_TOKEN.',
   'AWS sync':   'AWS Postgres rejected the connection. Check the AWS_PG_* credentials.',
+  'Non-ICP model': 'Anthropic rejected the API key. Check ANTHROPIC_API_KEY and the account credit balance. The brand-domain list is unaffected and still blocking.',
 };
 
 // Consecutive-failure streak per service. A run of failures is an outage at
@@ -2337,14 +2348,38 @@ async function checkNonIcpLlmHealth(db) {
     const errored     = parseInt(row.errored)     || 0;
     const unreachable = parseInt(row.unreachable) || 0;
 
-    /* Errors with nothing succeeding is the shape of a dead dependency:
-       a bad key, an exhausted balance, an outage. Red regardless of
-       volume, because one is enough to mean the layer is not working. */
-    if (errored > 0 && okCount === 0) {
-      return hc('nonicpllm', 'red', errored + ' failed, none succeeded in ' + HEALTH_NON_ICP_LLM_LOOKBACK_H + 'h',
-        'Every classification attempt failed. Check the ANTHROPIC_API_KEY and the [non-ICP/llm] lines in the Railway logs.');
+    /* THE IN-PROCESS COUNTERS COME FIRST, and they are the half that still
+       works once the cache is warm.
+
+       The table tells you what LANDED. The counters tell you what was
+       ATTEMPTED -- including attempts whose write failed, which by
+       definition never reach the table. With ~2,900 domains cached most
+       leads are a cache hit, so the table can be quiet for a whole day
+       while the API is dead, and a table-only check would call that grey.
+       The better the cache got, the blinder the check got. A live process
+       that has tried and failed is never grey here. */
+    const S = _nonIcpLlmStats;
+    const tried = S.ok + S.errored;
+
+    if (S.writeFailed > 0) {
+      return hc('nonicpllm', 'red', S.writeFailed + ' verdicts could not be saved',
+        'The model answered and the row could not be written, so those domains are re-classified on every visit and paid for again. Check the Railway database.');
     }
-    if (okCount > 0) {
+    /* A run of failures with nothing succeeding IN THIS PROCESS is an
+       outage whatever the table says. */
+    if (S.errored > 0 && S.ok === 0) {
+      return hc('nonicpllm', 'red', S.errored + ' classification attempts failed, none succeeded',
+        'Last error: ' + (S.lastError || 'unknown') + '. Check ANTHROPIC_API_KEY and the [non-ICP/llm] lines in the Railway logs. The brand-domain list is unaffected and still blocking.');
+    }
+    /* A high error RATE, even alongside successes. Rate limiting and a
+       spent balance both look like this, and the previous check -- red only
+       when NOTHING succeeded -- stayed green through both. */
+    if (tried >= 5 && S.errored / tried >= 0.5) {
+      return hc('nonicpllm', 'red', Math.round(100 * S.errored / tried) + '% of attempts failing (' + S.errored + ' of ' + tried + ')',
+        'Last error: ' + (S.lastError || 'unknown') + '. Rate limiting and a spent balance both look like this.');
+    }
+
+    if (okCount > 0 || S.ok > 0) {
       /* Unreachable sites are NORMAL and are reported, never alerted on.
          8.9% of domains refuse a scraper -- the national carriers most of
          all -- and that is the measured reason the brand-domain list is
@@ -2352,15 +2387,19 @@ async function checkNonIcpLlmHealth(db) {
          and would train people to ignore it. */
       const extra = [errored ? errored + ' API errors' : null,
                      unreachable ? unreachable + ' sites unreadable' : null].filter(Boolean).join(', ');
-      return hc('nonicpllm', 'green', okCount + ' classified in ' + HEALTH_NON_ICP_LLM_LOOKBACK_H + 'h',
-        (extra ? extra + '. ' : '') + 'Last success ' + (row.last_ok ? etStamp(new Date(row.last_ok)) : 'unknown') + '.');
+      return hc('nonicpllm', 'green', (okCount || S.ok) + ' classified in ' + HEALTH_NON_ICP_LLM_LOOKBACK_H + 'h',
+        (extra ? extra + '. ' : '') + 'Last success ' +
+        (row.last_ok ? etStamp(new Date(row.last_ok)) : (S.lastOkAt ? etStamp(new Date(S.lastOkAt)) : 'unknown')) + '.');
     }
-    if (unreachable > 0) {
-      return hc('nonicpllm', 'insufficient_data', unreachable + ' sites unreadable, nothing classified',
-        'Every domain seen in the last ' + HEALTH_NON_ICP_LLM_LOOKBACK_H + 'h refused a scraper. Not an outage on our side, but nothing has been verified either.');
+    if (unreachable > 0 || S.unreachable > 0) {
+      return hc('nonicpllm', 'insufficient_data', (unreachable || S.unreachable) + ' sites unreadable, nothing classified',
+        'Every domain seen refused a scraper. Not an outage on our side, but nothing has been verified either.');
     }
-    return hc('nonicpllm', 'insufficient_data', 'No new domains in ' + HEALTH_NON_ICP_LLM_LOOKBACK_H + 'h',
-      'Nothing to classify — every domain seen was already cached.');
+    /* Genuinely nothing attempted. With a warm cache this is the NORMAL
+       steady state, and it is grey rather than green on purpose: a check
+       that has verified nothing must never claim the layer works. */
+    return hc('nonicpllm', 'insufficient_data', 'Nothing needed classifying',
+      'Every domain seen was already cached and this process has attempted no classifications. Not a fault — but nothing has been verified either, so this is not green.');
   } catch (err) {
     return hc('nonicpllm', 'red', 'Could not check', err && err.message);
   }
@@ -7482,6 +7521,29 @@ function nonIcpCandidateDomains({ email, website } = {}) {
    cache. */
 const _nonIcpLlmInFlight = new Map();
 
+/* IN-PROCESS OUTCOME COUNTERS, and they are what makes a dead layer
+   visible once the cache is warm.
+
+   The health row used to count rows in non_icp_domain_verdicts. That works
+   on a cold cache and STOPS WORKING on a warm one: with 2,900 domains
+   cached, most leads are a cache hit, few classifications run, and the row
+   settles on "No new domains in 24h" -- grey, inert, and INDISTINGUISHABLE
+   FROM THE API BEING DEAD. The better the cache gets, the blinder the
+   check gets, which is the worst possible direction for a health signal.
+
+   So attempts are counted here, in memory, as they happen. A table read
+   cannot tell "nothing needed classifying" from "everything failed"; a
+   counter can. Same pattern the ELV health snapshot already uses.
+
+   Lost on restart, deliberately: a fresh process has made no attempts and
+   should report "nothing yet" rather than inherit a stale verdict about
+   its own health. */
+const _nonIcpLlmStats = { ok: 0, errored: 0, unreachable: 0, writeFailed: 0,
+                          lastOkAt: null, lastErrorAt: null, lastError: null,
+                          since: Date.now() };
+
+function nonIcpLlmHealthSnapshot() { return { ..._nonIcpLlmStats }; }
+
 function warmNonIcpLlm({ email, website } = {}) {
   if (!NON_ICP_LLM_ENABLED) return;
   if (isPartnerStackTestEmail(email)) return;
@@ -7491,7 +7553,46 @@ function warmNonIcpLlm({ email, website } = {}) {
       const cached = await nonIcpReadVerdictRow(domain);
       if (cached) return;                       // fresh enough, nothing to do
       const v = await nonIcpClassifyDomain(domain);
-      await nonIcpWriteVerdictRow(v);
+
+      /* COUNT THE OUTCOME BEFORE THE WRITE. If the write throws, the
+         attempt still happened and the health row must know about it --
+         counting after would lose exactly the failures worth seeing. */
+      if (v.source === 'llm') {
+        _nonIcpLlmStats.ok++; _nonIcpLlmStats.lastOkAt = Date.now();
+        /* Resets the consecutive-failure streak. Without this, "3 failures
+           in a row" silently means "3 since the last alert, ever" -- the
+           exact defect that made the Meta CAPI streak meaningless until
+           recordSuccess was wired in. */
+        recordSuccess('Non-ICP model');
+      } else if (v.source === 'llm_unreachable') {
+        /* NOT a failure. A site that refuses a scraper is the normal case
+           for 8.9% of domains and for most national brands. Counted so it
+           is visible, never alerted on. */
+        _nonIcpLlmStats.unreachable++;
+      } else {
+        _nonIcpLlmStats.errored++;
+        _nonIcpLlmStats.lastErrorAt = Date.now();
+        _nonIcpLlmStats.lastError = v.error || 'unknown';
+        /* A bad key, a spent balance, a 429, a refusal, an unparseable
+           body. Three in a row pages; a 401 pages on the first. */
+        recordFailure('Non-ICP model', domain, v.error || 'classification failed');
+      }
+
+      try {
+        await nonIcpWriteVerdictRow(v);
+      } catch (err) {
+        /* A WRITE FAILURE IS ITS OWN SILENT DISASTER, separate from a
+           classification failure. The verdict was produced and paid for and
+           then dropped: the domain is re-classified on every blur forever,
+           the cost is unbounded, and nothing downstream changes -- so there
+           is no symptom at all. Counted and alerted rather than swallowed. */
+        _nonIcpLlmStats.writeFailed++;
+        _nonIcpLlmStats.lastErrorAt = Date.now();
+        _nonIcpLlmStats.lastError = 'verdict write failed: ' + (err && err.message);
+        recordFailure('Non-ICP model', domain, 'verdict write failed: ' + (err && err.message));
+        throw err;
+      }
+
       if (v.source === 'llm') {
         console.log(`[non-ICP/llm] ${domain} → ${v.business_type} (${v.confidence}) ` +
                     `${v.blocking ? 'FLAG' : 'keep'} | ${v.model_id}`);

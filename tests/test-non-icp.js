@@ -1290,6 +1290,66 @@ results13 = (async () => {
               (await stale.nonIcpLlmCachedVerdict({ email: 'x@brokerage.test', website: '' })) === null]);
   }
 
+  /* ── 13g3. THE HEALTH ROW, EXECUTED ──────────────────────────────
+     "Health checks fail LOUD... a green badge means verified working,
+     just now. If it cannot verify, it must not be green." That is a claim
+     about behaviour, and behaviour has to be driven. Every branch below
+     is called with real counter state and a real stubbed pool. */
+  {
+    const hfLift = between('const HEALTH_NON_ICP_LLM_LOOKBACK_H', '/* One place that runs them all');
+    const mkH = (stats, env, tableRow) => (new Function('process', '_nonIcpLlmStats', 'hc', 'etStamp',
+      'NON_ICP_LLM_ENABLED',
+      hfLift + '\nreturn checkNonIcpLlmHealth;'))(
+      { env }, stats,
+      (id, state, text, detail) => ({ id, state, text, detail }),
+      () => 'STAMP', env.NON_ICP_LLM_ENABLED === 'true')({ query: async () => ({ rows: [tableRow || {}] }) });
+    const ENV_ON = { NON_ICP_LLM_ENABLED: 'true', ANTHROPIC_API_KEY: 'sk-x' };
+    const zero = () => ({ ok: 0, errored: 0, unreachable: 0, writeFailed: 0, lastOkAt: null, lastErrorAt: null, lastError: null });
+
+    let h = await mkH(zero(), { NON_ICP_LLM_ENABLED: 'false' });
+    out.push(['health: the layer switched off is GREY, never green', h.state === 'insufficient_data', h.state + ' / ' + h.text]);
+
+    h = await mkH(zero(), { NON_ICP_LLM_ENABLED: 'true' });
+    out.push(['health: a missing API key is RED', h.state === 'red' && /No API key/.test(h.text), h.state + ' / ' + h.text]);
+
+    /* THE BLIND SPOT THAT PROMPTED THIS. Empty table, warm cache, and a
+       process that has failed every attempt. A table-only check reads this
+       as "no new domains" and goes grey. */
+    h = await mkH({ ...zero(), errored: 4, lastError: 'HTTP 401' }, ENV_ON, {});
+    out.push(['health: all attempts failing is RED even with an EMPTY table',
+              h.state === 'red' && /attempts failed/.test(h.text), h.state + ' / ' + h.text]);
+    out.push(['health: …and it names the error so somebody can act', /401/.test(h.detail || ''), h.detail]);
+
+    h = await mkH({ ...zero(), ok: 3, errored: 7, lastError: 'HTTP 429' }, ENV_ON, {});
+    out.push(['health: a 70% failure rate is RED even alongside successes',
+              h.state === 'red' && /failing/.test(h.text), h.state + ' / ' + h.text]);
+
+    h = await mkH({ ...zero(), ok: 40, errored: 1 }, ENV_ON, { ok: '40' });
+    out.push(['health: an occasional error alongside plenty of successes is GREEN',
+              h.state === 'green', h.state + ' / ' + h.text]);
+
+    h = await mkH({ ...zero(), ok: 5, writeFailed: 2 }, ENV_ON, { ok: '5' });
+    out.push(['health: a verdict that cannot be SAVED is RED even while classifying fine',
+              h.state === 'red' && /could not be saved/.test(h.text), h.state + ' / ' + h.text]);
+
+    /* The steady state once the cache is warm. Grey, never green: nothing
+       has been verified, so nothing may be claimed. */
+    h = await mkH(zero(), ENV_ON, {});
+    out.push(['health: a fully-cached day is GREY, never green',
+              h.state === 'insufficient_data' && /Nothing needed classifying/.test(h.text), h.state + ' / ' + h.text]);
+
+    /* Unreadable sites are normal and must never redden the row. */
+    h = await mkH({ ...zero(), unreachable: 30 }, ENV_ON, {});
+    out.push(['health: sites refusing a scraper do NOT turn it red',
+              h.state === 'insufficient_data', h.state + ' / ' + h.text]);
+
+    /* A live process with successes is green even if the TABLE window is
+       empty -- the counters are the authority on "is it working now". */
+    h = await mkH({ ...zero(), ok: 6, lastOkAt: Date.now() }, ENV_ON, {});
+    out.push(['health: in-process successes alone are enough to be GREEN',
+              h.state === 'green', h.state + ' / ' + h.text]);
+  }
+
   /* ── 13h. WIRING — the parts an execution test cannot reach ──────── */
   {
     const verdictFn = between('async function nonIcpVerdict({ email, website } = {})', 'function nonIcpStamp(v)');
@@ -1387,7 +1447,54 @@ results13 = (async () => {
     const healthFn = between('async function checkNonIcpLlmHealth(db)', 'One place that runs them all');
     out.push(['V2: a missing key is RED on the health row', /ANTHROPIC_API_KEY[\s\S]{0,200}?'red'/.test(healthFn)]);
     out.push(['V2: the layer being off is grey, never green', /'insufficient_data', 'Off'/.test(healthFn)]);
-    out.push(['V2: all-errors-no-successes is RED', /errored > 0 && okCount === 0[\s\S]{0,200}?'red'/.test(healthFn)]);
+
+    /* ── THE WARM-CACHE BLIND SPOT ──────────────────────────────────
+       The first version of this row counted rows in the verdict table.
+       That works on a cold cache and goes blind on a warm one: with ~2,900
+       domains cached most leads are a hit, nothing new is classified, and
+       the row settles on grey — which is what a dead API looks like too.
+       The better the cache got, the less the check could see.
+
+       The counters fix it, so they are asserted to come FIRST and to be
+       able to fire on their own. */
+    out.push(['V2: health reads in-process counters, not only the table',
+              healthFn.includes('_nonIcpLlmStats')]);
+    out.push(['V2: the counters are consulted BEFORE the table counts decide',
+              healthFn.indexOf('const S = _nonIcpLlmStats') < healthFn.indexOf('okCount > 0 || S.ok > 0')]);
+    out.push(['V2: an all-failed process is RED even with an empty table',
+              /S\.errored > 0 && S\.ok === 0[\s\S]{0,240}?'red'/.test(healthFn)]);
+    out.push(['V2: a high failure RATE is RED even alongside successes',
+              /S\.errored \/ tried >= 0\.5[\s\S]{0,240}?'red'/.test(healthFn)]);
+    out.push(['V2: a verdict that cannot be SAVED is RED',
+              /S\.writeFailed > 0[\s\S]{0,240}?'red'/.test(healthFn)]);
+    out.push(['V2: a fully-cached day is grey, never green',
+              /'insufficient_data', 'Nothing needed classifying'/.test(healthFn)]);
+
+    /* ── THE ALERTING THAT DID NOT EXIST ────────────────────────────
+       Every failure inside nonIcpClassifyDomain was console-only. The
+       layer fails open, so an outage costs no lead and shows no symptom —
+       the exact shape that hid 21 PartnerStack call sites. */
+    const warm = between('function warmNonIcpLlm({ email, website } = {})', 'The read at the moment of decision');
+    out.push(['V2: a classification failure calls recordFailure',
+              /recordFailure\('Non-ICP model'/.test(warm)]);
+    out.push(['V2: a landed verdict calls recordSuccess, so the streak resets',
+              /recordSuccess\('Non-ICP model'\)/.test(warm),
+              'without this, "3 failures in a row" means "3 since the last alert, ever"']);
+    out.push(['V2: an unreadable site is NOT alerted on',
+              /llm_unreachable[\s\S]{0,400}?_nonIcpLlmStats\.unreachable\+\+/.test(warm)
+              && !/llm_unreachable[\s\S]{0,200}?recordFailure/.test(warm),
+              '8.9% of domains refuse a scraper; alerting would be permanently red']);
+    out.push(['V2: a failed verdict WRITE is counted and alerted, not swallowed',
+              /verdict write failed/.test(warm) && /_nonIcpLlmStats\.writeFailed\+\+/.test(warm)]);
+    out.push(['V2: outcomes are counted BEFORE the write, so a write failure keeps its attempt',
+              warm.indexOf('_nonIcpLlmStats.ok++') < warm.indexOf('await nonIcpWriteVerdictRow')]);
+    out.push(['V2: the source is registered in FAILURE_MONITORS',
+              /'Non-ICP model': \{ alertAfter/.test(src),
+              'recordFailure is a silent no-op for an unregistered source']);
+    out.push(['V2: a rejected key has plain-English guidance',
+              /'Non-ICP model': 'Anthropic rejected the API key/.test(src)]);
+
+    out.push(['V2: all-errors-no-successes is RED', /S\.errored > 0 && S\.ok === 0[\s\S]{0,240}?'red'/.test(healthFn)]);
     out.push(['V2: a failed probe is RED, never unknown-styled-as-fine', /catch \(err\)[\s\S]{0,120}?'red', 'Could not check'/.test(healthFn)]);
     out.push(['V2: unreachable sites alone are NOT red', /unreachable > 0[\s\S]{0,200}?'insufficient_data'/.test(healthFn)]);
     out.push(['V2: the health check is registered in runHealthChecks', /safeCheck\('nonicpllm'/.test(src)]);
