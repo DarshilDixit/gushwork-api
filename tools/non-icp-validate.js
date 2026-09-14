@@ -339,10 +339,84 @@ function score() {
   console.error('\nwritten: ' + SP + '/report.md');
 }
 
+/* ── Phase 4: load verdicts into the production cache ────────────
+   ONE-TIME, AND IT REFUSES TO RUN IF THE VERDICTS DO NOT MATCH WHAT IS
+   LIVE. A verdict row is only meaningful alongside the model and prompt
+   that produced it -- loading Sonnet rows into an Opus deployment, or
+   rows from an older prompt, would put verdicts into production that
+   nothing on this deployment would reproduce and nobody could audit.
+   So the precondition is checked here rather than trusted.
+
+   ONLY `source = llm` ROWS ARE LOADED. The llm_unreachable rows carry a
+   six-hour TTL, so loading them would expire tonight anyway -- and worse,
+   they would SUPPRESS a fresh scrape for those six hours. The bulk scrape
+   ran 14-way concurrent and under-read: a careful one-at-a-time pass
+   reads roughly twice as many of the same domains. Those domains are
+   better off being re-tried by the live warm path than pinned to a
+   failure this tool already knows was pessimistic.
+
+   ON CONFLICT DO NOTHING: anything production has already written wins.
+   A row from live traffic is fresher than anything on disk here. */
+async function loadIntoCache() {
+  const { Pool } = require('pg');
+  const url = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL;
+  if (!url) { console.error('DATABASE_PUBLIC_URL or DATABASE_URL required'); process.exit(1); }
+  const model = process.env.NON_ICP_LLM_MODEL;
+  if (!model) { console.error('NON_ICP_LLM_MODEL must be set so the precondition can be checked'); process.exit(1); }
+
+  const rows = jsonl(`${SP}/verdicts.${model}.jsonl`).filter((v) => v.source === 'llm');
+  if (!rows.length) { console.error(`no llm verdicts on disk for ${model}`); process.exit(1); }
+
+  /* PRECONDITION. Every row must name the live model and the live prompt
+     version. One mismatch aborts the whole load -- a partial load is worse
+     than none, because the half that landed is invisible. */
+  const src2 = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+  const livePrompt = (src2.match(/NON_ICP_PROMPT_VERSION = '([^']+)'/) || [])[1];
+  const badModel  = rows.filter((v) => v.model_id !== model);
+  const badPrompt = rows.filter((v) => v.prompt_version !== livePrompt);
+  if (badModel.length || badPrompt.length) {
+    console.error(`REFUSING TO LOAD. live model=${model} prompt=${livePrompt}`);
+    console.error(`  rows with a different model_id : ${badModel.length}`);
+    console.error(`  rows with a different prompt   : ${badPrompt.length}`);
+    process.exit(1);
+  }
+  console.error(`precondition OK — ${rows.length} rows, all ${model} / ${livePrompt}`);
+
+  const pool = new Pool({ connectionString: url, ssl: { rejectUnauthorized: false }, max: 4 });
+  let loaded = 0, skipped = 0;
+  for (let i = 0; i < rows.length; i += 200) {
+    const chunk = rows.slice(i, i + 200);
+    const vals = [], params = [];
+    chunk.forEach((v, n) => {
+      const b = n * 13;
+      vals.push(`($${b+1},$${b+2},$${b+3},$${b+4},$${b+5},$${b+6},$${b+7},$${b+8},$${b+9},$${b+10},$${b+11},$${b+12},$${b+13},NOW())`);
+      params.push(v.domain, v.business_type || null, v.blocking === true,
+        Number.isFinite(v.confidence) ? v.confidence : null, v.evidence_quote || null,
+        v.reason || null, v.source, v.model_id || null, v.prompt_version || null,
+        v.page_text_sha256 || null, v.page_url_used || null, v.page_text_chars || null,
+        v.scrape_status || null);
+    });
+    const r = await pool.query(
+      `INSERT INTO non_icp_domain_verdicts
+         (domain, business_type, blocking, confidence, evidence_quote, reason, source,
+          model_id, prompt_version, page_text_sha256, page_url_used, page_text_chars,
+          scrape_status, checked_at)
+       VALUES ${vals.join(',')}
+       ON CONFLICT (domain) DO NOTHING`, params);
+    loaded += r.rowCount; skipped += chunk.length - r.rowCount;
+    process.stderr.write(`  ${i + chunk.length}/${rows.length}\n`);
+  }
+  const tot = await pool.query('SELECT count(*) n, count(*) FILTER (WHERE blocking) b FROM non_icp_domain_verdicts');
+  console.error(`loaded ${loaded}, skipped ${skipped} (already present)`);
+  console.error(`cache now: ${tot.rows[0].n} verdicts, ${tot.rows[0].b} blocking`);
+  await pool.end();
+}
+
 const cmd = process.argv[2];
 (async () => {
   if (cmd === 'scrape')        await scrape();
   else if (cmd === 'classify') await classify(process.argv[3], process.argv[4] ? process.argv[4].split(',') : null);
   else if (cmd === 'score')    score();
-  else { console.error('usage: scrape | classify <model> | score'); process.exit(1); }
+  else if (cmd === 'load')     await loadIntoCache();
+  else { console.error('usage: scrape | classify <model> | score | load'); process.exit(1); }
 })().catch((err) => { console.error(err); process.exit(1); });
