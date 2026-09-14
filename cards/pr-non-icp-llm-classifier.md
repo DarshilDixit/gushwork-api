@@ -482,3 +482,124 @@ eight-name literal. It now derives both sides, so it cannot go stale again.
 5. **`business_type` has no dashboard surface.** A flagged lead's type,
    confidence and evidence quote live in `non_icp_domain_verdicts` and in the
    Slack post, and nowhere on the monitor.
+
+---
+
+# ADDENDUM, 14 Sept 2026 — the revenue question, and it changes the answer
+
+Asked after the PR merged: *of the 124 booked-and-showed leads, how many became
+paying customers?* The literal answer is **zero**. The useful answer is not,
+and it argues harder against the block than anything in section 4.
+
+## 1. The literal question: 0 of 124
+
+Checked four ways against `gist.customer_contract_terms` and the wider customer
+tables:
+
+| check | result |
+|---|---|
+| customer row whose **domain** is one of the 124 | 0 |
+| customer row whose **customer_email** is one of the 146 lead emails behind them | 0 |
+| customer row whose **email domain** is one of the 124 | 0 |
+| any of the 124 in the **681-domain bypass set** (all three customer tables) | 0 |
+| **company-name** match against `customer_enrichment` + `gist_accountsmaster` | 0 |
+
+**Two of those five are partly circular and I am not counting them as evidence.**
+G2 was constructed to exclude G1, and G1 was built from the customer domain and
+the customer-email domain — so the first and third rows could not have come back
+non-zero. The name match and the bypass-set check are independent, and both are
+zero.
+
+**The limit, stated rather than hidden:** a company among the 124 that became a
+customer under *both* a different domain *and* a different company name would
+not be found by any of this. There is no way to rule that out short of manual
+review.
+
+## 2. The question that actually decides it
+
+Turn it around. **Of our 675 enriched customers, how many are in the two
+business types this feature blocks?**
+
+**28** — 15 whose `major_industry` is `Insurance`, 13 `Real Estate`. That is
+**4.2% of the customer base**, and it is not an artefact of anything: it comes
+from a table this analysis had not otherwise touched.
+
+Run the real classifier over their websites:
+
+| model | readable | **would flag** |
+|---|---|---|
+| claude-sonnet-5 | 20 of 26 | **14** |
+| claude-opus-5 | 20 of 26 | **14** |
+
+Including `gabrielleborowski.com` at **0.99 / 0.98** — sub-industry
+*"Residential Real Estate Agent"*. An individual residential realtor who is a
+paying customer. That is the exact population the block exists to turn away.
+
+## 3. The bypass would not have saved them, and here is why
+
+The obvious objection is that the known-customer bypass protects all of this.
+**It does not, because the bypass only knows about people who are already
+customers.**
+
+Eight of the 26 came through the form. In **every single case the lead arrived
+BEFORE the onboarding date**:
+
+| domain | first lead | onboarded | gap | would the model flag it? | MRR |
+|---|---|---|---|---|---|
+| `nomadgroup.io` | 2026-04-21 | 2026-04-26 | 5d | **FLAG** real_estate 0.90 | **$2,200** |
+| `sspins.com` | 2026-05-07 | 2026-06-30 | 54d | **FLAG** insurance 0.95 | **$920** |
+| `yourhealthyourmoneyaz.com` | 2026-05-30 | 2026-06-04 | 5d | **FLAG** insurance 0.90 | **$740** |
+| `garylifeindex.com` | 2026-06-25 | 2026-06-29 | 4d | **FLAG** insurance 0.97 | **$640** |
+| `vellumlifegroup.com` | 2026-05-22 | 2026-05-29 | 7d | **FLAG** insurance 0.98 | **$500** |
+| `jacobsfamilyinsurance.net` | 2026-06-21 | 2026-06-24 | 3d | no verdict — page too thin | $900 |
+| `homesandrental.com` | 2026-05-10 | 2026-05-18 | 8d | no verdict — unreachable | — |
+| `americanhomeinvestmentsatlanta.com` | 2026-07-11 | 2026-07-15 | 4d | no verdict — page too thin | — |
+
+**Five paying customers, $5,000/month of MRR, would have been turned away at the
+form** — days or weeks before they were customers, so nothing in the bypass
+could have known.
+
+The three that survive are saved by an unreadable page, not by design. And
+`jacobsfamilyinsurance.net`'s lead email is `nedjacobs@allstate.com`, which **V1
+blocks today on the email** — so that $900 is already exposed to the mechanism
+that is live right now.
+
+## 4. What this means for the decision
+
+**The customer bypass protects renewals. It cannot protect first-time buyers,
+and first-time buyers are the entire population the form exists to capture.**
+That is a structural hole, not a tuning problem, and it is why section 4a's
+comforting "1 of 6 survives the bypass" understates the risk. Scored at the
+moment a lead actually arrives, the number is **5 of 8**.
+
+Nothing here says the model is wrong. All five are correctly classified —
+they *are* insurance brokerages and a real-estate firm. It says the premise is
+wrong: **we sell to these people.** 4.2% of the customer base and $6,035/month
+of known MRR across 7 contracted RE/insurance customers.
+
+**Recommendation is unchanged and now much more strongly held: do not switch
+`NON_ICP_LLM_BLOCK` on.** Flag-and-watch gives the AE-time saving you actually
+asked for without the revenue risk, because a flagged lead still books.
+
+If the block is switched on later, the bypass needs a second leg that the
+current design does not have — something that recognises a *prospective* buyer,
+not just an existing one.
+
+## 5. The breakdown by type and brand affiliation
+
+| | insurance | real_estate | total |
+|---|---|---|---|
+| **independent** | 53 | 44 | **97 (78%)** |
+| brand, by company name | 6 | 7 | 13 |
+| already on `NON_ICP_DOMAINS` | 8 | 6 | 14 |
+| **total** | **67** | **57** | **124** |
+
+**78% are independents** — precisely the gap V1 cannot reach, so the layer is
+doing what it was built for. Only 27 are brand-affiliated, and **14 of those are
+already blocked today**, so the model block's incremental effect on this
+population is **110 new refusals, not 124**.
+
+The brand-affiliated 27 are the recognisable ones: State Farm agents (×6),
+Coldwell Banker (×3), Berkshire Hathaway (×2), Compass, Century 21, eXp, RE/MAX,
+Sotheby's, Howard Hanna, McGraw, HealthMarkets (×2), Bankers Life, GEICO, Globe
+Life, New York Life, Farmers.
