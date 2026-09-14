@@ -3720,7 +3720,10 @@ app.get('/monitor', (req, res) => {
   '</div>' +
   '<div class="card" style="padding:12px 14px;margin-bottom:16px;font-size:12px;color:#666">' +
   'Every row here is somebody we turned away, and every one is <b>also still in All Leads</b> and in every Overview total &#8212; marked, not removed, so the numbers reconcile. ' +
-  'If one looks like a real prospect, the list is <code>NON_ICP_DOMAINS</code> in index.js; <code>NON_ICP_BLOCK=false</code> on Railway turns the whole thing off without a deploy.' +
+  /* TWO mechanisms block now, and they are switched off by different
+     variables. A reader who turns NON_ICP_BLOCK off to stop a wrong model
+     block would watch it keep happening and conclude the switch is broken. */
+  'If one looks like a real prospect: a <b>brand-domain</b> block comes from <code>NON_ICP_DOMAINS</code> in index.js and stops with <code>NON_ICP_BLOCK=false</code>; a <b>model</b> block stops with <code>NON_ICP_LLM_BLOCK=false</code>. Either takes effect on Railway without a deploy. The matched domain on each row says which.' +
   '</div>' +
   /* THE SAME TABLE AS ALL LEADS, rendered by the same leadRowsHtml. A
      summary of its own would drift, and the expandable panel is exactly
@@ -7058,6 +7061,28 @@ const NON_ICP_PROMPT_VERSION = 'v1-2026-09-14';
 const NON_ICP_LLM_CONFIDENCE_FLOOR = Number(process.env.NON_ICP_LLM_CONFIDENCE_FLOOR || 0.75);
 
 const NON_ICP_LLM_MODEL       = process.env.NON_ICP_LLM_MODEL || 'claude-sonnet-5';
+
+/* EFFORT IS NOT UNIVERSAL, AND SENDING IT TO A MODEL THAT REFUSES IT IS AN
+   INVISIBLE OUTAGE. Found on 14 Sept 2026 during the historical validation
+   run: every one of 1,643 Haiku 4.5 calls came back
+
+     HTTP 400 invalid_request_error
+     "This model does not support the effort parameter."
+
+   and produced no verdict at all. Nothing was wrong on the lead path --
+   every lead sailed through, because that is what fail-open means -- and
+   nothing anywhere said the layer had stopped working. That is the exact
+   shape the health row exists for, and it is why that row reports RED on
+   "errors, and nothing succeeded" rather than waiting for a threshold.
+
+   ALLOWLIST, NOT DENYLIST, and the direction matters. An unknown model omits
+   effort and works, slightly slower and dearer; a denylist would send effort
+   to the next model that refuses it and silently classify nobody. The safe
+   failure is the request that still succeeds. */
+const NON_ICP_EFFORT_MODELS = [/^claude-opus-/, /^claude-fable-/, /^claude-mythos-/, /^claude-sonnet-5/, /^claude-sonnet-4-6/];
+function nonIcpModelTakesEffort(modelId) {
+  return NON_ICP_EFFORT_MODELS.some((re) => re.test(String(modelId || '')));
+}
 const NON_ICP_LLM_TIMEOUT_MS  = Number(process.env.NON_ICP_LLM_TIMEOUT_MS  || 20000);
 const NON_ICP_FETCH_TIMEOUT_MS = Number(process.env.NON_ICP_FETCH_TIMEOUT_MS || 8000);
 /* The cap is on the page text we SEND, and it is the only thing standing
@@ -7238,11 +7263,14 @@ async function nonIcpClassifyDomain(domain) {
         body: JSON.stringify({
           model: NON_ICP_LLM_MODEL,
           max_tokens: 1024,
-          /* Low effort on purpose. This is a bounded judgement over one
-             page, it sits in a warm path a visitor may be waiting behind,
-             and the validation run is what decides whether a more
-             expensive setting buys anything. */
-          output_config: { effort: 'low', format: { type: 'json_schema', schema: NON_ICP_OUTPUT_SCHEMA } },
+          /* Low effort on purpose, where the model takes it at all. This is
+             a bounded judgement over one page, it sits in a warm path a
+             visitor may be waiting behind, and the validation run is what
+             decides whether a more expensive setting buys anything. */
+          output_config: {
+            ...(nonIcpModelTakesEffort(NON_ICP_LLM_MODEL) ? { effort: 'low' } : {}),
+            format: { type: 'json_schema', schema: NON_ICP_OUTPUT_SCHEMA },
+          },
           system: NON_ICP_SYSTEM_PROMPT,
           messages: [{
             role: 'user',

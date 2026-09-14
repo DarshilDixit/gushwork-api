@@ -1073,6 +1073,36 @@ results13 = (async () => {
               big.calls.bodies[0].messages[0].content.length < M2.NON_ICP_PAGE_TEXT_CAP + 500]);
   }
 
+  /* ── 13f2. EFFORT IS ONLY SENT WHERE IT IS ACCEPTED ──────────────
+     A real outage, found by the validation run on 14 Sept 2026: Haiku 4.5
+     rejects `effort` with a 400, and all 1,643 calls produced no verdict
+     while every lead went through perfectly happily. Fail-open means a
+     total outage of this layer is invisible from the lead path, so the
+     only things that can catch it are this assertion and the health row. */
+  {
+    const envH = { ...ENV };
+    const dH = stubDeps({ apiBody: answer({ business_type: 'insurance', confidence: 0.9, evidence_quote: 'q', reason: 'r' }) });
+    (new Function('process','o','return 0'))({ env: envH }, 0);
+    /* Drive it per model id and read what actually went on the wire. */
+    const cases = [['claude-haiku-4-5', false], ['claude-sonnet-4-5', false],
+                   ['claude-sonnet-5', true], ['claude-opus-5', true], ['claude-fable-5-1', true],
+                   ['some-future-model', false]];
+    for (const [model, expectEffort] of cases) {
+      const d = stubDeps({ apiBody: answer({ business_type: 'insurance', confidence: 0.9, evidence_quote: 'q', reason: 'r' }) });
+      const M = V2({ ...ENV, NON_ICP_LLM_MODEL: model }, d);
+      await M.nonIcpClassifyDomain('x.test');
+      const oc = d.calls.bodies[0].output_config;
+      out.push([`V2: ${model} ${expectEffort ? 'sends' : 'omits'} effort`,
+                ('effort' in oc) === expectEffort, JSON.stringify(oc)]);
+      /* The schema goes on every request whatever the model. */
+      out.push([`V2: ${model} still pins the output schema`, oc.format && oc.format.type === 'json_schema']);
+    }
+    /* AN UNKNOWN MODEL OMITS IT. A denylist would send effort to the next
+       model that refuses it and classify nobody, silently. */
+    out.push(['V2: the effort rule is an allowlist, not a denylist',
+              /ALLOWLIST, NOT DENYLIST/.test(src) && /NON_ICP_EFFORT_MODELS/.test(src)]);
+  }
+
   /* ── 13g. THE ROW IS AUDITABLE ───────────────────────────────────
      A V1 block is re-derivable by reading a list. This one is not, so the
      row has to carry its own evidence or a disputed block six weeks from
