@@ -580,6 +580,91 @@ const results7 = (async () => {
 }
 
 /* ============================================================
+   10f. THE THIRD REJECTION COLUMN — audit every consumer again
+
+   CLAUDE.md, learned the hard way three times in one night: "a second
+   column that means 'we rejected this lead' is not additive. It silently
+   re-scopes every consumer of the first one."
+
+   non_icp_llm_flagged is the THIRD such column, and it is a different
+   shape from the first two. disqualified and non_icp_blocked both mean
+   "reject". This one does NOT: a flagged-not-blocked lead is one of the
+   four industries that suppress Meta and never block, and it must reach
+   the calendar, Salesforce, PartnerStack and the dialer exactly like any
+   other lead.
+
+   So the audit runs in BOTH directions:
+     (a) every consumer that excludes a rejected lead must cover an LLM
+         block -- satisfied by reading non_icp_blocked, which an LLM block
+         sets, and enumerated here so a future consumer cannot miss it
+     (b) NOTHING may exclude a lead merely for being llm_flagged, or
+         turning on Meta suppression would quietly stop paying affiliates
+         and stop AEs seeing restaurants
+   ============================================================ */
+{
+  const consumers = [
+    ['Salesforce push',       "console.log(`[/submit] ⏭ Salesforce push skipped — non-ICP"],
+    ['PartnerStack signup',   'SELECT non_icp_blocked, non_icp_reason FROM leads WHERE session_id = $1'],
+    ['PartnerStack retry',    'AND non_icp_blocked IS NOT TRUE'],
+    ['recovery cron',         'AND l.non_icp_blocked IS NOT TRUE'],
+    ['recovery health row',   'AND l.non_icp_blocked IS NOT TRUE'],
+    ['SDR list',              'AND l.non_icp_blocked IS NOT TRUE'],
+    ['AWS mirror upsert',     'non_icp_blocked         = (gw_form_leads.non_icp_blocked IS TRUE OR EXCLUDED.non_icp_blocked IS TRUE)'],
+  ];
+  for (const [name, needle] of consumers) {
+    ok(`10f: ${name} reads non_icp_blocked, so an LLM block is covered`, src.includes(needle), name);
+  }
+
+  /* (b) THE DIRECTION THAT IS NEW. Every use of the flag column, and what
+     it is allowed to be. It may drive Meta and Slack and it may be stored
+     and mirrored — it may never gate money, Salesforce, the SDR list or
+     the recovery cron. */
+  const flagUses = [...src.matchAll(/non_icp_llm_flagged/g)].map((m) => {
+    const line = src.slice(0, m.index).split('\n').length;
+    const ctx  = src.slice(Math.max(0, m.index - 260), m.index + 160);
+    return { line, ctx };
+  });
+  ok('10f: the flag column is actually used somewhere', flagUses.length > 0);
+
+  /* No SQL predicate anywhere may filter a population on the flag. The
+     ONLY legal SQL uses are the upsert assignment, the RETURNING, the
+     SELECT list, and the index/migration in db.js. */
+  const flagPredicates = [...src.matchAll(/non_icp_llm_flagged\s+IS\s+(NOT\s+)?TRUE/g)]
+    .filter((m) => {
+      /* The sticky upsert assignment legitimately contains IS TRUE twice. */
+      const before = src.slice(Math.max(0, m.index - 120), m.index);
+      return !/non_icp_llm_flagged\s+=\s+\(leads\./.test(before);
+    });
+  eq('10f: NO query filters a population on the flag column', flagPredicates.length, 0);
+
+  /* And specifically: the five consumers above must not mention it. */
+  const mustNotSee = [
+    ['PartnerStack signup', between('async function runPartnerStackSignup', 'async function sendQualificationForDomain')],
+    ['recovery health',     between('async function checkRecoveryHealth', 'The model layer')],
+    ['SDR list',            between("app.get('/monitor/sdr'", "app.get('/monitor'")],
+  ];
+  for (const [name, body] of mustNotSee) {
+    ok(`10f: ${name} does NOT gate on the flag column`, !body.includes('non_icp_llm_flagged'), name);
+  }
+
+  /* The flag IS allowed to drive Meta, and must. */
+  ok('10f: the flag drives Schedule suppression',
+     between('function nonIcpScheduleSuppressed(fullLead, routeTag)', 'const SCHEDULE_LEAD_SQL')
+       .includes('non_icp_llm_flagged'));
+
+  /* THE MIRROR. The flag is deliberately NOT synced to gw_form_leads:
+     a flagged-not-blocked lead should still be dialled, so shipping the
+     column before a consumer exists would be premature. An LLM BLOCK is
+     mirrored, because it sets non_icp_blocked, which already syncs. */
+  const awsCols = between('CREATE TABLE IF NOT EXISTS gw_form_leads', 'ALTER TABLE gw_form_leads');
+  ok('10f: the mirror carries non_icp_blocked, so a model block reaches the dialer',
+     src.includes('ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS non_icp_blocked'));
+  ok('10f: the mirror deliberately does NOT carry the flag column',
+     !src.includes('ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS non_icp_llm_flagged'),
+     'if this is added, decide what sdr-calling should do with a flagged-not-blocked lead first');
+}
+
+/* ============================================================
    10c. THE DASHBOARD MUST STILL RECONCILE
 
    A blocked lead is still a lead. Hiding it from All Leads would make
@@ -898,7 +983,7 @@ const V2 = (() => {
     return { NON_ICP_BUSINESS_TYPES, NON_ICP_BUSINESS_TYPE_KEYS, nonIcpTypeBlocks,
              nonIcpClassifyDomain, nonIcpFetchPageText, nonIcpSha256,
              NON_ICP_SYSTEM_PROMPT, NON_ICP_OUTPUT_SCHEMA, NON_ICP_PROMPT_VERSION,
-             NON_ICP_LLM_ENABLED, NON_ICP_LLM_BLOCK, NON_ICP_LLM_META,
+             NON_ICP_LLM_ENABLED, NON_ICP_LLM_BLOCK, NON_ICP_LLM_META, nonIcpTypeSuppressesMeta,
              NON_ICP_LLM_CONFIDENCE_FLOOR, NON_ICP_PAGE_TEXT_CAP };`
   ))({ env }, deps.fetch, deps.attemptFetch, deps.analyzeSubstance,
       deps.isPrivateOrLocalHost || (() => false),
@@ -951,6 +1036,38 @@ results13 = (async () => {
        rule as every website verdict: a failure to decide is not a verdict. */
     out.push(['V2: unknown never blocks', M.nonIcpTypeBlocks('unknown') === false]);
     out.push(['V2: a type nobody declared never blocks', M.nonIcpTypeBlocks('realestate') === false]);
+    /* ── THE TWO SCOPES ARE DIFFERENT AND THAT IS THE WHOLE POINT ────
+       Swapnil: "don't fire conversion events for any of these industries,
+       explicitly block only real estate agents." Blocking is TWO types;
+       Meta suppression is all SIX. If these two sets ever become equal,
+       somebody has either widened blocking to restaurants or narrowed Meta
+       back to V1's scope, and both are decisions nobody made. */
+    const blocksSet = M.NON_ICP_BUSINESS_TYPE_KEYS.filter((k) => M.NON_ICP_BUSINESS_TYPES[k].blocks).sort();
+    const metaSet   = M.NON_ICP_BUSINESS_TYPE_KEYS.filter((k) => M.NON_ICP_BUSINESS_TYPES[k].suppresses).sort();
+    out.push(['V2: exactly SIX types suppress Meta',
+              JSON.stringify(metaSet) === JSON.stringify(
+                ['home_services','insurance','print_sign','real_estate','restaurant_food','spa_salon']),
+              metaSet.join(',')]);
+    out.push(['V2: the blocking set is a STRICT SUBSET of the Meta set',
+              blocksSet.every((k) => metaSet.includes(k)) && blocksSet.length < metaSet.length]);
+    /* Every type that blocks must also suppress. A lead we turn away that
+       still feeds the ad algorithm a conversion is incoherent. */
+    for (const k of blocksSet) {
+      out.push([`V2: ${k} blocks AND suppresses`, M.NON_ICP_BUSINESS_TYPES[k].suppresses === true]);
+    }
+    /* The four that suppress but must never block. */
+    for (const k of ['restaurant_food','spa_salon','home_services','print_sign']) {
+      out.push([`V2: ${k} suppresses Meta but does NOT block`,
+                M.NON_ICP_BUSINESS_TYPES[k].suppresses === true && M.nonIcpTypeBlocks(k) === false]);
+    }
+    /* The in-ICP-by-name rows do neither. The doc keeps them and nobody has
+       reversed that; a mortgage broker must not lose its Meta events. */
+    for (const k of ['mortgage_lending','financial_advisory','software_technology','b2b_services','unknown','other']) {
+      out.push([`V2: ${k} neither blocks nor suppresses`,
+                M.nonIcpTypeBlocks(k) === false && M.nonIcpTypeSuppressesMeta(k) === false]);
+    }
+    out.push(['V2: an unknown type suppresses nothing', M.nonIcpTypeSuppressesMeta('realtor') === false]);
+
     out.push(['V2: the schema enum IS the type list',
               JSON.stringify(M.NON_ICP_OUTPUT_SCHEMA.properties.business_type.enum) === JSON.stringify(M.NON_ICP_BUSINESS_TYPE_KEYS)]);
     out.push(['V2: the schema refuses extra keys', M.NON_ICP_OUTPUT_SCHEMA.additionalProperties === false]);
@@ -1122,6 +1239,56 @@ results13 = (async () => {
     out.push(['V2: the evidence quote is kept', v.evidence_quote.includes('independent insurance agency')]);
   }
 
+
+  /* ── 13g2. THE CACHE READ, EXECUTED — block must outrank meta ─────
+     A lead can carry two domains with different verdicts: a restaurant
+     email and a brokerage website, say. Whichever the loop happens to see
+     first must not decide, or the weaker action wins by accident of
+     iteration order. Driven against a stubbed pool rather than read. */
+  {
+    const V2M = V2(ENV, stubDeps());
+    const lift = between('/* ── The cache ──', '/* ── The read at the moment of decision ──')
+               + between('async function nonIcpLlmCachedVerdict({ email, website } = {})', 'async function partnerStackEligibility');
+    const mk = (rowsByDomain) => (new Function('process', 'pool', 'partnerStackCustomerKey',
+      'isPartnerStackTestEmail', 'nonIcpTypeSuppressesMeta', 'NON_ICP_LLM_CONFIDENCE_FLOOR',
+      'NON_ICP_LLM_ENABLED', 'nonIcpClassifyDomain', 'console',
+      'NON_ICP_VERDICT_TTL_D',
+      lift + '\nreturn { nonIcpLlmCachedVerdict, nonIcpCandidateDomains };'))(
+      { env: {} },
+      { query: async (q, p) => ({ rows: rowsByDomain[p[0]] ? [rowsByDomain[p[0]]] : [] }) },
+      (raw) => { const s = String(raw || '').toLowerCase(); const at = s.lastIndexOf('@');
+                 return (at >= 0 ? s.slice(at + 1) : s).replace(/^www\./, '') || null; },
+      () => false, V2M.nonIcpTypeSuppressesMeta, V2M.NON_ICP_LLM_CONFIDENCE_FLOOR, true, async () => ({}),
+      { log() {}, warn() {} }, 180);
+    const row = (o) => ({ checked_at: new Date().toISOString(), source: 'llm', confidence: 0.9, ...o });
+
+    const both = mk({
+      'brokerage.test': row({ domain: 'brokerage.test', business_type: 'real_estate', blocking: true }),
+      'diner.test':     row({ domain: 'diner.test',     business_type: 'restaurant_food', blocking: false }),
+    });
+    const a = await both.nonIcpLlmCachedVerdict({ email: 'x@diner.test', website: 'brokerage.test' });
+    out.push(['V2: a blocking domain outranks a Meta-only one', a && a.action === 'block', JSON.stringify(a && a.action)]);
+    const b = await both.nonIcpLlmCachedVerdict({ email: 'x@brokerage.test', website: 'diner.test' });
+    out.push(['V2: …in either field order', b && b.action === 'block', JSON.stringify(b && b.action)]);
+
+    const metaOnly = mk({ 'diner.test': row({ domain: 'diner.test', business_type: 'restaurant_food', blocking: false }) });
+    const c = await metaOnly.nonIcpLlmCachedVerdict({ email: 'x@diner.test', website: '' });
+    out.push(['V2: a restaurant alone returns action=meta', c && c.action === 'meta', JSON.stringify(c && c.action)]);
+
+    /* Below the floor it is not actionable at all -- Meta included. */
+    const weak = mk({ 'diner.test': row({ domain: 'diner.test', business_type: 'restaurant_food', blocking: false, confidence: 0.6 }) });
+    out.push(['V2: a weak Meta-only verdict does nothing',
+              (await weak.nonIcpLlmCachedVerdict({ email: 'x@diner.test', website: '' })) === null]);
+    /* An in-ICP type is never actionable however confident. */
+    const mort = mk({ 'loans.test': row({ domain: 'loans.test', business_type: 'mortgage_lending', blocking: false, confidence: 0.99 }) });
+    out.push(['V2: mortgage_lending is never actioned',
+              (await mort.nonIcpLlmCachedVerdict({ email: 'x@loans.test', website: '' })) === null]);
+    /* A stale row is a miss, whatever it says. */
+    const stale = mk({ 'brokerage.test': row({ domain: 'brokerage.test', business_type: 'real_estate', blocking: true,
+      checked_at: new Date(Date.now() - 400 * 86400000).toISOString() }) });
+    out.push(['V2: a stale verdict is a miss',
+              (await stale.nonIcpLlmCachedVerdict({ email: 'x@brokerage.test', website: '' })) === null]);
+  }
 
   /* ── 13h. WIRING — the parts an execution test cannot reach ──────── */
   {
