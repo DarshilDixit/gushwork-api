@@ -1484,8 +1484,17 @@ function slackNonIcpBlocked(d) {
    mode ever becomes permanent, fold it into slackSubmit instead. */
 function slackNonIcpLlmFlagged(d) {
   const name = [d.first_name, d.last_name].filter(Boolean).join(' ');
+  /* TWO DIFFERENT MESSAGES, because two different things happened and a
+     reader who cannot tell them apart cannot act on either. A 'meta' lead
+     was NOT a candidate for blocking at all -- it is one of the four
+     industries Meta suppression covers and blocking does not -- so calling
+     it "would have been blocked" would be a straight falsehood in the one
+     channel that exists to catch mistakes. */
+  const metaOnly = d.action === 'meta';
   const blocks = [];
-  blocks.push(bHeader('🔎 Would have been blocked — non-ICP (model)'));
+  blocks.push(bHeader(metaOnly
+    ? '📉 Meta events withheld — non-ICP industry (model)'
+    : '🔎 Would have been blocked — non-ICP (model)'));
   blocks.push(bDivider());
   blocks.push(bSection(
     `*Judged:* ${d.business_type_label || d.business_type || 'unknown'}` +
@@ -1500,12 +1509,15 @@ function slackNonIcpLlmFlagged(d) {
     { label: '🏢 Company', value: d.company },
   ]);
   if (lf) blocks.push(lf);
-  blocks.push(bSection(
-    '_This lead went through normally — they reached the calendar and are in Salesforce._ ' +
-    '*Nothing was blocked.* Read these for a week before switching `NON_ICP_LLM_BLOCK` on.'
+  blocks.push(bSection(metaOnly
+    ? '_This lead went through completely normally — calendar, Salesforce, SDR list, all as usual._ ' +
+      '*Only the Meta conversion events were withheld*, because this industry is one of the four ' +
+      'that suppress Meta but never block. `NON_ICP_LLM_META=false` stops this.'
+    : '_This lead went through normally — they reached the calendar and are in Salesforce._ ' +
+      '*Nothing was blocked.* Read these for a week before switching `NON_ICP_LLM_BLOCK` on.'
   ));
-  sendSlack(blocks,
-    `🔎 Would have blocked (non-ICP model): ${d.email || name || 'unknown'} — ${d.business_type || 'unknown'}`);
+  sendSlack(blocks, (metaOnly ? '📉 Meta withheld' : '🔎 Would have blocked') +
+    ` (non-ICP model): ${d.email || name || 'unknown'} — ${d.business_type || 'unknown'}`);
 }
 
 function slackSubmit(d) {
@@ -6835,17 +6847,24 @@ async function nonIcpVerdict({ email, website } = {}) {
        the model here. A miss is "we have not decided", which blocks and
        flags nobody. */
     if (NON_ICP_LLM_ENABLED) {
-      const v = await nonIcpLlmCachedVerdict({ email, website });
-      if (v) {
+      const hit = await nonIcpLlmCachedVerdict({ email, website });
+      if (hit) {
+        const v = hit.row;
+        /* THE BYPASS RUNS FOR BOTH ACTIONS, not just for blocking. A paying
+           customer should not have their conversion events withheld either;
+           the reason we do not turn them away is the same reason we do not
+           stop telling Meta they converted. */
         const bypass = await nonIcpCustomerBypass({ email, website, matched_domain: v.domain });
         if (bypass) return bypass;
+        const blocks = hit.action === 'block';
         return {
-          /* FLAGGED IS NOT BLOCKED. With NON_ICP_LLM_BLOCK off this returns
-             blocked:false and the lead reaches the calendar exactly as it
-             does today -- the flag is recorded, and Meta is suppressed only
-             if that was separately switched on. */
-          blocked:        NON_ICP_LLM_BLOCK,
+          /* BLOCKING IS THE NARROW ACTION -- real estate and insurance only,
+             and only with NON_ICP_LLM_BLOCK on. The other four rule-6
+             industries reach this line with action 'meta': they book, they
+             go to Salesforce, they get dialled, and they stop firing Meta. */
+          blocked:        blocks && NON_ICP_LLM_BLOCK,
           llm_flagged:    true,
+          llm_action:     hit.action,
           suppress_meta:  NON_ICP_LLM_META,
           source:         'llm',
           reason:         v.domain,
@@ -7010,17 +7029,38 @@ const NON_ICP_LLM_META    = NON_ICP_LLM_BLOCK || process.env.NON_ICP_LLM_META ==
    model forced to choose between "real estate" and "other" for a mortgage
    broker will pick real estate. Giving the near-misses their own name is
    what keeps them out of the two that matter. */
+/* TWO DECISIONS PER TYPE, AND THEIR SCOPES ARE DIFFERENT. Swapnil's
+   original instruction: "don't fire conversion events for any of these
+   industries, explicitly block only real estate agents." V1 could express
+   neither half -- a brand-domain list cannot see a restaurant. This can.
+
+     blocks      real estate + insurance ONLY. Turns a person away.
+     suppresses  all SIX rule-6 industries. Withholds an ad signal.
+
+   Keeping them as separate columns rather than one severity rank is
+   deliberate: the two have different costs, different authorisations and
+   different blast radii, and a single ordering would let a future edit
+   widen blocking by accident while looking like it widened Meta.
+
+   BOTH ARE DERIVED AT READ TIME FROM business_type, never stored as a
+   policy decision. Moving an industry between the two is then a one-line
+   change that takes effect on the next request -- no re-classification of
+   4,701 domains, and no stale verdict rows encoding last month's policy. */
 const NON_ICP_BUSINESS_TYPES = {
-  real_estate:         { blocks: true,  label: 'Real estate' },
-  insurance:           { blocks: true,  label: 'Insurance' },
-  // ── Deliberately NOT blocking. Each one is a near-miss that would
-  //    otherwise be forced into one of the two above.
+  real_estate:         { blocks: true,  suppresses: true,  label: 'Real estate' },
+  insurance:           { blocks: true,  suppresses: true,  label: 'Insurance' },
+  // ── The other four rule-6 industries. Meta suppression ONLY: these
+  //    people still reach the calendar, still go to Salesforce, and are
+  //    still dialled. They simply stop training the ad audience.
+  restaurant_food:     { blocks: false, suppresses: true,  label: 'Restaurant / food service' },
+  spa_salon:           { blocks: false, suppresses: true,  label: 'Spa / salon' },
+  home_services:       { blocks: false, suppresses: true,  label: 'Home services / trades' },
+  print_sign:          { blocks: false, suppresses: true,  label: 'Print / sign shop' },
+  // ── Neither. Each is a near-miss that would otherwise be forced into
+  //    one of the two blocking types, and each is kept in ICP BY NAME in
+  //    the Non-ICP doc.
   mortgage_lending:    { blocks: false, label: 'Mortgage / lending' },
   financial_advisory:  { blocks: false, label: 'Financial advisory' },
-  restaurant_food:     { blocks: false, label: 'Restaurant / food service' },
-  spa_salon:           { blocks: false, label: 'Spa / salon' },
-  home_services:       { blocks: false, label: 'Home services / trades' },
-  print_sign:          { blocks: false, label: 'Print / sign shop' },
   construction:        { blocks: false, label: 'Construction / contracting' },
   software_technology: { blocks: false, label: 'Software / technology' },
   manufacturing:       { blocks: false, label: 'Manufacturing' },
@@ -7044,6 +7084,13 @@ const NON_ICP_BUSINESS_TYPE_KEYS = Object.keys(NON_ICP_BUSINESS_TYPES);
 function nonIcpTypeBlocks(businessType) {
   const t = NON_ICP_BUSINESS_TYPES[businessType];
   return !!(t && t.blocks);
+}
+
+/* All six rule-6 industries, which is a WIDER set than the two that block.
+   An unknown type suppresses nothing, the same way it blocks nothing. */
+function nonIcpTypeSuppressesMeta(businessType) {
+  const t = NON_ICP_BUSINESS_TYPES[businessType];
+  return !!(t && t.suppresses);
 }
 
 /* Bumped whenever the prompt text below changes in a way that could move a
@@ -7471,11 +7518,29 @@ function warmNonIcpLlm({ email, website } = {}) {
    "this domain is fine" and is not "this domain is bad". It blocks
    nobody and it flags nobody. */
 async function nonIcpLlmCachedVerdict({ email, website } = {}) {
+  let metaOnly = null;
   for (const domain of nonIcpCandidateDomains({ email, website })) {
     const row = await nonIcpReadVerdictRow(domain);
-    if (row && row.blocking === true) return row;
+    if (!row) continue;
+    /* A BLOCKING hit wins outright and returns immediately. Only if no
+       domain on the lead blocks does a Meta-only hit get used -- otherwise
+       a lead whose email is a restaurant and whose website is a brokerage
+       would be Meta-suppressed and not blocked, which is the weaker of the
+       two actions winning by accident of iteration order. */
+    if (row.blocking === true) return { row, action: 'block' };
+    /* Meta suppression is decided from the TYPE at read time, not from the
+       stored `blocking` column, so the six-industry scope can change
+       without re-classifying anything. The confidence floor is the same
+       one blocking uses: a verdict too weak to act on is too weak to act
+       on, and using a lower bar for Meta would mean the ad audience is
+       reshaped on evidence we would not turn anyone away for. */
+    if (!metaOnly
+        && nonIcpTypeSuppressesMeta(row.business_type)
+        && Number(row.confidence) >= NON_ICP_LLM_CONFIDENCE_FLOOR) {
+      metaOnly = { row, action: 'meta' };
+    }
   }
-  return null;
+  return metaOnly;
 }
 
 /* The verdict. Reason strings are stable identifiers — they are stored, and
@@ -11062,6 +11127,7 @@ app.post('/submit', async (req, res) => {
          on, a flagged lead is blocked and took the branch above. */
       if (nonIcpLlmFlagged) {
         slackNonIcpLlmFlagged({ matched_domain: nonIcpReason,
+          action: nonIcp.llm_action || null,
           business_type: nonIcp.business_type || null,
           business_type_label: nonIcp.label || null,
           confidence: nonIcp.confidence != null ? nonIcp.confidence : null,
