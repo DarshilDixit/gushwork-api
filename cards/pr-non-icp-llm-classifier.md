@@ -756,3 +756,199 @@ So the honest position on both sides:
 Until at least (1), this decision is being made on Swapnil's judgement rather
 than on a measurement, which is a legitimate way to make it — it just should not
 be described as evidence-backed in either direction.
+
+---
+
+# ADDENDUM 3, 15 Sept 2026 — CS's onboarding tracker
+
+Source: CS's own Google Sheet, exported to `data/` (gitignored, not committed).
+**The copy at the given path was 0 bytes — the Sheets export had failed.** The
+same export sat intact in `~/Downloads`; that is what was read, and it should be
+re-copied deliberately rather than relied on from there.
+
+Note also that the `data/` line in `.gitignore` is **an uncommitted working-tree
+change**. It protects nothing if the tree is reset.
+
+## 1. What is actually in it
+
+743 rows, 36 columns, every row carrying a domain.
+
+| asked for | in the sheet? |
+|---|---|
+| **Status** | **YES** — Active 506, Pre-Onboarding Drop Off 105, Post-Onboarding Drop Off 86, **Churned 27**, To be Onboarded 19 |
+| **Churn date** | **NO.** No such column exists |
+| **Months retained before churning** | **NO** — see below |
+| **Revenue actually collected** | **NO.** Only `Initial Subscription Package/Month`, which is MRR at signature — the same figure `customer_contract_terms` already had |
+| **Refunds** | **NO** |
+
+**`Days Since Onboarding` does not date a churn, and this was tested rather than
+assumed.** Solving each row for its implied "as of" date gives **2026-08-11 for
+every row, in every status class, without exception** — Active, Churned and both
+drop-off types alike. It is `TODAY() − onboarding`, frozen at export. It says
+how old an account is, never when it stopped.
+
+**The sheet is a snapshot as of 11 August 2026** — five weeks stale today, but
+still far fresher than anything else: Salesforce stops maintaining status in
+June, `customer_contract_terms` was loaded 13 July.
+
+**What it adds that nothing else had: status for the June–August 2026 cohorts**
+(158, 132 and 40 accounts). That is exactly the window the earlier analysis
+could not see, and it is why this changes the answer.
+
+## 2. The 28 RE/insurance customers
+
+23 of 26 domains found (missing: `luxuryhomes.com`,
+`americanhomeinvestmentsatlanta.com`, `jacobsfamilyinsurance.net`).
+
+**Active 16 · Post-Onboarding Drop Off 4 · Pre-Onboarding Drop Off 3 · Churned 0**
+
+The four who onboarded and then left: `personalwarehouse.com`, **`sspins.com`**,
+`aimerchantry.com`, `nexuhouse.com`.
+
+## 3. The eight that came through the form
+
+| domain | status at 11 Aug | onboarded | MRR | lock-in |
+|---|---|---|---|---|
+| `nomadgroup.io` | Active | 2026-04-27 | $2,200 | 6 mo |
+| `vellumlifegroup.com` | Active | 2026-05-29 | $500 | 3 mo |
+| `garylifeindex.com` | Active | 2026-06-29 | $640 | 3 mo |
+| `yourhealthyourmoneyaz.com` | Active | 2026-07-24 | $560 | 12 mo |
+| **`sspins.com`** | **Post-Onboarding Drop Off** | 2026-06-30 | $920 | 6 mo |
+| `homesandrental.com` | Pre-Onboarding Drop Off | 2026-05-19 | $3,000 | 3 mo |
+| `americanhomeinvestmentsatlanta.com` | not in tracker | — | — | — |
+| `jacobsfamilyinsurance.net` | not in tracker | — | — | — |
+
+### Addendum 1's $5,000, checked at last
+
+| | |
+|---|---|
+| Contracted at signature (the five the model would have flagged) | **$4,820/month** |
+| Still Active at the 11 Aug snapshot | **$3,900/month** |
+| Already gone — `sspins.com` | **$920/month** |
+
+So the figure was roughly right in size and **81% of it was still live five
+weeks ago**. One of the five had already dropped off. `sspins.com` onboarded
+30 June and the snapshot is 11 August, so it lasted **at most 1.4 months** —
+the exact shape Swapnil described. There is still no churn date, so "at most"
+is the strongest statement available.
+
+## 4. The base-rate comparison
+
+Post-onboarding churn = (Churned + Post-Onboarding Drop Off) ÷ onboarded.
+Pre-onboarding drop-offs are excluded — they never started, so they are not a
+retention outcome.
+
+| | RE/insurance | everyone else |
+|---|---|---|
+| **All rows** | 20.0% (4 of 20) | 18.2% (109 of 599) |
+| **Cohort-matched, onboarded May 2026+** | **28.6% (4 of 14)** | **14.0% (51 of 365)** |
+
+**The pooled number is misleading and the cohort-matched one is the honest
+read.** RE/insurance customers skew heavily recent — 16 of 23 onboarded in May
+or later — and recent cohorts have had less time to churn, which drags the
+pooled comparison flat.
+
+Cohort-matched, **they churn at twice the base rate**. But at n=14 the expected
+count is 1.96 against 4 observed, and **P(≥4 at the base rate) = 12.1%** — not
+significant at 5%.
+
+By month, the signal is concentrated almost entirely in June:
+
+| onboarded | RE churned | base rate |
+|---|---|---|
+| 2026-03 | 0 of 4 | 30.7% |
+| 2026-05 | 1 of 7 | 19.4% |
+| **2026-06** | **3 of 6** | **16.4%** |
+| 2026-07 | 0 of 3 | 8.4% |
+
+**And the older cohort cuts the other way.** The six RE/insurance customers who
+onboarded Jan–Apr have had five to eight months to leave and **none have**,
+against a 27.7% base for those months. If the claim were simply "this industry
+churns fast", the group with the most elapsed time should show it most. It shows
+it least.
+
+## 5. Has it aged enough? No — and the arithmetic is specific
+
+Swapnil's claim is churn *within a few months*. At the 11 August snapshot the
+eight form-arriving customers were **18 to 106 days old** — 0.6 to 3.5 months.
+Four of the five still-active ones had been customers for under two months when
+the sheet was taken.
+
+**The four RE/insurance drop-offs all occurred at ≤3 months of tenure, which is
+consistent with his claim — but so is a 14% base rate that also occurs early.**
+What cannot be done with this data is separate "churns faster than everyone
+else" from "churns at the same rate, and everyone churns early." There are no
+churn dates, so a survival comparison is impossible; only the endpoint counts
+exist, and at n=14 they do not reach significance.
+
+**This is now a genuine signal at 2× the base rate, not the empty result of
+Addendum 2. It is still one month of ageing short of settling.** Re-run this
+against a fresh export in December 2026 and n will be large enough to decide it.
+
+## 6. A finding regardless of how this lands: Salesforce is wrong on 22% of accounts
+
+271 accounts carry a status in **both** systems. **They disagree on 59 — 21.8%**,
+and the disagreement is almost entirely one-directional:
+
+| Salesforce says | CS says | count |
+|---|---|---|
+| Active | **Churned** | **26** |
+| Active | **Post-Onboarding Drop Off** | **18** |
+| Active | Pre-Onboarding Drop Off | 1 |
+| To Be Onboarded | Active | 6 |
+| To Be Onboarded | Post-Onboarding Drop Off | 4 |
+| To Be Onboarded | Pre-Onboarding Drop Off | 3 |
+| Pre-Onboarding Drop Off | Post-Onboarding Drop Off | 1 |
+
+**45 accounts read Active in Salesforce for customers CS records as gone.**
+Among them: `storylane.io`, `finout.io`, `althire.ai`, `torcsill.com`,
+`wigglesworth.com`, `perfectimprints.com`, and — relevant here —
+`luxurioushomes.com` (Mel Bernstein Team, Premier Sotheby's), onboarded 6 May,
+Active in Salesforce, Post-Onboarding Drop Off in CS's sheet.
+
+**`Account.Customer_Status__c` systematically overstates Active.** Addendum 2 §3
+was built on it and reported "7 RE/insurance accounts, all Active" — that number
+was reading a field that is wrong about 45 accounts base-wide. Do not use it for
+retention without reconciling against CS first.
+
+## 7. A correction to Addendum 1: it was NOT 0 of 124
+
+Addendum 1 reported that **none** of the 124 flagged booked-and-showed leads
+became customers, checked against `customer_contract_terms`, `customer_enrichment`
+and the bypass set. **CS's tracker has ten of them**, and that check missed every
+one:
+
+| domain | tracker status | onboarded | MRR |
+|---|---|---|---|
+| `greenoakpropertymanagement.com` | **Active** | 2026-07-30 | **$1,200** |
+| `franklinbenefitsgroup.com` | **Active** | 2026-07-31 | **$800** |
+| `black-swan-insurance-group.com` | To be Onboarded | 2026-08-10 | $1,500 |
+| `luxurioushomes.com` | Post-Onboarding Drop Off | 2026-05-06 | $1,200 |
+| `healthmarketsjax.com` | Pre-Onboarding Drop Off | — | $800 |
+| `timjamesinsurance.net` | Pre-Onboarding Drop Off | — | $800 |
+| `easysell411.com` | Pre-Onboarding Drop Off | — | $1,200 |
+| `wizewall.com` | Pre-Onboarding Drop Off | — | $1,200 |
+| `zoloins.com` | Pre-Onboarding Drop Off | 2026-07-30 | $800 |
+| `munerisbenefits.com` | not in tracker; Salesforce onboarding 2026-08-19 | — | — |
+
+So **at least two of the 124 are currently paying customers — $2,000/month —
+and a third worth $1,500/month was days from onboarding.** The earlier zero was
+an artefact of the customer tables being two months stale and missing the
+July–August onboardings entirely.
+
+Note also the shape: **five of the ten are Pre-Onboarding Drop Offs.** This
+population signs and then does not start, at a higher rate than it churns.
+That is its own argument, and it is closer to Swapnil's than to mine.
+
+## 8. Where this leaves it
+
+- **Swapnil's claim now has real support for the first time:** 2× base-rate
+  churn cohort-matched, all four drop-offs inside three months, plus a
+  pre-onboarding drop-off rate that says this group signs and does not start.
+- **It is not yet significant** (p = 0.12, n = 14), and the Jan–Apr cohort
+  points the other way with 0 of 6 churned against a 27.7% base.
+- **Blocking is not free either way:** two of the 124 are paying today, a third
+  is onboarding, and $3,900/month of Addendum 1's five is still live.
+
+No recommendation — the instruction stands until the numbers do, and at n=14
+they do not. The date that settles it is **December 2026**, on a fresh export.
