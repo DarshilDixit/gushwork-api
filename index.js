@@ -2606,6 +2606,13 @@ app.get('/monitor/metrics', async (req, res) => {
           COUNT(*) FILTER (WHERE booking_uid IS NOT NULL)                   AS booked,
           COUNT(*) FILTER (WHERE disqualified = true)                       AS disqualified,
           COUNT(*) FILTER (WHERE non_icp_blocked IS TRUE)                    AS non_icp,
+          /* FLAGGED AND NOT BLOCKED. A separate count from non_icp above,
+             because they are separate populations and separate actions: a
+             blocked lead never reached the calendar, a flagged one did and
+             only stopped firing Meta. Summing them would produce a number
+             that is true of neither. */
+          COUNT(*) FILTER (WHERE non_icp_llm_flagged IS TRUE
+                             AND non_icp_blocked IS NOT TRUE)               AS non_icp_meta_only,
           COUNT(*) FILTER (WHERE loops_sent = true)                         AS loops_sent,
           COUNT(*) FILTER (WHERE completed = true AND booking_uid IS NULL)  AS completed_no_booking_sessions
         FROM leads
@@ -2616,7 +2623,9 @@ app.get('/monitor/metrics', async (req, res) => {
           COUNT(DISTINCT LOWER(email)) FILTER (WHERE completed = true)        AS people_completed,
           COUNT(DISTINCT LOWER(email)) FILTER (WHERE booking_uid IS NOT NULL) AS people_booked,
           COUNT(DISTINCT LOWER(email)) FILTER (WHERE disqualified = true)     AS people_disqualified,
-          COUNT(DISTINCT LOWER(email)) FILTER (WHERE non_icp_blocked IS TRUE)  AS people_non_icp
+          COUNT(DISTINCT LOWER(email)) FILTER (WHERE non_icp_blocked IS TRUE)  AS people_non_icp,
+          COUNT(DISTINCT LOWER(email)) FILTER (WHERE non_icp_llm_flagged IS TRUE
+                                                AND non_icp_blocked IS NOT TRUE) AS people_meta_only
         FROM leads
         WHERE email IS NOT NULL
       `),
@@ -2731,7 +2740,17 @@ app.get('/monitor/metrics', async (req, res) => {
                lead is not an SDR target, so it must not be in the number that
                tells an SDR how much work there is. */
             AND non_icp_blocked IS NOT TRUE
-            AND sell_to ILIKE 'B2B%'
+            /* THE CRM PRODUCT SELLS TO B2C, so a B2C answer on /ai-demo is
+               an ordinary answer and that lead is a real SDR target. Before
+               15 Sept 2026 no such lead existed -- the form disqualified
+               them at step 1 and they never reached step 2 -- so this
+               predicate and the one in /monitor/sdr agreed with the form by
+               accident. The form stopped gating CRM on that date and this
+               clause is what keeps the two in step.
+               MOVES WITH /monitor/sdr. This card is the COUNT of that list,
+               so a difference between the two is a number that disagrees
+               with the page it links to. */
+            AND (sell_to ILIKE 'B2B%' OR product = 'crm')
             AND ${noBookingAnywhereSql('leads.email')}
           ORDER BY LOWER(email), created_at DESC
         ) deduped
@@ -2784,6 +2803,7 @@ app.get('/monitor/metrics', async (req, res) => {
     const booked       = parseInt(t.booked) || 0;
     const disqualified = parseInt(t.disqualified) || 0;
     const nonIcpBlocked = parseInt(t.non_icp) || 0;
+    const nonIcpMetaOnly = parseInt(t.non_icp_meta_only) || 0;
     const loopsSent    = parseInt(t.loops_sent) || 0;
     const completedNoBookingSessions = parseInt(t.completed_no_booking_sessions) || 0;
 
@@ -2802,6 +2822,7 @@ app.get('/monitor/metrics', async (req, res) => {
        nothing in the suite could see it. tests/test-non-icp-routes.js §7 now
        drives the route and asserts a 200. */
     const peopleNonIcp = parseInt(p.people_non_icp) || 0;
+    const peopleMetaOnly = parseInt(p.people_meta_only) || 0;
 
     /* Ordered by volume, so aeo leads and a new product appears underneath
        rather than being buried. */
@@ -2845,7 +2866,8 @@ app.get('/monitor/metrics', async (req, res) => {
     const locPct     = ecTotal ? Math.round(parseInt(ec.has_location) / ecTotal * 100) : 0;
 
     res.json({
-      total, completed, booked, disqualified, nonIcpBlocked, peopleNonIcp, enriched, loopsSent,
+      total, completed, booked, disqualified, nonIcpBlocked, peopleNonIcp,
+      nonIcpMetaOnly, peopleMetaOnly, enriched, loopsSent,
       pendingPartials: pending, noBookingUid, todayCount, awsSynced: !!awsPool,
       enrichTitlePct: titlePct, enrichFundingPct: fundingPct, enrichLocationPct: locPct,
       completedNoBookingSessions,
@@ -3515,7 +3537,12 @@ app.get('/monitor/sdr', async (req, res) => {
              an SDR to ring. Same omission as the PartnerStack guard above --
              disqualified is only half the question now. */
           AND l.non_icp_blocked IS NOT TRUE
-          AND l.sell_to ILIKE 'B2B%'
+          /* Same exception as the noBooking card in /monitor/metrics, and
+             the two must move together. A CRM lead who answered B2C is not
+             disqualified any more, so without this line they would drop out
+             of the SDR list silently -- present in every headline number,
+             absent from the one surface that gets acted on. */
+          AND (l.sell_to ILIKE 'B2B%' OR l.product = 'crm')
           AND ${noBookingAnywhereSql('l.email')}
         ORDER BY LOWER(l.email), l.created_at DESC
       ) deduped
@@ -3663,6 +3690,11 @@ app.get('/monitor', (req, res) => {
   '<div class="tab" id="t-lm" onclick="showTab(\'lm\')">Lead Magnet</div>' +
   '<div class="tab" id="t-partners" onclick="showTab(\'partners\')">Partners</div>' +
   '<div class="tab" id="t-blocked" onclick="showTab(\'blocked\')">Blocked</div>' +
+  /* SEPARATE FROM Blocked, DELIBERATELY. Blocked means "we turned these
+     people away". A model flag that only withholds Meta events is not
+     that, and folding the two tabs together would make the one surface
+     whose meaning is unambiguous mean two things. */
+  '<div class="tab" id="t-model" onclick="showTab(\'model\')">Model</div>' +
   '<div class="tab" id="t-health" onclick="showTab(\'health\')">System Health</div>' +
   '</div>' +
   '<div class="tp act" id="tp-overview">' +
@@ -3673,6 +3705,12 @@ app.get('/monitor', (req, res) => {
   '<div class="mc" title="People with a booking on at least one of their sessions."><div class="ml">People booked</div><div class="mv" id="m-book">&#8212;</div><div class="ms" id="m-bpct">&#8212;</div></div>' +
   '<div class="mc" title="People marked disqualified (B2C / Mixed) on at least one session."><div class="ml">Disqualified</div><div class="mv" id="m-disq">&#8212;</div><div class="ms" id="m-dsq">B2C / Mixed</div></div>' +
   '<div class="mc" title="Leads stopped before the calendar by the real-estate / insurance brand-domain list. These are NOT removed from any other number on this page &#8212; they are still leads and still counted in Total, Completed and the stages. Click through to the Blocked tab to see them." style="cursor:pointer" onclick="showTab(\'blocked\')"><div class="ml">Blocked &#8212; Non-ICP</div><div class="mv" id="m-nonicp">&#8212;</div><div class="ms" id="m-nonicp-sub">still counted in every total</div></div>' +
+  /* THE 4.2% NOBODY COULD SEE. A flagged lead is NOT blocked -- it books,
+     it reaches Salesforce, it gets dialled -- and the only thing that
+     changes is that Meta stops hearing about it. The label has to say all
+     of that, because a card next to "Blocked" that shows a number will be
+     read as blocking within a day. */
+  '<div class="mc" title="Leads the model judged to be one of the four rule-6 industries that suppress Meta but never block. They booked, they are in Salesforce and the SDR list, and they are counted in every total on this page. The ONLY thing withheld is the Meta conversion events. Click through for the evidence quote behind each one." style="cursor:pointer" onclick="showTab(\'model\')"><div class="ml">Meta withheld &#8212; model</div><div class="mv" id="m-metaonly">&#8212;</div><div class="ms" id="m-metaonly-sub">not blocked &#8212; events only</div></div>' +
   '</div>' +
   /* Same three measures as the cards above, same unit (people, deduped by
      lower(email)), split by product. Deliberately a thin row rather than a
@@ -3814,6 +3852,45 @@ app.get('/monitor', (req, res) => {
   '</tr></thead><tbody id="blk-tbody"><tr><td colspan="11" class="nd">Loading...</td></tr></tbody></table></div></div>' +
   '<div class="pag" id="blkpag"></div>' +
   '</div>' +
+
+  /* ── THE MODEL TAB ────────────────────────────────────────────────
+     Four panels, and the order is the order of the questions: what did
+     it do, to whom, on what evidence, and what could it not see. The
+     last one is the blind spot and it goes last on purpose -- it is the
+     panel you read when one of the first three looks wrong. */
+  '<div class="tp" id="tp-model">' +
+  '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
+  '<div><div class="sl" style="margin-bottom:2px">Model layer</div>' +
+  '<div style="font-size:12px;color:#888">What the website classifier decided, and what it could not read. ' +
+  'A <b>blocked</b> lead was turned away; a <b>Meta withheld</b> lead booked, went to Salesforce and is on the SDR list as normal &#8212; only the conversion events were held back.</div></div>' +
+  '<div><select id="mdl-days" onchange="loadModel()"><option value="1">Last 24h</option><option value="7" selected>Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option></select> ' +
+  '<button class="btn" onclick="loadModel()">&#8635; Refresh</button></div>' +
+  '</div>' +
+  '<div class="card" style="padding:10px 14px;margin-bottom:16px;font-size:12px;color:#666" id="mdl-flags">Loading...</div>' +
+
+  '<div class="sl">What the layer did</div>' +
+  '<div class="card" style="padding:14px;margin-bottom:16px" id="mdl-ladder"><div class="nd">Loading...</div></div>' +
+
+  '<div class="sl">By industry</div>' +
+  '<div class="card" style="padding:0;overflow:hidden;margin-bottom:16px"><div style="overflow-x:auto"><table><thead><tr>' +
+  '<th>Industry</th><th>What it does</th><th>Leads</th><th>Companies</th><th>Median confidence</th>' +
+  '</tr></thead><tbody id="mdl-ind"><tr><td colspan="5" class="nd">Loading...</td></tr></tbody></table></div></div>' +
+
+  '<div class="sl">Every decision, with the evidence</div>' +
+  '<div class="card" style="padding:12px 14px;margin-bottom:8px;font-size:12px;color:#666">' +
+  'The quote is what the model read on their own site and decided on. If a row looks like a real prospect, that quote is the fastest way to tell a wrong scope from a wrong call. ' +
+  'A brand-domain block stops with <code>NON_ICP_BLOCK=false</code>, a model block with <code>NON_ICP_LLM_BLOCK=false</code>, and Meta suppression alone with <code>NON_ICP_LLM_META=false</code>.</div>' +
+  '<div class="card" style="padding:0;overflow:hidden;margin-bottom:16px"><div style="overflow-x:auto"><table class="lt"><thead><tr>' +
+  '<th style="width:30px"></th><th>When (ET)</th><th>Email</th><th>Domain judged</th><th>Industry</th><th>Conf.</th><th>Action</th><th>Booked</th><th>What the page said</th>' +
+  '</tr></thead><tbody id="mdl-dec"><tr><td colspan="9" class="nd">Loading...</td></tr></tbody></table></div></div>' +
+
+  '<div class="sl">What we could not read</div>' +
+  '<div class="card" style="padding:14px;margin-bottom:16px" id="mdl-scrape"><div class="nd">Loading...</div></div>' +
+  '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
+  '<th>Domain</th><th>Why</th><th>Lead</th><th>Their website</th><th>Blocked anyway?</th><th>Last tried (ET)</th>' +
+  '</tr></thead><tbody id="mdl-unread"><tr><td colspan="6" class="nd">Loading...</td></tr></tbody></table></div></div>' +
+  '</div>' +
+
   '<div class="tp" id="tp-health">' +
   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
   '<div class="sl" style="margin:0">Step health</div>' +
@@ -3913,11 +3990,99 @@ app.get('/monitor', (req, res) => {
   'var TZ="' + DASH_TZ + '";' +
   'var API=window.location.origin;' +
   'var lChart=null,curPage=1,stimer=null,curSort="created_at",curDir="desc",filterOptsLoaded=false;' +
-  'function showTab(n){["overview","leads","sdr","dupes","health","lm","partners","blocked"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="partners"&&document.getElementById("ptbody").textContent.indexOf("Loading")>=0)loadPartners();if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();if(n==="blocked"&&document.getElementById("blk-tbody").textContent.indexOf("Loading")>=0)loadBlocked();if(n==="health")checkHealth();}' +
+  'function showTab(n){["overview","leads","sdr","dupes","health","lm","partners","blocked","model"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="partners"&&document.getElementById("ptbody").textContent.indexOf("Loading")>=0)loadPartners();if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();if(n==="blocked"&&document.getElementById("blk-tbody").textContent.indexOf("Loading")>=0)loadBlocked();if(n==="model"&&document.getElementById("mdl-ladder").textContent.indexOf("Loading")>=0)loadModel();if(n==="health")checkHealth();}' +
   /* Hits /monitor/leads with nonicp=only rather than a route of its own, so
      the row shape, the panel and the change log are the same objects All
      Leads uses. One query, one contract, nothing to drift. */
   'var blkPage=1;' +
+  /* ── THE MODEL TAB LOADER ──────────────────────────────────────
+     EVERY HELPER HERE IS DECLARED AT TOP LEVEL, not nested inside
+     loadModel. The Blocked tab broke on 12 Sept 2026 for exactly that
+     reason -- leadRowsHtml was declared inside loadLeads, so All Leads
+     could see it and Blocked could not, and the error arrived as a tidy
+     "Could not load:" message rather than a crash. The route test
+     asserts each of these is defined at top level and then calls the
+     loader and reads what the tables painted. */
+  'function mdlChip(a){if(a==="block")return "<span class=\\"badge br\\">Blocks</span>";if(a==="meta")return "<span class=\\"badge ba\\">Meta only</span>";return "<span class=\\"badge bx\\">No action</span>";}' +
+  'function mdlActionChip(a){if(a==="blocked_list")return "<span class=\\"badge br\\">Blocked \\u2014 list</span>";if(a==="blocked_model")return "<span class=\\"badge br\\">Blocked \\u2014 model</span>";return "<span class=\\"badge ba\\">Meta withheld</span>";}' +
+  'function mdlConf(c){if(c==null)return "\\u2014";return Math.round(c*100)+"%";}' +
+  /* A percentage we could not compute is a dash, never a zero. Same rule
+     the lead-path checkers follow: "we could not tell" is not "none". */
+  'function mdlPct(p){return p==null?"\\u2014":p+"%";}' +
+  'function mdlBar(n,total,colour){var w=total>0?Math.round(n/total*100):0;' +
+  'return "<div style=\\"height:6px;background:#f0f0f0;border-radius:3px;overflow:hidden\\"><div style=\\"height:100%;width:"+w+"%;background:"+colour+"\\"></div></div>";}' +
+  'var MDL_COLOUR={blocked_list:"#b91c1c",blocked_model:"#b91c1c",meta_only:"#f59e0b",checked_clear:"#1a1a1a",not_decided:"#c7c7c7"};' +
+  'function mdlLadderHtml(l){if(!l||!l.rows)return "<div class=\\"nd\\">No data</div>";' +
+  'var h=l.rows.map(function(r){return "<div style=\\"display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #f2f2f2\\">"+' +
+  '"<div style=\\"flex:1;font-size:13px\\">"+esc(r.label)+"</div>"+' +
+  '"<div style=\\"width:160px\\">"+mdlBar(r.n,l.total,MDL_COLOUR[r.key]||"#1a1a1a")+"</div>"+' +
+  '"<div style=\\"width:110px;text-align:right;font-size:13px\\"><b>"+r.n+"</b> <span style=\\"color:#888\\">("+mdlPct(r.pct)+")</span></div></div>";}).join("");' +
+  /* The total is printed under the five rows so a reader can add them up.
+     They are exhaustive by construction and this is what makes that
+     checkable rather than claimed. */
+  'return h+"<div style=\\"padding-top:10px;font-size:12px;color:#888\\">"+l.total+" leads in the window. The five rows are mutually exclusive and sum to that total.</div>";}' +
+  'function mdlScrapeHtml(s){if(!s)return "<div class=\\"nd\\">No data</div>";' +
+  'function row(lbl,r,note){return "<div style=\\"display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #f2f2f2\\">"+' +
+  '"<div style=\\"flex:1\\"><div style=\\"font-size:13px\\">"+lbl+"</div><div class=\\"ms\\">"+note+"</div></div>"+' +
+  '"<div style=\\"width:230px;text-align:right;font-size:13px\\"><b>"+mdlPct(r.unreadable_pct)+"</b> <span style=\\"color:#888\\">unreadable \\u00b7 "+(r.unreachable+r.thin)+" of "+r.total+"</span></div></div>";}' +
+  'var p=s.inProcess||{};' +
+  'var h=row("Domains touched in the last 24h",s.last24h,"Latest outcome per domain, not a rate over time")+' +
+  'row("Everything in the cache",s.standing,"Standing state of every domain ever classified")+' +
+  '"<div style=\\"padding:10px 0 0;font-size:12px;color:#666\\"><b>Since this deploy:</b> "+p.ok+" classified, "+p.errored+" API errors, "+p.unreachable+" unreadable, "+p.writeFailed+" writes failed, "+p.bypassFailed+" blocks failed open. "+' +
+  '"Cache hits "+mdlPct(p.cacheHitPct)+" ("+p.cacheHits+" of "+(p.cacheHits+p.cacheMisses)+"). Warm "+(p.avgWarmMs==null?"\\u2014":p.avgWarmMs+"ms avg, "+p.maxWarmMs+"ms worst")+".</div>";' +
+  /* THE CAVEATS RIDE ON THE PAYLOAD, not only in the source. A number
+     whose limits live in a comment is a number somebody will quote
+     without them. */
+  'if(s.notes&&s.notes.length)h+="<div style=\\"padding-top:8px;font-size:11px;color:#999\\">"+s.notes.map(function(n){return esc(n);}).join("<br>")+"</div>";' +
+  'return h;}' +
+  'async function loadModel(){' +
+  'var dsel=document.getElementById("mdl-days");var days=dsel?dsel.value:7;' +
+  'document.getElementById("mdl-ladder").innerHTML="<div class=\\"nd\\">Loading...</div>";' +
+  'try{var r=await fetch(API+"/monitor/non-icp"+(TP||"?")+(TP?"&":"")+"days="+days,{signal:AbortSignal.timeout(20000)});' +
+  'if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
+  'var f=d.flags||{};' +
+  'document.getElementById("mdl-flags").innerHTML="<b>Brand list:</b> "+(f.list_block?"blocking":"off")+" &#183; <b>Model:</b> "+(f.llm_enabled?"on":"off")+' +
+  '" &#183; <b>Model blocks:</b> "+(f.llm_block?"yes":"no")+" &#183; <b>Meta suppressed:</b> "+(f.llm_meta?"yes":"no")+' +
+  '" &#183; "+esc(f.model||"?")+" &#183; floor "+mdlConf(f.confidence_floor)+" &#183; prompt "+esc(f.prompt_version||"?")+' +
+  '(d.truncated?" <span style=\\"color:#b91c1c\\">&#183; window capped &#8212; counts are a floor, not a total</span>":"");' +
+  'document.getElementById("mdl-ladder").innerHTML=mdlLadderHtml(d.ladder);' +
+  'var ind=d.industries||[];' +
+  'document.getElementById("mdl-ind").innerHTML=ind.length?ind.map(function(i){' +
+  'return "<tr><td>"+esc(i.label)+"</td><td>"+mdlChip(i.action)+"</td><td>"+i.leads+"</td><td>"+i.domains+"</td><td>"+mdlConf(i.median_confidence)+"</td></tr>";' +
+  '}).join(""):"<tr><td colspan=\\"5\\" class=\\"nd\\">Nothing classified in this window.</td></tr>";' +
+  'var dec=d.decisions||[];' +
+  'document.getElementById("mdl-dec").innerHTML=dec.length?dec.map(function(x){var sid=esc(x.session_id);' +
+  'return "<tr><td class=\\"xbtn\\" onclick=\\"toggleRow(\'md-"+sid+"\')\\">&#9658;</td>"+' +
+  '"<td style=\\"white-space:nowrap;color:#999\\">"+et(x.created_at)+"</td>"+' +
+  '"<td class=\\"te\\" title=\\""+esc(x.email)+"\\">"+esc(x.email||"\\u2014")+"</td>"+' +
+  '"<td><code>"+esc(x.domain_judged||"\\u2014")+"</code></td>"+' +
+  '"<td>"+esc(x.business_type_label||x.business_type||"\\u2014")+"</td>"+' +
+  '"<td>"+mdlConf(x.confidence)+"</td>"+' +
+  '"<td>"+mdlActionChip(x.action)+"</td>"+' +
+  '"<td>"+(x.booked?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td>"+' +
+  '"<td style=\\"max-width:360px;color:#555;font-size:12px\\">"+esc(x.evidence_quote||"\\u2014")+"</td></tr>"+' +
+  '"<tr class=\\"erow\\" id=\\"er-md-"+sid+"\\" style=\\"display:none\\"><td></td><td colspan=\\"8\\" style=\\"font-size:12px;line-height:1.7\\">"+' +
+  '"<b>Why:</b> "+esc(x.reason||"\\u2014")+"<br>"+' +
+  '"<b>Quote:</b> \\u201c"+esc(x.evidence_quote||"\\u2014")+"\\u201d<br>"+' +
+  '"<b>Company:</b> "+esc(x.company||"\\u2014")+" &#183; <b>Their website:</b> "+esc(x.website||"\\u2014")+" &#183; <b>Product:</b> "+esc(x.product||"\\u2014")+"<br>"+' +
+  '"<b>Decided by:</b> "+esc(x.source||"\\u2014")+" &#183; <b>Model:</b> "+esc(x.model_id||"\\u2014")+" &#183; <b>Prompt:</b> "+esc(x.prompt_version||"\\u2014")+"<br>"+' +
+  '"<b>Page read:</b> "+esc(x.page_url_used||"\\u2014")+" ("+(x.page_text_chars==null?"\\u2014":x.page_text_chars+" chars")+") &#183; <b>Decided at:</b> "+et(x.checked_at)+' +
+  '"</td></tr>";}).join(""):"<tr><td colspan=\\"9\\" class=\\"nd\\">Nothing was blocked or suppressed in this window.</td></tr>";' +
+  'document.getElementById("mdl-scrape").innerHTML=mdlScrapeHtml(d.scrape);' +
+  'var un=(d.scrape&&d.scrape.unreadable)||[];' +
+  'document.getElementById("mdl-unread").innerHTML=un.length?un.map(function(u){' +
+  'return "<tr><td><code>"+esc(u.domain)+"</code></td><td>"+esc(u.scrape_status||"\\u2014")+(u.error?" <span style=\\"color:#999\\">("+esc(u.error)+")</span>":"")+"</td>"+' +
+  '"<td class=\\"te\\">"+esc(u.email||"\\u2014")+"</td><td>"+esc(u.website||"\\u2014")+"</td>"+' +
+  '"<td>"+(u.blocked?"<span class=\\"badge br\\">Yes \\u2014 "+esc(u.blocked_by||"?")+"</span>":"<span class=\\"badge bx\\">No</span>")+"</td>"+' +
+  '"<td style=\\"white-space:nowrap;color:#999\\">"+et(u.checked_at)+"</td></tr>";' +
+  '}).join(""):"<tr><td colspan=\\"6\\" class=\\"nd\\">Every domain in this window was readable.</td></tr>";' +
+  /* The catch PAINTS the failure into the tables rather than throwing,
+     which is why the route test asserts on what was painted and not on
+     whether something threw. */
+  '}catch(e){document.getElementById("mdl-ladder").innerHTML="<div class=\\"nd\\" style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</div>";' +
+  'document.getElementById("mdl-ind").innerHTML="<tr><td colspan=\\"5\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</td></tr>";' +
+  'document.getElementById("mdl-dec").innerHTML="<tr><td colspan=\\"9\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</td></tr>";' +
+  'document.getElementById("mdl-unread").innerHTML="<tr><td colspan=\\"6\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</td></tr>";}}' +
   'async function loadBlocked(pg){blkPage=pg||1;' +
   'document.getElementById("blk-tbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\">Loading...</td></tr>";' +
   'try{var r=await fetch(API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"nonicp=only&page="+blkPage+"&stage=all&sort=created_at&dir=desc",{signal:AbortSignal.timeout(12000)});' +
@@ -4653,6 +4818,7 @@ app.get('/monitor', (req, res) => {
   'set("m-book",d.peopleBooked);set("m-bpct",pct(d.peopleBooked,d.peopleCompleted)+" of completed \\u00B7 "+d.booked+" sessions");' +
   'set("m-disq",d.peopleDisqualified);set("m-dsq","B2C / Mixed \\u00B7 "+d.disqualified+" sessions");' +
   'set("m-nonicp",d.nonIcpBlocked);set("m-nonicp-sub",(d.peopleNonIcp||0)+" people \\u00B7 still counted in every total");' +
+  'set("m-metaonly",d.nonIcpMetaOnly);set("m-metaonly-sub",(d.peopleMetaOnly||0)+" people \\u00B7 booked and dialled as normal");' +
   'renderProductRow(d.productBreakdown);' +
   'set("m-nb",d.peopleNoBooking);set("m-nbs",d.completedNoBookingSessions+" completed sessions w/o booking");' +
   'set("m-rec",d.recoveredBookings);set("m-pend",d.pendingPartials);set("m-mail",d.loopsSent);' +
@@ -10084,6 +10250,321 @@ app.get('/monitor/partner-gaps', async (req, res) => {
   }
 });
 
+/* ── /monitor/non-icp — what the model layer actually did ────────────
+   THE MODEL LAYER WAS INVISIBLE UNTIL THIS EXISTED, and only half of it
+   was invisible by accident. A blocked lead has the Blocked tab. A lead
+   the model flagged WITHOUT blocking -- one of the four rule-6
+   industries that suppress Meta and never block -- appeared nowhere at
+   all: not blocked, so not on that tab, and identical to any other lead
+   everywhere else. Measured over 90 days against the warmed cache it is
+   3.96% of leads whose conversion events we withhold, and on 15 Sept
+   2026 that was three leads in one night that all booked.
+
+   IT IS A SEPARATE TAB FROM Blocked, DELIBERATELY. Blocked means one
+   thing -- we turned these people away -- and putting flagged-not-
+   blocked leads into it would make that tab mean two things. That is
+   the disqualified / non_icp_blocked lesson arriving one column over,
+   and this file has paid for it twice already.
+
+   THE JOIN IS DONE IN JAVASCRIPT, not in SQL, and that is the one
+   design decision here worth defending. A lead is judged on the domains
+   nonIcpCandidateDomains returns, which ends in partnerStackCustomerKey
+   -- the single place a domain becomes an identity in this repo. A SQL
+   regexp_replace that approximates it would be a second normaliser
+   sitting next to the one function CLAUDE.md says must stay the only
+   one, and it would disagree with production on exactly the subdomain
+   and free-mailbox cases that matter. So: read the leads, key them with
+   the real function, then read the verdicts for that domain set. */
+const NON_ICP_REPORT_MAX_DAYS  = 90;
+const NON_ICP_REPORT_MAX_LEADS = 5000;
+
+/* Rounded to a whole percent of a stated denominator. Returns null
+   rather than 0 when there is nothing to divide by, so the UI can print
+   "not tracked" instead of a confident zero. */
+function nonIcpPct(n, total) {
+  if (!total) return null;
+  return Math.round((1000 * n) / total) / 10;
+}
+
+function nonIcpMedian(nums) {
+  const xs = nums.filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
+  if (!xs.length) return null;
+  const mid = Math.floor(xs.length / 2);
+  return xs.length % 2 ? xs[mid] : (xs[mid - 1] + xs[mid]) / 2;
+}
+
+/* What a business type DOES, as one word the tab can print. Read from
+   NON_ICP_BUSINESS_TYPES rather than re-listed, so the six-industry
+   scope cannot be described here as one thing and applied there as
+   another. */
+function nonIcpTypeAction(businessType) {
+  const t = NON_ICP_BUSINESS_TYPES[businessType];
+  if (!t) return 'none';
+  if (t.blocks) return 'block';
+  if (t.suppresses) return 'meta';
+  return 'none';
+}
+
+async function nonIcpModelReport({ days } = {}) {
+  const d = Math.min(NON_ICP_REPORT_MAX_DAYS,
+                     Math.max(1, parseInt(days, 10) || 7));
+
+  /* Every lead in the window with the columns the ladder reads. No
+     LIMIT on purpose for the counts -- a capped population would make
+     the five ladder rows stop summing to the total, which is the one
+     property that makes them worth reading. NON_ICP_REPORT_MAX_LEADS is
+     a guard against a silly days value, and when it bites the report
+     says so rather than quietly reporting a sample as a total. */
+  const leadRows = await pool.query(`
+    SELECT l.session_id, l.email, l.website, l.company,
+           l.first_name, l.last_name, l.created_at, l.product,
+           l.booking_uid IS NOT NULL                         AS booked,
+           l.completed, l.non_icp_blocked, l.non_icp_reason,
+           l.non_icp_source, l.non_icp_llm_flagged, l.non_icp_checked_at
+      FROM leads l
+     WHERE l.created_at >= NOW() - ($1 || ' days')::interval
+     ORDER BY l.created_at DESC
+     LIMIT ${NON_ICP_REPORT_MAX_LEADS + 1}`, [String(d)]);
+
+  const truncated = leadRows.rows.length > NON_ICP_REPORT_MAX_LEADS;
+  const leads     = truncated ? leadRows.rows.slice(0, NON_ICP_REPORT_MAX_LEADS) : leadRows.rows;
+
+  /* Key every lead with the REAL function, then read the verdicts for
+     the union of those domains in one round trip. */
+  const perLead = leads.map((l) => ({
+    lead: l,
+    domains: nonIcpCandidateDomains({ email: l.email, website: l.website }),
+  }));
+  const wanted = [...new Set(perLead.flatMap((x) => x.domains))];
+
+  const verdictRows = wanted.length
+    ? (await pool.query(
+        `SELECT domain, business_type, blocking, confidence, evidence_quote, reason,
+                source, model_id, prompt_version, scrape_status, error,
+                page_url_used, page_text_chars, checked_at
+           FROM non_icp_domain_verdicts
+          WHERE domain = ANY($1::text[])`, [wanted])).rows
+    : [];
+  const byDomain = new Map(verdictRows.map((v) => [v.domain, v]));
+
+  /* ── Panel 1: the ladder ──────────────────────────────────────────
+     FIVE STATES, MUTUALLY EXCLUSIVE AND EXHAUSTIVE, resolved in this
+     order, exactly like the stage ladder. The five sum to the lead
+     total or one of them is wrong.
+
+     THE LAST TWO ROWS CANNOT BE READ OFF THE LEAD COLUMNS ALONE, and
+     that is the reason this function joins at all. nonIcpStamp writes
+     non_icp_checked_at for any verdict that is not check_failed or
+     disabled -- INCLUDING the plain no-match verdict returned when the
+     brand list missed and the model cache had nothing fresh. So
+     "checked_at is set, source is null" mixes "the model read their
+     site and had no objection" with "the model never had a verdict for
+     this lead at all", and only the verdict table can split them. On
+     the first night live that was 23 of 27 leads in one bucket. */
+  const ladder = {
+    blocked_list:  0,   /* the brand-domain list stopped them          */
+    blocked_model: 0,   /* the model stopped them                      */
+    meta_only:     0,   /* flagged, not blocked: Meta events withheld  */
+    checked_clear: 0,   /* a real verdict existed and took no action   */
+    not_decided:   0,   /* no fresh verdict for any of their domains   */
+  };
+  const decisions   = [];
+  const unreadable  = [];
+  const industry    = new Map();
+
+  for (const { lead, domains } of perLead) {
+    const verdicts = domains.map((x) => byDomain.get(x)).filter(Boolean);
+
+    if (lead.non_icp_blocked === true) {
+      if (lead.non_icp_source === 'llm') ladder.blocked_model++;
+      else                               ladder.blocked_list++;
+    } else if (lead.non_icp_llm_flagged === true) {
+      ladder.meta_only++;
+    } else if (verdicts.some((v) => v.source === 'llm')) {
+      ladder.checked_clear++;
+    } else {
+      ladder.not_decided++;
+    }
+
+    /* Panel 3 rows: only the two populations anybody has to audit. The
+       verdict chosen is the one for the domain we stamped on the lead,
+       falling back to the first that has one -- non_icp_reason holds a
+       domain for BOTH mechanisms, so it is the right key. */
+    if (lead.non_icp_blocked === true || lead.non_icp_llm_flagged === true) {
+      const v = byDomain.get(lead.non_icp_reason) || verdicts[0] || null;
+      decisions.push({
+        session_id: lead.session_id,
+        created_at: lead.created_at,
+        email: lead.email, website: lead.website, company: lead.company,
+        first_name: lead.first_name, last_name: lead.last_name,
+        booked: lead.booked, completed: lead.completed,
+        product: lead.product,
+        action: lead.non_icp_blocked === true
+          ? (lead.non_icp_source === 'llm' ? 'blocked_model' : 'blocked_list')
+          : 'meta_only',
+        source: lead.non_icp_source || null,
+        domain_judged: lead.non_icp_reason || null,
+        business_type: v ? v.business_type : null,
+        business_type_label: v && NON_ICP_BUSINESS_TYPES[v.business_type]
+          ? NON_ICP_BUSINESS_TYPES[v.business_type].label : null,
+        confidence: v && v.confidence != null ? Number(v.confidence) : null,
+        evidence_quote: v ? v.evidence_quote : null,
+        reason: v ? v.reason : null,
+        model_id: v ? v.model_id : null,
+        prompt_version: v ? v.prompt_version : null,
+        page_url_used: v ? v.page_url_used : null,
+        page_text_chars: v ? v.page_text_chars : null,
+        checked_at: lead.non_icp_checked_at || (v ? v.checked_at : null),
+      });
+    }
+
+    /* Panel 4's actionable half. A domain we could not read, WITH the
+       lead attached -- which is the only form in which it is worth
+       anything. thegerigteam.net on its own is a failed fetch;
+       thegerigteam.net beside a remax.com website is the reason the
+       brand-domain list is not being retired. */
+    for (const v of verdicts) {
+      if (v.source === 'llm') continue;
+      unreadable.push({
+        domain: v.domain, scrape_status: v.scrape_status, error: v.error,
+        checked_at: v.checked_at,
+        email: lead.email, website: lead.website,
+        blocked: lead.non_icp_blocked === true,
+        blocked_by: lead.non_icp_blocked === true ? (lead.non_icp_source || null) : null,
+      });
+    }
+
+    /* Panel 2. Counted per LEAD, and the domain set per type counted
+       separately, because they answer different questions: leads is how
+       much traffic a type is touching, domains is how many distinct
+       companies produced it. One noisy company is not a trend. */
+    for (const v of verdicts) {
+      if (v.source !== 'llm' || !v.business_type) continue;
+      if (!industry.has(v.business_type)) {
+        industry.set(v.business_type, { business_type: v.business_type, leads: 0, domains: new Set(), confs: [] });
+      }
+      const row = industry.get(v.business_type);
+      row.leads++;
+      row.domains.add(v.domain);
+      if (v.confidence != null) row.confs.push(Number(v.confidence));
+      break;   /* one type per lead, the first domain that has a verdict */
+    }
+  }
+
+  const total = leads.length;
+
+  /* ── Panel 4: the scrape picture ──────────────────────────────────
+     LATEST OUTCOME PER DOMAIN, NEVER A HISTORICAL RATE, and the label
+     on screen has to say so. nonIcpWriteVerdictRow is ON CONFLICT DO
+     UPDATE, so a domain that failed and later succeeded overwrites its
+     own failure and the table keeps no history. A rate computed from it
+     would therefore UNDERSTATE failures by exactly the ones that later
+     resolved, and rendering that as "the scrape failure rate" is the
+     same mistake as rendering a floor as a total.
+
+     A second reason the standing numbers read low: the historical
+     backfill deliberately loaded only source=llm rows, so roughly 2,900
+     of the cache's rows are successes by selection. Both caveats ride
+     on the payload as notes rather than living only in this comment. */
+  const touched = await pool.query(`
+    SELECT scrape_status, source, COUNT(*)::int AS n
+      FROM non_icp_domain_verdicts
+     WHERE checked_at >= NOW() - INTERVAL '24 hours'
+     GROUP BY 1, 2`);
+  const standing = await pool.query(`
+    SELECT scrape_status, source, COUNT(*)::int AS n
+      FROM non_icp_domain_verdicts
+     GROUP BY 1, 2`);
+
+  const rollup = (rows) => {
+    const out = { ok: 0, unreachable: 0, thin: 0, other: 0, total: 0 };
+    for (const r of rows) {
+      out.total += r.n;
+      if (r.source === 'llm')                 out.ok          += r.n;
+      else if (r.scrape_status === 'unreachable') out.unreachable += r.n;
+      else if (r.scrape_status === 'thin')        out.thin        += r.n;
+      else                                        out.other       += r.n;
+    }
+    return { ...out, unreadable_pct: nonIcpPct(out.unreachable + out.thin, out.total) };
+  };
+
+  /* The in-process counters, and they are labelled for what they are.
+     Lost on every deploy, which is deliberate -- a fresh process has
+     attempted nothing and must not inherit a verdict about its own
+     health -- so "since this deploy" is the only honest label. */
+  const S = nonIcpLlmHealthSnapshot();
+  const attempts = S.cacheHits + S.cacheMisses;
+
+  return {
+    windowDays: d,
+    generatedAt: new Date().toISOString(),
+    truncated,
+    flags: {
+      list_block:  NON_ICP_BLOCK_ENABLED,
+      llm_enabled: NON_ICP_LLM_ENABLED,
+      llm_block:   NON_ICP_LLM_BLOCK,
+      llm_meta:    NON_ICP_LLM_META,
+      model:       NON_ICP_LLM_MODEL,
+      confidence_floor: NON_ICP_LLM_CONFIDENCE_FLOOR,
+      prompt_version:   NON_ICP_PROMPT_VERSION,
+    },
+    ladder: {
+      total,
+      rows: [
+        { key: 'blocked_list',  label: 'Blocked — brand list',   n: ladder.blocked_list,  pct: nonIcpPct(ladder.blocked_list,  total) },
+        { key: 'blocked_model', label: 'Blocked — model',        n: ladder.blocked_model, pct: nonIcpPct(ladder.blocked_model, total) },
+        { key: 'meta_only',     label: 'Meta withheld only',     n: ladder.meta_only,     pct: nonIcpPct(ladder.meta_only,     total) },
+        { key: 'checked_clear', label: 'Checked, no action',     n: ladder.checked_clear, pct: nonIcpPct(ladder.checked_clear, total) },
+        { key: 'not_decided',   label: 'Not decided',            n: ladder.not_decided,   pct: nonIcpPct(ladder.not_decided,   total) },
+      ],
+    },
+    industries: [...industry.values()]
+      .map((r) => ({
+        business_type: r.business_type,
+        label: (NON_ICP_BUSINESS_TYPES[r.business_type] || {}).label || r.business_type,
+        action: nonIcpTypeAction(r.business_type),
+        leads: r.leads,
+        domains: r.domains.size,
+        median_confidence: nonIcpMedian(r.confs),
+      }))
+      .sort((a, b) => b.leads - a.leads),
+    decisions: decisions.sort((a, b) => new Date(b.created_at) - new Date(a.created_at)),
+    scrape: {
+      last24h:  rollup(touched.rows),
+      standing: rollup(standing.rows),
+      /* Deduped: one lead can contribute the same unreadable domain
+         twice through email and website. */
+      unreadable: [...new Map(unreadable.map((u) => [u.domain + '|' + u.email, u])).values()]
+        .sort((a, b) => new Date(b.checked_at) - new Date(a.checked_at)),
+      inProcess: {
+        since: S.since, ok: S.ok, errored: S.errored,
+        unreachable: S.unreachable, writeFailed: S.writeFailed,
+        bypassFailed: S.bypassFailed,
+        cacheHits: S.cacheHits, cacheMisses: S.cacheMisses,
+        cacheHitPct: nonIcpPct(S.cacheHits, attempts),
+        avgWarmMs: S.cacheMisses ? Math.round(S.totalMs / S.cacheMisses) : null,
+        maxWarmMs: S.maxMs || null,
+        lastOkAt: S.lastOkAt, lastErrorAt: S.lastErrorAt, lastError: S.lastError,
+      },
+      notes: [
+        'Latest outcome per domain, not a historical rate. A domain that failed and later succeeded overwrites its own failure, so failures that resolved are not counted here.',
+        'The standing cache is biased towards success: the historical backfill loaded only rows the model actually judged.',
+      ],
+    },
+  };
+}
+
+app.get('/monitor/non-icp', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    res.json(await nonIcpModelReport({ days: req.query.days }));
+  } catch (err) {
+    console.error('[/monitor/non-icp]', err.message);
+    res.status(500).json({ error: 'Non-ICP report failed', detail: err.message });
+  }
+});
+
 /* ── PER-DOMAIN SALESFORCE STATE ─────────────────────────────────────
    Refreshed on every poll for EVERY partner domain, not only the ones already
    eligible to qualify. The row worth acting on daily is "Opportunity exists,
@@ -11306,8 +11787,22 @@ app.post('/submit', async (req, res) => {
       // only: everything above has already fired, Meta included.
       alertUnverifiablePair({ email, elv_status: elv?.status, website_check_reason });
 
-      /* Flag-and-watch. Only reachable with NON_ICP_LLM_BLOCK off -- with it
-         on, a flagged lead is blocked and took the branch above. */
+      /* Flag-and-watch, AND the Meta-only industries.
+
+         AN EARLIER COMMENT HERE SAID "only reachable with
+         NON_ICP_LLM_BLOCK off". That was wrong, and it was wrong in the
+         direction that matters: blocked is `blocks && NON_ICP_LLM_BLOCK`,
+         and `blocks` is false for the four rule-6 industries that suppress
+         Meta without ever blocking. So a home_services or print_sign lead
+         is flagged-not-blocked WITH BLOCK ON and arrives right here. It
+         fired twice on the first night live, 15 Sept 2026, for
+         pfifashions.com and smartsolarsolution.org.
+
+         The Slack post already knew this -- slackNonIcpLlmFlagged branches
+         on d.action and prints "Meta events withheld" for a meta lead. The
+         log line below did not, and printed "Would have blocked" about a
+         lead that was never a blocking candidate: the exact falsehood the
+         comment inside that function says must never appear. */
       if (nonIcpLlmFlagged) {
         slackNonIcpLlmFlagged({ matched_domain: nonIcpReason,
           action: nonIcp.llm_action || null,
@@ -11316,7 +11811,9 @@ app.post('/submit', async (req, res) => {
           confidence: nonIcp.confidence != null ? nonIcp.confidence : null,
           evidence_quote: nonIcp.evidence_quote || null,
           first_name, last_name, email, company, website });
-        console.log(`[/submit] 🔎 Would have blocked (model): ${email} | ${nonIcp.business_type || '?'} | ${nonIcpReason}`);
+        console.log(nonIcp.llm_action === 'meta'
+          ? `[/submit] 📉 Meta withheld, not blocked (model): ${email} | ${nonIcp.business_type || '?'} | ${nonIcpReason}`
+          : `[/submit] 🔎 Would have blocked (model): ${email} | ${nonIcp.business_type || '?'} | ${nonIcpReason}`);
       }
 
       console.log(`[/submit] ✅ Lead completed: ${email} | session: ${session_id} | email check: ${elv?.status || 'not stored'}`);

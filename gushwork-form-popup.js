@@ -1,7 +1,7 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.11.0-ads  (ADS PAGE VERSION)
+  GUSHWORK — MULTI-STEP FORM  v5.12.0-ads  (ADS PAGE VERSION)
 
-  Tracks /demo v5.11.0. Full feature parity with /demo, EXCEPT the
+  Tracks /demo v5.12.0. Full feature parity with /demo, EXCEPT the
   booking step, which keeps the Ads page's fullscreen modal
   presentation — opened after step 2 — instead of /demo's inline
   column render, AND the close affordances that modal needs (v5.7.2).
@@ -9,6 +9,13 @@
   port of gushwork-form.js and should be kept in step with it. A
   modal needs a way out and an inline column does not, so this
   section has no /demo counterpart to track.
+
+  v5.12.0-ads — the CRM product (/ai-demo) allows B2C and Mixed.
+    Ported from /demo v5.12.0, identical. /ai-demo serves
+    gushwork-form.js today, not this file, so this carries the change
+    for parity rather than for traffic -- which is the point: the two
+    files have silently diverged before and the fix is not to reason
+    about which page serves which.
 
   v5.11.0-ads — /thank-you greets blocked leads by name. Ported from
     /demo v5.11.0, identical.
@@ -627,6 +634,32 @@
     // businesses (see afgmmoving.com). Add or remove a reason here to change
     // scope; nothing else needs touching.
     const WEBSITE_BLOCKING_REASONS = ['nxdomain', 'brand_mismatch', 'mailbox_domain'];
+
+    /* PAGES WHOSE PRODUCT SELLS TO CONSUMERS TOO, so the B2C/Mixed gate
+       below does not apply on them.
+
+       The CRM product lives on /ai-demo and sells to B2C and Mixed
+       businesses exactly as happily as to B2B. The non-ICP reasoning that
+       produced the gate is about AEO and does not transfer, so a B2C
+       answer there is an ordinary answer and must not be a dead end.
+       Measured before the change: 17 of 29 /ai-demo leads hit the gate,
+       14 of them by pressing "actually we're B2B" to get past it.
+
+       THIS IS A FOURTH COPY OF A LIST THAT MUST STAY IN SYNC.
+       PRODUCT_PATHS in meta-capi.js is the catalogue; index.js imports it;
+       gushwork-form.js and gushwork-form-popup.js each carry this. A test
+       in tests/test-batch2.js lifts all three files and asserts they agree
+       on which paths are the CRM product, because a list this shape has
+       drifted three times in this repo already.
+
+       Matched against the PATHNAME, lowercased, trailing slash stripped --
+       the same normalisation resolveProduct does, so /ai-demo/ and
+       /AI-Demo cannot disagree with the server about what they are. */
+    const B2C_ALLOWED_PATHS = ['/ai-demo'];
+    function b2cAllowedHere() {
+      var p = (window.location.pathname || '').toLowerCase().replace(/\/+$/, '') || '/';
+      return B2C_ALLOWED_PATHS.indexOf(p) !== -1;
+    }
     // ── ADS-PAGE POLICY SWITCH ────────────────────────────────────────
     // v4.5 on this page hard-blocked gmail/yahoo/etc at step 1 with
     // "Please use your work email." /demo does the opposite: it lets them
@@ -2636,7 +2669,14 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
         formState.sell_to = sellTo;
         localStorage.setItem('gw_email', formState.email);
 
-        if (sellTo === 'B2C' || sellTo === 'Mixed') {
+        /* B2C AND MIXED ARE ORDINARY ANSWERS ON A B2C-ALLOWED PAGE.
+           Computed once and used for both the flag and the step below, so
+           the recorded state and the step the visitor sees can never
+           disagree -- two independent copies of this condition is how a
+           lead gets marked disqualified and shown step 2 anyway. */
+        const gateOnSellTo = (sellTo === 'B2C' || sellTo === 'Mixed') && !b2cAllowedHere();
+
+        if (gateOnSellTo) {
           formState.disqualified = true;
           formState.disqualified_reason = 'b2c_or_mixed';
         } else {
@@ -2669,7 +2709,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
         await triggerEnrichment(formState.email);
         await savePartial(1);
 
-        if (sellTo === 'B2C' || sellTo === 'Mixed') showStep('step-disqualified');
+        if (gateOnSellTo) showStep('step-disqualified');
         else showStep('step-2');
       } finally {
         _submitting = false;
@@ -3056,7 +3096,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.11.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.12.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

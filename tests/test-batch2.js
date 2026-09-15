@@ -2623,6 +2623,94 @@ async function section12() {
      !/ADD COLUMN IF NOT EXISTS (attribution|field_step|arrived_step|prev_step|back_navigation|hit_no)[^,;]*DEFAULT/.test(dbsrc));
 }
 
+/* ============================================================
+   21. THE CRM PRODUCT ALLOWS B2C — AND THE FOURTH COPY OF THE LIST
+
+   The sell_to gate is entirely client-side. B2C or Mixed at step 1 marks
+   the lead disqualified and shows a terminal step, and the server just
+   believes the boolean it is handed. So "the CRM product allows B2C"
+   could only be built in the two form files -- which means the set of
+   CRM paths now exists in FOUR places:
+
+     meta-capi.js          PRODUCT_PATHS          the catalogue
+     index.js              (imports it)           resolveProduct
+     gushwork-form.js      B2C_ALLOWED_PATHS
+     gushwork-form-popup.js B2C_ALLOWED_PATHS
+
+   CLAUDE.md names three separate pairs of lists that must stay in sync
+   and the repo has been bitten by every one of them. This section is
+   the thing that stops the fourth: if a product page is added to the
+   catalogue and not to the forms, the visitor is disqualified on a page
+   the server has already decided is CRM, and nothing else in the repo
+   would say so.
+
+   IT ASSERTS AGREEMENT, NOT A LITERAL. Hardcoding ['/ai-demo'] here
+   would make this a fifth copy.
+   ============================================================ */
+{
+  const capisrc = fs.readFileSync(path.join(__dirname, '..', 'meta-capi.js'), 'utf8');
+  const formA   = fs.readFileSync(path.join(__dirname, '..', 'gushwork-form.js'), 'utf8');
+  const formB   = fs.readFileSync(path.join(__dirname, '..', 'gushwork-form-popup.js'), 'utf8');
+
+  /* The catalogue, lifted and executed rather than regexed, so the
+     answer is the same object resolveProduct reads. */
+  const { PRODUCT_PATHS, DEFAULT_PRODUCT } = require('../meta-capi');
+  const crmPaths = Object.keys(PRODUCT_PATHS)
+    .filter((p) => PRODUCT_PATHS[p] === 'crm').sort();
+  ok('21: the catalogue has at least one CRM path', crmPaths.length > 0);
+  ok('21: aeo is still the default', DEFAULT_PRODUCT === 'aeo');
+
+  const liftAllowed = (fsrc, name) => {
+    const m = fsrc.match(/const B2C_ALLOWED_PATHS = (\[[^\]]*\]);/);
+    ok(`21: ${name} declares B2C_ALLOWED_PATHS`, !!m, name);
+    return m ? JSON.parse(m[1].replace(/'/g, '"')) : null;
+  };
+  const allowedA = liftAllowed(formA, 'gushwork-form.js');
+  const allowedB = liftAllowed(formB, 'gushwork-form-popup.js');
+
+  eq('21: /demo form allows exactly the CRM paths', (allowedA || []).slice().sort(), crmPaths);
+  eq('21: ads form allows exactly the CRM paths',   (allowedB || []).slice().sort(), crmPaths);
+  eq('21: the two form files agree with each other', allowedA, allowedB);
+
+  /* THE GATE ITSELF. Both files must compute the condition ONCE and use
+     it for both the flag and the step. Two independent copies is how a
+     lead gets marked disqualified and shown step 2 anyway -- the state
+     we record and the screen the visitor sees disagreeing. */
+  for (const [name, f] of [['/demo', formA], ['ads', formB]]) {
+    ok(`21: ${name} computes the gate once`,
+       /const gateOnSellTo = \(sellTo === 'B2C' \|\| sellTo === 'Mixed'\) && !b2cAllowedHere\(\);/.test(f), name);
+    ok(`21: ${name} flags disqualified from that one value`,
+       /if \(gateOnSellTo\) \{\s*formState\.disqualified = true;/.test(f), name);
+    ok(`21: ${name} chooses the step from that same one value`,
+       /if \(gateOnSellTo\) showStep\('step-disqualified'\);/.test(f), name);
+    /* No stray copy of the raw condition left behind. If one survives,
+       half the decision is still gating CRM. */
+    eq(`21: ${name} has no leftover raw B2C condition`,
+       (f.match(/sellTo === 'B2C' \|\| sellTo === 'Mixed'/g) || []).length, 1);
+    /* Normalised the same way resolveProduct normalises, so /ai-demo/
+       and /AI-Demo cannot disagree with the server about what they are. */
+    ok(`21: ${name} lowercases and strips the trailing slash`,
+       /toLowerCase\(\)\.replace\(\/\\\/\+\$\/, ''\)/.test(f), name);
+  }
+
+  /* THE SERVER HALF. A CRM lead who answers B2C is no longer
+     disqualified, so the two sell_to predicates would drop them
+     silently -- present in every headline number, absent from the one
+     surface anybody acts on. Both, and they move together. */
+  const sdr     = between("app.get('/monitor/sdr'", "app.get('/monitor'");
+  const metrics = between("app.get('/monitor/metrics'", "app.get('/monitor/funnel'");
+  ok('21: the SDR list keeps CRM B2C leads',
+     /\(l\.sell_to ILIKE 'B2B%' OR l\.product = 'crm'\)/.test(sdr));
+  ok('21: the No booking yet card keeps them too',
+     /\(sell_to ILIKE 'B2B%' OR product = 'crm'\)/.test(metrics));
+  /* PINNED AS A PAIR. The card is the COUNT of the list, so one moving
+     without the other is a number that disagrees with the page it links
+     to -- the SDR_SEARCH_COLUMNS / SDR_SEARCH_FIELDS lesson again. */
+  eq('21: exactly two sell_to B2B predicates exist, and both are excepted',
+     (src.match(/sell_to ILIKE 'B2B%'/g) || []).length,
+     (src.match(/sell_to ILIKE 'B2B%' OR l?\.?product = 'crm'/g) || []).length);
+}
+
 /* ============================================================ */
 /* Section 12 is async, so the totals are printed from its continuation.
    The catch is not optional: without it a throw in there escapes as an

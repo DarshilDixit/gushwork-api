@@ -3628,11 +3628,12 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     /* Pinned to the CURRENT version on purpose: this is what catches a form
        file shipped without its version bumped, which is how the Webflow re-pin
        silently ships half a fix. Bump both when you bump the files. */
-    /* v5.11.0 since 11 Sept. This assertion sat on v5.10.0 and has been
-       failing on main ever since that PR bumped both form files and not the
-       test -- which is precisely the shape the comment above describes,
-       arriving as a red bar nobody read rather than as a caught bug. */
-    ok(`form(${name}): version banner says v5.11.0`, /Form initialised v5\.11\.0/.test(f));
+    /* v5.12.0 since 15 Sept, when the CRM product stopped disqualifying
+       B2C. Was v5.11.0, and before that sat on v5.10.0 while both form
+       files had moved on -- failing on main for days as a red bar nobody
+       read rather than as a caught bug. Bump it in the same commit that
+       bumps the files. */
+    ok(`form(${name}): version banner says v5.12.0`, /Form initialised v5\.12\.0/.test(f));
   }
 
   console.log('');

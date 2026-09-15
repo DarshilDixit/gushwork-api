@@ -43,7 +43,11 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* Scenario state, reset between runs. */
-const S = { fetches: [], slackPayloads: [], leadRow: null, writes: [], psBlocked: false, verdict: null };
+const S = { fetches: [], slackPayloads: [], leadRow: null, writes: [], psBlocked: false, verdict: null,
+            /* /monitor/non-icp's two inputs, set per scenario. null means
+               "this suite is not driving the report", so every other
+               scenario keeps the stub's existing behaviour. */
+            reportLeads: null, reportVerdicts: null };
 
 /* ── stub pg ──────────────────────────────────────────────────────
    Both pools (Railway and the AWS warehouse) come through here.
@@ -85,6 +89,26 @@ function stubQuery(q, params) {
       non_icp_llm_flagged: p[p.length - 1] === true,
       prev_booked: false, step_reached: 2,
     }], rowCount: 1 };
+  }
+  /* ── /monitor/non-icp's three reads ──────────────────────────────
+     MATCHED BEFORE THE GENERIC BRANCHES BELOW, and that ordering is
+     load-bearing: the report's verdict query also opens with
+     "SELECT domain, business_type, blocking" but binds an ARRAY of
+     domains rather than one, so the single-domain branch below would
+     silently return nothing and the report would read as a cold cache
+     for every lead. */
+  if (/FROM non_icp_domain_verdicts WHERE domain = ANY/.test(flat)) {
+    const want = new Set((params || [])[0] || []);
+    const rows = (S.reportVerdicts || []).filter((v) => want.has(v.domain));
+    return { rows, rowCount: rows.length };
+  }
+  if (/FROM leads l WHERE l\.created_at >=/.test(flat)) {
+    const rows = S.reportLeads || [];
+    return { rows, rowCount: rows.length };
+  }
+  if (/SELECT scrape_status, source, COUNT\(\*\)::int/.test(flat)) {
+    return { rows: [{ scrape_status: 'ok', source: 'llm', n: 7 },
+                     { scrape_status: 'unreachable', source: 'llm_unreachable', n: 3 }], rowCount: 2 };
   }
   /* The model layer's verdict cache. S.verdict is the row the classifier
      would have written; null means a cold cache, which must block nobody. */
@@ -195,7 +219,7 @@ const post = async (p, body) => {
   let j = null; try { j = await r.json(); } catch (_) {}
   return { status: r.status, body: j };
 };
-const reset = () => { S.fetches = []; S.slackPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; };
+const reset = () => { S.fetches = []; S.slackPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; };
 const metaFired      = () => S.fetches.some((u) => /graph\.facebook\.com/.test(u));
 const salesforceHit  = () => S.fetches.some((u) => /\/sobjects\//.test(u));
 const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') || true);
@@ -546,6 +570,10 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
       ['/monitor/lm-metrics',   'Lead Magnet'],
       ['/monitor/partners',     'Partners'],
       ['/monitor/leads?nonicp=only&page=1', 'Blocked'],
+      /* The Model tab. It is the only monitor route that joins leads to
+         the verdict cache IN JAVASCRIPT rather than in SQL, so a 200 here
+         also proves nonIcpCandidateDomains is reachable from it. */
+      ['/monitor/non-icp?days=7', 'Model'],
       ['/monitor/health',       'System Health'],
     ];
     for (const [path, label] of TABS) {
@@ -624,6 +652,43 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
                     non_icp_blocked: true, non_icp_reason: 'kw.com', step_reached: 2 }],
           rows: [], partners: [], domains: [], checks: [], sessions: [],
           duplicates: [], people: 1, byDay: [], funnel: [],
+          /* The Model tab's shape. Present so mdlLadderHtml, the
+             decisions map and the unreadable map all RUN -- a loader
+             that renders an empty state cannot catch a scope error in
+             the branch that renders rows. */
+          windowDays: 7, truncated: false,
+          flags: { list_block: true, llm_enabled: true, llm_block: true,
+                   llm_meta: true, model: 'claude-opus-5',
+                   confidence_floor: 0.75, prompt_version: 'v1-test' },
+          ladder: { total: 4, rows: [
+            { key: 'blocked_list',  label: 'Blocked — brand list', n: 1, pct: 25 },
+            { key: 'meta_only',     label: 'Meta withheld only',   n: 1, pct: 25 },
+            { key: 'checked_clear', label: 'Checked, no action',   n: 1, pct: 25 },
+            { key: 'not_decided',   label: 'Not decided',          n: 1, pct: null },
+          ] },
+          industries: [{ business_type: 'home_services', label: 'Home services / trades',
+                         action: 'meta', leads: 2, domains: 2, median_confidence: 0.84 }],
+          decisions: [{ session_id: 's1', created_at: new Date().toISOString(),
+                        email: 'a@kw.com', website: 'https://kw.com', company: 'KW',
+                        booked: true, product: 'aeo', action: 'blocked_list',
+                        source: 'domain_list', domain_judged: 'kw.com',
+                        business_type: 'real_estate', business_type_label: 'Real estate',
+                        confidence: 0.97, evidence_quote: 'We are a brokerage',
+                        reason: 'brokerage', model_id: 'm', prompt_version: 'v1-test',
+                        page_url_used: 'https://kw.com', page_text_chars: 900,
+                        checked_at: new Date().toISOString() }],
+          scrape: {
+            last24h:  { ok: 9, unreachable: 1, thin: 0, other: 0, total: 10, unreadable_pct: 10 },
+            standing: { ok: 90, unreachable: 5, thin: 5, other: 0, total: 100, unreadable_pct: 10 },
+            unreadable: [{ domain: 'x.test', scrape_status: 'thin', error: null,
+                           checked_at: new Date().toISOString(), email: 'a@x.test',
+                           website: 'https://x.test', blocked: false, blocked_by: null }],
+            inProcess: { since: Date.now(), ok: 3, errored: 0, unreachable: 1,
+                         writeFailed: 0, bypassFailed: 0, cacheHits: 5, cacheMisses: 3,
+                         cacheHitPct: 62.5, avgWarmMs: 2793, maxWarmMs: 6671,
+                         lastOkAt: Date.now(), lastErrorAt: null, lastError: null },
+            notes: ['Latest outcome per domain, not a historical rate.'],
+          },
         }),
       }),
     };
@@ -643,7 +708,15 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
            + ' esc: typeof esc === "function" ? esc : null,'
            + ' et: typeof et === "function" ? et : null,'
            + ' enrichPanel: typeof enrichPanel === "function" ? enrichPanel : null,'
-           + ' stageBadge: typeof stageBadge === "function" ? stageBadge : null };'
+           + ' stageBadge: typeof stageBadge === "function" ? stageBadge : null,'
+           + ' loadModel: typeof loadModel === "function" ? loadModel : null,'
+           + ' mdlLadderHtml: typeof mdlLadderHtml === "function" ? mdlLadderHtml : null,'
+           + ' mdlScrapeHtml: typeof mdlScrapeHtml === "function" ? mdlScrapeHtml : null,'
+           + ' mdlChip: typeof mdlChip === "function" ? mdlChip : null,'
+           + ' mdlActionChip: typeof mdlActionChip === "function" ? mdlActionChip : null,'
+           + ' mdlConf: typeof mdlConf === "function" ? mdlConf : null,'
+           + ' mdlPct: typeof mdlPct === "function" ? mdlPct : null,'
+           + ' mdlBar: typeof mdlBar === "function" ? mdlBar : null };'
       )(...Object.values(sandbox));
     } catch (err) { evalErr = err; }
     ok('dashboard: the inline script evaluates without throwing', !evalErr, evalErr && evalErr.message);
@@ -654,7 +727,13 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
          that is not visible at top level cannot be shared between tabs. */
       for (const nm of ['leadRowsHtml', 'esc', 'et', 'enrichPanel', 'stageBadge',
                         'showTab', 'loadLeads', 'loadBlocked', 'loadSDR',
-                        'loadDupes', 'loadLM', 'loadPartners', 'checkHealth']) {
+                        'loadDupes', 'loadLM', 'loadPartners', 'checkHealth',
+                        /* The Model tab's own helpers. Every one is used by
+                           loadModel and by nothing else today, which is
+                           exactly the shape leadRowsHtml had the day it was
+                           declared inside loadLeads. */
+                        'loadModel', 'mdlLadderHtml', 'mdlScrapeHtml', 'mdlChip',
+                        'mdlActionChip', 'mdlConf', 'mdlPct', 'mdlBar']) {
         ok(`dashboard: ${nm} is defined at TOP LEVEL`, typeof scope[nm] === 'function',
            'declared inside another function, so other tabs cannot see it');
       }
@@ -663,7 +742,7 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
          render path running -- this is what actually reproduces the
          Blocked tab break. */
       for (const nm of ['loadLeads', 'loadBlocked', 'loadSDR', 'loadDupes',
-                        'loadLM', 'loadPartners', 'checkHealth']) {
+                        'loadLM', 'loadPartners', 'checkHealth', 'loadModel']) {
         let thrown = null;
         try { await scope[nm](1); } catch (err) { thrown = err; }
         ok(`dashboard: ${nm}() runs without a ReferenceError`,
@@ -675,6 +754,33 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
          reads as a tidy "Could not load:" message rather than a crash.
          Probing for a thrown error misses it entirely. */
       const painted_ = Object.entries(painted);
+      /* THE MODEL TAB'S CONTAINERS ARE ASSERTED FROM A FIXED LIST, not
+         from whatever happened to be painted, and that is the difference
+         between a suite that catches a regression and one that can be
+         MEASURED catching it.
+
+         Iterating over Object.entries(painted) makes the assertion count
+         depend on how far the loader got. Break the ladder renderer and
+         mdl-scrape is never reached, so the suite runs one assertion
+         fewer -- and measure.js correctly refuses to call that a catch,
+         because it cannot tell a caught mutation from a suite that
+         quietly ran a different set of checks. That is the
+         test-ads-parity failure mode (one failure, 13 of 159 assertions)
+         arriving in a new place.
+
+         A fixed list runs the same number of assertions either way: each
+         container is asserted to have been painted AND to hold content
+         rather than an error. */
+      for (const id of ['mdl-flags', 'mdl-ladder', 'mdl-ind', 'mdl-dec',
+                        'mdl-scrape', 'mdl-unread']) {
+        const html = painted[id];
+        ok(`dashboard: ${id} was painted at all`, !!html && String(html).length > 10,
+           id + ' -> ' + String(html).slice(0, 140));
+        ok(`dashboard: ${id} rendered content, not an error`,
+           !!html && !/Could not load|Failed:|is not defined|is not a function/i.test(html),
+           id + ' -> ' + String(html).slice(0, 140));
+      }
+
       for (const [id, html] of painted_) {
         if (!/tbody|-tbody$/.test(id)) continue;
         ok(`dashboard: ${id} rendered content, not an error`,
@@ -870,6 +976,123 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     const txt = JSON.stringify(S.slackPayloads);
     ok('META-ONLY: Slack says Meta was withheld, NOT that it would have blocked',
        /Meta events withheld/.test(txt) && !/Would have been blocked/.test(txt), txt.slice(0, 200));
+  }
+
+  /* ========================================================
+     THE LADDER ON /monitor/non-icp, DRIVEN WITH REAL ROWS.
+
+     The four panels are only worth reading because the ladder is
+     mutually exclusive and exhaustive: five rows that sum to the lead
+     total, exactly like the stage ladder. Nothing asserted that, and a
+     mutation deleting the meta_only branch outright SURVIVED the whole
+     suite -- the route still answered 200 and the tab still painted,
+     with one population silently folded into another.
+
+     So this drives the real route with crafted leads and verdicts and
+     checks where each one lands. The five inputs below are one of each
+     state, plus the case the lead columns cannot answer on their own.
+     ======================================================== */
+  {
+    reset();
+    const now = new Date().toISOString();
+    const L = (over) => ({
+      session_id: 's', email: 'x@ex.test', website: null, company: null,
+      first_name: null, last_name: null, created_at: now, product: 'aeo',
+      booked: false, completed: true, non_icp_blocked: false, non_icp_reason: null,
+      non_icp_source: null, non_icp_llm_flagged: false, non_icp_checked_at: now, ...over,
+    });
+    S.reportLeads = [
+      L({ session_id: 'a', email: 'a@kw.test',     website: 'https://kw.test',
+          non_icp_blocked: true, non_icp_source: 'domain_list', non_icp_reason: 'kw.test' }),
+      L({ session_id: 'b', email: 'b@realty.test', website: 'https://realty.test',
+          non_icp_blocked: true, non_icp_source: 'llm', non_icp_reason: 'realty.test' }),
+      L({ session_id: 'c', email: 'c@solar.test',  website: 'https://solar.test',
+          non_icp_llm_flagged: true, non_icp_source: 'llm', non_icp_reason: 'solar.test', booked: true }),
+      /* Judged, and the model had no objection. */
+      L({ session_id: 'd', email: 'd@saas.test',   website: 'https://saas.test' }),
+      /* NOT DECIDED, and this is the case the lead row alone cannot
+         answer: non_icp_checked_at is stamped (nonIcpStamp sets it for
+         any verdict that is not check_failed or disabled, including a
+         plain no-match) while no verdict for this domain exists. Read
+         off the lead columns it is indistinguishable from the row
+         above. Only the join can split them. */
+      L({ session_id: 'e', email: 'e@nosite.test', website: 'https://nosite.test' }),
+    ];
+    S.reportVerdicts = [
+      { domain: 'kw.test', business_type: 'real_estate', blocking: true, confidence: 0.97,
+        evidence_quote: 'We are a brokerage', reason: 'brokerage', source: 'llm',
+        model_id: 'm', prompt_version: 'v1', scrape_status: 'ok', error: null,
+        page_url_used: 'https://kw.test', page_text_chars: 900, checked_at: now },
+      { domain: 'realty.test', business_type: 'real_estate', blocking: true, confidence: 0.96,
+        evidence_quote: 'Homes for sale', reason: 'brokerage', source: 'llm',
+        model_id: 'm', prompt_version: 'v1', scrape_status: 'ok', error: null,
+        page_url_used: 'https://realty.test', page_text_chars: 800, checked_at: now },
+      { domain: 'solar.test', business_type: 'home_services', blocking: false, confidence: 0.82,
+        evidence_quote: 'Residential Solar Installation', reason: 'installer', source: 'llm',
+        model_id: 'm', prompt_version: 'v1', scrape_status: 'ok', error: null,
+        page_url_used: 'https://solar.test', page_text_chars: 700, checked_at: now },
+      { domain: 'saas.test', business_type: 'software_technology', blocking: false, confidence: 0.95,
+        evidence_quote: 'A SaaS platform', reason: 'saas', source: 'llm',
+        model_id: 'm', prompt_version: 'v1', scrape_status: 'ok', error: null,
+        page_url_used: 'https://saas.test', page_text_chars: 600, checked_at: now },
+      /* A failure row, which is NOT a verdict: nosite.test stays "not
+         decided" and also shows up in the unreadable list. */
+      { domain: 'nosite.test', business_type: null, blocking: false, confidence: null,
+        evidence_quote: null, reason: null, source: 'llm_unreachable',
+        model_id: 'm', prompt_version: 'v1', scrape_status: 'thin', error: 'text=0',
+        page_url_used: null, page_text_chars: null, checked_at: now },
+    ];
+
+    const r = await realFetch(BASE + '/monitor/non-icp?days=7&token=stub', { signal: AbortSignal.timeout(20000) });
+    const d = await r.json();
+    ok('report: answers 200', r.status === 200, String(r.status));
+
+    const by = {};
+    for (const row of (d.ladder && d.ladder.rows) || []) by[row.key] = row.n;
+    ok('report: the brand-list block lands in blocked_list',  by.blocked_list === 1,  JSON.stringify(by));
+    ok('report: the model block lands in blocked_model',      by.blocked_model === 1, JSON.stringify(by));
+    ok('report: the flagged-not-blocked lead lands in meta_only', by.meta_only === 1, JSON.stringify(by));
+    ok('report: the judged-and-cleared lead lands in checked_clear', by.checked_clear === 1, JSON.stringify(by));
+    /* THE ONE THE LEAD COLUMNS CANNOT ANSWER. A failure row is not a
+       verdict, so this lead is undecided however stamped it looks. */
+    ok('report: a lead with only a FAILURE row is not decided',   by.not_decided === 1, JSON.stringify(by));
+
+    /* EXHAUSTIVE AND MUTUALLY EXCLUSIVE. This is the property the whole
+       panel rests on and the one a deleted branch breaks silently. */
+    const sum = Object.values(by).reduce((a, b) => a + b, 0);
+    ok('report: the five rows sum to the lead total',
+       sum === d.ladder.total && d.ladder.total === 5, sum + ' vs ' + (d.ladder && d.ladder.total));
+
+    /* Panel 3: both actioned populations, and nothing else. */
+    const acts = (d.decisions || []).map((x) => x.action).sort();
+    ok('report: decisions carries exactly the blocked and suppressed leads',
+       JSON.stringify(acts) === JSON.stringify(['blocked_list', 'blocked_model', 'meta_only']),
+       JSON.stringify(acts));
+    ok('report: each decision carries its evidence quote',
+       (d.decisions || []).every((x) => !!x.evidence_quote),
+       JSON.stringify((d.decisions || []).map((x) => x.evidence_quote)));
+
+    /* Panel 2: the action per industry is read from NON_ICP_BUSINESS_TYPES,
+       so a change to the six-industry scope cannot be described here as
+       one thing and applied there as another. */
+    const ind = {};
+    for (const i of d.industries || []) ind[i.business_type] = i.action;
+    ok('report: real_estate is shown as blocking',      ind.real_estate === 'block', JSON.stringify(ind));
+    ok('report: home_services is shown as Meta-only',   ind.home_services === 'meta', JSON.stringify(ind));
+    ok('report: software_technology takes no action',   ind.software_technology === 'none', JSON.stringify(ind));
+
+    /* Panel 4: the unreadable domain arrives WITH its lead attached,
+       which is the only form in which it is actionable. */
+    const un = (d.scrape && d.scrape.unreadable) || [];
+    ok('report: the unreadable domain is listed with its lead',
+       un.length === 1 && un[0].domain === 'nosite.test' && un[0].email === 'e@nosite.test',
+       JSON.stringify(un));
+    ok('report: the scrape panel says it is latest-outcome, not a rate',
+       (d.scrape.notes || []).some((n) => /not a historical rate/i.test(n)),
+       JSON.stringify(d.scrape.notes));
+    ok('report: the flags block says what is actually switched on',
+       d.flags && typeof d.flags.llm_block === 'boolean' && typeof d.flags.llm_meta === 'boolean',
+       JSON.stringify(d.flags));
   }
 
   loud();
