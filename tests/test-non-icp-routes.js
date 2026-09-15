@@ -1365,6 +1365,34 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     ok('report: the scrape panel says it is latest-outcome, not a rate',
        (d.scrape.notes || []).some((n) => /not a historical rate/i.test(n)),
        JSON.stringify(d.scrape.notes));
+    /* ── AN EMPTY GROUP STILL COMES BACK ──────────────────────────
+       Driven on its own fixture, because the one above has all three
+       groups populated -- so a mutation dropping empty groups is a
+       no-op against it and SURVIVED the whole suite when it was tried.
+
+       This is the property the split exists for: "Blocked by the model
+       - none in this window" is how the tab states that the model has
+       turned nobody away, and in production that is the true state. A
+       group that disappears when empty cannot say it, and its absence
+       reads as "no data" rather than "zero". */
+    {
+      const only = { ...S };
+      S.reportLeads = [L({ session_id: 'z', email: 'z@kw.test', website: 'https://kw.test',
+        non_icp_blocked: true, non_icp_source: 'domain_list', non_icp_reason: 'kw.test' })];
+      const r2 = await realFetch(BASE + '/monitor/non-icp?days=7&token=stub', { signal: AbortSignal.timeout(20000) });
+      const d2 = await r2.json();
+      const keys2 = (d2.industries || []).map((g) => g.key);
+      ok('report: all three groups return even when two are empty',
+         keys2.length === 3 && keys2.includes('blocked_list')
+         && keys2.includes('blocked_model') && keys2.includes('meta_only'),
+         JSON.stringify(keys2));
+      const empty = (d2.industries || []).filter((g) => g.leads === 0);
+      ok('report: the empty groups report zero rather than being absent',
+         empty.length === 2 && empty.every((g) => g.rows.length === 0),
+         JSON.stringify((d2.industries || []).map((g) => [g.key, g.leads])));
+      S.reportLeads = only.reportLeads;
+    }
+
     ok('report: the flags block says what is actually switched on',
        d.flags && typeof d.flags.llm_block === 'boolean' && typeof d.flags.llm_meta === 'boolean',
        JSON.stringify(d.flags));
