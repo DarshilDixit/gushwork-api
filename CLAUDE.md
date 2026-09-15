@@ -149,19 +149,35 @@ the Webflow CSS/JS embeds, not these two files. Don't confuse the two.
 ### Deploying a form change — the Webflow step
 
 **A `git push` does NOT ship a form change.** The two form files reach production
-through a `<script src>` in **Webflow → Project Settings → Custom Code**, and that
-URL names an immutable commit SHA:
+through a `<script src>` that names an immutable commit SHA:
 
 ```
 https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@<40-char-sha>/gushwork-form.js
 https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@<40-char-sha>/gushwork-form-popup.js
 ```
 
+**THE TAGS ARE PER-PAGE, NOT IN PROJECT SETTINGS — CORRECTED 15 SEPT 2026.**
+This section used to say the tags live in **Project Settings → Custom Code**.
+They do not, and have not for as long as anyone can check. Measured by reading
+all 81 pages through the Webflow API on 15 Sept: the site-wide head and footer
+blocks contain **no `gushwork-api` tag at all**, there are **zero registered
+scripts**, and every pin lives in an individual page's **before-`</body>`**
+footer block. Twelve pages carry one.
+
+That is not a detail, it is the whole reason a page goes stale. There is no
+single place to edit, so "update both script tags" is **twelve page edits**,
+and a Project-Settings republish genuinely cannot touch any of them. Anyone
+following the old wording would look in Project Settings, find nothing, and
+either give up or ADD a tag there — which would load the form script twice, at
+two different SHAs, with no error anywhere.
+
 So shipping a form fix is **two** steps, and the second one is outside this repo:
 
 1. Merge to `main` as usual.
-2. Take the new `main` SHA (`git rev-parse HEAD`) and update **both** script tags
-   in Webflow, then republish.
+2. Take the new `main` SHA (`git rev-parse HEAD`) and update the script tag in
+   **each page's footer custom code**, then republish. Both files move together
+   even though no page carries both — `/demo` and `/ai-demo` carry
+   `gushwork-form.js`, the ten ad landers carry `gushwork-form-popup.js`.
 
 Miss step 2 and the fix is in `main`, the tests pass, Railway has redeployed — and
 every real lead is still running the old file. Nothing in this repo will tell you.
@@ -173,6 +189,15 @@ take. Pinning removes the purge from the process entirely.
 
 **Use the full 40-character SHA.** Short SHAs work today but are ambiguous as the
 repo grows, and a collision resolves to the wrong file rather than erroring.
+
+**The `curl` sweep below has a blind spot the API closes.** Its page list is
+maintained by hand, so it cannot find a page carrying a pin that nobody
+remembered to add to it. Reading every page's footer block found exactly that:
+**`/start-old` is pinned to `d493e92e`, a 26 June commit** — v4.4-era, months
+behind. It is a 404 today and therefore harmless, which is also why no sweep
+would ever have caught it. Publish that page and it serves June's form to real
+visitors. Prefer the API sweep; see the section at the end of
+`docs/tickets/non-icp-v1-block.md`.
 
 **AND SWEEP EVERY PAGE, not just the two you changed.** The pin lives in a
 `<script src>`, and Webflow lets a *page* carry its own script tag that a
@@ -584,6 +609,26 @@ loader wraps its render in a `try/catch` that paints the error into the
 table — so a scope error arrives as a tidy "Could not load:" message, not a
 crash, and **a probe for a thrown error misses it entirely.** Assert on what
 the user sees.
+
+**THE WEBFLOW DESIGNER SERVES A STALE TREE AFTER A HEADLESS WRITE, AND
+THAT MAKES A SNAPSHOT LIE.** The MCP data tools write through the API; the
+open Designer session renders from its own in-memory copy and does not
+reload. On 15 Sept 2026 `element_snapshot_tool` returned **"Element not
+found"** for markup that had just been created and could be read back
+through `query_elements` in the same minute. Worse than the error is the
+quiet case: after the element exists, a **style** change made through the
+API kept rendering at its old value, so the snapshot showed a stale layout
+with no error at all.
+
+`switch_page` to another page and back forces the reload; `select_element`
+on the new element confirms the canvas can see it. Do that before every
+snapshot you intend to treat as evidence.
+
+This is the repo's oldest lesson wearing a picture instead of an
+assertion. "It rendered" and "I photographed what is actually there" are
+different claims, and the gap between them is a screenshot of the previous
+state pasted under the word *verified*. A snapshot is only evidence if the
+canvas was refreshed after the last write.
 
 **A GUARD ADDED TO THE OBVIOUS SITE MISSES ITS SIBLINGS. This happened three
 times in one night, to the same column.** `leads.disqualified` has **fourteen

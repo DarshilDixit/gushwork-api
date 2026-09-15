@@ -14,9 +14,20 @@ report six weeks later. Anyone who reads `Non-ICP-flagging-rules` and then reads
 ## STATUS — read this first
 
 **Live in production since 11 September 2026.** `NON_ICP_BLOCK=true` on the
-`gushwork-api` Railway service. Form pinned in Webflow at
-`4b419c392256754c105c86791d2a854dd5ca6fed`, **v5.11.0** / **v5.11.0-ads**, all
-12 form pages verified on that SHA.
+`gushwork-api` Railway service.
+
+**PIN SUPERSEDED — re-verified 15 September 2026.** This paragraph used to
+name `4b419c392256754c105c86791d2a854dd5ca6fed` / **v5.11.0**. That is no
+longer what is live and has not been since PR #72 merged on 15 Sept. Every
+form page is pinned to **`4e9d39e68a5a9ad8b0724eeebad9938a1f9e1ec4`**, form
+**v5.12.0**, which is *newer* — the stamp went stale, the deploy did not.
+Verified twice and independently: by reading each page's footer custom code
+through the Webflow API, and by the published-page `curl` sweep. All twelve
+form pages agree on that one SHA; none is unpinned.
+
+Leaving the old SHA standing would have been worse than useless — the next
+reader comparing production against this file would have found a mismatch and
+concluded the re-pin had been missed.
 
 ### What is live
 
@@ -1172,8 +1183,35 @@ looking at it. A bad write there serves broken code to real visitors with
 no error anywhere, which is the same failure mode as a missed re-pin,
 arriving faster.
 
-**What it does not solve.** The Project-Settings pin itself is site-level
-custom code, not page-level. `get_site_freeform_code` / `set_site_freeform_code`
-cover that block, so both halves are reachable — but they are two different
-calls against two different scopes, and conflating them is how you would
-"verify" the sweep while reading the wrong one.
+**MEASURED 15 SEPT 2026 — there is no site-level pin, and that changes the
+shape of the job.** The paragraph above was written expecting the
+Project-Settings block to hold the pin and page blocks to be the exception. It
+is the other way round, and the reading proves it: across all 81 pages, the
+site-wide head and footer blocks contain **no `gushwork-api` tag**, there are
+**zero registered scripts**, and all twelve pins sit in individual pages'
+footer blocks. `CLAUDE.md` said Project Settings and has been corrected.
+
+The inventory, by reading rather than by list:
+
+| Pages | SHA | File |
+|---|---|---|
+| `/demo`, `/ai-demo` | `4e9d39e6` (v5.12.0) | `gushwork-form.js` |
+| `/start`, `/start-now`, `/seo-leads`, `/lead-gen`, the four industry landers, the two SEO landers — ten in all | `4e9d39e6` (v5.12.0) | `gushwork-form-popup.js` |
+| **`/start-old`** | **`d493e92e` — 26 June, v4.4-era** | `gushwork-form.js` |
+| `/careers`, `/meeting-booked` | none | — tags removed, as recorded above |
+
+**`/start-old` is the blind spot arriving on schedule.** It is not in the
+fourteen-path `curl` sweep, so no run of that sweep could ever have reported
+it. It currently 404s, which is why it has sat there since June doing no harm
+— and also why nothing would have surfaced it. Publishing that page would
+serve a June form to real visitors, three months of fixes missing, with
+nothing anywhere saying so. Decide whether to delete the page or re-pin it;
+leaving it is fine only as long as it stays unpublished, which is not a
+property anyone is watching.
+
+**What it does not solve.** The site-level block is a different scope from the
+page-level ones. `get_site_freeform_code` / `set_site_freeform_code` cover it,
+so both halves are reachable — but they are two different calls, and
+conflating them is how you would "verify" the sweep while reading the wrong
+one. Today the site-level block is empty of pins; that is a fact with a date
+on it, not a permanent property, so a sweep should keep checking both.
