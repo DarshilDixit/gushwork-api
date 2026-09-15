@@ -1523,6 +1523,95 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
        storedLtv === wantLtv, 'stored=' + storedLtv + ' sent=' + wantLtv);
   }
 
+  /* ========================================================
+     PAGES WITHOUT THE QUESTION MUST BE UNCHANGED, AND NOTHING
+     MAY FIRE TWICE.
+
+     The question exists on /demo only. Eleven other pages run the same
+     build with no needs markup, and the whole promise of this release is
+     that they behave exactly as they did before it. "product_interest is
+     null so the resolvers fall through to the page default" is a
+     reasonable thing to believe and a bad thing to assume -- it is the
+     same shape as every other silent-wrong-number bug this week. So
+     drive each page shape for real and read what reached
+     graph.facebook.com.
+
+     The double-fire check is here rather than in the divergence loop
+     because it is a different claim: deduplication is documented as
+     cross-source only, and every active ad set optimises on conversion
+     COUNT, so two events for one person corrupts exactly what they bid
+     on. Counting the events is the only way to see it.
+     ======================================================== */
+  for (const [label, pageUrl, wantIds, wantLtv] of [
+    ['/start lander',            'https://www.gushwork.ai/start',      ['aeo'], 12000],
+    ['/seo-leads lander',        'https://www.gushwork.ai/seo-leads',  ['aeo'], 12000],
+    ['/lead-gen lander',         'https://www.gushwork.ai/lead-gen',   ['aeo'], 12000],
+    /* /ai-demo is the one page whose DEFAULT is crm, from PRODUCT_PATHS.
+       It has no needs question either, so it must keep firing crm. */
+    ['/ai-demo',                 'https://www.gushwork.ai/ai-demo',    ['crm'],  5000],
+  ]) {
+    reset();
+    const sid = '00000000-0000-4000-8000-0000000000d' + (label.length % 9);
+    await realFetch(BASE + '/submit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sid, email: 'x@cleanbiz.test', website: 'https://cleanbiz.test',
+        company: 'Clean', first_name: 'A', last_name: 'B', sell_to: 'B2B',
+        page_url: pageUrl,
+        /* no product_interest at all -- these pages never ask */
+      }),
+    });
+    await sleep(600);
+
+    const ins = S.writes.find((w) => /INSERT INTO leads \(/.test(w.flat));
+    const cols = ins ? boundCols(ins) : {};
+    /* NULL, not '' -- "we never asked" is not "they ticked nothing". */
+    ok(`nopage[${label}]: product_interest is null`,
+       cols.product_interest === null || cols.product_interest === undefined,
+       JSON.stringify(cols.product_interest));
+
+    const leadEvents = [];
+    for (const payload of S.metaPayloads) {
+      for (const e of (payload.data || [])) if (e.event_name === 'Lead') leadEvents.push(e);
+    }
+    ok(`nopage[${label}]: exactly ONE Lead event fired`, leadEvents.length === 1,
+       'count=' + leadEvents.length);
+    const ev = leadEvents[0];
+    ok(`nopage[${label}]: content_ids are ${JSON.stringify(wantIds)}`,
+       !!ev && JSON.stringify(ev.custom_data && ev.custom_data.content_ids) === JSON.stringify(wantIds),
+       JSON.stringify(ev && ev.custom_data && ev.custom_data.content_ids));
+    ok(`nopage[${label}]: predicted_ltv is ${wantLtv}`,
+       !!ev && ev.custom_data && ev.custom_data.predicted_ltv === wantLtv,
+       String(ev && ev.custom_data && ev.custom_data.predicted_ltv));
+    ok(`nopage[${label}]: value is 0 on the upstream event`,
+       !!ev && ev.custom_data && Number(ev.custom_data.value) === 0,
+       String(ev && ev.custom_data && ev.custom_data.value));
+  }
+
+  /* One more shape: a /demo lead who ticks BOTH must still be ONE event,
+     not one per slug. This is the case the count is actually protecting. */
+  {
+    reset();
+    await realFetch(BASE + '/submit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: '00000000-0000-4000-8000-0000000000e1',
+        email: 'x@cleanbiz.test', website: 'https://cleanbiz.test',
+        company: 'Clean', first_name: 'A', last_name: 'B', sell_to: 'B2B',
+        page_url: 'https://www.gushwork.ai/demo', product_interest: 'aeo,crm',
+      }),
+    });
+    await sleep(600);
+    const leadEvents = [];
+    for (const payload of S.metaPayloads) {
+      for (const e of (payload.data || [])) if (e.event_name === 'Lead') leadEvents.push(e);
+    }
+    ok('both-ticked fires ONE event, not two', leadEvents.length === 1, 'count=' + leadEvents.length);
+    ok('both-ticked carries BOTH ids on that one event',
+       leadEvents[0] && JSON.stringify(leadEvents[0].custom_data.content_ids) === JSON.stringify(['aeo', 'crm']),
+       JSON.stringify(leadEvents[0] && leadEvents[0].custom_data.content_ids));
+  }
+
   loud();
   console.log('');
   console.log(`  passed: ${pass}`);
