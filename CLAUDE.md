@@ -856,6 +856,49 @@ times in one session. **Commit before mutation testing** — which is also
 the correct order, because a mutation must be measured against a committed
 baseline.
 
+**ONE ROW BUILDER, TWO TABLES, AND THE ROW ID MUST BE NAMESPACED.**
+`leadRowsHtml(leads, ns)` renders **All Leads and Blocked**, and `showTab`
+toggles a class — it never clears a panel — so both tables sit in the
+document at once. An unscoped `id="er-<session_id>"` therefore existed
+**twice** for any lead that was blocked *and* on the loaded All Leads page,
+and `getElementById` returns the first in document order. `tp-leads`
+precedes `tp-blocked`, so the click on Blocked expanded the hidden copy in
+the inactive All Leads panel and **nothing happened on screen**.
+
+It presented as "the top two rows won't expand" because All Leads page 1 is
+the newest 25 leads: a blocked lead breaks while it is new enough to be
+there and silently starts working again once it falls off. A moving window,
+which is why it read as a property of those rows — and why enrichment
+looked relevant and was not.
+
+`toggleRow(key, sid)` and `loadChanges(key, sid)` take **two** arguments:
+the key addresses the DOM, the session id addresses the lead. Collapsing
+them is what caused this, and it would also send a namespaced key to
+`/monitor/lead-changes` as a session id. Every caller passes a distinct
+namespace and a test pins it.
+
+**The Model tab keeps ONE claim per number.** Its industry table counts
+**leads acted on in the window** and nothing else; the standing cache is a
+separate block counted in **companies, all time, with no rate**. They were
+one table until 15 Sept 2026, and because ~2,937 of the cache is a backfill
+that loaded only successfully-judged rows, it read "Insurance 19" in a week
+with five insurance blocks and a 0.3% scrape-failure rate against a live
+rate near 26%. Both had an explanation in small print under the number
+people actually quote. The scrape rate is scoped to the domains behind the
+window's leads, and **"never tried" is its own number, deliberately outside
+the denominator** — a domain the warm path has not reached is not a scrape
+that failed.
+
+**Our own test submissions are MARKED, never silently excluded.**
+`INTERNAL_TEST_EMAILS` (extensible from the Railway env) plus
+`ELV_EXCLUDED_DOMAINS`, behind `isInternalLead`. Five of the first ten
+non-ICP blocks were ours. Nothing is subtracted from any total — the rule
+above about internal addresses still holds — so rows carry a marker, the
+Blocked tab and the ladder print the excluding-ours figure **beside** the
+count, and the filter is opt-in. **Never inferred from a person's name**: a
+real prospect may be called Darshil, and `allstate.com` is a real brokerage
+domain that is on the block list for that reason.
+
 **Two copies of the label map.** `WEBSITE_REASON_LABELS` is a normal JS object.
 The monitor dashboard has a second copy (`var WLBL=`) inside a JS string that gets
 sent to the browser. Both need updating, and the string one uses `\u2014` for em

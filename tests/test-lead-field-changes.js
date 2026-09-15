@@ -450,7 +450,14 @@ const NO_CHANGE  = Object.assign({}, CHANGED, { prev_email: CHANGED.email, prev_
   }
   ok('dashboard: every inline script parses as JavaScript', parsed, why);
   ok('dashboard: loadChanges is defined in the page', /function loadChanges\(/.test(page));
-  ok('dashboard: toggleRow calls it on expand', /if\(!vis\)loadChanges\(sid\)/.test(page));
+  /* KEY AND SESSION ID, separately. They were one value until 15 Sept
+     2026, which collided the All Leads and Blocked row ids -- and would
+     also have sent a namespaced key to /monitor/lead-changes as if it
+     were a session_id. */
+  ok('dashboard: toggleRow calls it on expand, with both the key and the session id',
+     /if\(!vis&&sid\)loadChanges\(key,sid\)/.test(page));
+  ok('dashboard: the change log is fetched by the SESSION id, not the row key',
+     /session_id="\+encodeURIComponent\(sid\)/.test(page));
   ok('dashboard: an unreadable log renders as unavailable, never as no changes',
      /Change log unavailable/.test(page) && /not the same as no changes/.test(page));
 
