@@ -47,7 +47,7 @@ const S = { fetches: [], slackPayloads: [], leadRow: null, writes: [], psBlocked
             /* /monitor/non-icp's two inputs, set per scenario. null means
                "this suite is not driving the report", so every other
                scenario keeps the stub's existing behaviour. */
-            reportLeads: null, reportVerdicts: null };
+            reportLeads: null, reportVerdicts: null, metaPayloads: [] };
 
 /* ── stub pg ──────────────────────────────────────────────────────
    Both pools (Railway and the AWS warehouse) come through here.
@@ -223,7 +223,12 @@ global.fetch = async function (url, opts) {
   const j = (o) => ({ ok: true, status: 200, json: async () => o, text: async () => JSON.stringify(o) });
   if (/oauth2\/token/.test(u))        return j({ access_token: 'stub', instance_url: 'https://stub.my.salesforce.com' });
   if (/salesforce\.com/.test(u))      return j({ id: '00Qstub', success: true });
-  if (/graph\.facebook\.com/.test(u)) return j({ events_received: 1 });
+  if (/graph\.facebook\.com/.test(u)) {
+    /* THE BODY, not just the URL. The one thing worth asserting about a
+       Meta call is what content_ids it carried, and a URL cannot say. */
+    try { S.metaPayloads.push(JSON.parse(opts && opts.body)); } catch (_) {}
+    return j({ events_received: 1 });
+  }
   if (/partnerlinks\.io/.test(u))     return { ok: true, status: 200, text: async () => '', json: async () => ({}) };
   return j({});
 };
@@ -272,7 +277,7 @@ const post = async (p, body) => {
   let j = null; try { j = await r.json(); } catch (_) {}
   return { status: r.status, body: j };
 };
-const reset = () => { S.fetches = []; S.slackPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; };
+const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; };
 const metaFired      = () => S.fetches.some((u) => /graph\.facebook\.com/.test(u));
 const salesforceHit  = () => S.fetches.some((u) => /\/sobjects\//.test(u));
 const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') || true);
@@ -1447,6 +1452,55 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     ok('report: the flags block says what is actually switched on',
        d.flags && typeof d.flags.llm_block === 'boolean' && typeof d.flags.llm_meta === 'boolean',
        JSON.stringify(d.flags));
+  }
+
+  /* ========================================================
+     THE STORED COLUMN AND THE META EVENT MUST NOT DIVERGE.
+
+     This is the sharpest failure mode the product question introduces,
+     and it is completely silent. buildEventData resolved the slug from
+     page_url alone, which was correct only while product was a pure
+     function of the page. The moment a checkbox can decide it, a /demo
+     lead who ticks AI-CRM stores 'crm' and fires 'aeo' -- the dashboard
+     says one thing, Facebook optimises for another, and nothing
+     anywhere reconciles them. No error, no alert, no red row.
+
+     So: drive /submit for real, read what was BOUND to leads.product,
+     read what content_ids actually went to graph.facebook.com, and
+     require them to be the same string.
+     ======================================================== */
+  for (const [label, needs, wantProduct] of [
+    ['AI-CRM only on /demo',  'crm',     'crm'],
+    ['both ticked on /demo',  'aeo,crm', 'crm'],
+    ['Lead Gen only on /demo','aeo',     'aeo'],
+    ['nothing ticked',         '',       'aeo'],
+  ]) {
+    reset();
+    const sid = '00000000-0000-4000-8000-0000000000c' + (needs.length % 9);
+    await realFetch(BASE + '/submit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sid, email: 'x@cleanbiz.test', website: 'https://cleanbiz.test',
+        company: 'Clean', first_name: 'A', last_name: 'B', sell_to: 'B2B',
+        page_url: 'https://www.gushwork.ai/demo',
+        product_interest: needs,
+      }),
+    });
+    await sleep(600);
+
+    const ins = S.writes.find((w) => /INSERT INTO leads \(/.test(w.flat));
+    const stored = ins ? boundCols(ins).product : undefined;
+    ok(`divergence[${label}]: stored product is ${wantProduct}`, stored === wantProduct, String(stored));
+
+    const lead = S.metaPayloads.find((p) => (p.data || []).some((e) => e.event_name === 'Lead'));
+    const ev = lead && lead.data.find((e) => e.event_name === 'Lead');
+    const ids = ev && ev.custom_data && ev.custom_data.content_ids;
+    ok(`divergence[${label}]: Meta fired a Lead event`, !!ev, JSON.stringify(S.metaPayloads).slice(0, 120));
+    /* THE ASSERTION THAT MATTERS. Not "Meta got something" -- Meta got
+       the SAME thing the column got. */
+    ok(`divergence[${label}]: Meta content_ids match the stored column`,
+       !!ids && ids.length === 1 && ids[0] === stored,
+       'stored=' + stored + ' meta=' + JSON.stringify(ids));
   }
 
   loud();
