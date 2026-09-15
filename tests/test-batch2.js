@@ -2705,8 +2705,13 @@ async function section12() {
      lead gets marked disqualified and shown step 2 anyway -- the state
      we record and the screen the visitor sees disagreeing. */
   for (const [name, f] of [['/demo', formA], ['ads', formB]]) {
-    ok(`21: ${name} computes the gate once`,
-       /const gateOnSellTo = \(sellTo === 'B2C' \|\| sellTo === 'Mixed'\) && !b2cAllowedHere\(\);/.test(f), name);
+    /* PATH OR SELECTION since 15 Sept 2026. Ticking AI-CRM unlocks the
+       B2C exception exactly as being on /ai-demo does -- the exception is
+       about the product, and the page was only ever a proxy for it.
+       Still computed ONCE and used for both the flag and the step. */
+    ok(`21: ${name} computes the gate once, from path OR selection`,
+       /const crmChosen = b2cAllowedHere\(\) \|\| wantsCrm\(\);/.test(f)
+       && /const gateOnSellTo = \(sellTo === 'B2C' \|\| sellTo === 'Mixed'\) && !crmChosen;/.test(f), name);
     ok(`21: ${name} flags disqualified from that one value`,
        /if \(gateOnSellTo\) \{\s*formState\.disqualified = true;/.test(f), name);
     ok(`21: ${name} chooses the step from that same one value`,
@@ -2715,6 +2720,42 @@ async function section12() {
        half the decision is still gating CRM. */
     eq(`21: ${name} has no leftover raw B2C condition`,
        (f.match(/sellTo === 'B2C' \|\| sellTo === 'Mixed'/g) || []).length, 1);
+    /* ── PROGRESSIVE REVEAL, AND WHY IT IS SAFE ─────────────────
+       The question appears only once sell-to is answered. That is a
+       layout decision, but it would have been a correctness bug if the
+       B2C gate fired on SELECTION rather than at the Next click: a B2C
+       click would jump to the DQ step before the checkboxes existed and
+       the CRM exception could never apply.
+
+       It fires at Next. These three assertions are what keep it there. */
+    ok(`21: ${name} reveals the question only once sell-to is answered`,
+       /function syncNeedsVisibility\(\)/.test(f)
+       && /wrap\.style\.display = chosen \? '' : 'none';/.test(f), name);
+    ok(`21: ${name} only demands an answer once the question is visible`,
+       /needsAsked\(\) && needsVisible\(\) && !selectedNeeds\(\)\.length/.test(f), name);
+    /* THE GATE STAYS AT THE NEXT CLICK. The sell-to change handler may
+       only show and hide -- if it ever calls showStep or touches
+       disqualified, the reveal has become a verdict. */
+    {
+      const handler = (f.match(/function syncNeedsVisibility\(\)[\s\S]*?\n    \}/) || [''])[0];
+      ok(`21: ${name} the sell-to handler never decides anything`,
+         !/showStep|disqualified|savePartial/.test(handler), name);
+    }
+    /* The STATEMENT, not the string -- the comment above it names the
+       step too, and counting mentions would make prose a test failure. */
+    ok(`21: ${name} the DQ step is still reached from exactly one place`,
+       (f.match(/if \(gateOnSellTo\) showStep\('step-disqualified'\);/g) || []).length === 1, name);
+
+    /* about_business follows the CRM tick, and is cleared on untick --
+       the ELEMENT, not just the state, because it is read from the DOM
+       at step 2 and a hidden populated textarea would still submit. */
+    ok(`21: ${name} clears the about-business element on untick`,
+       /function syncAboutBusiness\(\)/.test(f)
+       && /if \(el\) el\.value = '';/.test(f)
+       && /formState\.about_business = '';/.test(f), name);
+    ok(`21: ${name} does nothing where there is no wrapper`,
+       /var wrap = document\.getElementById\('about-business-wrap'\);\s*\n\s*if \(!wrap\) return;/.test(f), name);
+
     /* Normalised the same way resolveProduct normalises, so /ai-demo/
        and /AI-Demo cannot disagree with the server about what they are. */
     ok(`21: ${name} lowercases and strips the trailing slash`,

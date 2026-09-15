@@ -447,11 +447,31 @@ const P = build(popup);
    "the source contains a querySelector" is not "it returns 6804".
    ============================================================ */
 {
-  const runRouter = (src, attrValue) => {
-    const fnSrc = liftFn(src, 'rhRouterId');
+  /* THE ROUTER NOW DEPENDS ON THE SELECTION, so the selection readers
+     are lifted with it. `ticked` is what the visitor checked; `attrs` is
+     what the page carries. /demo will carry data-rh-router-crm and NO
+     data-rh-router; /ai-demo keeps data-rh-router and has no checkboxes
+     at all. */
+  const runRouter = (src, attrValue, opts = {}) => {
+    const ticked = opts.ticked || [];
+    const crmAttr = opts.crmAttr;
+    const fnSrc = liftFn(src, 'rhRouterId') + '\n'
+      + liftFn(src, 'selectedNeeds') + '\n'
+      + liftFn(src, 'wantsCrm') + '\n'
+      + (/const NEEDS_SLUGS = \[[^\]]*\];/.exec(src) || [''])[0];
     const def = /const RH_ROUTER_ID_DEFAULT = '(\d+)';/.exec(src);
+    const box = (v) => ({ checked: true, value: v });
     const document = {
+      querySelectorAll: (sel) => (/needs/.test(sel) ? ticked.map(box) : []),
+      getElementById: (id) => {
+        const m = /^need-(.+)$/.exec(id);
+        return m && ticked.includes(m[1]) ? { checked: true, value: m[1] } : null;
+      },
       querySelector: (sel) => {
+        if (sel === '[data-rh-router-crm]') {
+          return crmAttr === undefined ? null
+            : { getAttribute: (a) => (a === 'data-rh-router-crm' ? crmAttr : null) };
+        }
         if (sel !== '[data-rh-router]' || attrValue === undefined) return null;
         return { getAttribute: (a) => (a === 'data-rh-router' ? attrValue : null) };
       },
@@ -466,6 +486,25 @@ const P = build(popup);
     eq(`router: ${label} reads 6804 from data-rh-router`, runRouter(src, '6804'), '6804');
     eq(`router: ${label} falls back to 6138 with no attribute`, runRouter(src, undefined), '6138');
     eq(`router: ${label} falls back to 6138 on an empty attribute`, runRouter(src, ''), '6138');
+    /* ── THE SELECTION PATH ──────────────────────────────────────
+       /demo carries data-rh-router-crm and no data-rh-router, so an
+       AI-CRM tick must route to the CRM team and everything else must
+       keep the default. Ticking is what decides, not the page. */
+    eq(`router: ${label} routes an AI-CRM tick to the CRM router`,
+       runRouter(src, undefined, { ticked: ['crm'], crmAttr: '6804' }), '6804');
+    eq(`router: ${label} routes BOTH ticked to the CRM router`,
+       runRouter(src, undefined, { ticked: ['aeo', 'crm'], crmAttr: '6804' }), '6804');
+    eq(`router: ${label} keeps the default on a Lead-Gen-only tick`,
+       runRouter(src, undefined, { ticked: ['aeo'], crmAttr: '6804' }), '6138');
+    /* FAILS SAFE. A CRM tick on a page that forgot the attribute gets
+       the page default, which is today's behaviour -- never a wrong
+       team, and never undefined. */
+    eq(`router: ${label} falls back to the page default when the CRM attribute is missing`,
+       runRouter(src, undefined, { ticked: ['crm'] }), '6138');
+    /* And a page with the old attribute and no checkboxes -- /ai-demo --
+       is completely unaffected. */
+    eq(`router: ${label} leaves an unticked page on its own attribute`,
+       runRouter(src, '6804', { ticked: [] }), '6804');
     /* Parse-time evaluation is the failure this shape exists to prevent, so
        assert the read is inside a function and not at the top level. */
     ok(`router: ${label} does not evaluate the attribute at parse time`,
