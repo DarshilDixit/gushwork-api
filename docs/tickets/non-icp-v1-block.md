@@ -16,6 +16,16 @@ report six weeks later. Anyone who reads `Non-ICP-flagging-rules` and then reads
 **Live in production since 11 September 2026.** `NON_ICP_BLOCK=true` on the
 `gushwork-api` Railway service.
 
+**PIN UPDATED 16 September 2026 — `f275e1e406b458b0bb496f91f27a16df40d918f6`,
+form v5.13.0 / v5.13.0-ads.** PR #75 merged; the pin was written into twelve
+page footers through the Webflow API and each was read back and compared
+byte-for-byte against the intended content. All twelve EXACT. **Nothing is
+published** — the new pin reaches no visitor until someone publishes.
+
+**`/start-old` was NOT re-pinned and still holds `d493e92e` (26 June).** It is
+an unpublished 404 draft, so it serves nobody; it is listed here so it is not
+mistaken for done. See the note at the end of this file.
+
 **PIN SUPERSEDED — re-verified 15 September 2026.** This paragraph used to
 name `4b419c392256754c105c86791d2a854dd5ca6fed` / **v5.11.0**. That is no
 longer what is live and has not been since PR #72 merged on 15 Sept. Every
@@ -1215,3 +1225,40 @@ so both halves are reachable — but they are two different calls, and
 conflating them is how you would "verify" the sweep while reading the wrong
 one. Today the site-level block is empty of pins; that is a fact with a date
 on it, not a permanent property, so a sweep should keep checking both.
+
+
+---
+
+## The page-footer rewrite is the wrong tool, and `/start-old` is where it shows
+
+**16 September 2026.** Twelve pages were re-pinned this way successfully. The
+mechanism is worth writing down because it is worse than it looks.
+
+`set_page_freeform_code` **replaces a block's entire content**. There is no
+patch operation. So changing a 40-character SHA means reproducing the whole
+block — 7KB to 26KB of live production JavaScript — perfectly, through a JSON
+tool argument. Ninety-nine percent of every write is bytes that did not need to
+change and that only risk being corrupted.
+
+**It corrupted one block on the first attempt.** `/seo-leads` came back 24 bytes
+short: the box-drawing runs in five comment separators were reproduced too short.
+Harmless — they are inside JS block comments — but it was invisible, and the
+only reason it was caught is that the intended content was generated locally and
+every write was read back and hashed against it. **Do that every time.** A write
+that "looks right" in the response is not verified; compare bytes.
+
+**`/start-old` was left on `d493e92e` deliberately.** Its block is 26,343
+characters and contains a live Slack webhook URL, a template literal holding
+literal `\n` sequences, an escaped backtick pair, a regex full of backslashes,
+an emoji, and **nine lines whose only content is trailing whitespace**. That is
+the highest-corruption-risk block on the site and the lowest-value one to
+change: the page 404s and is a draft. Re-pinning it by hand in the Designer is
+a ten-second edit to one line and carries none of this risk.
+
+**The real fix is to stop pinning per page.** `data_scripts_tool` can
+`register_hosted_script` once against the jsDelivr URL and then `add_page_script`
+it to each page; a future re-pin becomes a single `update_registered_script`
+call instead of twelve full-block rewrites, and the stale-page class of bug
+disappears because there is one place to change. It needs an SRI hash and a
+migration off the freeform tags, so it is a decision, not a tidy-up — but it is
+the one worth making before the next form release.
