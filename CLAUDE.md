@@ -751,8 +751,8 @@ the error surfaces as `SyntaxError: missing ) after argument list` pointing at t
 `pool.query(` line, not at the comment. Four of these happened in one sitting. Use
 plain words inside SQL comments, and run `node --check index.js` before committing.
 
-**"What do you need?" ON `/demo` ONLY — and `product` vs `product_interest`
-are two columns because they answer two questions.** Two mandatory
+**"What are you looking for?" ON `/demo` ONLY — and `product` vs
+`product_interest` are two columns because they answer two questions.** Two mandatory
 checkboxes (`aeo`, `crm`) revealed after `sell_to` is answered. The values
 in the markup ARE the product slugs, so the checkbox, `product_interest`,
 the Salesforce picklist and the Meta `content_ids` are one vocabulary with
@@ -828,13 +828,44 @@ the checkboxes were visible and the CRM exception could never apply. Four
 assertions hold it there, including one that the sell-to change handler never
 calls `showStep`, `savePartial` or touches `disqualified`.
 
-**Webflow markup this depends on, `/demo` only:** `#needs-wrap`
-(`display:none`), `#need-aeo` / `#need-crm` with `name="needs"` and
-`value="aeo"`/`"crm"`, `#needs-error`, `#about-business-wrap`
-(`display:none`), and `data-rh-router-crm="6804"` on the form wrapper —
+**Webflow markup this depends on, `/demo` only:** `#needs-wrap`, `#need-aeo`
+/ `#need-crm` with `name="needs"` and `value="aeo"`/`"crm"`, `#needs-error`,
+`#about-business-wrap`, and `data-rh-router-crm="6804"` on the form wrapper —
 **and NOT `data-rh-router`**, whose absence is what keeps the 6138 AEO
 default. No markup means no selection, the server resolves from the page as
 before, and `product_interest` stays NULL. `/ai-demo` is untouched.
+
+The on-screen heading is **"What are you looking for?"**, changed in Webflow
+on 16 Sept. Nothing in the code reads it — it is recorded here only so this
+file and the page agree.
+
+**HIDDEN BY A CLASS, NOT `display:none`, AND THAT IS LOAD-BEARING.** Both
+wrappers carry `field-wrapper is-collapsible is-hidden`. Webflow cannot store
+an inline style, so `style.display = ''` could never reveal anything — that
+shipped in PR 75 and meant `#about-business-wrap` could not have appeared at
+all. `setWrapHidden` toggles `is-hidden`; `needsVisible()` reads the class, so
+it is correct from first paint rather than only after init.
+
+`.field-wrapper.is-collapsible` is the animation: `overflow:hidden`,
+`max-height:240px`, and a 180ms transition on max-height, opacity, transform
+and margin-bottom. The hidden state is the three-class combo
+`.field-wrapper.is-collapsible.is-hidden` — three classes so it beats the
+two-class combos whatever order Webflow emits them in.
+
+**The 240px ceiling is the one fragile number.** Measured: the needs block is
+about 94px and the textarea wrapper about 110px, so it is roughly 2x headroom.
+Grow past it and the content **clips silently** — no scrollbar, no error. A
+taller ceiling is not free either: the visible content finishes expanding
+before the max-height animation does, which reads as a dead pause. If a third
+card or a taller textarea ever lands here, re-measure rather than just raising
+the number.
+
+**The cards wrap fluidly, with no media query.** `.radio-wrap.is-needs` is
+`flex: 1 1 200px` with `min-width: 200px`, and the row carries
+`.radio-holder.is-needs-row { flex-wrap: wrap }`. Two cards plus the 14px gap
+need 414px; below that they stack and each grows to the full width. The base
+`.radio-wrap` and `.radio-holder` are **untouched** — they are shared with 36
+elements on other pages.
 
 **THE `sell_to` GATE IS CLIENT-SIDE ONLY, and the CRM product is excepted
 from it.** B2C or Mixed at step 1 sets `disqualified` and shows a terminal
