@@ -546,6 +546,10 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
       ['/monitor/lm-metrics',   'Lead Magnet'],
       ['/monitor/partners',     'Partners'],
       ['/monitor/leads?nonicp=only&page=1', 'Blocked'],
+      /* The Model tab. It is the only monitor route that joins leads to
+         the verdict cache IN JAVASCRIPT rather than in SQL, so a 200 here
+         also proves nonIcpCandidateDomains is reachable from it. */
+      ['/monitor/non-icp?days=7', 'Model'],
       ['/monitor/health',       'System Health'],
     ];
     for (const [path, label] of TABS) {
@@ -624,6 +628,43 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
                     non_icp_blocked: true, non_icp_reason: 'kw.com', step_reached: 2 }],
           rows: [], partners: [], domains: [], checks: [], sessions: [],
           duplicates: [], people: 1, byDay: [], funnel: [],
+          /* The Model tab's shape. Present so mdlLadderHtml, the
+             decisions map and the unreadable map all RUN -- a loader
+             that renders an empty state cannot catch a scope error in
+             the branch that renders rows. */
+          windowDays: 7, truncated: false,
+          flags: { list_block: true, llm_enabled: true, llm_block: true,
+                   llm_meta: true, model: 'claude-opus-5',
+                   confidence_floor: 0.75, prompt_version: 'v1-test' },
+          ladder: { total: 4, rows: [
+            { key: 'blocked_list',  label: 'Blocked — brand list', n: 1, pct: 25 },
+            { key: 'meta_only',     label: 'Meta withheld only',   n: 1, pct: 25 },
+            { key: 'checked_clear', label: 'Checked, no action',   n: 1, pct: 25 },
+            { key: 'not_decided',   label: 'Not decided',          n: 1, pct: null },
+          ] },
+          industries: [{ business_type: 'home_services', label: 'Home services / trades',
+                         action: 'meta', leads: 2, domains: 2, median_confidence: 0.84 }],
+          decisions: [{ session_id: 's1', created_at: new Date().toISOString(),
+                        email: 'a@kw.com', website: 'https://kw.com', company: 'KW',
+                        booked: true, product: 'aeo', action: 'blocked_list',
+                        source: 'domain_list', domain_judged: 'kw.com',
+                        business_type: 'real_estate', business_type_label: 'Real estate',
+                        confidence: 0.97, evidence_quote: 'We are a brokerage',
+                        reason: 'brokerage', model_id: 'm', prompt_version: 'v1-test',
+                        page_url_used: 'https://kw.com', page_text_chars: 900,
+                        checked_at: new Date().toISOString() }],
+          scrape: {
+            last24h:  { ok: 9, unreachable: 1, thin: 0, other: 0, total: 10, unreadable_pct: 10 },
+            standing: { ok: 90, unreachable: 5, thin: 5, other: 0, total: 100, unreadable_pct: 10 },
+            unreadable: [{ domain: 'x.test', scrape_status: 'thin', error: null,
+                           checked_at: new Date().toISOString(), email: 'a@x.test',
+                           website: 'https://x.test', blocked: false, blocked_by: null }],
+            inProcess: { since: Date.now(), ok: 3, errored: 0, unreachable: 1,
+                         writeFailed: 0, bypassFailed: 0, cacheHits: 5, cacheMisses: 3,
+                         cacheHitPct: 62.5, avgWarmMs: 2793, maxWarmMs: 6671,
+                         lastOkAt: Date.now(), lastErrorAt: null, lastError: null },
+            notes: ['Latest outcome per domain, not a historical rate.'],
+          },
         }),
       }),
     };
@@ -643,7 +684,15 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
            + ' esc: typeof esc === "function" ? esc : null,'
            + ' et: typeof et === "function" ? et : null,'
            + ' enrichPanel: typeof enrichPanel === "function" ? enrichPanel : null,'
-           + ' stageBadge: typeof stageBadge === "function" ? stageBadge : null };'
+           + ' stageBadge: typeof stageBadge === "function" ? stageBadge : null,'
+           + ' loadModel: typeof loadModel === "function" ? loadModel : null,'
+           + ' mdlLadderHtml: typeof mdlLadderHtml === "function" ? mdlLadderHtml : null,'
+           + ' mdlScrapeHtml: typeof mdlScrapeHtml === "function" ? mdlScrapeHtml : null,'
+           + ' mdlChip: typeof mdlChip === "function" ? mdlChip : null,'
+           + ' mdlActionChip: typeof mdlActionChip === "function" ? mdlActionChip : null,'
+           + ' mdlConf: typeof mdlConf === "function" ? mdlConf : null,'
+           + ' mdlPct: typeof mdlPct === "function" ? mdlPct : null,'
+           + ' mdlBar: typeof mdlBar === "function" ? mdlBar : null };'
       )(...Object.values(sandbox));
     } catch (err) { evalErr = err; }
     ok('dashboard: the inline script evaluates without throwing', !evalErr, evalErr && evalErr.message);
@@ -654,7 +703,13 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
          that is not visible at top level cannot be shared between tabs. */
       for (const nm of ['leadRowsHtml', 'esc', 'et', 'enrichPanel', 'stageBadge',
                         'showTab', 'loadLeads', 'loadBlocked', 'loadSDR',
-                        'loadDupes', 'loadLM', 'loadPartners', 'checkHealth']) {
+                        'loadDupes', 'loadLM', 'loadPartners', 'checkHealth',
+                        /* The Model tab's own helpers. Every one is used by
+                           loadModel and by nothing else today, which is
+                           exactly the shape leadRowsHtml had the day it was
+                           declared inside loadLeads. */
+                        'loadModel', 'mdlLadderHtml', 'mdlScrapeHtml', 'mdlChip',
+                        'mdlActionChip', 'mdlConf', 'mdlPct', 'mdlBar']) {
         ok(`dashboard: ${nm} is defined at TOP LEVEL`, typeof scope[nm] === 'function',
            'declared inside another function, so other tabs cannot see it');
       }
@@ -663,7 +718,7 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
          render path running -- this is what actually reproduces the
          Blocked tab break. */
       for (const nm of ['loadLeads', 'loadBlocked', 'loadSDR', 'loadDupes',
-                        'loadLM', 'loadPartners', 'checkHealth']) {
+                        'loadLM', 'loadPartners', 'checkHealth', 'loadModel']) {
         let thrown = null;
         try { await scope[nm](1); } catch (err) { thrown = err; }
         ok(`dashboard: ${nm}() runs without a ReferenceError`,
@@ -676,7 +731,13 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
          Probing for a thrown error misses it entirely. */
       const painted_ = Object.entries(painted);
       for (const [id, html] of painted_) {
-        if (!/tbody|-tbody$/.test(id)) continue;
+        /* The Model tab paints into two plain divs (mdl-ladder, mdl-scrape)
+           as well as three table bodies, and a div is where its ladder and
+           its scrape summary live -- the two panels most likely to carry a
+           scope error. An id filter that only knew about tbodies would
+           watch the exact containers this tab renders into and assert
+           nothing about them. */
+        if (!/tbody|-tbody$|^mdl-/.test(id)) continue;
         ok(`dashboard: ${id} rendered content, not an error`,
            !/Could not load|Failed:|is not defined|is not a function/i.test(html),
            id + ' -> ' + String(html).slice(0, 140));

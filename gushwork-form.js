@@ -1,5 +1,15 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.11.0  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.12.0  (/demo PAGE VERSION - thru github/jsdlivr)
+
+  v5.12.0 — the CRM product (/ai-demo) allows B2C and Mixed.
+    B2C_ALLOWED_PATHS near the top of FORM LOGIC. The B2C/Mixed answer
+    at step 1 sends the visitor straight to step 2 on those pages
+    instead of the disqualified step, and the lead is NOT marked
+    disqualified. Non-ICP reasoning is about AEO and does not transfer
+    to CRM. Measured: 17 of 29 /ai-demo leads hit the gate, 14 of them
+    pressed "actually we're B2B" to get past it.
+    A test asserts this path list agrees with PRODUCT_PATHS in
+    meta-capi.js and with the copy in the other form file.
 
   v5.11.0 — /thank-you greets blocked leads by name.
     The non-ICP redirect now appends attendeeName, which the page reads.
@@ -262,6 +272,32 @@
     // businesses (see afgmmoving.com). Add or remove a reason here to change
     // scope; nothing else needs touching.
     const WEBSITE_BLOCKING_REASONS = ['nxdomain', 'brand_mismatch', 'mailbox_domain'];
+
+    /* PAGES WHOSE PRODUCT SELLS TO CONSUMERS TOO, so the B2C/Mixed gate
+       below does not apply on them.
+
+       The CRM product lives on /ai-demo and sells to B2C and Mixed
+       businesses exactly as happily as to B2B. The non-ICP reasoning that
+       produced the gate is about AEO and does not transfer, so a B2C
+       answer there is an ordinary answer and must not be a dead end.
+       Measured before the change: 17 of 29 /ai-demo leads hit the gate,
+       14 of them by pressing "actually we're B2B" to get past it.
+
+       THIS IS A FOURTH COPY OF A LIST THAT MUST STAY IN SYNC.
+       PRODUCT_PATHS in meta-capi.js is the catalogue; index.js imports it;
+       gushwork-form.js and gushwork-form-popup.js each carry this. A test
+       in tests/test-batch2.js lifts all three files and asserts they agree
+       on which paths are the CRM product, because a list this shape has
+       drifted three times in this repo already.
+
+       Matched against the PATHNAME, lowercased, trailing slash stripped --
+       the same normalisation resolveProduct does, so /ai-demo/ and
+       /AI-Demo cannot disagree with the server about what they are. */
+    const B2C_ALLOWED_PATHS = ['/ai-demo'];
+    function b2cAllowedHere() {
+      var p = (window.location.pathname || '').toLowerCase().replace(/\/+$/, '') || '/';
+      return B2C_ALLOWED_PATHS.indexOf(p) !== -1;
+    }
 
     const formState = {
       session_id: '',
@@ -2249,7 +2285,14 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
         formState.sell_to = sellTo;
         localStorage.setItem('gw_email', formState.email);
 
-        if (sellTo === 'B2C' || sellTo === 'Mixed') {
+        /* B2C AND MIXED ARE ORDINARY ANSWERS ON A B2C-ALLOWED PAGE.
+           Computed once and used for both the flag and the step below, so
+           the recorded state and the step the visitor sees can never
+           disagree -- two independent copies of this condition is how a
+           lead gets marked disqualified and shown step 2 anyway. */
+        const gateOnSellTo = (sellTo === 'B2C' || sellTo === 'Mixed') && !b2cAllowedHere();
+
+        if (gateOnSellTo) {
           formState.disqualified = true;
           formState.disqualified_reason = 'b2c_or_mixed';
         } else {
@@ -2282,7 +2325,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
         await triggerEnrichment(formState.email);
         await savePartial(1);
 
-        if (sellTo === 'B2C' || sellTo === 'Mixed') showStep('step-disqualified');
+        if (gateOnSellTo) showStep('step-disqualified');
         else showStep('step-2');
       } finally {
         _submitting = false;
@@ -2630,7 +2673,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.11.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.12.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

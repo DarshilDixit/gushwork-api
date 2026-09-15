@@ -628,14 +628,67 @@ const results7 = (async () => {
 
   /* No SQL predicate anywhere may filter a population on the flag. The
      ONLY legal SQL uses are the upsert assignment, the RETURNING, the
-     SELECT list, and the index/migration in db.js. */
-  const flagPredicates = [...src.matchAll(/non_icp_llm_flagged\s+IS\s+(NOT\s+)?TRUE/g)]
+     SELECT list, the index/migration in db.js -- and COUNTING, which is
+     the exemption below.
+
+     COUNTING IS NOT FILTERING, and the difference is the whole point of
+     this section. A predicate in a WHERE or an AND decides who gets a
+     conversion, a Salesforce record or an SDR call. A predicate inside
+     COUNT(...) FILTER (...) decides what a number on a dashboard says
+     and reaches no lead at all. The first is what "flagged is not
+     blocked" forbids; the second is how anybody finds out the layer is
+     running, and forbidding it outright is what kept 4.2% of leads
+     invisible until 15 Sept 2026.
+
+     So aggregate FILTER clauses are exempt, and the exemption is
+     ENUMERATED rather than open: each one is named with its reason, and
+     the count is pinned. A third counter appearing here is a thing
+     somebody has to look at, not a thing that slips through -- exactly
+     how the DELIBERATE list in 10b works one section up. */
+  const FLAG_COUNTERS_DELIBERATE = [
+    ['/monitor/metrics totals: non_icp_meta_only',
+     'the Overview card "Meta withheld — model". Counts leads whose Meta events were withheld and who were NOT blocked. Observational: it reaches no lead, and without it the population has no surface at all.'],
+    ['/monitor/metrics people: people_meta_only',
+     'the same card deduped to people, matching the people-by-default rule for headline numbers.'],
+  ];
+
+  const allFlagPredicates = [...src.matchAll(/non_icp_llm_flagged\s+IS\s+(NOT\s+)?TRUE/g)]
     .filter((m) => {
       /* The sticky upsert assignment legitimately contains IS TRUE twice. */
       const before = src.slice(Math.max(0, m.index - 120), m.index);
       return !/non_icp_llm_flagged\s+=\s+\(leads\./.test(before);
     });
+
+  /* An aggregate FILTER opener immediately before the predicate, and
+     nothing else, is what makes a use a counter. Deliberately narrow:
+     COUNT(...) FILTER (WHERE <flag> ... . Anything reached through a
+     plain WHERE or AND is a gate and fails below however it is worded. */
+  const isCounter = (m) => {
+    const before = src.slice(Math.max(0, m.index - 200), m.index);
+    /* One level of nesting allowed inside COUNT, because the people
+       counters are COUNT(DISTINCT LOWER(email)). A flat [^)]* stops at
+       the inner paren and silently classifies those as gates. */
+    return /COUNT\((?:[^()]|\([^()]*\))*\)\s*FILTER\s*\(\s*WHERE\s*$/.test(before);
+  };
+  const flagCounters   = allFlagPredicates.filter(isCounter);
+  const flagPredicates = allFlagPredicates.filter((m) => !isCounter(m));
+
   eq('10f: NO query filters a population on the flag column', flagPredicates.length, 0);
+  /* PINNED. If this moves, a new counter was added and somebody has to
+     decide it really is only counting -- which is the check, not a
+     formality. */
+  eq('10f: exactly the deliberate flag COUNTERS exist, and no more',
+     flagCounters.length, FLAG_COUNTERS_DELIBERATE.length);
+  /* And they are where they are claimed to be. A counter that drifted
+     out of /monitor/metrics into a route that acts on leads would keep
+     the count above correct while being a completely different thing. */
+  const metricsBody = between("app.get('/monitor/metrics'", "app.get('/monitor/funnel'");
+  eq('10f: both deliberate counters live in /monitor/metrics',
+     (metricsBody.match(/non_icp_llm_flagged\s+IS\s+TRUE/g) || []).length,
+     FLAG_COUNTERS_DELIBERATE.length);
+  for (const [name, why] of FLAG_COUNTERS_DELIBERATE) {
+    ok(`10f: deliberate counter has a written reason — ${name}`, why.length > 40, name);
+  }
 
   /* And specifically: the five consumers above must not mention it. */
   const mustNotSee = [
