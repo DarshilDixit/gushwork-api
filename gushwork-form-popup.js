@@ -731,7 +731,19 @@
       var wrap = document.getElementById('about-business-wrap');
       if (!wrap) return;
       var show = wantsCrm();
-      wrap.style.display = show ? '' : 'none';
+      /* 'block', NEVER ''. Webflow CANNOT STORE AN INLINE STYLE -- the
+         Designer converts one into a generated combo class, and the API
+         rejects a style attribute outright (tried, 15 Sept 2026). So both
+         wrappers are hidden by a CLASS: .field-wrapper.is-hidden here and
+         .field-wrapper.about-biz-wrap on the textarea.
+
+         Setting '' only REMOVES an inline declaration. There was never
+         one, so the class keeps winning and the field never appears.
+         about-business shipped that way in PR 75 and could not have been
+         revealed on /demo at all. .field-wrapper is margin-bottom and
+         nothing else, so 'block' is its natural display and beats the
+         class without changing layout. */
+      wrap.style.display = show ? 'block' : 'none';
       if (!show) {
         var el = document.getElementById('about-business');
         if (el) el.value = '';
@@ -766,7 +778,19 @@
         || (document.getElementById('sell-b2b') || {}).checked
         || (document.getElementById('sell-b2c') || {}).checked
         || (document.getElementById('sell-mixed') || {}).checked);
-      wrap.style.display = chosen ? '' : 'none';
+      /* 'block', NEVER ''. Webflow CANNOT STORE AN INLINE STYLE -- the
+         Designer converts one into a generated combo class, and the API
+         rejects a style attribute outright (tried, 15 Sept 2026). So both
+         wrappers are hidden by a CLASS: .field-wrapper.is-hidden here and
+         .field-wrapper.about-biz-wrap on the textarea.
+
+         Setting '' only REMOVES an inline declaration. There was never
+         one, so the class keeps winning and the field never appears.
+         about-business shipped that way in PR 75 and could not have been
+         revealed on /demo at all. .field-wrapper is margin-bottom and
+         nothing else, so 'block' is its natural display and beats the
+         class without changing layout. */
+      wrap.style.display = chosen ? 'block' : 'none';
       /* A stale error under a hidden question reads as an error about
          the thing above it. */
       if (!chosen) hideError('needs-error');

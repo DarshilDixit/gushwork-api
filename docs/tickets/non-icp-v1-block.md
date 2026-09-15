@@ -1123,3 +1123,57 @@ that V1 contradicts a dated document, so the next reader would not have to guess
 which was current. It then did the same thing one layer up: put an inference in
 the same bullet as a ruling and left no way to tell them apart. Attribute the
 sentence, not the paragraph.
+
+---
+
+## The Webflow SHA sweep could be automated — `set_page_freeform_code`
+
+**Recorded 15 September 2026. Not built, not run. Do this after the
+`product_interest` form change ships, not before.**
+
+The two stale pages found on 10 Sept were stale because the jsDelivr pin
+does not only live in Project Settings. Webflow lets an individual **page**
+carry its own `<script src>` in its head or footer custom code, and a
+Project-Settings republish never touches it. Nothing in this repo can see
+that, which is why the fix was a `curl` loop over 14 public URLs, reading
+back what the CDN happened to serve.
+
+The Webflow MCP server exposes that block directly:
+
+- `data_scripts_tool > get_page_freeform_code` — read a page's head/footer
+  custom code (`page_id`, optional `location`)
+- `data_scripts_tool > set_page_freeform_code` — replace one block's full
+  content
+- `data_pages_tool > list_pages` — enumerate every page and its id
+
+Confirmed present on the Gushwork site (`65c292289fb0ea1ff3a84bd3`) on
+15 Sept 2026. `get_page_freeform_code` was **not** called; only the tool
+surface was read.
+
+**Why this is better than the curl sweep, and it is not a small margin.**
+The curl loop reads the *published* page, so it answers "what is a visitor
+getting right now" — which is the right question after a republish and the
+wrong one before. It also cannot distinguish a page-level pin from the
+Project-Settings one, because both arrive as a `<script src>` in the same
+HTML. Reading the freeform block names the pin's **location**, which is the
+fact you actually need to fix it. And it finds a page carrying a pin that
+is not in the 14-page list at all — the sweep's real blind spot, since that
+list is maintained by hand.
+
+**Shape it as read-then-report, never write-then-hope.** Enumerate pages,
+read both blocks on each, extract every `gushwork-api@<sha>`, and print the
+ones that are not the SHA just pinned — plus, separately, any page with a
+`<script src>` naming this repo and **no** `@sha`, which is worse than
+stale for the reason the deploy section already gives. That is a read-only
+tool and it closes the gap on its own. Writing the new SHA back through
+`set_page_freeform_code` is a second, later decision: it **replaces the
+block's full content**, so it needs the read first, a diff, and a human
+looking at it. A bad write there serves broken code to real visitors with
+no error anywhere, which is the same failure mode as a missed re-pin,
+arriving faster.
+
+**What it does not solve.** The Project-Settings pin itself is site-level
+custom code, not page-level. `get_site_freeform_code` / `set_site_freeform_code`
+cover that block, so both halves are reachable — but they are two different
+calls against two different scopes, and conflating them is how you would
+"verify" the sweep while reading the wrong one.

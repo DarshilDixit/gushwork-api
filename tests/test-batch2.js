@@ -2767,7 +2767,10 @@ async function section12() {
        It fires at Next. These three assertions are what keep it there. */
     ok(`21: ${name} reveals the question only once sell-to is answered`,
        /function syncNeedsVisibility\(\)/.test(f)
-       && /wrap\.style\.display = chosen \? '' : 'none';/.test(f), name);
+       /* The VALUE is section 25's business, not this one's -- pinning the
+          literal here is what let the '' reveal bug sit green. This asserts
+          only what this section is about: the reveal is gated on `chosen`. */
+       && /wrap\.style\.display = chosen \? '[a-z-]+' : 'none';/.test(f), name);
     ok(`21: ${name} only demands an answer once the question is visible`,
        /needsAsked\(\) && needsVisible\(\) && !selectedNeeds\(\)\.length/.test(f), name);
     /* THE GATE STAYS AT THE NEXT CLICK. The sell-to change handler may
@@ -3010,6 +3013,90 @@ async function section12() {
     .map((h) => { try { return canonicalProductInterest(h); } catch { return 'THREW'; } }));
   const bad = [...seen].filter((v) => v !== null && !SF_PRODUCT_PICKLIST.includes(v));
   eq('24: the canonicaliser emits nothing outside the picklist', bad, []);
+}
+
+/* ============================================================
+   25. A REVEAL MUST NAME A DISPLAY VALUE, NEVER ''
+
+   syncAboutBusiness shipped in PR 75 as:
+
+       wrap.style.display = show ? '' : 'none';
+
+   and could not have revealed anything on /demo. #about-business-wrap is
+   hidden by a CLASS (.field-wrapper.about-biz-wrap { display:none }), and
+   '' does not set display to its default -- it REMOVES the inline
+   declaration. There was never one, so the class kept winning and the
+   textarea stayed hidden for every AI-CRM lead. syncNeedsVisibility was
+   written the same way and would have failed the same way.
+
+   IT IS A CLASS BECAUSE WEBFLOW GIVES NO CHOICE. The Designer converts an
+   inline style into a generated combo class, and the Data API rejects a
+   style attribute outright -- both confirmed by attempt on 15 Sept 2026.
+   So every wrapper this code reveals is hidden by a class, always, and ''
+   can never reveal any of them.
+
+   WHY THIS IS A LINT AND NOT A DRIVEN TEST. The bug lives in the
+   interaction between our JavaScript and CSS that is not in this repo at
+   all -- it is in Webflow. A stubbed DOM has no stylesheet, so
+   style.display = '' followed by reading style.display returns '' and
+   every behavioural assertion passes. There is no fixture that makes this
+   visible: the suite cannot see the rule that wins. Same ceiling as the
+   SQL lint in section 13 -- a source assertion cannot tell you whether a
+   query parses, and no DOM test here can tell you which rule applied.
+
+   So this bans the SHAPE. Any empty-string display assignment in either
+   form file fails, whatever it is called and whoever writes it next.
+   ============================================================ */
+{
+  const FORM_FILES = ['gushwork-form.js', 'gushwork-form-popup.js'];
+
+  for (const file of FORM_FILES) {
+    const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    const lines = text.split('\n');
+
+    /* Any assignment to .style.display whose value is an empty string --
+       plain (= '') or either branch of a ternary (? '' : / : ''). Quotes
+       both ways, because a future edit may not match the house style. */
+    const offenders = [];
+    lines.forEach((line, i) => {
+      if (!/\.style\.display\s*=/.test(line)) return;
+      const rhs = line.slice(line.indexOf('.style.display') + '.style.display'.length)
+        .replace(/^\s*=/, '');
+      if (/(^|[?:]\s*)(''|"")\s*(:|;|$)/.test(rhs.trim())) {
+        offenders.push(`${file}:${i + 1}: ${line.trim().slice(0, 80)}`);
+      }
+    });
+    eq(`25: ${file} never reveals with an empty display string`, offenders, []);
+  }
+
+  /* And the two reveals specifically, by name, so deleting the functions
+     cannot quietly satisfy the lint above. Each must assign a real CSS
+     display keyword on its showing branch. */
+  const REVEALS = [
+    ['syncAboutBusiness', 'about-business-wrap'],
+    ['syncNeedsVisibility', 'needs-wrap'],
+  ];
+  for (const file of FORM_FILES) {
+    const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    for (const [fn, domId] of REVEALS) {
+      const start = text.indexOf(`function ${fn}(`);
+      ok(`25: ${file} declares ${fn}`, start !== -1, fn);
+      if (start === -1) continue;
+      /* The function body, to its closing brace at the same indent. */
+      const body = text.slice(start, start + 2000);
+      const assign = body.match(/\.style\.display\s*=\s*([^;]+);/);
+      ok(`25: ${fn} assigns style.display`, !!assign, fn);
+      if (!assign) continue;
+      const shown = assign[1].split('?')[1] ? assign[1].split('?')[1].split(':')[0].trim()
+                                            : assign[1].trim();
+      ok(`25: ${fn} reveals with a named display value, not '' (got ${shown})`,
+         /^'(block|flex|inline-flex|inline-block|grid)'$/.test(shown), shown);
+      /* It must still be the right element -- a reveal pointed at the
+         wrong wrapper would pass everything above. */
+      ok(`25: ${fn} still targets #${domId}`,
+         body.indexOf(`'${domId}'`) !== -1, domId);
+    }
+  }
 }
 
 /* ============================================================ */
