@@ -751,9 +751,17 @@ const results7 = (async () => {
 
   /* ONE row builder, both tabs -- the Blocked tab gets the expandable
      panel for free and cannot drift from All Leads. */
-  ok('dash: there is a single shared row builder', src.includes("'function leadRowsHtml(leads){"));
+  ok('dash: there is a single shared row builder', src.includes("'function leadRowsHtml(leads,ns){"));
   eq('dash: both tabs render through it',
-     (src.match(/leadRowsHtml\(d\.leads\)/g) || []).length, 2);
+     (src.match(/leadRowsHtml\(d\.leads,"[a-z]+"\)/g) || []).length, 2);
+  /* ONE BUILDER, TWO TABLES, AND BOTH PANELS IN THE DOCUMENT AT ONCE.
+     showTab toggles a class and never clears a panel, so an unscoped
+     row id existed twice for any lead that was blocked AND on the
+     loaded All Leads page -- getElementById returned the All Leads
+     copy, and the click on Blocked did nothing at all. Reported
+     15 Sept 2026. The namespace is what keeps the ids distinct. */
+  eq('dash: the two tabs pass DIFFERENT namespaces',
+     new Set((src.match(/leadRowsHtml\(d\.leads,"([a-z]+)"\)/g) || [])).size, 2);
   ok('dash: the Blocked tab reuses /monitor/leads rather than its own route',
      src.includes('"/monitor/leads"+(TP||"?")+(TP?"&":"")+"nonicp=only'));
   ok('dash: the dead /monitor/blocked route is gone', !src.includes("app.get('/monitor/blocked'"));

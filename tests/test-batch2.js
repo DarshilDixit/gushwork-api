@@ -2711,6 +2711,130 @@ async function section12() {
      (src.match(/sell_to ILIKE 'B2B%' OR l?\.?product = 'crm'/g) || []).length);
 }
 
+/* ============================================================
+   22. ONE ROW BUILDER, TWO TABLES, AND THE IDS MUST NOT COLLIDE
+
+   leadRowsHtml renders All Leads AND Blocked. showTab toggles a class
+   and never clears a panel, so both tables are in the document at the
+   same time -- which means an unnamespaced row id exists twice for any
+   lead that is blocked and also on the loaded All Leads page, and
+   getElementById silently returns the All Leads copy.
+
+   The symptom is a click that does nothing: no throw, no error painted,
+   a perfectly rendered row. The behavioural half of this lives in
+   test-non-icp-routes.js, which evaluates the dashboard and compares the
+   ids the two tables emit. This half is the one that catches a NEW
+   caller added without a namespace.
+   ============================================================ */
+{
+  const dash = between("'function leadRowsHtml(leads,ns)", "'function renderPag(");
+
+  ok('22: leadRowsHtml takes a namespace', /function leadRowsHtml\(leads,ns\)/.test(src));
+  ok('22: the row key is built from it', /key=esc\(ns\|\|"x"\)\+"-"\+sid/.test(src));
+
+  /* EVERY caller passes one. A bare leadRowsHtml(x) is the collision
+     coming back, and it reads as perfectly ordinary code. */
+  const calls = [...src.matchAll(/leadRowsHtml\(([^)]*)\)/g)]
+    .map((m) => m[1])
+    .filter((a) => !/^leads,ns$/.test(a));          // the declaration itself
+  ok('22: leadRowsHtml has callers', calls.length >= 2, JSON.stringify(calls));
+  for (const a of calls) {
+    ok(`22: caller passes a namespace — leadRowsHtml(${a})`, /,\s*"[a-z]+"\s*$/.test(a), a);
+  }
+  /* And the namespaces are DISTINCT. Two callers both passing "l" is
+     the same bug with extra steps. */
+  const namespaces = calls.map((a) => (a.match(/,\s*"([a-z]+)"\s*$/) || [])[1]).filter(Boolean);
+  eq('22: every caller uses a different namespace',
+     namespaces.length, new Set(namespaces).size);
+
+  /* The key addresses the DOM, the session id addresses the lead, and
+     they are separate arguments now. Collapsing them back would both
+     re-collide the ids and send a namespaced key to
+     /monitor/lead-changes as a session_id. */
+  ok('22: toggleRow takes a key AND a session id',
+     /function toggleRow\(key,sid\)/.test(src));
+  ok('22: loadChanges is addressed by the key and fetches by the session id',
+     /function loadChanges\(key,sid\)/.test(src)
+     && /getElementById\("lc-"\+key\)/.test(src)
+     && /session_id="\+encodeURIComponent\(sid\)/.test(src));
+  /* The Model tab emits its own er- ids under a third prefix. It has no
+     change-log div, so it deliberately passes no session id -- stated
+     by the call rather than left to a getElementById miss. */
+  ok('22: the Model tab uses its own row prefix',
+     /toggleRow\(\\'md-"\+sid\+"\\'\)/.test(src));
+}
+
+/* ============================================================
+   23. OUR OWN TEST SUBMISSIONS ARE MARKED, NEVER SILENTLY EXCLUDED
+
+   Four of the ten non-ICP blocks on 15 Sept 2026 were Darshil testing
+   the walkthrough as agent@allstate.com, which makes "10 blocked" a
+   number nobody can quote.
+
+   CLAUDE.md is explicit that internal addresses are counted in every
+   leads number today, that this is a known distortion nobody chose, and
+   that excluding them would move every historical number at once. So
+   the fix adds a flag, a marker, an opt-in filter and a figure printed
+   BESIDE the count -- and changes no total. This section is what stops
+   that turning into a quiet subtraction later.
+   ============================================================ */
+{
+  const M = require('module');
+  ok('23: the internal list is an explicit constant',
+     /const INTERNAL_TEST_EMAILS = \[/.test(src));
+  ok('23: it names the address that caused this, with a dated reason',
+     /'agent@allstate\.com',\s*\/\/[^\n]*Sept 2026/.test(src));
+  ok('23: it is extensible from the environment without a deploy',
+     /process\.env\.INTERNAL_TEST_EMAILS/.test(src));
+  /* NOT inferred from the name. "Darshil Test" is a tempting signal and
+     a wrong one: a real prospect may be called Darshil, and the block
+     list already contains allstate.com because it is a real brokerage. */
+  ok('23: test-ness is never inferred from a person name',
+     !/first_name[^\n]{0,80}[Tt]est['"]/.test(src)
+     && !/isInternalLead[\s\S]{0,400}first_name/.test(src));
+
+  const fn = between('function isInternalLead(email)', 'function internalLeadSqlClause');
+  ok('23: it matches on the whole address, lowercased', /trim\(\)\.toLowerCase\(\)/.test(fn));
+  ok('23: and still covers the existing test DOMAINS',
+     /ELV_EXCLUDED_DOMAINS\.includes/.test(fn));
+
+  /* ONE DEFINITION, TWO CONSUMERS. The SQL clause exists because paging
+     happens in the database; it must be built from the same constants,
+     not a retyped list. */
+  const sql = between('function internalLeadSqlClause(emailCol, params)', '\n/* ── Rule (a)');
+  ok('23: the SQL clause is built from the same two constants',
+     /params\.push\(INTERNAL_TEST_EMAILS\)/.test(sql) && /params\.push\(ELV_EXCLUDED_DOMAINS\)/.test(sql));
+  /* An env var must never be interpolated into query text. */
+  ok('23: the values go through bound parameters, never string interpolation',
+     /ANY\(\$\$\{a\}::text\[\]\)/.test(sql) && !/\$\{INTERNAL_TEST_EMAILS/.test(sql));
+
+  /* THE DEFAULT IS STILL "COUNT EVERYTHING". A default that excluded
+     would be the quiet fix CLAUDE.md forbids. */
+  const leads = between("app.get('/monitor/leads'", "app.get('/monitor/lead-changes'");
+  ok('23: the filter is opt-in, defaulting to null',
+     /const internal\s+= req\.query\.internal\s+\|\| null;/.test(leads));
+  ok('23: both directions are offered', /internal === 'exclude'/.test(leads) && /internal === 'only'/.test(leads));
+  ok('23: no query filters on it unless asked',
+     !/conditions\.push\([^)]*internalLeadSqlClause[^)]*\);\s*\n\s*(?!.*internal ===)/.test(leads));
+
+  /* The per-row flag is computed in JS, beside unverifiable_pair, and
+     for a stated reason: baseSelect is built before the count query and
+     they share a params array, so a clause pushing parameters from the
+     SELECT list leaves the count bound to parameters it never uses. */
+  ok('23: the row flag is computed in JS, not in the SELECT list',
+     /is_internal: isInternalLead\(r\.email\)/.test(leads)
+     && !/AS is_internal/.test(leads));
+  ok('23: the CSV carries it from the same function',
+     /'is_internal'/.test(leads) && /c === 'is_internal'\s*\? isInternalLead\(r\.email\)/.test(leads));
+
+  /* The Model tab counts ours in PARALLEL and never subtracts, so the
+     ladder still sums to the lead total. */
+  const rep = between('async function nonIcpModelReport', "app.get('/monitor/non-icp'");
+  ok('23: the ladder counts ours alongside rather than removing them',
+     /const internalIn = \{/.test(rep) && /ladder\[bucket\]\+\+;/.test(rep) && /if \(mine\) internalIn\[bucket\]\+\+;/.test(rep));
+  ok('23: every decision row says whether it is ours', /is_internal: mine/.test(rep));
+}
+
 /* ============================================================ */
 /* Section 12 is async, so the totals are printed from its continuation.
    The catch is not optional: without it a throw in there escapes as an

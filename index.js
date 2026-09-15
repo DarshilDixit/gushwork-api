@@ -3190,6 +3190,12 @@ app.get('/monitor/leads', async (req, res) => {
      because hiding them would make the tab totals stop reconciling with the
      Overview counts and with each other. They are marked, not removed. */
   const nonIcp     = req.query.nonicp     || null;
+  /* 'exclude' drops our own test submissions, 'only' shows just them.
+     Default is NEITHER, deliberately: they are counted today, and
+     removing them by default would move every number on the page at
+     once -- the distortion CLAUDE.md says to flag rather than quietly
+     fix. Opt in when you want a figure to quote. */
+  const internal   = req.query.internal   || null;
   const websiteCheck = req.query.websiteCheck || 'all';
   const repeatAttempts = req.query.repeatAttempts || 'all';
   const partner      = req.query.partner      || null;
@@ -3236,6 +3242,12 @@ app.get('/monitor/leads', async (req, res) => {
 
   if (nonIcp === 'only')    conditions.push('l.non_icp_blocked IS TRUE');
   if (nonIcp === 'exclude') conditions.push('l.non_icp_blocked IS NOT TRUE');
+  /* THE FILTER IS SQL BECAUSE THE PAGING IS SQL -- a JavaScript filter
+     after the query would drop rows out of a page and make the count
+     disagree with the table. The per-row FLAG is computed in JS below,
+     from the same function, so there is still one definition. */
+  if (internal === 'exclude') conditions.push('NOT ' + internalLeadSqlClause('l.email', params));
+  if (internal === 'only')    conditions.push(internalLeadSqlClause('l.email', params));
 
   if (sellTo === '__clarified') {
     // any lead that flipped B2C/Mixed -> B2B at the disqualified step
@@ -3349,7 +3361,7 @@ app.get('/monitor/leads', async (req, res) => {
         'completed','booking_uid','disqualified','non_icp_blocked','non_icp_reason','step_reached','created_at','submitted_at','booked_at',
         'utm_source','utm_medium','utm_campaign','utm_term','referrer','prefill_source',
         'landing_page','previous_page','page_url','website_check_failed','website_check_reason','prior_attempts','prior_disqualified',
-        'elv_status','unverifiable_pair',
+        'elv_status','unverifiable_pair','is_internal',
         'enriched_title','enriched_company_size','enriched_industry','enriched_seniority','enriched_departments',
         'enriched_linkedin','enriched_city','enriched_state','enriched_country',
         'enriched_annual_revenue','enriched_total_funding','enriched_funding_stage'
@@ -3362,7 +3374,10 @@ app.get('/monitor/leads', async (req, res) => {
       const csv = [
         cols.join(','),
         // Same derived flag as the JSON path, from the same function.
-        ...allRows.rows.map(r => cols.map(c => escape(c === 'unverifiable_pair' ? isUnverifiablePair(r) : r[c])).join(','))
+        ...allRows.rows.map(r => cols.map(c => escape(
+          c === 'unverifiable_pair' ? isUnverifiablePair(r)
+          : c === 'is_internal'     ? isInternalLead(r.email)
+          : r[c])).join(','))
       ].join('\n');
       res.setHeader('Content-Type', 'text/csv');
       res.setHeader('Content-Disposition', `attachment; filename="leads-${etDateOnly()}.csv"`);
@@ -3386,7 +3401,16 @@ app.get('/monitor/leads', async (req, res) => {
        one place (isUnverifiablePair) and the dashboard just renders the
        answer. Duplicating the verdict list into the dashboard's JS string
        is exactly how the label map ended up with two copies. */
-    const leadRows = leadsResult.rows.map(r => ({ ...r, unverifiable_pair: isUnverifiablePair(r) }));
+    const leadRows = leadsResult.rows.map(r => ({
+      ...r,
+      unverifiable_pair: isUnverifiablePair(r),
+      /* NOT in the SELECT list. baseSelect is built before the count
+         query runs and they share one params array, so a clause pushing
+         parameters from inside it would leave the count query bound to
+         two parameters it never references -- which Postgres rejects
+         outright. Same reason unverifiable_pair is computed here. */
+      is_internal: isInternalLead(r.email),
+    }));
 
     res.json({ total, page, pages: Math.ceil(total / limit), leads: leadRows });
   } catch (err) {
@@ -3835,7 +3859,8 @@ app.get('/monitor', (req, res) => {
   '<div><div class="sl" style="margin-bottom:2px">Blocked &#8212; Non-ICP</div>' +
   '<div style="font-size:12px;color:#888">Leads stopped before the calendar by the real-estate / insurance brand-domain list. ' +
   'INDEPENDENT of the stage and sell_to filters &#8212; a blocked lead keeps whatever stage it reached, and most cleared the B2C step by clicking &quot;actually we&#39;re B2B&quot;.</div></div>' +
-  '<span id="blk-count" style="font-size:12px;color:#888"></span>' +
+  '<div><select id="blk-internal" onchange="loadBlocked(1)"><option value="">Everything (counted as normal)</option><option value="exclude">Hide our own test submissions</option><option value="only">Only our own test submissions</option></select> ' +
+  '<span id="blk-count" style="font-size:12px;color:#888"></span></div>' +
   '</div>' +
   '<div class="card" style="padding:12px 14px;margin-bottom:16px;font-size:12px;color:#666">' +
   'Every row here is somebody we turned away, and every one is <b>also still in All Leads</b> and in every Overview total &#8212; marked, not removed, so the numbers reconcile. ' +
@@ -3871,9 +3896,13 @@ app.get('/monitor', (req, res) => {
   '<div class="sl">What the layer did</div>' +
   '<div class="card" style="padding:14px;margin-bottom:16px" id="mdl-ladder"><div class="nd">Loading...</div></div>' +
 
-  '<div class="sl">By industry</div>' +
+  '<div class="sl">By industry &#8212; what we ACTED ON</div>' +
+  '<div class="card" style="padding:12px 14px;margin-bottom:8px;font-size:12px;color:#666">' +
+  'Leads blocked or Meta-suppressed in this window, and nothing else. ' +
+  'This used to count every lead whose domain had a cached verdict, which mixed the week&#39;s activity with Monday&#39;s backfill of 2,937 historical domains ' +
+  '&#8212; so it read &quot;Insurance 19&quot; in a week when five insurance leads were blocked. The standing cache is further down, counted in companies.</div>' +
   '<div class="card" style="padding:0;overflow:hidden;margin-bottom:16px"><div style="overflow-x:auto"><table><thead><tr>' +
-  '<th>Industry</th><th>What it does</th><th>Leads</th><th>Companies</th><th>Median confidence</th>' +
+  '<th>Industry</th><th>What it does</th><th>Leads acted on</th><th>Companies</th><th>Median confidence</th>' +
   '</tr></thead><tbody id="mdl-ind"><tr><td colspan="5" class="nd">Loading...</td></tr></tbody></table></div></div>' +
 
   '<div class="sl">Every decision, with the evidence</div>' +
@@ -3886,6 +3915,13 @@ app.get('/monitor', (req, res) => {
 
   '<div class="sl">What we could not read</div>' +
   '<div class="card" style="padding:14px;margin-bottom:16px" id="mdl-scrape"><div class="nd">Loading...</div></div>' +
+  '<div class="sl">What the cache knows &#8212; companies, all time</div>' +
+  '<div class="card" style="padding:12px 14px;margin-bottom:8px;font-size:12px;color:#666">' +
+  'A standing inventory of every domain ever classified, mostly the historical backfill. ' +
+  '<b>Not this window, and not leads</b> &#8212; it is the forward-looking exposure: how many companies in our history the model would act on if they came back today.</div>' +
+  '<div class="card" style="padding:0;overflow:hidden;margin-bottom:16px"><div style="overflow-x:auto"><table><thead><tr>' +
+  '<th>Industry</th><th>What it does</th><th>Companies cached</th>' +
+  '</tr></thead><tbody id="mdl-cache"><tr><td colspan="3" class="nd">Loading...</td></tr></tbody></table></div></div>' +
   '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
   '<th>Domain</th><th>Why</th><th>Lead</th><th>Their website</th><th>Blocked anyway?</th><th>Last tried (ET)</th>' +
   '</tr></thead><tbody id="mdl-unread"><tr><td colspan="6" class="nd">Loading...</td></tr></tbody></table></div></div>' +
@@ -4016,19 +4052,32 @@ app.get('/monitor', (req, res) => {
   'var h=l.rows.map(function(r){return "<div style=\\"display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #f2f2f2\\">"+' +
   '"<div style=\\"flex:1;font-size:13px\\">"+esc(r.label)+"</div>"+' +
   '"<div style=\\"width:160px\\">"+mdlBar(r.n,l.total,MDL_COLOUR[r.key]||"#1a1a1a")+"</div>"+' +
-  '"<div style=\\"width:110px;text-align:right;font-size:13px\\"><b>"+r.n+"</b> <span style=\\"color:#888\\">("+mdlPct(r.pct)+")</span></div></div>";}).join("");' +
+  '"<div style=\\"width:150px;text-align:right;font-size:13px\\"><b>"+r.n+"</b> <span style=\\"color:#888\\">("+mdlPct(r.pct)+")</span>"+(r.ours?"<span style=\\"color:#888\\"> \\u00b7 "+r.ours+" ours</span>":"")+"</div></div>";}).join("");' +
   /* The total is printed under the five rows so a reader can add them up.
      They are exhaustive by construction and this is what makes that
      checkable rather than claimed. */
-  'return h+"<div style=\\"padding-top:10px;font-size:12px;color:#888\\">"+l.total+" leads in the window. The five rows are mutually exclusive and sum to that total.</div>";}' +
+  'return h+"<div style=\\"padding-top:10px;font-size:12px;color:#888\\">"+l.total+" leads in the window. The five rows are mutually exclusive and sum to that total."+(l.ours?" "+l.ours+" of them are our own test submissions \\u2014 counted here like everything else, and marked on each row.":"")+"</div>";}' +
   'function mdlScrapeHtml(s){if(!s)return "<div class=\\"nd\\">No data</div>";' +
-  'function row(lbl,r,note){return "<div style=\\"display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #f2f2f2\\">"+' +
-  '"<div style=\\"flex:1\\"><div style=\\"font-size:13px\\">"+lbl+"</div><div class=\\"ms\\">"+note+"</div></div>"+' +
-  '"<div style=\\"width:230px;text-align:right;font-size:13px\\"><b>"+mdlPct(r.unreadable_pct)+"</b> <span style=\\"color:#888\\">unreadable \\u00b7 "+(r.unreachable+r.thin)+" of "+r.total+"</span></div></div>";}' +
-  'var p=s.inProcess||{};' +
-  'var h=row("Domains touched in the last 24h",s.last24h,"Latest outcome per domain, not a rate over time")+' +
-  'row("Everything in the cache",s.standing,"Standing state of every domain ever classified")+' +
-  '"<div style=\\"padding:10px 0 0;font-size:12px;color:#666\\"><b>Since this deploy:</b> "+p.ok+" classified, "+p.errored+" API errors, "+p.unreachable+" unreadable, "+p.writeFailed+" writes failed, "+p.bypassFailed+" blocks failed open. "+' +
+  'var w=s.window||{},p=s.inProcess||{},c=s.cache||{};' +
+  /* ONE RATE, over ONE population: the domains this window's leads were
+     actually judged on. It used to be computed over the whole cache and
+     read 0.3% against a live rate near 26%, because 2,937 of those rows
+     are a backfill that loaded only successes. */
+  'var h="<div style=\\"display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #f2f2f2\\">"+' +
+  '"<div style=\\"flex:1\\"><div style=\\"font-size:13px\\">Companies behind this window&#39;s leads</div>"+' +
+  '"<div class=\\"ms\\">Of the ones we have an answer for. Latest outcome per company, not a rate over time.</div></div>"+' +
+  '"<div style=\\"width:250px;text-align:right;font-size:13px\\"><b>"+mdlPct(w.unreadable_pct)+"</b> <span style=\\"color:#888\\">could not be read \\u00b7 "+((w.unreachable||0)+(w.thin||0)+(w.other||0))+" of "+(w.answered||0)+"</span></div></div>";' +
+  /* NEVER TRIED is its own number, never folded into the rate: it is a
+     domain the warm path has not reached, not a scrape that failed, and
+     adding it to the numerator would make a quiet day look broken. */
+  'h+="<div style=\\"display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #f2f2f2\\">"+' +
+  '"<div style=\\"flex:1\\"><div style=\\"font-size:13px\\">Never tried</div><div class=\\"ms\\">No verdict at all \\u2014 not a scrape failure, so deliberately not in the rate above.</div></div>"+' +
+  '"<div style=\\"width:250px;text-align:right;font-size:13px\\"><b>"+(w.no_verdict||0)+"</b> <span style=\\"color:#888\\">of "+(w.total||0)+" companies</span></div></div>";' +
+  /* COUNTS, NO PERCENTAGE. A rate over a population selected for having
+     succeeded is the thing that misled; printing it smaller would not
+     make it true. */
+  'h+="<div style=\\"padding:10px 0 0;font-size:12px;color:#666\\"><b>Standing cache:</b> "+(c.domains||0)+" companies classified all time \\u2014 "+(c.judged||0)+" judged, "+(c.unreadable||0)+" currently unreadable. No rate shown: most of these came from a backfill that only loaded companies it could read, so a percentage over them would not mean anything.</div>";' +
+  'h+="<div style=\\"padding:6px 0 0;font-size:12px;color:#666\\"><b>Since this deploy:</b> "+p.ok+" classified, "+p.errored+" API errors, "+p.unreachable+" unreadable, "+p.writeFailed+" writes failed, "+p.bypassFailed+" blocks failed open. "+' +
   '"Cache hits "+mdlPct(p.cacheHitPct)+" ("+p.cacheHits+" of "+(p.cacheHits+p.cacheMisses)+"). Warm "+(p.avgWarmMs==null?"\\u2014":p.avgWarmMs+"ms avg, "+p.maxWarmMs+"ms worst")+".</div>";' +
   /* THE CAVEATS RIDE ON THE PAYLOAD, not only in the source. A number
      whose limits live in a comment is a number somebody will quote
@@ -4054,7 +4103,7 @@ app.get('/monitor', (req, res) => {
   'document.getElementById("mdl-dec").innerHTML=dec.length?dec.map(function(x){var sid=esc(x.session_id);' +
   'return "<tr><td class=\\"xbtn\\" onclick=\\"toggleRow(\'md-"+sid+"\')\\">&#9658;</td>"+' +
   '"<td style=\\"white-space:nowrap;color:#999\\">"+et(x.created_at)+"</td>"+' +
-  '"<td class=\\"te\\" title=\\""+esc(x.email)+"\\">"+esc(x.email||"\\u2014")+"</td>"+' +
+  '"<td class=\\"te\\" title=\\""+esc(x.email)+"\\">"+(x.is_internal?"<span title=\\"One of our own test submissions\\" style=\\"color:#6b7280\\">&#129514; </span>":"")+esc(x.email||"\\u2014")+"</td>"+' +
   '"<td><code>"+esc(x.domain_judged||"\\u2014")+"</code></td>"+' +
   '"<td>"+esc(x.business_type_label||x.business_type||"\\u2014")+"</td>"+' +
   '"<td>"+mdlConf(x.confidence)+"</td>"+' +
@@ -4069,6 +4118,10 @@ app.get('/monitor', (req, res) => {
   '"<b>Page read:</b> "+esc(x.page_url_used||"\\u2014")+" ("+(x.page_text_chars==null?"\\u2014":x.page_text_chars+" chars")+") &#183; <b>Decided at:</b> "+et(x.checked_at)+' +
   '"</td></tr>";}).join(""):"<tr><td colspan=\\"9\\" class=\\"nd\\">Nothing was blocked or suppressed in this window.</td></tr>";' +
   'document.getElementById("mdl-scrape").innerHTML=mdlScrapeHtml(d.scrape);' +
+  'var cb=(d.cache&&d.cache.byType)||[];' +
+  'document.getElementById("mdl-cache").innerHTML=cb.length?cb.map(function(i){' +
+  'return "<tr><td>"+esc(i.label)+"</td><td>"+mdlChip(i.action)+"</td><td>"+i.domains+"</td></tr>";' +
+  '}).join(""):"<tr><td colspan=\\"3\\" class=\\"nd\\">Nothing cached yet.</td></tr>";' +
   'var un=(d.scrape&&d.scrape.unreadable)||[];' +
   'document.getElementById("mdl-unread").innerHTML=un.length?un.map(function(u){' +
   'return "<tr><td><code>"+esc(u.domain)+"</code></td><td>"+esc(u.scrape_status||"\\u2014")+(u.error?" <span style=\\"color:#999\\">("+esc(u.error)+")</span>":"")+"</td>"+' +
@@ -4082,14 +4135,26 @@ app.get('/monitor', (req, res) => {
   '}catch(e){document.getElementById("mdl-ladder").innerHTML="<div class=\\"nd\\" style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</div>";' +
   'document.getElementById("mdl-ind").innerHTML="<tr><td colspan=\\"5\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</td></tr>";' +
   'document.getElementById("mdl-dec").innerHTML="<tr><td colspan=\\"9\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</td></tr>";' +
-  'document.getElementById("mdl-unread").innerHTML="<tr><td colspan=\\"6\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</td></tr>";}}' +
+  'document.getElementById("mdl-unread").innerHTML="<tr><td colspan=\\"6\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</td></tr>";' +
+  'document.getElementById("mdl-cache").innerHTML="<tr><td colspan=\\"3\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</td></tr>";}}' +
   'async function loadBlocked(pg){blkPage=pg||1;' +
+  'var inc=document.getElementById("blk-internal");var mode=inc?inc.value:"";' +
   'document.getElementById("blk-tbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\">Loading...</td></tr>";' +
-  'try{var r=await fetch(API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"nonicp=only&page="+blkPage+"&stage=all&sort=created_at&dir=desc",{signal:AbortSignal.timeout(12000)});' +
+  'try{var r=await fetch(API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"nonicp=only&page="+blkPage+"&stage=all&sort=created_at&dir=desc"+(mode?"&internal="+mode:""),{signal:AbortSignal.timeout(12000)});' +
+  /* BOTH FIGURES, ALWAYS. The unfiltered total is fetched alongside so
+     the tab can say "10 blocked, 6 not ours" rather than making you
+     toggle a filter to find out which number you are looking at. */
+  'var tot=d0=null;try{var r2=await fetch(API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"nonicp=only&internal=exclude&page=1&stage=all",{signal:AbortSignal.timeout(12000)});if(r2.ok){d0=await r2.json();}}catch(e2){}' +
   'if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
   'if(!d.leads||!d.leads.length){document.getElementById("blk-tbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\">Nothing blocked. Either the flag is off or nobody has matched yet.</td></tr>";document.getElementById("blk-count").textContent="";document.getElementById("blkpag").innerHTML="";return;}' +
-  'document.getElementById("blk-count").textContent=d.total+" blocked";' +
-  'document.getElementById("blk-tbody").innerHTML=leadRowsHtml(d.leads);' +
+  /* A count we could not compute is never rendered as a number. If the
+     second fetch failed, the tab says so instead of silently showing
+     the total twice. */
+  'document.getElementById("blk-count").textContent=d.total+" blocked"+(d0?(" \\u00b7 "+d0.total+" excluding our own tests"):" \\u00b7 (could not separate our own tests)");' +
+  /* "b", not the default. All Leads renders the same builder into a
+     panel that is still in the document, so an unscoped id here is the
+     duplicate that broke this tab. */
+  'document.getElementById("blk-tbody").innerHTML=leadRowsHtml(d.leads,"b");' +
   'var h="";if(d.pages>1){for(var i=1;i<=d.pages;i++)h+="<button class=\\"pb"+(i===d.page?" act":"")+"\\" onclick=\\"loadBlocked("+i+")\\">"+i+"</button>";}document.getElementById("blkpag").innerHTML=h;' +
   '}catch(e){document.getElementById("blk-tbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</td></tr>";}}' +
   'var WLBL={"nxdomain": "Domain doesn\'t exist \u2014 likely a typo", "no_dns_records": "Domain registered but nothing set up on it", "hosting_placeholder": "No website yet \u2014 domain points to a hosting setup page", "parked_confirmed": "Domain registered but no website on it", "parked": "Domain registered but no website on it", "parked_ns": "Domain registered but no website on it", "parked_suspect": "Looks like a parked domain \u2014 could not confirm", "for_sale_lander": "Domain is listed for sale", "marketplace_redirect": "Domain is for sale on a domain marketplace", "mailbox_domain": "Typed an email provider instead of their website", "brand_mismatch": "Typed a well-known brand\'s site, not their own", "social_profile_url": "Gave a social profile instead of a website", "thin_content": "Page looked mostly empty to us \u2014 worth a manual look", "thin_content_wildcard": "Page looked mostly empty to us \u2014 worth a manual look", "check_blocked": "Site blocked our check \u2014 the page itself looks fine", "dns_unresolved": "Could not look up the domain \u2014 DNS gave no answer", "forwarded_to_live_site": "Redirects to their live site \u2014 checked OK", "live_despite_dns_hint": "Live site (an early parking signal was overruled)", "mx_only": "Email-only company \u2014 no website, but mail works", "nxdomain_contradicted": "DNS blip \u2014 domain matches their verified email domain", "content_clean": "Live website", "resolved": "Domain resolves", "dns_indeterminate": "Could not reach the site to check it", "doh_error": "Could not reach the site to check it", "timeout": "Could not reach the site to check it", "unreachable": "Could not reach the site to check it", "non_html": "Address did not return a web page", "backend_error": "Our check errored \u2014 not the website\u2019s fault", "fetch_error": "Our check errored \u2014 not the website\u2019s fault", "skipped_no_backend": "Check was skipped", "skipped_unsafe_target": "Address pointed at an internal network \u2014 skipped", "test_email_skipped": "Internal test \u2014 check skipped", "ok": "Website checked OK"};' +
@@ -4600,7 +4665,26 @@ app.get('/monitor', (req, res) => {
   'function dateManual(){var p=document.getElementById("fpreset");if(p)p.value="";loadLeads(1);}' +
   'function exportLeads(){var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,product=document.getElementById("fproduct").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"format=csv&stage="+stage+"&sort="+curSort+"&dir="+curDir;if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(product&&product!=="all")url+="&product="+encodeURIComponent(product);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;var ni=document.getElementById("fnonicp").value;if(ni)url+="&nonicp="+encodeURIComponent(ni);window.location.href=url;}' +
   'async function loadFilterOptions(){if(filterOptsLoaded)return;try{var r=await fetch(API+"/monitor/filter-options"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(10000)});if(!r.ok)return;var d=await r.json();var sel=document.getElementById("fsource");if(sel&&d.utmSource){d.utmSource.forEach(function(v){var o=document.createElement("option");o.value=v;o.textContent=v;sel.appendChild(o);});}var ps=document.getElementById("fpartner");if(ps&&d.partners){d.partners.forEach(function(p){var o=document.createElement("option");o.value=p.key;o.textContent="Partner: "+(p.name||p.key)+(p.email?" <"+p.email+">":"");ps.appendChild(o);});}var dl=document.getElementById("hearlist");if(dl&&d.hearAbout){dl.innerHTML=d.hearAbout.map(function(v){return"<option value=\\""+esc(v)+"\\"></option>";}).join("");}filterOptsLoaded=true;}catch(e){}}' +
-  'function toggleRow(sid){var row=document.getElementById("er-"+sid);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=row.previousElementSibling&&row.previousElementSibling.querySelector(".xbtn");if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";if(!vis)loadChanges(sid);}' +
+  /* TWO ARGUMENTS, AND THEY ARE NOT THE SAME THING. `key` addresses the
+     DOM, `sid` addresses the lead. They were one value until 15 Sept
+     2026 and that is what broke the Blocked tab.
+
+     leadRowsHtml is rendered by BOTH All Leads and Blocked, and showTab
+     only toggles a class -- it never clears a panel -- so both tables
+     sit in the document at once. A lead on the loaded All Leads page
+     that is ALSO blocked therefore had id="er-<uuid>" TWICE, and
+     getElementById returns the first in document order. tp-leads
+     precedes tp-blocked, so clicking the row on Blocked expanded the
+     hidden copy inside the inactive All Leads panel and nothing
+     happened on screen.
+
+     It looked like "the top two rows are broken" because All Leads
+     page 1 is the 25 newest leads: a blocked lead breaks while it is
+     new enough to appear there and silently starts working again once
+     it falls off. Nothing about the row itself was ever wrong, which is
+     why enrichment looked relevant and was not -- four working rows had
+     none either. */
+  'function toggleRow(key,sid){var row=document.getElementById("er-"+key);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=row.previousElementSibling&&row.previousElementSibling.querySelector(".xbtn");if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";if(!vis&&sid)loadChanges(key,sid);}' +
   /* Lazily fetched, once per row, on first expand. lead_field_changes is
      one-to-many against leads, so joining it into /monitor/leads would
      multiply the rows of a list whose whole contract is one row per lead
@@ -4610,7 +4694,7 @@ app.get('/monitor', (req, res) => {
      A failed fetch says "unavailable", never "no changes", and clears
      data-loaded so it can be retried. An empty history and an unreadable
      one are different facts and must not render the same way. */
-  'function loadChanges(sid){var el=document.getElementById("lc-"+sid);if(!el||el.getAttribute("data-loaded"))return;el.setAttribute("data-loaded","1");' +
+  'function loadChanges(key,sid){var el=document.getElementById("lc-"+key);if(!el||el.getAttribute("data-loaded"))return;el.setAttribute("data-loaded","1");' +
   'var un=function(){el.innerHTML="<div style=\\"margin-top:10px;color:#b45309;font-size:12px\\">Change log unavailable \\u2014 this is not the same as no changes.</div>";el.removeAttribute("data-loaded");};' +
   'fetch(API+"/monitor/lead-changes"+(TP||"?")+(TP?"&":"")+"session_id="+encodeURIComponent(sid)).then(function(r){return r.json();}).then(function(d){' +
   'if(!d||!d.ok){un();return;}' +
@@ -4647,9 +4731,15 @@ app.get('/monitor', (req, res) => {
      function rather than a summary of its own, so the expandable panel, the
      enrichment badges and the change log all come for free and cannot drift
      from All Leads the way a second copy would. */
-  'function leadRowsHtml(leads){return leads.map(function(l){var sid=esc(l.session_id),name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\\u2014",src=l.utm_source?esc(l.utm_source)+(l.utm_medium?" / "+esc(l.utm_medium):""):(l.referrer?"referral":"\\u2014");' +
-  'return"<tr"+(l.non_icp_blocked?" style=\\"background:#fff7ed\\"":"")+"><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.non_icp_blocked?"<span title=\\"Blocked \\u2014 non-ICP ("+esc(l.non_icp_reason||"")+"). Still counted in every total.\\" style=\\"color:#c2410c\\">&#128683; </span>":"")+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+esc(l.product||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
-  '"<tr class=\\"erow\\" id=\\"er-"+sid+"\\" style=\\"display:none\\"><td></td><td colspan=\\"10\\">"+enrichPanel(l)+"<div id=\\"lc-"+sid+"\\"></div></td></tr>";}).join("");}' +
+  /* NS IS REQUIRED, and it is what makes the row id unique in a
+     document that holds both tables. Every caller passes its own, and a
+     test asserts no caller omits it: a missing namespace would collide
+     the two tabs again and the symptom is a click that does nothing,
+     which is invisible to any check that only asks whether the row
+     rendered. */
+  'function leadRowsHtml(leads,ns){return leads.map(function(l){var sid=esc(l.session_id),key=esc(ns||"x")+"-"+sid,name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\\u2014",src=l.utm_source?esc(l.utm_source)+(l.utm_medium?" / "+esc(l.utm_medium):""):(l.referrer?"referral":"\\u2014");' +
+  'return"<tr"+(l.non_icp_blocked?" style=\\"background:#fff7ed\\"":"")+"><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+key+"\',\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.is_internal?"<span title=\\"One of our own test submissions. Counted in every total, like everything else \\u2014 use the filter to take them out of a number you are about to quote.\\" style=\\"color:#6b7280\\">&#129514; </span>":"")+(l.non_icp_blocked?"<span title=\\"Blocked \\u2014 non-ICP ("+esc(l.non_icp_reason||"")+"). Still counted in every total.\\" style=\\"color:#c2410c\\">&#128683; </span>":"")+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+esc(l.product||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
+  '"<tr class=\\"erow\\" id=\\"er-"+key+"\\" style=\\"display:none\\"><td></td><td colspan=\\"10\\">"+enrichPanel(l)+"<div id=\\"lc-"+key+"\\"></div></td></tr>";}).join("");}' +
   'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,product=document.getElementById("fproduct").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
   'var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"page="+curPage+"&stage="+stage+"&sort="+curSort+"&dir="+curDir;' +
   'if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(product&&product!=="all")url+="&product="+encodeURIComponent(product);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;var ni=document.getElementById("fnonicp").value;if(ni)url+="&nonicp="+encodeURIComponent(ni);' +
@@ -4657,7 +4747,7 @@ app.get('/monitor', (req, res) => {
   'try{var r=await fetch(url,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
   'set("lcount",d.total+" lead"+(d.total!==1?"s":"")+" found");' +
   'if(!d.leads.length){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\">No leads match your filters.</td></tr>";document.getElementById("lpag").innerHTML="";return;}' +
-  'document.getElementById("ltbody").innerHTML=leadRowsHtml(d.leads);renderPag(d.page,d.pages);}catch(e){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
+  'document.getElementById("ltbody").innerHTML=leadRowsHtml(d.leads,"l");renderPag(d.page,d.pages);}catch(e){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function renderPag(pg,pages){if(pages<=1){document.getElementById("lpag").innerHTML="";return;}var h="";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg-1)+")\\""+(pg<=1?" disabled":"")+">&larr;</button>";var s=Math.max(1,pg-2),e=Math.min(pages,pg+2);if(s>1)h+="<button class=\\"pb\\" onclick=\\"loadLeads(1)\\">1</button>"+(s>2?"<span class=\\"pi\\">&#8230;</span>":"");for(var i=s;i<=e;i++)h+="<button class=\\"pb"+(i===pg?" act":"")+ "\\" onclick=\\"loadLeads("+i+")\\" >"+i+"</button>";if(e<pages)h+=(e<pages-1?"<span class=\\"pi\\">&#8230;</span>":"")+"<button class=\\"pb\\" onclick=\\"loadLeads("+pages+")\\" >"+pages+"</button>";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg+1)+")\\"" +(pg>=pages?" disabled":"")+">&rarr;</button><span class=\\"pi\\">Page "+pg+" of "+pages+"</span>";document.getElementById("lpag").innerHTML=h;}' +
   'var lmLeads=[],lmChart=null,lmFilter="all";' +
   'var lmPillDefs=[["all","All"],["awaiting","Awaiting send"],["sent","Sent"],["abandoned","Abandoned"],["internal","Internal tests"]];' +
@@ -5024,6 +5114,63 @@ const ELV_WINDOW_MAX      = 200; // hard cap so a traffic burst can't grow the w
 // testing of utsav,singh@gushwork.ai fired a real Slack page at 4:22pm —
 // that was noise, not an incident.
 const ELV_EXCLUDED_DOMAINS = ['gushwork.ai', 'test.com', 'example.com', 'example.org'];
+
+/* ── OUR OWN TEST SUBMISSIONS ────────────────────────────────────────
+   MARKED, NEVER SILENTLY EXCLUDED. CLAUDE.md is explicit that internal
+   addresses are counted in every leads number today, that this is a
+   known distortion nobody chose, and that quietly fixing it would move
+   every historical number at once. So this changes no total: it adds a
+   flag, a marker on the row, an opt-in filter, and an "excluding ours"
+   figure printed BESIDE the count rather than instead of it.
+
+   Same shape as the non-ICP block one layer up -- blocked leads are
+   counted in every headline and marked rather than hidden -- and for
+   the same reason: a number that silently drops rows is a number
+   nobody can reconcile against the database.
+
+   AN EXPLICIT LIST, NOT AN INFERENCE. Four of the ten blocked leads on
+   15 Sept 2026 were Darshil's own submissions as agent@allstate.com,
+   under the names "Darshil Test" and "Darshil Dixit". Neither the
+   domain nor the name is safe to key on: allstate.com is a real
+   brokerage domain on the block list, and a real prospect may be called
+   Darshil. So the address is named outright, the way NON_ICP_DOMAINS
+   names its domains -- deterministic and re-derivable by reading a
+   list.
+
+   INTERNAL_TEST_EMAILS on Railway extends it without a deploy,
+   comma-separated. ELV_EXCLUDED_DOMAINS still covers whole test
+   domains. */
+const INTERNAL_TEST_EMAILS = [
+  'agent@allstate.com',    // the non-ICP block walkthrough, 11 and 15 Sept 2026
+  ...String(process.env.INTERNAL_TEST_EMAILS || '')
+    .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
+];
+
+function isInternalLead(email) {
+  const e = String(email || '').trim().toLowerCase();
+  if (!e) return false;
+  if (INTERNAL_TEST_EMAILS.includes(e)) return true;
+  return ELV_EXCLUDED_DOMAINS.includes(e.slice(e.lastIndexOf('@') + 1));
+}
+
+/* The same test, as SQL, for queries that page in the database and so
+   cannot answer it in JavaScript. ONE definition feeds both: the arrays
+   come from the constants above rather than being retyped, because two
+   copies of "which addresses are ours" is exactly how a count and its
+   filter start disagreeing.
+
+   IT PUSHES ITS OWN PARAMETERS and returns the clause, matching how
+   /monitor/leads already builds its WHERE. Interpolating the list into
+   the SQL text instead would put an env-var value inside a query
+   string, which is the one thing worth never doing here. */
+function internalLeadSqlClause(emailCol, params) {
+  params.push(INTERNAL_TEST_EMAILS);
+  const a = params.length;
+  params.push(ELV_EXCLUDED_DOMAINS);
+  const b = params.length;
+  return `(LOWER(${emailCol}) = ANY($${a}::text[])
+           OR SPLIT_PART(LOWER(${emailCol}), '@', 2) = ANY($${b}::text[]))`;
+}
 
 const _elvWindow    = [];   // [{ t: ms, bad: bool }]
 let   _elvDegraded  = false;
@@ -10368,6 +10515,14 @@ async function nonIcpModelReport({ days } = {}) {
     checked_clear: 0,   /* a real verdict existed and took no action   */
     not_decided:   0,   /* no fresh verdict for any of their domains   */
   };
+  /* OUR OWN TEST SUBMISSIONS, counted in PARALLEL and never subtracted
+     here. Four of the ten blocks on 15 Sept 2026 were Darshil testing
+     the walkthrough as agent@allstate.com, which makes "10 blocked" a
+     number nobody can quote. The ladder still counts everything --
+     changing what it totals would break the property that makes it
+     worth reading -- and this rides alongside so the tab can print both
+     figures. */
+  const internalIn = { blocked_list: 0, blocked_model: 0, meta_only: 0, checked_clear: 0, not_decided: 0 };
   const decisions   = [];
   const unreadable  = [];
   const industry    = new Map();
@@ -10375,16 +10530,19 @@ async function nonIcpModelReport({ days } = {}) {
   for (const { lead, domains } of perLead) {
     const verdicts = domains.map((x) => byDomain.get(x)).filter(Boolean);
 
+    const mine = isInternalLead(lead.email);
+    let bucket;
     if (lead.non_icp_blocked === true) {
-      if (lead.non_icp_source === 'llm') ladder.blocked_model++;
-      else                               ladder.blocked_list++;
+      bucket = lead.non_icp_source === 'llm' ? 'blocked_model' : 'blocked_list';
     } else if (lead.non_icp_llm_flagged === true) {
-      ladder.meta_only++;
+      bucket = 'meta_only';
     } else if (verdicts.some((v) => v.source === 'llm')) {
-      ladder.checked_clear++;
+      bucket = 'checked_clear';
     } else {
-      ladder.not_decided++;
+      bucket = 'not_decided';
     }
+    ladder[bucket]++;
+    if (mine) internalIn[bucket]++;
 
     /* Panel 3 rows: only the two populations anybody has to audit. The
        verdict chosen is the one for the domain we stamped on the lead,
@@ -10402,6 +10560,7 @@ async function nonIcpModelReport({ days } = {}) {
         action: lead.non_icp_blocked === true
           ? (lead.non_icp_source === 'llm' ? 'blocked_model' : 'blocked_list')
           : 'meta_only',
+        is_internal: mine,
         source: lead.non_icp_source || null,
         domain_judged: lead.non_icp_reason || null,
         business_type: v ? v.business_type : null,
@@ -10434,59 +10593,105 @@ async function nonIcpModelReport({ days } = {}) {
       });
     }
 
-    /* Panel 2. Counted per LEAD, and the domain set per type counted
-       separately, because they answer different questions: leads is how
-       much traffic a type is touching, domains is how many distinct
-       companies produced it. One noisy company is not a trend. */
-    for (const v of verdicts) {
-      if (v.source !== 'llm' || !v.business_type) continue;
-      if (!industry.has(v.business_type)) {
-        industry.set(v.business_type, { business_type: v.business_type, leads: 0, domains: new Set(), confs: [] });
+    /* Panel 2. ONLY LEADS THE SYSTEM ACTUALLY ACTED ON.
+
+       IT COUNTED EVERY LEAD WITH A CACHED VERDICT UNTIL 15 SEPT 2026,
+       AND THAT WAS TWO CLAIMS IN ONE COLUMN. Most of the cache is
+       Monday's backfill of historical domains, so the row read
+       "Insurance 19" in a week when five insurance leads were blocked.
+       The small print explained it; the number is what gets quoted, and
+       a number that needs a footnote to not be wrong is wrong.
+
+       The standing cache is still reported -- see cacheInventory below
+       -- but as DOMAINS, all time, in its own block, where it cannot be
+       read as this week's activity. */
+    if (lead.non_icp_blocked === true || lead.non_icp_llm_flagged === true) {
+      const v = byDomain.get(lead.non_icp_reason)
+        || verdicts.find((x) => x.source === 'llm' && x.business_type)
+        || null;
+      /* A brand-list block on an unreadable domain has no business type
+         at all -- beckygerig.remax.com is the case -- and it belongs in
+         its own bucket rather than being dropped or guessed at. */
+      const key = (v && v.business_type) ? v.business_type : '_no_verdict';
+      if (!industry.has(key)) {
+        industry.set(key, { business_type: key, leads: 0, domains: new Set(), confs: [] });
       }
-      const row = industry.get(v.business_type);
+      const row = industry.get(key);
       row.leads++;
-      row.domains.add(v.domain);
-      if (v.confidence != null) row.confs.push(Number(v.confidence));
-      break;   /* one type per lead, the first domain that has a verdict */
+      if (v) row.domains.add(v.domain);
+      if (v && v.confidence != null) row.confs.push(Number(v.confidence));
     }
   }
 
   const total = leads.length;
 
   /* ── Panel 4: the scrape picture ──────────────────────────────────
-     LATEST OUTCOME PER DOMAIN, NEVER A HISTORICAL RATE, and the label
-     on screen has to say so. nonIcpWriteVerdictRow is ON CONFLICT DO
-     UPDATE, so a domain that failed and later succeeded overwrites its
-     own failure and the table keeps no history. A rate computed from it
-     would therefore UNDERSTATE failures by exactly the ones that later
-     resolved, and rendering that as "the scrape failure rate" is the
-     same mistake as rendering a floor as a total.
+     THE RATE IS COMPUTED OVER THE DOMAINS BEHIND THIS WINDOW'S LEADS,
+     and over nothing else.
 
-     A second reason the standing numbers read low: the historical
-     backfill deliberately loaded only source=llm rows, so roughly 2,900
-     of the cache's rows are successes by selection. Both caveats ride
-     on the payload as notes rather than living only in this comment. */
-  const touched = await pool.query(`
-    SELECT scrape_status, source, COUNT(*)::int AS n
-      FROM non_icp_domain_verdicts
-     WHERE checked_at >= NOW() - INTERVAL '24 hours'
-     GROUP BY 1, 2`);
-  const standing = await pool.query(`
-    SELECT scrape_status, source, COUNT(*)::int AS n
-      FROM non_icp_domain_verdicts
-     GROUP BY 1, 2`);
+     IT USED TO BE COMPUTED OVER THE WHOLE CACHE AND READ 0.3%, WHICH
+     WAS WRONG BY TWO ORDERS OF MAGNITUDE. Roughly 2,937 of the cache's
+     rows are Monday's backfill, and tools/non-icp-validate.js loads
+     ONLY source=llm rows -- successes, by construction. So the
+     denominator was a population selected for having succeeded, and the
+     headline read 0.3% against a live rate of about 26%. A note under
+     the number said as much. Nobody reads the note; they read the
+     number and quote it.
 
-  const rollup = (rows) => {
-    const out = { ok: 0, unreachable: 0, thin: 0, other: 0, total: 0 };
-    for (const r of rows) {
-      out.total += r.n;
-      if (r.source === 'llm')                 out.ok          += r.n;
-      else if (r.scrape_status === 'unreachable') out.unreachable += r.n;
-      else if (r.scrape_status === 'thin')        out.thin        += r.n;
-      else                                        out.other       += r.n;
+     Scoping it to the domains this window's leads were actually judged
+     on fixes it without a cutoff date to maintain: the backfill only
+     counts here where a backfilled domain genuinely sits behind a lead
+     in the window, which is the case where we really did have a
+     readable verdict for that lead.
+
+     STILL LATEST-OUTCOME-PER-DOMAIN, NOT A HISTORY.
+     nonIcpWriteVerdictRow is ON CONFLICT DO UPDATE, so a domain that
+     failed and later succeeded overwrites its own failure. The label
+     says so. */
+  const scrapeWindow = { ok: 0, unreachable: 0, thin: 0, other: 0, no_verdict: 0, total: 0 };
+  for (const d of new Set(perLead.flatMap((x) => x.domains))) {
+    scrapeWindow.total++;
+    const v = byDomain.get(d);
+    if (!v)                                     scrapeWindow.no_verdict++;
+    else if (v.source === 'llm')                scrapeWindow.ok++;
+    else if (v.scrape_status === 'unreachable') scrapeWindow.unreachable++;
+    else if (v.scrape_status === 'thin')        scrapeWindow.thin++;
+    else                                        scrapeWindow.other++;
+  }
+  /* Of the domains we have an ANSWER for, how many were unreadable.
+     "Never tried" is excluded from the denominator on purpose: it is
+     not a scrape failure, it is a domain the warm path has not reached,
+     and folding the two together would make a quiet day look like a
+     broken scraper. It is reported beside the rate as its own number. */
+  const scrapeAnswered = scrapeWindow.ok + scrapeWindow.unreachable + scrapeWindow.thin + scrapeWindow.other;
+  scrapeWindow.unreadable_pct = nonIcpPct(scrapeWindow.unreachable + scrapeWindow.thin + scrapeWindow.other, scrapeAnswered);
+  scrapeWindow.answered = scrapeAnswered;
+
+  /* THE STANDING CACHE IS AN INVENTORY, NOT A RATE. Counts only, and
+     deliberately no percentage: a percentage over a population selected
+     for success is the thing that misled in the first place, and
+     printing it smaller does not make it true. */
+  const cacheRows = await pool.query(`
+    SELECT business_type, source, scrape_status, COUNT(*)::int AS n
+      FROM non_icp_domain_verdicts
+     GROUP BY 1, 2, 3`);
+  const cacheInv = { domains: 0, judged: 0, unreadable: 0 };
+  const cacheByType = new Map();
+  for (const r of cacheRows.rows) {
+    /* COERCED, because one NaN poisons every total it touches and then
+       serialises to null -- which reaches the tab as a blank where a
+       count should be, with nothing anywhere saying why. */
+    const n = Number(r.n) || 0;
+    cacheInv.domains += n;
+    if (r.source === 'llm') {
+      cacheInv.judged += n;
+      if (r.business_type) {
+        cacheByType.set(r.business_type, (cacheByType.get(r.business_type) || 0) + n);
+      }
+    } else {
+      cacheInv.unreadable += n;
     }
-    return { ...out, unreadable_pct: nonIcpPct(out.unreachable + out.thin, out.total) };
-  };
+  }
 
   /* The in-process counters, and they are labelled for what they are.
      Lost on every deploy, which is deliberate -- a fresh process has
@@ -10510,28 +10715,50 @@ async function nonIcpModelReport({ days } = {}) {
     },
     ladder: {
       total,
+      ours: Object.values(internalIn).reduce((a, b) => a + b, 0),
       rows: [
-        { key: 'blocked_list',  label: 'Blocked — brand list',   n: ladder.blocked_list,  pct: nonIcpPct(ladder.blocked_list,  total) },
-        { key: 'blocked_model', label: 'Blocked — model',        n: ladder.blocked_model, pct: nonIcpPct(ladder.blocked_model, total) },
-        { key: 'meta_only',     label: 'Meta withheld only',     n: ladder.meta_only,     pct: nonIcpPct(ladder.meta_only,     total) },
-        { key: 'checked_clear', label: 'Checked, no action',     n: ladder.checked_clear, pct: nonIcpPct(ladder.checked_clear, total) },
-        { key: 'not_decided',   label: 'Not decided',            n: ladder.not_decided,   pct: nonIcpPct(ladder.not_decided,   total) },
+        { key: 'blocked_list',  label: 'Blocked — brand list',   n: ladder.blocked_list,  ours: internalIn.blocked_list,  pct: nonIcpPct(ladder.blocked_list,  total) },
+        { key: 'blocked_model', label: 'Blocked — model',        n: ladder.blocked_model, ours: internalIn.blocked_model, pct: nonIcpPct(ladder.blocked_model, total) },
+        { key: 'meta_only',     label: 'Meta withheld only',     n: ladder.meta_only,     ours: internalIn.meta_only,     pct: nonIcpPct(ladder.meta_only,     total) },
+        { key: 'checked_clear', label: 'Checked, no action',     n: ladder.checked_clear, ours: internalIn.checked_clear, pct: nonIcpPct(ladder.checked_clear, total) },
+        { key: 'not_decided',   label: 'Not decided',            n: ladder.not_decided,   ours: internalIn.not_decided,   pct: nonIcpPct(ladder.not_decided,   total) },
       ],
     },
+    /* ACTED ON, in the window, counted as LEADS. This is the number
+       that gets quoted, so it means exactly one thing. */
     industries: [...industry.values()]
       .map((r) => ({
         business_type: r.business_type,
-        label: (NON_ICP_BUSINESS_TYPES[r.business_type] || {}).label || r.business_type,
-        action: nonIcpTypeAction(r.business_type),
+        label: r.business_type === '_no_verdict'
+          ? 'No readable verdict'
+          : (NON_ICP_BUSINESS_TYPES[r.business_type] || {}).label || r.business_type,
+        action: r.business_type === '_no_verdict' ? 'block' : nonIcpTypeAction(r.business_type),
         leads: r.leads,
         domains: r.domains.size,
         median_confidence: nonIcpMedian(r.confs),
       }))
       .sort((a, b) => b.leads - a.leads),
+    /* THE STANDING CACHE, kept because it is the forward-looking
+       exposure and genuinely useful -- but in its own block, counted in
+       DOMAINS, with no window and no rate, so it cannot be read as this
+       week's activity. */
+    cache: {
+      domains: cacheInv.domains,
+      judged: cacheInv.judged,
+      unreadable: cacheInv.unreadable,
+      byType: [...cacheByType.entries()]
+        .map(([t, n]) => ({
+          business_type: t,
+          label: (NON_ICP_BUSINESS_TYPES[t] || {}).label || t,
+          action: nonIcpTypeAction(t),
+          domains: n,
+        }))
+        .filter((r) => r.action !== 'none')
+        .sort((a, b) => b.domains - a.domains),
+    },
     decisions: decisions.sort((a, b) => new Date(b.created_at) - new Date(a.created_at)),
     scrape: {
-      last24h:  rollup(touched.rows),
-      standing: rollup(standing.rows),
+      window: scrapeWindow,
       /* Deduped: one lead can contribute the same unreadable domain
          twice through email and website. */
       unreadable: [...new Map(unreadable.map((u) => [u.domain + '|' + u.email, u])).values()]
@@ -10548,7 +10775,6 @@ async function nonIcpModelReport({ days } = {}) {
       },
       notes: [
         'Latest outcome per domain, not a historical rate. A domain that failed and later succeeded overwrites its own failure, so failures that resolved are not counted here.',
-        'The standing cache is biased towards success: the historical backfill loaded only rows the model actually judged.',
       ],
     },
   };
