@@ -730,14 +730,35 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
          reads as a tidy "Could not load:" message rather than a crash.
          Probing for a thrown error misses it entirely. */
       const painted_ = Object.entries(painted);
+      /* THE MODEL TAB'S CONTAINERS ARE ASSERTED FROM A FIXED LIST, not
+         from whatever happened to be painted, and that is the difference
+         between a suite that catches a regression and one that can be
+         MEASURED catching it.
+
+         Iterating over Object.entries(painted) makes the assertion count
+         depend on how far the loader got. Break the ladder renderer and
+         mdl-scrape is never reached, so the suite runs one assertion
+         fewer -- and measure.js correctly refuses to call that a catch,
+         because it cannot tell a caught mutation from a suite that
+         quietly ran a different set of checks. That is the
+         test-ads-parity failure mode (one failure, 13 of 159 assertions)
+         arriving in a new place.
+
+         A fixed list runs the same number of assertions either way: each
+         container is asserted to have been painted AND to hold content
+         rather than an error. */
+      for (const id of ['mdl-flags', 'mdl-ladder', 'mdl-ind', 'mdl-dec',
+                        'mdl-scrape', 'mdl-unread']) {
+        const html = painted[id];
+        ok(`dashboard: ${id} was painted at all`, !!html && String(html).length > 10,
+           id + ' -> ' + String(html).slice(0, 140));
+        ok(`dashboard: ${id} rendered content, not an error`,
+           !!html && !/Could not load|Failed:|is not defined|is not a function/i.test(html),
+           id + ' -> ' + String(html).slice(0, 140));
+      }
+
       for (const [id, html] of painted_) {
-        /* The Model tab paints into two plain divs (mdl-ladder, mdl-scrape)
-           as well as three table bodies, and a div is where its ladder and
-           its scrape summary live -- the two panels most likely to carry a
-           scope error. An id filter that only knew about tbodies would
-           watch the exact containers this tab renders into and assert
-           nothing about them. */
-        if (!/tbody|-tbody$|^mdl-/.test(id)) continue;
+        if (!/tbody|-tbody$/.test(id)) continue;
         ok(`dashboard: ${id} rendered content, not an error`,
            !/Could not load|Failed:|is not defined|is not a function/i.test(html),
            id + ' -> ' + String(html).slice(0, 140));
