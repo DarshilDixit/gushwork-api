@@ -706,6 +706,61 @@ the error surfaces as `SyntaxError: missing ) after argument list` pointing at t
 `pool.query(` line, not at the comment. Four of these happened in one sitting. Use
 plain words inside SQL comments, and run `node --check index.js` before committing.
 
+**"What do you need?" ON `/demo` ONLY — and `product` vs `product_interest`
+are two columns because they answer two questions.** Two mandatory
+checkboxes (`aeo`, `crm`) revealed after `sell_to` is answered. The values
+in the markup ARE the product slugs, so the checkbox, `product_interest`,
+the Salesforce picklist and the Meta `content_ids` are one vocabulary with
+no mapping table to drift.
+
+- **`leads.product` stays SINGLE-VALUED** — the routing slug. One calendar,
+  one Meta event, one Salesforce picklist value. CRM wins a both-ticked
+  selection. Widening it would break `Product__c` (a restricted picklist)
+  and the three `product = 'crm'` equality predicates at once.
+- **`leads.product_interest` holds what they ticked** — canonical: lowercase,
+  known slugs only, deduped, **sorted**. `'aeo'`, `'crm'`, `'aeo,crm'`.
+  **NULL means "we never asked"** and is the honest value for every page but
+  `/demo`. Never backfilled.
+- **Salesforce gets `product_interest ?? product`.** `Product__c` carries
+  three values — `aeo`, `crm`, `aeo,crm` — added and verified against the
+  live org on 15 Sept 2026.
+
+**`resolveProduct` TAKES THE SELECTION AND THE PAGE, AND BOTH THE COLUMN AND
+THE META EVENT MUST BE RESOLVED FROM BOTH.** `buildEventData` read `page_url`
+alone, which was correct only while product was a pure function of the page.
+With a checkbox deciding it, a `/demo` lead ticking AI-CRM stores `crm` and
+would fire `aeo` — the dashboard saying one thing and Facebook optimising for
+another, **with no error anywhere**. `tests/test-non-icp-routes.js` drives
+`/submit` across four selections and compares the bound column against the
+`content_ids` that actually reached `graph.facebook.com`.
+
+**An unknown `product_interest` loses the whole LEAD, not the field.**
+`Product__c` is restricted; an unknown value is
+`INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST`, which `sfUnknownFields` does
+**not** retry. `canonicalProductInterest` dropping unknown slugs is the only
+thing between a tampered checkbox and a lost lead — `test-batch2.js` §24
+executes it against 24 adversarial inputs and enumerates every slug subset
+against the picklist, so adding a third product without adding its
+combinations to Salesforce fails there rather than in production.
+
+**THE B2C GATE FIRES AT THE NEXT CLICK, NOT ON SELECTION**, and the
+progressive reveal depends on that. There is no change handler on the
+`sell_to` radios that decides anything, `handleStep1Next` has exactly two
+triggers, and `showStep('step-disqualified')` is reached from one statement
+inside it — so the checkboxes are read one line above the gate in the same
+call. Had it fired on selection, a B2C click would jump to the DQ step before
+the checkboxes were visible and the CRM exception could never apply. Four
+assertions hold it there, including one that the sell-to change handler never
+calls `showStep`, `savePartial` or touches `disqualified`.
+
+**Webflow markup this depends on, `/demo` only:** `#needs-wrap`
+(`display:none`), `#need-aeo` / `#need-crm` with `name="needs"` and
+`value="aeo"`/`"crm"`, `#needs-error`, `#about-business-wrap`
+(`display:none`), and `data-rh-router-crm="6804"` on the form wrapper —
+**and NOT `data-rh-router`**, whose absence is what keeps the 6138 AEO
+default. No markup means no selection, the server resolves from the page as
+before, and `product_interest` stays NULL. `/ai-demo` is untouched.
+
 **THE `sell_to` GATE IS CLIENT-SIDE ONLY, and the CRM product is excepted
 from it.** B2C or Mixed at step 1 sets `disqualified` and shows a terminal
 step — in `gushwork-form.js` and `gushwork-form-popup.js`. The server
