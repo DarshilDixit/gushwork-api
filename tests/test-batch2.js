@@ -2904,6 +2904,77 @@ async function section12() {
   ok('23: every decision row says whether it is ours', /is_internal: mine/.test(rep));
 }
 
+/* ============================================================
+   24. NOTHING OUTSIDE THE SALESFORCE PICKLIST CAN EVER BE PUSHED
+
+   Product__c is a RESTRICTED picklist carrying exactly three values --
+   aeo, crm and aeo,crm -- added and verified against the live org on
+   15 Sept 2026. An unknown value there returns
+   INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST, and sfUnknownFields retries
+   only INVALID_FIELD and INVALID_FIELD_FOR_INSERT_UPDATE. So a bad
+   value does not cost us the field, it costs us THE WHOLE LEAD, with a
+   critical alert saying "This lead is NOT in Salesforce. Add it
+   manually."
+
+   product_interest is the only thing that reaches that field which
+   originates in a form body, so the canonicaliser is the only thing
+   standing between a tampered checkbox and a lost lead. A mutation that
+   dropped its allow-list filter SURVIVED the whole suite before this
+   section existed.
+   ============================================================ */
+{
+  const capi = require('../meta-capi');
+  const canonicalProductInterest = capi.canonicalProductInterest;
+  const PRODUCT_INTEREST_SLUGS = capi.PRODUCT_INTEREST_SLUGS;
+
+  /* What Salesforce will accept. Written out rather than derived, so
+     adding a product without adding its picklist value fails HERE
+     rather than in production on the first both-ticked lead. */
+  const SF_PRODUCT_PICKLIST = ['aeo', 'crm', 'aeo,crm'];
+
+  eq('24: the slug vocabulary is exactly the catalogue keys',
+     PRODUCT_INTEREST_SLUGS.slice().sort(), ['aeo', 'crm']);
+
+  /* EVERY non-empty sorted subset of the slugs must be in the picklist.
+     This is what breaks the day a third product is added: the new
+     combinations will not be there, and Salesforce would reject them. */
+  const subsets = [];
+  const S2 = PRODUCT_INTEREST_SLUGS.slice().sort();
+  for (let mask = 1; mask < (1 << S2.length); mask++) {
+    subsets.push(S2.filter((_, i) => mask & (1 << i)).join(','));
+  }
+  for (const v of subsets) {
+    ok(`24: "${v}" is a value Salesforce will accept`, SF_PRODUCT_PICKLIST.includes(v), v);
+  }
+  eq('24: and the picklist has no values the form cannot produce',
+     SF_PRODUCT_PICKLIST.slice().sort(), subsets.slice().sort());
+
+  /* ADVERSARIAL INPUT, EXECUTED. The field is a form body: anything can
+     arrive in it. Every one of these must come back null or a picklist
+     value -- never a passthrough. */
+  const hostile = [
+    'crm; DROP TABLE leads', 'aeo,crm,enterprise', 'ENTERPRISE', 'crm,,,', ',',
+    'aeo crm', 'crm\naeo', '  CRM  ', 'aeo,CRM', 'crm,aeo', ['crm', 'enterprise'],
+    ['<script>'], 'null', 'undefined', '0', 0, 1, true, false, {}, [], null, undefined,
+    'a'.repeat(500), 'aeo,'.repeat(50) + 'crm',
+  ];
+  for (const h of hostile) {
+    let out;
+    try { out = canonicalProductInterest(h); } catch (e) { out = 'THREW: ' + e.message; }
+    const safe = out === null || SF_PRODUCT_PICKLIST.includes(out);
+    /* String(): JSON.stringify(undefined) is undefined, not a string. */
+    ok(`24: hostile input cannot reach the picklist — ${String(JSON.stringify(h)).slice(0, 34)}`,
+       safe, 'got ' + JSON.stringify(out));
+  }
+
+  /* And the guarantee stated directly: the ONLY values this function can
+     ever return are null or a picklist member. */
+  const seen = new Set(hostile.concat(subsets).concat(['aeo', 'crm'])
+    .map((h) => { try { return canonicalProductInterest(h); } catch { return 'THREW'; } }));
+  const bad = [...seen].filter((v) => v !== null && !SF_PRODUCT_PICKLIST.includes(v));
+  eq('24: the canonicaliser emits nothing outside the picklist', bad, []);
+}
+
 /* ============================================================ */
 /* Section 12 is async, so the totals are printed from its continuation.
    The catch is not optional: without it a throw in there escapes as an
