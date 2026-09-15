@@ -9,7 +9,7 @@ const { Pool }  = require('pg');
 const { pool, initDB } = require('./db');
 const { sendConversion, fetchPartnership, sendAction, fetchCustomer } = require('./partnerstack');
 const { pushToSalesforce, findSFLeadByEmail, updateSFLead, updateOpportunityFields, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails } = require('./salesforce');
-const { pushFormEventsToMeta, pushStartTrialToMeta, resolveProduct, canonicalProductInterest, setMetaOutcomeReporter } = require('./meta-capi');
+const { pushFormEventsToMeta, pushStartTrialToMeta, resolveProduct, resolveEventProduct, predictedLtvFor, canonicalProductInterest, setMetaOutcomeReporter } = require('./meta-capi');
 const createLeadMagnetRouter = require('./lead-magnet');
 
 const app  = express();
@@ -308,6 +308,7 @@ async function initAWSTable() {
          other repo read this table, not Railway. Additive -- nothing over
          there selects it yet, and NULL keeps meaning "we never asked". */
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS product_interest TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS meta_predicted_ltv NUMERIC`,
       /* Free text from the About-your-business textarea, capped at 1000
          chars server side. Mirrors leads.about_business. */
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS about_business TEXT`,
@@ -354,8 +355,8 @@ function syncToAWS(data) {
           60-placeholder statement by hand is the one edit here that
           fails silently, by binding the right values to the wrong
           columns. */
-       product_interest, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,NOW())
+       product_interest, meta_predicted_ltv, updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,$62,NOW())
     ON CONFLICT (session_id) DO UPDATE SET
       page_url                = COALESCE(EXCLUDED.page_url,                gw_form_leads.page_url),
       email                   = COALESCE(EXCLUDED.email,                   gw_form_leads.email),
@@ -436,6 +437,7 @@ function syncToAWS(data) {
          sync must not blank a slug an earlier write already resolved. */
       product                 = COALESCE(EXCLUDED.product,                 gw_form_leads.product),
       product_interest        = COALESCE(EXCLUDED.product_interest,        gw_form_leads.product_interest),
+      meta_predicted_ltv      = COALESCE(EXCLUDED.meta_predicted_ltv,      gw_form_leads.meta_predicted_ltv),
       /* COALESCE: the textarea is a step-2 field, so /partial syncs a NULL
          first and /submit fills it. An overwrite would blank it back. */
       about_business          = COALESCE(EXCLUDED.about_business,          gw_form_leads.about_business),
@@ -489,7 +491,8 @@ function syncToAWS(data) {
     data.ps_qualified_sent_at    || null,   data.hear_about_us_raw         || null,
     data.product                 || null,   data.about_business            || null,
     data.non_icp_blocked         ?? false,  data.non_icp_reason            || null,
-    data.product_interest        || null                 /* $61, appended */
+    data.product_interest        || null,
+    data.meta_predicted_ltv      ?? null                 /* $61, $62 — appended, nothing renumbered */
   ]).then(() => {
     console.log(`[AWS] ✅ Synced session ${data.session_id}`);
   }).catch(err => {
@@ -11756,13 +11759,29 @@ app.post('/partial', async (req, res) => {
 
     const nonIcp = await nonIcpVerdict({ email, website });
 
+    /* WHAT META WILL BE TOLD THIS LEAD IS WORTH, decided here so it can
+       ride the same upsert rather than needing a second write.
+
+       GATED ON THE SAME THREE CONDITIONS THE StartTrial BRANCH BELOW
+       USES, in the same order, so the column cannot claim we reported a
+       value we suppressed. The two must be read together: if that
+       branch grows a condition, this needs it too, and a test asserts
+       the pair stays in step.
+
+       NULL is "no event was sent", never "we sent zero". */
+    const _ltvFree = email ? freeEmailMatch(email.split('@')[1] || '') : null;
+    const metaWillFire = !nonIcp.suppress_meta && !disqualified && !!email && !_ltvFree;
+    const meta_predicted_ltv = metaWillFire
+      ? predictedLtvFor(resolveEventProduct({ page_url, product_interest }))
+      : null;
+
     const upsert = await pool.query(`
       WITH prev AS (
         SELECT email, company, website, phone, first_name, last_name, sell_to, booking_uid, step_reached
           FROM leads WHERE session_id = $1
       )
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business,non_icp_blocked,non_icp_reason,non_icp_source,non_icp_checked_at,non_icp_llm_flagged,product_interest)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW(),$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46)
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business,non_icp_blocked,non_icp_reason,non_icp_source,non_icp_checked_at,non_icp_llm_flagged,product_interest,meta_predicted_ltv)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW(),$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47)
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -11817,6 +11836,10 @@ app.post('/partial', async (req, res) => {
            B2B" button calls savePartial(1) a second time -- so a later
            call carrying nothing must not erase it. */
         product_interest      = COALESCE(EXCLUDED.product_interest,      leads.product_interest),
+        /* COALESCEd: /partial writes it when StartTrial fires, and a
+           later call that suppressed must not erase what was already
+           reported. The first non-null value is what we actually sent. */
+        meta_predicted_ltv    = COALESCE(EXCLUDED.meta_predicted_ltv,    leads.meta_predicted_ltv),
         /* COALESCE for the same reason as product: the textarea is a step-2
            field, so /partial writes NULL and /submit fills it in. */
         about_business        = COALESCE(EXCLUDED.about_business,        leads.about_business),
@@ -11856,14 +11879,14 @@ app.post('/partial', async (req, res) => {
         (SELECT p.step_reached FROM prev p) AS prev_step_reached,
         leads.email, leads.company, leads.website, leads.phone,
         leads.first_name, leads.last_name, leads.sell_to, leads.step_reached
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business,nonIcp.blocked===true,(nonIcp.blocked||nonIcp.llm_flagged)?nonIcp.reason:null,nonIcpStamp(nonIcp).source,nonIcpStamp(nonIcp).checked_at,nonIcp.llm_flagged===true,product_interest]);
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business,nonIcp.blocked===true,(nonIcp.blocked||nonIcp.llm_flagged)?nonIcp.reason:null,nonIcpStamp(nonIcp).source,nonIcpStamp(nonIcp).checked_at,nonIcp.llm_flagged===true,product_interest,meta_predicted_ltv]);
 
     /* After the write, off the response path. Never awaited. */
     recordLeadFieldChanges(session_id, upsert.rows[0], '/partial', { arrived_step: step_reached });
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/partial] Enrichment sync failed (non-blocking):', err.message));
 
-    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false,hear_about_us_raw:hear_about_us,product,product_interest,about_business,non_icp_blocked:nonIcp.blocked===true,non_icp_reason:nonIcp.blocked?nonIcp.reason:null,...ps});
+    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false,hear_about_us_raw:hear_about_us,product,product_interest,meta_predicted_ltv,about_business,non_icp_blocked:nonIcp.blocked===true,non_icp_reason:nonIcp.blocked?nonIcp.reason:null,...ps});
 
     // StartTrial fires ONLY for qualified (B2B) leads on BUSINESS emails —
     // free-mailbox leads (gmail/yahoo/...) are skipped so Meta optimises
@@ -11999,13 +12022,27 @@ app.post('/submit', async (req, res) => {
 
     const nonIcp = await nonIcpVerdict({ email, website });
 
+    /* Same column, same rule, this route's own gate: the Lead branch
+       below fires when Meta is not suppressed AND the website verified.
+
+       Uses the PRE-upsert verdict, like the branch below reads the
+       sticky one. They differ only for a lead blocked at step 1 who
+       returns -- and the brand list and the model cache are both
+       deterministic per domain, so the two agree in practice. COALESCEd
+       in the upsert, so /partial's value is never overwritten with null
+       by a later call. */
+    const meta_predicted_ltv = (!nonIcp.suppress_meta
+        && isWebsiteVerified({ website_check_failed, website_check_reason }))
+      ? predictedLtvFor(resolveEventProduct({ page_url, product_interest }))
+      : null;
+
     const upsert = await pool.query(`
       WITH prev AS (
         SELECT email, company, website, phone, first_name, last_name, sell_to, booking_uid, step_reached
           FROM leads WHERE session_id = $1
       )
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business,non_icp_blocked,non_icp_reason,non_icp_source,non_icp_checked_at,non_icp_llm_flagged,product_interest)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW(),$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45)
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business,non_icp_blocked,non_icp_reason,non_icp_source,non_icp_checked_at,non_icp_llm_flagged,product_interest,meta_predicted_ltv)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW(),$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46)
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -12063,6 +12100,10 @@ app.post('/submit', async (req, res) => {
            B2B" button calls savePartial(1) a second time -- so a later
            call carrying nothing must not erase it. */
         product_interest      = COALESCE(EXCLUDED.product_interest,      leads.product_interest),
+        /* COALESCEd: /partial writes it when StartTrial fires, and a
+           later call that suppressed must not erase what was already
+           reported. The first non-null value is what we actually sent. */
+        meta_predicted_ltv    = COALESCE(EXCLUDED.meta_predicted_ltv,    leads.meta_predicted_ltv),
         /* COALESCE for the same reason as product, and a BLOCK comment for
            the same reason as the line above. */
         about_business        = COALESCE(EXCLUDED.about_business,        leads.about_business),
@@ -12101,7 +12142,7 @@ app.post('/submit', async (req, res) => {
            (Meta, Slack, the response) must read the row rather than the
            in-memory verdict or the block silently lifts itself. */
         leads.non_icp_blocked, leads.non_icp_reason, leads.non_icp_llm_flagged, leads.non_icp_source
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business,nonIcp.blocked===true,(nonIcp.blocked||nonIcp.llm_flagged)?nonIcp.reason:null,nonIcpStamp(nonIcp).source,nonIcpStamp(nonIcp).checked_at,nonIcp.llm_flagged===true,product_interest]);
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business,nonIcp.blocked===true,(nonIcp.blocked||nonIcp.llm_flagged)?nonIcp.reason:null,nonIcpStamp(nonIcp).source,nonIcpStamp(nonIcp).checked_at,nonIcp.llm_flagged===true,product_interest,meta_predicted_ltv]);
 
     /* After the write, off the response path. Never awaited. */
     const identityDiff = diffLeadIdentityFields(upsert.rows[0], { arrived_step: 2 });
@@ -12109,7 +12150,7 @@ app.post('/submit', async (req, res) => {
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/submit] Enrichment sync failed (non-blocking):', err.message));
 
-    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true,hear_about_us_raw:hear_about_us,product,product_interest,about_business,non_icp_blocked:upsert.rows[0]?.non_icp_blocked===true,non_icp_reason:upsert.rows[0]?.non_icp_reason||null,...ps});
+    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true,hear_about_us_raw:hear_about_us,product,product_interest,meta_predicted_ltv,about_business,non_icp_blocked:upsert.rows[0]?.non_icp_blocked===true,non_icp_reason:upsert.rows[0]?.non_icp_reason||null,...ps});
 
     /* The EFFECTIVE block, read back from the row after the sticky OR --
        never the in-memory verdict. See the RETURNING comment above. */

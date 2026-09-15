@@ -1094,13 +1094,45 @@ function finish() {
     catch (e) { return { threw: true, custom_data: {}, error: e.message }; }
   };
 
-  // ── The catalogue itself. These numbers move ad spend; pin them.
-  eq('product: the catalogue has exactly two products',
-     Object.keys(META.PRODUCTS).sort(), ['aeo', 'crm']);
-  eq('product: aeo is content_ids [aeo], predicted_ltv 12000',
-     META.PRODUCTS.aeo, { content_ids: ['aeo'], predicted_ltv: 12000 });
-  eq('product: crm is content_ids [crm], predicted_ltv 5000',
-     META.PRODUCTS.crm, { content_ids: ['crm'], predicted_ltv: 5000 });
+  /* ── The catalogue. THREE KEYS, and the third is not a product you
+     can tick -- 'aeo,crm' is what ticking both produces. content_ids is
+     an array by design, which is how ONE event covers both products:
+     two events would count one person twice, and every active ad set
+     optimises on conversion count. */
+  eq('product: the catalogue has three event slugs, including the combined one',
+     Object.keys(META.PRODUCTS).sort(), ['aeo', 'aeo,crm', 'crm']);
+  eq('product: aeo carries one content id', META.PRODUCTS.aeo, { content_ids: ['aeo'] });
+  eq('product: crm carries one content id', META.PRODUCTS.crm, { content_ids: ['crm'] });
+  eq('product: the combined slug carries BOTH content ids',
+     META.PRODUCTS['aeo,crm'], { content_ids: ['aeo', 'crm'] });
+  /* And the tickable vocabulary is NOT the catalogue keys. Deriving one
+     from the other would let 'aeo,crm' through as a single checkbox
+     value and into the restricted Salesforce picklist as a duplicate. */
+  eq('product: only aeo and crm are tickable',
+     META.PRODUCT_INTEREST_SLUGS.slice().sort(), ['aeo', 'crm']);
+
+  /* ── PREDICTED LTV IS CONFIG ──────────────────────────────────────
+     All three are PROVISIONAL and all three are env-settable, so real
+     numbers from the agency are a Railway change rather than a deploy.
+     The defaults are pinned because they move ad spend the day anyone
+     switches a campaign to value optimisation. */
+  eq('product: the three provisional defaults', META.PREDICTED_LTV,
+     { aeo: 12000, crm: 5000, 'aeo,crm': 15000 });
+  /* COMBINED IS 15000, NOT THE 17000 SUM. predicted_ltv predicts what
+     the PERSON is worth; the sum asserts they buy both at full price
+     with certainty. */
+  ok('product: combined is not the naive sum of the parts',
+     META.PREDICTED_LTV['aeo,crm'] !== META.PREDICTED_LTV.aeo + META.PREDICTED_LTV.crm,
+     String(META.PREDICTED_LTV['aeo,crm']));
+  ok('product: combined is above the higher single product',
+     META.PREDICTED_LTV['aeo,crm'] > Math.max(META.PREDICTED_LTV.aeo, META.PREDICTED_LTV.crm));
+  /* Every catalogue key must have a number, or an event fires without
+     the field and the cohort becomes unreconstructable. */
+  for (const k of Object.keys(META.PRODUCTS)) {
+    ok(`product: ${k} has a predicted_ltv`, Number.isFinite(META.predictedLtvFor(k)), k);
+  }
+  eq('product: an unknown slug has no ltv rather than a wrong one',
+     META.predictedLtvFor('enterprise'), null);
 
   /* AEO is the DEFAULT and the exceptions are listed. An AEO allowlist
      would rot: the form is already on a dozen pages and new SEO landers
@@ -1504,8 +1536,13 @@ function finish() {
     ok('product: it imports the push functions from the same module',
        names.includes('pushFormEventsToMeta') && names.includes('pushStartTrialToMeta'), names.join(','));
   }
+  /* index.js may READ the ltv for the column it persists, but must not
+     declare a catalogue or a number of its own -- the bare identifier,
+     not the meta_predicted_ltv column name that legitimately appears. */
   ok('product: index.js defines no catalogue of its own',
-     !/const PRODUCTS\s*=/.test(src) && !/predicted_ltv/.test(src));
+     !/const PRODUCTS\s*=/.test(src)
+     && !/const PREDICTED_LTV\s*=/.test(src)
+     && !/[^_]predicted_ltv\s*[:=]\s*\d/.test(src));
   /* BOTH ROUTES RESOLVE FROM THE SAME TWO INPUTS, and Meta is handed the
      second one so it resolves identically. Before 15 Sept 2026 product was
      a pure function of the page and this read `{ page_url }`; the moment a

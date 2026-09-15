@@ -613,6 +613,24 @@ async function initDB() {
          a selection from the page would put a guess in a column whose
          whole point is that somebody told us. */
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS product_interest TEXT`,
+      /* WHAT WE ACTUALLY TOLD META THIS LEAD WAS WORTH.
+
+         predicted_ltv is config, and config changes -- that is the
+         point of it being config. So the number on the event and the
+         number in the config will disagree for every historical lead
+         the moment anybody tunes it, and without this column there is
+         no way back: you cannot reconstruct what was reported for a
+         cohort from a value that has since moved.
+
+         That reconstruction is exactly what somebody needs before
+         switching a campaign to value optimisation, which is the only
+         setting under which this number changes delivery at all.
+
+         NULL MEANS NO META EVENT WAS SENT FOR THIS LEAD -- suppressed
+         by the non-ICP layer, a free-email StartTrial skip, or a
+         website that never verified. It does not mean "we sent zero".
+         Never defaulted, for that reason. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS meta_predicted_ltv NUMERIC`,
       /* Free text from the About-your-business textarea, added Sept 2026.
          Capped at 1000 chars at parse time — the same number as the
          maxlength on the textarea, so what the visitor can see on screen is

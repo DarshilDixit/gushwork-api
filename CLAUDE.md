@@ -725,6 +725,36 @@ no mapping table to drift.
   three values — `aeo`, `crm`, `aeo,crm` — added and verified against the
   live org on 15 Sept 2026.
 
+**THE ROUTING SLUG AND THE EVENT SLUG ARE DIFFERENT FUNCTIONS.**
+`resolveProduct` answers "which calendar, which Salesforce picklist value"
+and must be single — `crm` for a both-ticked lead. `resolveEventProduct`
+answers "what did we tell Meta this conversion was", and a both-ticked lead
+is honestly **both**: `content_ids: ['aeo','crm']` on **one** event.
+
+**One event, never two.** Deduplication is documented as cross-source only
+(*"Does not deduplicate events when only using one event source"*), and every
+active ad set optimises on conversion **count** — so two events would count
+one person twice and corrupt exactly what they bid on.
+
+**The Meta event must match `product_interest`, not `product`** — the same
+rule `Product__c` already follows. They agree on every lead except the
+both-ticked one, which is the only place the invariant is visible, and the
+divergence test exists for that row.
+
+**`predicted_ltv` is CONFIG: `META_LTV_AEO` / `META_LTV_CRM` /
+`META_LTV_AEO_CRM`**, defaults 12000 / 5000 / **15000**, all PROVISIONAL.
+Combined is 15000 and **not** the 17000 sum: it predicts what the *person* is
+worth, where the sum would assert they buy both at full price with certainty.
+An unreadable env var falls back to the default and warns once — a `NaN` in a
+payload is worse than a stale number.
+
+**`leads.meta_predicted_ltv` records what was actually sent**, NULL where no
+Meta event fired. The config can move; without this there is no way back to
+what was reported for a cohort, which is exactly what you need before
+switching anything to value optimisation. **That switch is blocked on closed-won
+revenue joined back to leads, not on the config** — see the value-optimisation
+section in `docs/tickets/non-icp-v1-block.md`.
+
 **`resolveProduct` TAKES THE SELECTION AND THE PAGE, AND BOTH THE COLUMN AND
 THE META EVENT MUST BE RESOLVED FROM BOTH.** `buildEventData` read `page_url`
 alone, which was correct only while product was a pure function of the page.

@@ -968,6 +968,56 @@ stops all Meta suppression by the model layer without touching blocking.
 Narrowing it to the two blocking types is a `suppresses` edit in
 `NON_ICP_BUSINESS_TYPES`, one line per industry, no migration.
 
+---
+
+## VALUE OPTIMISATION IS NOT SWITCHABLE ON — and the blocker is not the config
+
+**Added 15 September 2026, alongside the `predicted_ltv` config.** Recorded
+here so nobody reads "the numbers are now env vars" as "we are ready to
+turn value optimisation on".
+
+All three `predicted_ltv` values — AEO 12000, CRM 5000, combined 15000 —
+are now `META_LTV_AEO`, `META_LTV_CRM` and `META_LTV_AEO_CRM` on Railway,
+so real numbers are a variable change rather than a deploy. **All three are
+still PROVISIONAL and none of them is measured.**
+
+**Today they change nothing.** Verified against the Marketing API on
+15 Sept 2026: all seven active ad sets are `optimization_goal =
+OFFSITE_CONVERSIONS`, which is count-based. Value optimisation would show
+as `VALUE`. So `predicted_ltv` is carried, recorded and reported, and it
+does not influence delivery at all.
+
+### The actual prerequisite: closed-won revenue joined back to leads
+
+`predicted_ltv` is a **prediction of what a person is worth**. Switching a
+campaign to value optimisation makes Meta bid against that number — so a
+number nobody has validated against realised revenue is a number that
+reshapes spend on a guess.
+
+We cannot validate it, and the reason is not this repo:
+
+- **`Customer_Status__c` has been unmaintained since June 2026.** It is the
+  field that would say which leads became customers.
+- **There is no revenue in the warehouse to join to.** `gw_prod` has no
+  closed-won amount per account that can be tied back to a form lead —
+  the same gap that blocked the retention analysis.
+
+Until a lead can be joined to what it actually earned, the three numbers
+are placeholders that feel precise. **The work is the revenue join, not
+the config**, and it is out of this repo.
+
+### What the new column buys in the meantime
+
+`leads.meta_predicted_ltv` records **what was actually sent for each
+lead**, NULL where no Meta event fired. Because the config can move, the
+number on a historical event and the number in the config will disagree
+the moment anybody tunes it — and without the column there is no way back
+to what was reported for a cohort. That reconstruction is exactly what
+somebody needs in front of them before flipping a campaign to value.
+
+**So the sequence is: revenue join → validate the three numbers against it
+→ then consider value optimisation.** Not the other way round.
+
 ### The browser walkthrough is DONE — do not re-run it
 
 All of it has now been walked by a human. Recorded so week one does not chase a

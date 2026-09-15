@@ -1469,11 +1469,17 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
      read what content_ids actually went to graph.facebook.com, and
      require them to be the same string.
      ======================================================== */
-  for (const [label, needs, wantProduct] of [
-    ['AI-CRM only on /demo',  'crm',     'crm'],
-    ['both ticked on /demo',  'aeo,crm', 'crm'],
-    ['Lead Gen only on /demo','aeo',     'aeo'],
-    ['nothing ticked',         '',       'aeo'],
+  for (const [label, needs, wantProduct, wantIds, wantLtv] of [
+    ['AI-CRM only on /demo',  'crm',     'crm', ['crm'],        5000],
+    /* THE ONE THAT SEPARATES THE TWO SLUGS. Routing must pick one
+       calendar, so product is 'crm'. The event is honestly BOTH, so
+       content_ids carries both ids -- and it must follow
+       product_interest, not product, exactly as Salesforce already
+       does. These agree on every other lead, which is why this row is
+       the only place the invariant is visible. */
+    ['both ticked on /demo',  'aeo,crm', 'crm', ['aeo', 'crm'], 15000],
+    ['Lead Gen only on /demo','aeo',     'aeo', ['aeo'],        12000],
+    ['nothing ticked',         '',       'aeo', ['aeo'],        12000],
   ]) {
     reset();
     const sid = '00000000-0000-4000-8000-0000000000c' + (needs.length % 9);
@@ -1496,11 +1502,25 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     const ev = lead && lead.data.find((e) => e.event_name === 'Lead');
     const ids = ev && ev.custom_data && ev.custom_data.content_ids;
     ok(`divergence[${label}]: Meta fired a Lead event`, !!ev, JSON.stringify(S.metaPayloads).slice(0, 120));
-    /* THE ASSERTION THAT MATTERS. Not "Meta got something" -- Meta got
-       the SAME thing the column got. */
-    ok(`divergence[${label}]: Meta content_ids match the stored column`,
-       !!ids && ids.length === 1 && ids[0] === stored,
-       'stored=' + stored + ' meta=' + JSON.stringify(ids));
+    /* THE ASSERTION THAT MATTERS, and its shape changed on 15 Sept 2026
+       when both-ticked became one event carrying both ids. It is no
+       longer "Meta matches leads.product" -- routing picks one calendar
+       and the event does not have to. It is "Meta matches what they
+       TICKED", the same rule Salesforce's Product__c already follows. */
+    const storedInterest = ins ? boundCols(ins).product_interest : undefined;
+    ok(`divergence[${label}]: Meta content_ids match what they TICKED`,
+       !!ids && JSON.stringify(ids) === JSON.stringify(wantIds),
+       'ticked=' + storedInterest + ' meta=' + JSON.stringify(ids));
+    ok(`divergence[${label}]: the stored interest is what drove the event`,
+       (storedInterest || null) === (needs || null), String(storedInterest));
+    /* predicted_ltv came from config and is PERSISTED, so a cohort can
+       be reconstructed after somebody tunes the number. */
+    ok(`divergence[${label}]: the event carries predicted_ltv ${wantLtv}`,
+       ev && ev.custom_data && ev.custom_data.predicted_ltv === wantLtv,
+       String(ev && ev.custom_data && ev.custom_data.predicted_ltv));
+    const storedLtv = ins ? Number(boundCols(ins).meta_predicted_ltv) : undefined;
+    ok(`divergence[${label}]: and the row records the SAME number we sent`,
+       storedLtv === wantLtv, 'stored=' + storedLtv + ' sent=' + wantLtv);
   }
 
   loud();

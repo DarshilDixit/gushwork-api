@@ -74,9 +74,72 @@ function normalizePhone(value) {
    upstream events. Changing a number here changes how Meta's algorithm
    weights these conversions, so it is a business decision, not a
    tidy-up. */
+/* ── PREDICTED LTV, IN CONFIG ────────────────────────────────────────
+   ALL THREE ARE PROVISIONAL AND ALL THREE ARE ENV-SETTABLE, so the day
+   the agency or Swapnil comes back with real numbers it is a Railway
+   variable change, not a deploy.
+
+   These are what Meta bids against under value optimisation. Nothing
+   optimises on value today -- every active ad set is
+   OFFSITE_CONVERSIONS, which is count-based, verified against the
+   Marketing API on 15 Sept 2026 -- so today these are recorded and
+   reported and change no delivery. That will stop being true the moment
+   somebody switches a campaign to value, which is why the numbers are
+   worth getting right before anyone does.
+
+   COMBINED IS 15000, NOT 17000. predicted_ltv is a prediction of what
+   this PERSON is worth, not the sum of a price list. 17000 would assert
+   they buy both products at full price with certainty; 15000 carries
+   the genuine upside of wanting both without claiming that. */
+const LTV_DEFAULTS = { aeo: 12000, crm: 5000, 'aeo,crm': 15000 };
+
+/* A misspelt or empty env var must not become NaN in a payload Meta
+   parses -- it would either reject the event or, worse, accept it and
+   learn from nothing. Anything unreadable falls back to the default and
+   says so once. */
+const _ltvWarned = new Set();
+function ltvFromEnv(key, envName) {
+  const raw = process.env[envName];
+  if (raw === undefined || raw === '') return LTV_DEFAULTS[key];
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) {
+    if (!_ltvWarned.has(envName)) {
+      _ltvWarned.add(envName);
+      console.warn(`[Meta CAPI] ${envName}="${raw}" is not a usable number — ` +
+                   `falling back to ${LTV_DEFAULTS[key]} for ${key}.`);
+    }
+    return LTV_DEFAULTS[key];
+  }
+  return n;
+}
+
+const PREDICTED_LTV = {
+  aeo:       ltvFromEnv('aeo',     'META_LTV_AEO'),
+  crm:       ltvFromEnv('crm',     'META_LTV_CRM'),
+  'aeo,crm': ltvFromEnv('aeo,crm', 'META_LTV_AEO_CRM'),
+};
+
+function predictedLtvFor(slug) {
+  return Object.prototype.hasOwnProperty.call(PREDICTED_LTV, slug) ? PREDICTED_LTV[slug] : null;
+}
+
+/* ── THE EVENT CATALOGUE ─────────────────────────────────────────────
+   KEYED BY THE EVENT SLUG, which is not the same as the routing slug.
+   'aeo,crm' is a real key here and never a value of leads.product:
+   routing has to pick one calendar, reporting does not have to pick one
+   product.
+
+   content_ids is an ARRAY by design -- it is how Meta expresses a
+   conversion covering more than one thing -- so a both-ticked lead is
+   ONE event carrying both ids rather than two events. Two events would
+   count one person as two conversions: deduplication is documented as
+   cross-source only ("Does not deduplicate events when only using one
+   event source"), and every active ad set optimises on conversion
+   COUNT, so a duplicate would corrupt exactly what they bid on. */
 const PRODUCTS = {
-  aeo: { content_ids: ['aeo'], predicted_ltv: 12000 },
-  crm: { content_ids: ['crm'], predicted_ltv: 5000  },
+  aeo:       { content_ids: ['aeo'] },
+  crm:       { content_ids: ['crm'] },
+  'aeo,crm': { content_ids: ['aeo', 'crm'] },
 };
 
 /* The exceptions. Everything not listed here is DEFAULT_PRODUCT. */
@@ -121,7 +184,13 @@ function noteDefaultedPath(pathname) {
    Unknown values are DROPPED rather than stored. The input is a form
    field: anything that is not a product we sell is not a product they
    asked for. */
-const PRODUCT_INTEREST_SLUGS = Object.keys(PRODUCTS);
+/* THE TICKABLE PRODUCTS, which is deliberately NOT Object.keys(PRODUCTS)
+   any more: the catalogue has a combined key ('aeo,crm') that is an
+   OUTPUT of ticking both, never something you can tick. Deriving one
+   from the other would let 'aeo,crm' through as a single checkbox
+   value and straight into the restricted Salesforce picklist as a
+   duplicate. */
+const PRODUCT_INTEREST_SLUGS = ['aeo', 'crm'];
 
 function canonicalProductInterest(raw) {
   if (raw == null) return null;
@@ -152,6 +221,21 @@ function resolveProduct({ page_url, product_interest } = {}) {
   const ticked = canonicalProductInterest(product_interest);
   if (ticked) return ticked.includes('crm') ? 'crm' : 'aeo';
   return resolveProductFromPage({ page_url });
+}
+
+/* ── THE EVENT SLUG, WHICH IS NOT THE ROUTING SLUG ───────────────────
+   resolveProduct answers "which calendar, which Salesforce picklist
+   value" and must be single -- it returns crm for a both-ticked lead.
+   This answers "what did we tell Meta this conversion was", and a
+   both-ticked lead is honestly BOTH.
+
+   SAME RULE SALESFORCE ALREADY HAS: what they ticked, falling back to
+   the page when nothing was. So the Meta event matches
+   product_interest, never leads.product, and a test pins that -- it is
+   the invariant that would otherwise drift silently, because the two
+   agree on every lead except the both-ticked one. */
+function resolveEventProduct({ page_url, product_interest } = {}) {
+  return canonicalProductInterest(product_interest) || resolveProductFromPage({ page_url });
 }
 
 function resolveProductFromPage({ page_url } = {}) {
@@ -278,20 +362,22 @@ function buildEventData(eventName, payload, options = {}) {
      array would let one caller mutate every future event. */
   const slug = PRODUCT_EXCLUDED_EVENTS.includes(eventName)
     ? null
-    /* THE SELECTION IS PASSED IN, NOT RE-DERIVED FROM THE PAGE.
-       This function used to read page_url alone, which was safe only
-       while product was a pure function of the page. The moment a
-       checkbox can decide it, a /demo lead who ticks AI-CRM stores
-       'crm' and would have fired 'aeo' -- the column and the event
-       disagreeing with nothing anywhere to reconcile them. A test
-       drives both and fails if they differ. */
-    : resolveProduct({ page_url: payload.page_url, product_interest: payload.product_interest });
+    /* THE SELECTION IS PASSED IN, NOT RE-DERIVED FROM THE PAGE, and it
+       resolves to the EVENT slug rather than the routing one. This read
+       page_url alone until 15 Sept 2026, which was safe only while
+       product was a pure function of the page; a /demo lead ticking
+       AI-CRM would have stored 'crm' and fired 'aeo' with nothing
+       anywhere to reconcile them. */
+    : resolveEventProduct({ page_url: payload.page_url, product_interest: payload.product_interest });
   if (slug) {
     eventData.custom_data.content_ids   = [...PRODUCTS[slug].content_ids];
     eventData.custom_data.content_type  = 'product';
     eventData.custom_data.value         = 0;
     eventData.custom_data.currency      = 'USD';
-    eventData.custom_data.predicted_ltv = PRODUCTS[slug].predicted_ltv;
+    /* From config, so the number is a Railway change rather than a
+       deploy. Never written when it cannot be read as a number. */
+    const ltv = predictedLtvFor(slug);
+    if (ltv != null) eventData.custom_data.predicted_ltv = ltv;
   }
 
   return eventData;
@@ -476,6 +562,9 @@ module.exports = {
   PRODUCT_PATHS,
   PRODUCT_INTEREST_SLUGS,
   canonicalProductInterest,
+  resolveEventProduct,
+  predictedLtvFor,
+  PREDICTED_LTV,
   DEFAULT_PRODUCT,
   PRODUCT_EXCLUDED_EVENTS,
   resolveProduct,
