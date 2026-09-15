@@ -96,14 +96,64 @@ resolve by name — append, insert or reorder all keep working.
 
 ---
 
+## Option C, added 15 Sept after the first build
+
+**Both-ticked is ONE event carrying `content_ids: ['aeo','crm']`** — not
+two. Meta's deduplication is cross-source only, and every active ad set
+optimises on conversion count, so two events would count one person twice
+and corrupt exactly what they bid on.
+
+**The routing slug and the event slug are now different functions.**
+`resolveProduct` stays single (`crm` for both-ticked — one calendar, one
+picklist value). `resolveEventProduct` follows `product_interest`, the same
+rule `Product__c` already had. They agree on every lead except the
+both-ticked one, which is why the divergence test's shape changed: it now
+asserts **Meta matches what they ticked**, not `leads.product`.
+
+**`predicted_ltv` is config** — `META_LTV_AEO` / `META_LTV_CRM` /
+`META_LTV_AEO_CRM`, defaults 12000 / 5000 / 15000, all PROVISIONAL. An
+unreadable env var falls back and warns once; a `NaN` in a payload is worse
+than a stale number. Combined is 15000 and not the 17000 sum, and a test
+asserts it is neither the sum nor below the higher single product.
+
+**`leads.meta_predicted_ltv` persists what was actually sent**, NULL where
+no event fired. Both routes compute it from the same helper the event uses,
+gated on their own Meta conditions, and the divergence test asserts the
+stored number equals the number on the wire.
+
+### Four more mutations, all CAUGHT
+
+| | |
+|---|---|
+| combined collapses to one `content_id` | CAUGHT ×2 |
+| event slug reverts to the routing slug | CAUGHT |
+| combined LTV becomes the naive 17000 sum | CAUGHT ×2 |
+| persisted number stops matching what was sent | CAUGHT |
+
+**One run came back UNMEASURED and was not counted.** A background
+mutation loop was still alive and competing for ports with the foreground
+run, so `test-lead-field-changes` printed no summary. Killed the stray
+process, confirmed the suite healthy, and re-ran all four in the
+foreground. The rule did its job — an unmeasurable run is not a catch.
+
+### Ticket, not built
+
+`docs/tickets/non-icp-v1-block.md` now records that **value optimisation is
+blocked on closed-won revenue joined back to leads, not on the config**.
+`Customer_Status__c` unmaintained since June, no per-account revenue in the
+warehouse — the same gap that blocked the retention analysis. Sequence:
+revenue join → validate the three numbers → then consider the switch.
+
 ## Still open — Darshil's call
 
-**Meta for a both-ticked lead.** Built as option A: `product` is `crm`,
-the event fires `crm`, column and event agree by construction. Option C
-is an addition to PRODUCTS plus one resolver line.
+**The three LTV numbers themselves.** All PROVISIONAL, none measured
+against realised revenue. They are now env vars so the agency's numbers
+are a Railway change — but see the ticket: validating them needs the
+revenue join first.
 
 From the campaign audit: no ad set filters on product or content_ids and
-none uses value optimisation, so this affects reporting, not delivery.
+none uses value optimisation, so today this affects reporting, not
+delivery.
 
 ## Not done
 
