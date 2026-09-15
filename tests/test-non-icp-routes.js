@@ -634,21 +634,10 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
       createElement: () => el, addEventListener() {}, body: el, documentElement: el,
     };
     const errs = [];
-    const sandbox = {
-      document: doc, window: { location: { href: '', search: '' }, addEventListener() {} },
-      location: { href: '', search: '' },
-      localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
-      setInterval: () => 0, clearInterval() {}, setTimeout: (f) => 0, clearTimeout() {},
-      Chart: function () { return { destroy() {}, update() {} }; },
-      AbortSignal: { timeout: () => undefined },
-      console: { log() {}, warn() {}, error() {} },
-      /* Every loader ends up here. Returning a plausible shape for each
-         means each render path actually RUNS rather than bailing early --
-         a loader that never reaches its renderer cannot catch a scope
-         error in that renderer. */
-      fetch: async () => ({
-        ok: true, status: 200, text: async () => '{}',
-        json: async () => ({
+    /* THE PAYLOAD, NAMED. The assertions below read numbers back out
+       of the painted HTML and compare them to this object, so it has
+       to be reachable by name rather than inlined into the stub. */
+    const sandboxPayload = {
           total: 1, page: 1, pages: 1,
           leads: [{ session_id: '00000000-0000-4000-8000-00000000000a', email: 'a@b.com',
                     first_name: 'A', last_name: 'B', company: 'C', sell_to: 'B2B',
@@ -670,8 +659,17 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
             { key: 'checked_clear', label: 'Checked, no action',   n: 1, pct: 25 },
             { key: 'not_decided',   label: 'Not decided',          n: 1, pct: null },
           ] },
-          industries: [{ business_type: 'home_services', label: 'Home services / trades',
-                         action: 'meta', leads: 2, domains: 2, median_confidence: 0.84 }],
+          industries: [
+            { key: 'blocked_list', label: 'Blocked by the brand-domain list', note: 'n', leads: 7,
+              rows: [{ business_type: 'insurance', label: 'Insurance', uncategorised: false,
+                       leads: 5, domains: 2, median_confidence: 0.99 },
+                     { business_type: '_uncategorised', label: 'Not categorised', uncategorised: true,
+                       leads: 2, domains: 0, median_confidence: null }] },
+            { key: 'blocked_model', label: 'Blocked by the model', note: 'n', leads: 0, rows: [] },
+            { key: 'meta_only', label: 'Meta withheld by the model', note: 'n', leads: 3,
+              rows: [{ business_type: 'home_services', label: 'Home services / trades',
+                       uncategorised: false, leads: 3, domains: 3, median_confidence: 0.84 }] },
+          ],
           decisions: [{ session_id: 's1', created_at: new Date().toISOString(),
                         email: 'a@kw.com', website: 'https://kw.com', company: 'KW',
                         booked: true, product: 'aeo', action: 'blocked_list',
@@ -681,8 +679,14 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
                         reason: 'brokerage', model_id: 'm', prompt_version: 'v1-test',
                         page_url_used: 'https://kw.com', page_text_chars: 900,
                         checked_at: new Date().toISOString() }],
-          cache: { domains: 100, judged: 90, unreadable: 10,
-                   byType: [{ business_type: 'real_estate', label: 'Real estate', action: 'block', domains: 12 }] },
+          /* TOP-LEVEL, a sibling of scrape. It was read as d.scrape.cache
+             by mdlScrapeHtml, which rendered "0 companies classified all
+             time" above a table listing hundreds. The numbers below are
+             distinctive on purpose so the assertions can find them in
+             the painted HTML rather than merely checking it is not an
+             error message. */
+          cache: { domains: 2975, judged: 2965, unreadable: 10,
+                   byType: [{ business_type: 'real_estate', label: 'Real estate', action: 'block', domains: 141 }] },
           scrape: {
             window: { ok: 9, unreachable: 1, thin: 0, other: 0, no_verdict: 2, total: 12,
                       answered: 10, unreadable_pct: 10 },
@@ -695,7 +699,22 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
                          lastOkAt: Date.now(), lastErrorAt: null, lastError: null },
             notes: ['Latest outcome per domain, not a historical rate.'],
           },
-        }),
+    };
+    const sandbox = {
+      document: doc, window: { location: { href: '', search: '' }, addEventListener() {} },
+      location: { href: '', search: '' },
+      localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+      setInterval: () => 0, clearInterval() {}, setTimeout: (f) => 0, clearTimeout() {},
+      Chart: function () { return { destroy() {}, update() {} }; },
+      AbortSignal: { timeout: () => undefined },
+      console: { log() {}, warn() {}, error() {} },
+      /* Every loader ends up here. Returning a plausible shape for each
+         means each render path actually RUNS rather than bailing early --
+         a loader that never reaches its renderer cannot catch a scope
+         error in that renderer. */
+      fetch: async () => ({
+        ok: true, status: 200, text: async () => '{}',
+        json: async () => sandboxPayload,
       }),
     };
     let evalErr = null;
@@ -785,6 +804,61 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
         ok(`dashboard: ${id} rendered content, not an error`,
            !!html && !/Could not load|Failed:|is not defined|is not a function/i.test(html),
            id + ' -> ' + String(html).slice(0, 140));
+      }
+
+      /* ── THE NUMBERS ON SCREEN MUST BE THE NUMBERS IN THE PAYLOAD ──
+         EVERYTHING ABOVE PASSES ON A CONFIDENT ZERO. On 15 Sept 2026
+         the standing-cache summary rendered "0 companies classified
+         all time — 0 judged, 0 currently unreadable" directly above a
+         table listing 224 home services, because mdlScrapeHtml read
+         d.scrape.cache when cache is a top-level field. Well-formed,
+         non-empty, not an error, and wrong.
+
+         "Did it render" cannot see that. The only thing that can is
+         reading the numbers back out of the painted HTML and comparing
+         them to what was handed in. The stub payload uses distinctive
+         values (2975 / 2965 / 141) precisely so they cannot match by
+         accident. */
+      {
+        const P = sandboxPayload;
+        const has = (id, n) => new RegExp('(^|[^0-9])' + n + '([^0-9]|$)').test(String(painted[id] || ''));
+
+        ok('numbers: the cache summary prints the payload company count',
+           has('mdl-scrape', P.cache.domains), 'want ' + P.cache.domains + ' in ' + String(painted['mdl-scrape']).slice(0, 200));
+        ok('numbers: the cache summary prints the payload judged count',
+           has('mdl-scrape', P.cache.judged), 'want ' + P.cache.judged);
+        ok('numbers: the cache summary prints the payload unreadable count',
+           has('mdl-scrape', P.cache.unreadable), 'want ' + P.cache.unreadable);
+        ok('numbers: the cache TABLE prints its own per-type count',
+           has('mdl-cache', P.cache.byType[0].domains), 'want ' + P.cache.byType[0].domains);
+        /* The bug in one assertion: summary and table disagreeing is
+           the symptom, and they are two different readers of one field. */
+        ok('numbers: the summary is not zero while the table has rows',
+           !/0 companies classified all time/.test(String(painted['mdl-scrape'] || '')),
+           String(painted['mdl-scrape']).slice(0, 200));
+
+        for (const r of P.ladder.rows) {
+          ok(`numbers: the ladder prints ${r.key} = ${r.n}`, has('mdl-ladder', r.n),
+             'want ' + r.n + ' for ' + r.key);
+        }
+        ok('numbers: the ladder prints the window total',
+           has('mdl-ladder', P.ladder.total), 'want ' + P.ladder.total);
+
+        for (const g of P.industries) {
+          ok(`numbers: the ${g.key} group prints its lead total (${g.leads})`,
+             has('mdl-ind', g.leads), 'want ' + g.leads + ' for ' + g.key);
+        }
+        /* THE EMPTY GROUP RENDERS AND SAYS SO. This is how the tab
+           states that the model has blocked nobody, so it must survive
+           being empty rather than vanishing. */
+        ok('numbers: an empty group still renders, saying none',
+           /Blocked by the model[\s\S]*?None in this window/.test(String(painted['mdl-ind'] || '')),
+           String(painted['mdl-ind']).slice(0, 400));
+
+        ok('numbers: the scrape panel prints the window unreadable rate',
+           has('mdl-scrape', P.scrape.window.unreadable_pct), 'want ' + P.scrape.window.unreadable_pct);
+        ok('numbers: the scrape panel prints never-tried separately',
+           has('mdl-scrape', P.scrape.window.no_verdict), 'want ' + P.scrape.window.no_verdict);
       }
 
       for (const [id, html] of painted_) {
@@ -1107,7 +1181,14 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
       L({ session_id: 'f', email: 'f@untouched.test', website: 'https://untouched.test' }),
       /* OURS. Counted in the ladder like everything else, and reported
          alongside so a quotable figure exists. */
-      L({ session_id: 'g', email: 'agent@allstate.com', website: 'https://allstate.com',
+      /* OURS, and the borrowing case in one row. Blocked on
+         allstate.com, which has NO verdict -- while carrying
+         saas.test as a website, which HAS one (software_technology
+         0.95). If the deciding-domain rule ever regresses to "any
+         candidate domain with a verdict", this lead is filed under
+         Software / technology instead of uncategorised, and the
+         assertion below says so by name. */
+      L({ session_id: 'g', email: 'agent@allstate.com', website: 'https://saas.test',
           non_icp_blocked: true, non_icp_source: 'domain_list', non_icp_reason: 'allstate.com' }),
     ];
     S.reportVerdicts = [
@@ -1188,27 +1269,62 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
        table read "Insurance 19" in a week with five insurance blocks --
        two claims in one column, with the explanation in small print
        under the number that actually gets quoted. */
-    const ind = {};
-    for (const i of d.industries || []) ind[i.business_type] = i;
-    ok('report: real_estate is shown as blocking',
-       ind.real_estate && ind.real_estate.action === 'block', JSON.stringify(Object.keys(ind)));
-    ok('report: home_services is shown as Meta-only',
-       ind.home_services && ind.home_services.action === 'meta', JSON.stringify(Object.keys(ind)));
+    const G = {};
+    for (const g of d.industries || []) G[g.key] = g;
+    const rowsOf = (k) => Object.fromEntries(((G[k] || {}).rows || []).map((r) => [r.business_type, r]));
+
+    /* ALL THREE GROUPS ALWAYS PRESENT, empty ones included. An empty
+       "Blocked by the model" is the clearest statement on the tab that
+       the model has turned nobody away, and a group that vanishes when
+       empty cannot make it. */
+    ok('report: all three source groups are present',
+       !!G.blocked_list && !!G.blocked_model && !!G.meta_only, JSON.stringify(Object.keys(G)));
+    /* THE SPLIT ITSELF. The same business type lands in two different
+       groups depending on what decided -- which is the whole point:
+       "Real estate 2 / Blocks" hid that one was the list and one was
+       the model, and in production the model column is zero. */
+    ok('report: a list block and a model block of the SAME type are in different groups',
+       rowsOf('blocked_list').real_estate && rowsOf('blocked_list').real_estate.leads === 1
+       && rowsOf('blocked_model').real_estate && rowsOf('blocked_model').real_estate.leads === 1,
+       JSON.stringify({ list: G.blocked_list.rows, model: G.blocked_model.rows }));
+    ok('report: each group carries its own lead total',
+       G.blocked_list.leads === 2 && G.blocked_model.leads === 1 && G.meta_only.leads === 1,
+       JSON.stringify(Object.values(G).map((g) => [g.key, g.leads])));
+    ok('report: home_services sits under the Meta-withheld group',
+       !!rowsOf('meta_only').home_services, JSON.stringify(G.meta_only));
+
     /* THE ONE THAT PROVES THE RESCOPE. saas.test was judged and cleared
-       -- a cached verdict, no action taken -- so it must NOT appear in a
-       table headed "what we acted on". */
-    ok('report: a judged-but-not-acted-on industry is ABSENT from the table',
-       !ind.software_technology, JSON.stringify(Object.keys(ind)));
-    /* Every row in it is a lead something happened to, so the leads
-       column sums to the three actioned ladder rows. */
-    const indLeads = (d.industries || []).reduce((a, i) => a + i.leads, 0);
-    ok('report: industry leads sum to the acted-on ladder rows',
+       -- a cached verdict, no action taken -- so it appears in no group. */
+    ok('report: a judged-but-not-acted-on industry is ABSENT from every group',
+       !Object.values(G).some((g) => g.rows.some((r) => r.business_type === 'software_technology')),
+       JSON.stringify(Object.values(G).map((g) => g.rows.map((r) => r.business_type))));
+
+    /* Every row is a lead something happened to, so the group totals
+       sum to the three actioned ladder rows. */
+    const indLeads = (d.industries || []).reduce((a, g) => a + g.leads, 0);
+    ok('report: group leads sum to the acted-on ladder rows',
        indLeads === by.blocked_list + by.blocked_model + by.meta_only,
        indLeads + ' vs ' + (by.blocked_list + by.blocked_model + by.meta_only));
-    /* A brand-list block on an unreadable domain has no business type
-       and must still be counted somewhere rather than dropped. */
-    ok('report: a block with no readable verdict gets its own row',
-       ind._no_verdict && ind._no_verdict.leads === 1, JSON.stringify(Object.keys(ind)));
+
+    /* ── THE INDUSTRY COMES FROM THE DECIDING DOMAIN, OR NOWHERE ──
+       remax.test blocked Becky and has NO verdict row, so her row must
+       say "not categorised". Before 15 Sept 2026 the code fell back to
+       any candidate domain with a verdict, which filed three
+       farmersagent.com blocks under Insurance on the strength of the
+       lead's WEBSITE being farmers.com. A block under the wrong
+       industry is something somebody acts on without knowing. */
+    const unc = rowsOf('blocked_list')._uncategorised;
+    ok('report: a block whose deciding domain has no verdict is NOT categorised',
+       unc && unc.leads === 1 && unc.uncategorised === true, JSON.stringify(G.blocked_list));
+    ok('report: an uncategorised row carries no confidence to read as one',
+       unc && unc.median_confidence === null, JSON.stringify(unc));
+    /* AND IT DOES NOT BORROW. Lead g is blocked on allstate.com (no
+       verdict) while carrying saas.test as its website (a real verdict,
+       software_technology). The fallback would file it under Software /
+       technology; the deciding-domain rule leaves it uncategorised. */
+    ok('report: a block does NOT borrow the industry of another domain on the lead',
+       !Object.values(G).some((g) => g.rows.some((r) => r.business_type === 'software_technology')),
+       JSON.stringify(Object.values(G).map((g) => [g.key, g.rows.map((r) => r.business_type)])));
 
     /* THE CACHE IS A SEPARATE CLAIM, in its own block, counted in
        companies and carrying no rate. */
@@ -1249,6 +1365,34 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     ok('report: the scrape panel says it is latest-outcome, not a rate',
        (d.scrape.notes || []).some((n) => /not a historical rate/i.test(n)),
        JSON.stringify(d.scrape.notes));
+    /* ── AN EMPTY GROUP STILL COMES BACK ──────────────────────────
+       Driven on its own fixture, because the one above has all three
+       groups populated -- so a mutation dropping empty groups is a
+       no-op against it and SURVIVED the whole suite when it was tried.
+
+       This is the property the split exists for: "Blocked by the model
+       - none in this window" is how the tab states that the model has
+       turned nobody away, and in production that is the true state. A
+       group that disappears when empty cannot say it, and its absence
+       reads as "no data" rather than "zero". */
+    {
+      const only = { ...S };
+      S.reportLeads = [L({ session_id: 'z', email: 'z@kw.test', website: 'https://kw.test',
+        non_icp_blocked: true, non_icp_source: 'domain_list', non_icp_reason: 'kw.test' })];
+      const r2 = await realFetch(BASE + '/monitor/non-icp?days=7&token=stub', { signal: AbortSignal.timeout(20000) });
+      const d2 = await r2.json();
+      const keys2 = (d2.industries || []).map((g) => g.key);
+      ok('report: all three groups return even when two are empty',
+         keys2.length === 3 && keys2.includes('blocked_list')
+         && keys2.includes('blocked_model') && keys2.includes('meta_only'),
+         JSON.stringify(keys2));
+      const empty = (d2.industries || []).filter((g) => g.leads === 0);
+      ok('report: the empty groups report zero rather than being absent',
+         empty.length === 2 && empty.every((g) => g.rows.length === 0),
+         JSON.stringify((d2.industries || []).map((g) => [g.key, g.leads])));
+      S.reportLeads = only.reportLeads;
+    }
+
     ok('report: the flags block says what is actually switched on',
        d.flags && typeof d.flags.llm_block === 'boolean' && typeof d.flags.llm_meta === 'boolean',
        JSON.stringify(d.flags));

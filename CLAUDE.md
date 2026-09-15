@@ -553,6 +553,26 @@ arriving in three new disguises, so the disguises are worth naming:
 | Blocked tab: `leadRowsHtml is not defined` | A **scope** error. The function was declared inside `loadLeads`, so All Leads could see it and Blocked could not. Valid syntax, correct text, wrong scope |
 | A Meta guard that never fired | An `if (false)` around it moves no source offset, so every ordering assertion still passed |
 
+**A CONFIDENT ZERO PASSES EVERY STRUCTURAL CHECK.** On 15 Sept 2026 the
+Model tab's standing-cache summary rendered **"0 companies classified all
+time — 0 judged, 0 currently unreadable"** directly above a table listing
+224 home services, 164 insurance and 141 real estate. `mdlScrapeHtml` read
+`d.scrape.cache`; `cache` is a **top-level** field of the payload. One
+reader wrong, one right, in the same feature.
+
+Every check passed. The element was painted, the content was non-empty, it
+was not an error string, it parsed, the loader threw nothing. The number was
+simply wrong — and a wrong number on a dashboard is the failure mode the
+dashboard exists to prevent.
+
+**So: anywhere a number is displayed, assert it MATCHES THE PAYLOAD, not
+that it exists.** Read the value back out of the painted HTML and compare it
+to the object that was handed in, with fixture values distinctive enough
+that they cannot match by accident. `tests/test-non-icp-routes.js` does this
+for every number on the Model tab. "It rendered" is the same class of claim
+as "we asserted it alerts" — it is one level short of the thing you actually
+care about, and the gap is where this bug lived.
+
 **The fix is not "write more assertions", it is "drive the thing".**
 `tests/test-non-icp-routes.js` boots the real app and (a) drives all eight
 `/monitor/*` routes for a 200, and (b) **evaluates the dashboard's inline
@@ -877,6 +897,29 @@ them is what caused this, and it would also send a namespaced key to
 `/monitor/lead-changes` as a session id. Every caller passes a distinct
 namespace and a test pins it.
 
+**The Model tab keeps ONE claim per number, and its industry table is
+SPLIT BY WHAT DECIDED.** "Insurance 8 / Blocks" read as the model having
+categorised and blocked eight leads, while the ladder beside it said
+`blocked_model: 0` — the list had done all ten. Three groups now render
+always, **empty ones included**, because an empty "Blocked by the model"
+is the clearest statement on the tab that the model has turned nobody away.
+
+**And the industry comes from the domain that ACTUALLY BLOCKED, or from
+nowhere.** It used to fall back to any candidate domain with a verdict,
+which filed three `farmersagent.com` blocks (no verdict for that domain)
+under Insurance because the lead's *website* was `farmers.com`. Harmless
+there — both are insurance — but on a lead whose email is a brokerage and
+whose website is a software company it files a block under the wrong
+industry, and a wrong industry here is something somebody acts on without
+knowing it is wrong. A block we cannot categorise now says **"not
+categorised"** rather than borrowing.
+
+**Blocked counts: three different units, and every label says which.**
+Overview's big number is **leads**, its sub-line is **people**, and the
+Blocked tab's "excluding our own tests" is **leads** again. 10 leads are 6
+people because five of those leads are one address of ours. The three sat
+adjacent with no units and invited subtraction.
+
 **The Model tab keeps ONE claim per number.** Its industry table counts
 **leads acted on in the window** and nothing else; the standing cache is a
 separate block counted in **companies, all time, with no rate**. They were
@@ -984,6 +1027,21 @@ lead. The database layer is one indexed lookup
 present, so organic leads pay nothing. The API call is the slow part and stays
 deferred; `upgradePartnerHearAboutUs` corrects the row afterwards — in our
 table, on the AWS mirror, and in Salesforce where the AE is looking.
+
+**A BLOCKED LEAD'S SLACK POST IS ITS ONLY HUMAN-FACING RECORD**, which
+changes what an unresolved partner key costs there. Partner identity
+resolves in three layers — memory, the database, then the API — and only
+the first two are awaited before Slack fires. For the **first ever** lead
+from a new partner both legitimately miss, so the post gets the raw hex
+key; the deferred API call then corrects the row, the mirror and
+Salesforce. For a normal lead that is fine, because Salesforce is where the
+AE looks. A blocked lead is deliberately **not** pushed to Salesforce and
+is **not** on the SDR list, so the one surface the upgrade cannot reach is
+the only surface there is. `slackPartnerHearLabel` therefore relabels the
+unresolved case in words — **display only**: the stored column keeps the
+exact `Partner - <key>` placeholder, because `upgradePartnerHearAboutUs`
+matches on that precise string and rewriting it would leave the row holding
+the key forever.
 
 **One display chain, three surfaces: name → email → raw key.**
 `partnerDisplayName()` is used by Slack, the dashboard and `hear_about_us` so

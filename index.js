@@ -3728,7 +3728,7 @@ app.get('/monitor', (req, res) => {
   '<div class="mc" title="People whose form reached Step 2 (completed) on at least one of their sessions."><div class="ml">People completed</div><div class="mv" id="m-comp">&#8212;</div><div class="ms" id="m-cpct">&#8212;</div></div>' +
   '<div class="mc" title="People with a booking on at least one of their sessions."><div class="ml">People booked</div><div class="mv" id="m-book">&#8212;</div><div class="ms" id="m-bpct">&#8212;</div></div>' +
   '<div class="mc" title="People marked disqualified (B2C / Mixed) on at least one session."><div class="ml">Disqualified</div><div class="mv" id="m-disq">&#8212;</div><div class="ms" id="m-dsq">B2C / Mixed</div></div>' +
-  '<div class="mc" title="Leads stopped before the calendar by the real-estate / insurance brand-domain list. These are NOT removed from any other number on this page &#8212; they are still leads and still counted in Total, Completed and the stages. Click through to the Blocked tab to see them." style="cursor:pointer" onclick="showTab(\'blocked\')"><div class="ml">Blocked &#8212; Non-ICP</div><div class="mv" id="m-nonicp">&#8212;</div><div class="ms" id="m-nonicp-sub">still counted in every total</div></div>' +
+  '<div class="mc" title="LEADS stopped before the calendar by the brand-domain list, with the number of distinct PEOPLE underneath. One person who submitted five times is five leads and one person, so those two are not comparable &#8212; and neither is comparable to the Blocked tab&#39;s &quot;excluding our own tests&quot;, which is leads again. These are NOT removed from any other number on this page. Click through to the Blocked tab." style="cursor:pointer" onclick="showTab(\'blocked\')"><div class="ml">Blocked &#8212; Non-ICP</div><div class="mv" id="m-nonicp">&#8212;</div><div class="ms" id="m-nonicp-sub">still counted in every total</div></div>' +
   /* THE 4.2% NOBODY COULD SEE. A flagged lead is NOT blocked -- it books,
      it reaches Salesforce, it gets dialled -- and the only thing that
      changes is that Meta stops hearing about it. The label has to say all
@@ -3896,14 +3896,13 @@ app.get('/monitor', (req, res) => {
   '<div class="sl">What the layer did</div>' +
   '<div class="card" style="padding:14px;margin-bottom:16px" id="mdl-ladder"><div class="nd">Loading...</div></div>' +
 
-  '<div class="sl">By industry &#8212; what we ACTED ON</div>' +
+  '<div class="sl">What we ACTED ON &#8212; by what acted</div>' +
   '<div class="card" style="padding:12px 14px;margin-bottom:8px;font-size:12px;color:#666">' +
-  'Leads blocked or Meta-suppressed in this window, and nothing else. ' +
-  'This used to count every lead whose domain had a cached verdict, which mixed the week&#39;s activity with Monday&#39;s backfill of 2,937 historical domains ' +
-  '&#8212; so it read &quot;Insurance 19&quot; in a week when five insurance leads were blocked. The standing cache is further down, counted in companies.</div>' +
-  '<div class="card" style="padding:0;overflow:hidden;margin-bottom:16px"><div style="overflow-x:auto"><table><thead><tr>' +
-  '<th>Industry</th><th>What it does</th><th>Leads acted on</th><th>Companies</th><th>Median confidence</th>' +
-  '</tr></thead><tbody id="mdl-ind"><tr><td colspan="5" class="nd">Loading...</td></tr></tbody></table></div></div>' +
+  'Leads blocked or Meta-suppressed in this window, and nothing else &#8212; grouped by the mechanism that decided. ' +
+  'The industry on each row comes from the model&#39;s verdict for <b>the domain that actually blocked them</b>, and nothing else: ' +
+  'where there is no verdict for that domain the row says <b>not categorised</b> rather than borrowing another domain on the lead. ' +
+  'The standing cache is further down, counted in companies.</div>' +
+  '<div id="mdl-ind"><div class="card" style="padding:14px"><div class="nd">Loading...</div></div></div>' +
 
   '<div class="sl">Every decision, with the evidence</div>' +
   '<div class="card" style="padding:12px 14px;margin-bottom:8px;font-size:12px;color:#666">' +
@@ -4057,8 +4056,37 @@ app.get('/monitor', (req, res) => {
      They are exhaustive by construction and this is what makes that
      checkable rather than claimed. */
   'return h+"<div style=\\"padding-top:10px;font-size:12px;color:#888\\">"+l.total+" leads in the window. The five rows are mutually exclusive and sum to that total."+(l.ours?" "+l.ours+" of them are our own test submissions \\u2014 counted here like everything else, and marked on each row.":"")+"</div>";}' +
-  'function mdlScrapeHtml(s){if(!s)return "<div class=\\"nd\\">No data</div>";' +
-  'var w=s.window||{},p=s.inProcess||{},c=s.cache||{};' +
+  /* TWO ARGUMENTS. `cache` is a TOP-LEVEL field of the payload, a
+     sibling of `scrape` -- it was read as s.cache here, which is always
+     undefined, so the summary rendered "0 companies classified all
+     time" directly above a table listing 224 home services. One reader
+     right, one wrong, in the same feature.
+
+     Passing it explicitly rather than reaching for d inside the helper
+     keeps the helper a pure function of its arguments, which is what
+     lets the test call it with a known payload and compare the numbers
+     it prints against that payload. */
+  /* THREE GROUPS, ALWAYS RENDERED, EMPTY ONES INCLUDED. An empty
+     "Blocked by the model" group saying "none" is the clearest
+     statement on this tab that the model has turned nobody away, and a
+     group that disappears when empty cannot make it. */
+  'function mdlGroupsHtml(gs){if(!gs.length)return "<div class=\\"card\\" style=\\"padding:14px\\"><div class=\\"nd\\">Nothing acted on in this window.</div></div>";' +
+  'return gs.map(function(g){' +
+  'var head="<div style=\\"padding:12px 14px;border-bottom:1px solid #f2f2f2\\"><div style=\\"font-size:13px;font-weight:600\\">"+esc(g.label)+" <span style=\\"color:#888;font-weight:400\\">\\u00b7 "+g.leads+" lead"+(g.leads===1?"":"s")+"</span></div>"+' +
+  '"<div class=\\"ms\\">"+g.note+"</div></div>";' +
+  'if(!g.rows.length)return "<div class=\\"card\\" style=\\"padding:0;overflow:hidden;margin-bottom:12px\\">"+head+' +
+  '"<div style=\\"padding:12px 14px;color:#888;font-size:13px\\">None in this window.</div></div>";' +
+  'var body=g.rows.map(function(r){' +
+  /* An uncategorised row is the ABSENCE of a verdict, not a category
+     the model returned, so it is styled as absence and carries no
+     confidence figure to read as one. */
+  'return "<tr><td"+(r.uncategorised?" style=\\"color:#888;font-style:italic\\"":"")+">"+esc(r.label)+"</td>"+' +
+  '"<td>"+r.leads+"</td><td>"+(r.domains||"\\u2014")+"</td><td>"+(r.uncategorised?"\\u2014":mdlConf(r.median_confidence))+"</td></tr>";}).join("");' +
+  'return "<div class=\\"card\\" style=\\"padding:0;overflow:hidden;margin-bottom:12px\\">"+head+' +
+  '"<div style=\\"overflow-x:auto\\"><table><thead><tr><th>Industry</th><th>Leads</th><th>Companies</th><th>Median confidence</th></tr></thead><tbody>"+body+"</tbody></table></div></div>";' +
+  '}).join("");}' +
+  'function mdlScrapeHtml(s,c){if(!s)return "<div class=\\"nd\\">No data</div>";' +
+  'var w=s.window||{},p=s.inProcess||{};c=c||{};' +
   /* ONE RATE, over ONE population: the domains this window's leads were
      actually judged on. It used to be computed over the whole cache and
      read 0.3% against a live rate near 26%, because 2,937 of those rows
@@ -4095,10 +4123,7 @@ app.get('/monitor', (req, res) => {
   '" &#183; "+esc(f.model||"?")+" &#183; floor "+mdlConf(f.confidence_floor)+" &#183; prompt "+esc(f.prompt_version||"?")+' +
   '(d.truncated?" <span style=\\"color:#b91c1c\\">&#183; window capped &#8212; counts are a floor, not a total</span>":"");' +
   'document.getElementById("mdl-ladder").innerHTML=mdlLadderHtml(d.ladder);' +
-  'var ind=d.industries||[];' +
-  'document.getElementById("mdl-ind").innerHTML=ind.length?ind.map(function(i){' +
-  'return "<tr><td>"+esc(i.label)+"</td><td>"+mdlChip(i.action)+"</td><td>"+i.leads+"</td><td>"+i.domains+"</td><td>"+mdlConf(i.median_confidence)+"</td></tr>";' +
-  '}).join(""):"<tr><td colspan=\\"5\\" class=\\"nd\\">Nothing classified in this window.</td></tr>";' +
+  'document.getElementById("mdl-ind").innerHTML=mdlGroupsHtml(d.industries||[]);' +
   'var dec=d.decisions||[];' +
   'document.getElementById("mdl-dec").innerHTML=dec.length?dec.map(function(x){var sid=esc(x.session_id);' +
   'return "<tr><td class=\\"xbtn\\" onclick=\\"toggleRow(\'md-"+sid+"\')\\">&#9658;</td>"+' +
@@ -4117,7 +4142,7 @@ app.get('/monitor', (req, res) => {
   '"<b>Decided by:</b> "+esc(x.source||"\\u2014")+" &#183; <b>Model:</b> "+esc(x.model_id||"\\u2014")+" &#183; <b>Prompt:</b> "+esc(x.prompt_version||"\\u2014")+"<br>"+' +
   '"<b>Page read:</b> "+esc(x.page_url_used||"\\u2014")+" ("+(x.page_text_chars==null?"\\u2014":x.page_text_chars+" chars")+") &#183; <b>Decided at:</b> "+et(x.checked_at)+' +
   '"</td></tr>";}).join(""):"<tr><td colspan=\\"9\\" class=\\"nd\\">Nothing was blocked or suppressed in this window.</td></tr>";' +
-  'document.getElementById("mdl-scrape").innerHTML=mdlScrapeHtml(d.scrape);' +
+  'document.getElementById("mdl-scrape").innerHTML=mdlScrapeHtml(d.scrape,d.cache);' +
   'var cb=(d.cache&&d.cache.byType)||[];' +
   'document.getElementById("mdl-cache").innerHTML=cb.length?cb.map(function(i){' +
   'return "<tr><td>"+esc(i.label)+"</td><td>"+mdlChip(i.action)+"</td><td>"+i.domains+"</td></tr>";' +
@@ -4133,7 +4158,7 @@ app.get('/monitor', (req, res) => {
      which is why the route test asserts on what was painted and not on
      whether something threw. */
   '}catch(e){document.getElementById("mdl-ladder").innerHTML="<div class=\\"nd\\" style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</div>";' +
-  'document.getElementById("mdl-ind").innerHTML="<tr><td colspan=\\"5\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</td></tr>";' +
+  'document.getElementById("mdl-ind").innerHTML="<div class=\\"card\\" style=\\"padding:14px\\"><div class=\\"nd\\" style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</div></div>";' +
   'document.getElementById("mdl-dec").innerHTML="<tr><td colspan=\\"9\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</td></tr>";' +
   'document.getElementById("mdl-unread").innerHTML="<tr><td colspan=\\"6\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</td></tr>";' +
   'document.getElementById("mdl-cache").innerHTML="<tr><td colspan=\\"3\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</td></tr>";}}' +
@@ -4150,7 +4175,11 @@ app.get('/monitor', (req, res) => {
   /* A count we could not compute is never rendered as a number. If the
      second fetch failed, the tab says so instead of silently showing
      the total twice. */
-  'document.getElementById("blk-count").textContent=d.total+" blocked"+(d0?(" \\u00b7 "+d0.total+" excluding our own tests"):" \\u00b7 (could not separate our own tests)");' +
+  /* EVERY FIGURE CARRIES ITS UNIT. "10 blocked" and "5 excluding our
+     own tests" are both LEADS; the Overview card's "6 people" is not
+     comparable to either, and saying so here is cheaper than expecting
+     anyone to remember it. */
+  'document.getElementById("blk-count").textContent=d.total+" lead"+(d.total===1?"":"s")+" blocked"+(d0?(" \\u00b7 "+d0.total+" leads excluding our own tests"):" \\u00b7 (could not separate our own tests)");' +
   /* "b", not the default. All Leads renders the same builder into a
      panel that is still in the document, so an unscoped id here is the
      duplicate that broke this tab. */
@@ -4907,8 +4936,14 @@ app.get('/monitor', (req, res) => {
   'set("m-comp",d.peopleCompleted);set("m-cpct",pct(d.peopleCompleted,d.peopleTotal)+" of people \\u00B7 "+d.completed+" sessions");' +
   'set("m-book",d.peopleBooked);set("m-bpct",pct(d.peopleBooked,d.peopleCompleted)+" of completed \\u00B7 "+d.booked+" sessions");' +
   'set("m-disq",d.peopleDisqualified);set("m-dsq","B2C / Mixed \\u00B7 "+d.disqualified+" sessions");' +
-  'set("m-nonicp",d.nonIcpBlocked);set("m-nonicp-sub",(d.peopleNonIcp||0)+" people \\u00B7 still counted in every total");' +
-  'set("m-metaonly",d.nonIcpMetaOnly);set("m-metaonly-sub",(d.peopleMetaOnly||0)+" people \\u00B7 booked and dialled as normal");' +
+  /* THE UNIT IS IN THE TEXT, on both halves. The big number is LEADS
+     and the sub-line is PEOPLE, and until 15 Sept 2026 neither said so.
+     Next to the Blocked tab's "5 excluding our own tests" -- which is
+     leads -- "6 people" read as a comparable figure one greater. It is
+     not: 10 leads are 6 people because five of those leads are one
+     address of ours. */
+  'set("m-nonicp",d.nonIcpBlocked);set("m-nonicp-sub",(d.nonIcpBlocked||0)+" leads \\u00B7 "+(d.peopleNonIcp||0)+" people \\u00B7 counted in every total");' +
+  'set("m-metaonly",d.nonIcpMetaOnly);set("m-metaonly-sub",(d.nonIcpMetaOnly||0)+" leads \\u00B7 "+(d.peopleMetaOnly||0)+" people \\u00B7 booked and dialled as normal");' +
   'renderProductRow(d.productBreakdown);' +
   'set("m-nb",d.peopleNoBooking);set("m-nbs",d.completedNoBookingSessions+" completed sessions w/o booking");' +
   'set("m-rec",d.recoveredBookings);set("m-pend",d.pendingPartials);set("m-mail",d.loopsSent);' +
@@ -8302,6 +8337,48 @@ function partnerDisplayName(identity, partnerKey) {
   return (identity && identity.name) || (identity && identity.email) || partnerKey || null;
 }
 
+/* WHAT A HUMAN SHOULD READ WHEN THE NAME HAS NOT RESOLVED YET.
+
+   DISPLAY ONLY. The stored hear_about_us keeps the exact
+   "Partner - <key>" placeholder, because upgradePartnerHearAboutUs
+   matches on that precise string to replace it later. Rewriting the
+   column here would make the upgrade stop recognising its own
+   placeholder and the row would keep the key forever -- fixing the
+   symptom by causing the disease.
+
+   WHY IT IS NEEDED AT ALL, and only for a blocked lead. The identity
+   resolves in three layers: memory, the database, then the
+   PartnerStack API. The first two are awaited before Slack fires; the
+   API call is deferred until after res.json() so no lead waits on a
+   third party. For the FIRST EVER lead from a new partner both fast
+   layers legitimately miss, so Slack gets the raw key -- and the API
+   call corrects the row, the mirror and Salesforce seconds later.
+
+   For a normal lead that is fine: Salesforce carries the corrected
+   name and that is where the AE looks. A BLOCKED lead is deliberately
+   never pushed to Salesforce and is not on the SDR list, so this Slack
+   post is its only human-facing record -- the one surface the upgrade
+   cannot reach is the only surface there is. Happened on 15 Sept 2026
+   for cd34e586561e, which resolved to "Reviews Guide" moments after
+   the post went out reading as a bare hex string.
+
+   So the post says the name is still coming rather than printing
+   something that looks like a database id nobody can search for. */
+/* NAMED SO IT CANNOT SHADOW A LIFT MARKER. Its first name was
+   partnerHearAboutUsDisplay, which sits earlier in the file than
+   partnerHearAboutUs and is a prefix-extension of it -- so
+   test-partnerstack's indexOf('function partnerHearAboutUs') resolved
+   HERE instead, and the lifted span swallowed the PS_HEAR_PREFIX
+   declaration. The suite crashed rather than failing, which is exactly
+   what crash-reporter.js exists to make visible. */
+function slackPartnerHearLabel(hearAboutUs, partnerKey) {
+  if (!partnerKey || !hearAboutUs) return hearAboutUs;
+  /* ONLY the exact raw-key placeholder. A resolved name, a resolved
+     email, a referral, or anything a human typed is left alone. */
+  if (hearAboutUs !== PS_HEAR_PREFIX + partnerKey) return hearAboutUs;
+  return `Partner — name not resolved yet (key \`${partnerKey}\`). It lands on the lead within seconds; the dashboard has it.`;
+}
+
 /* Memory, then the database. NO network — this is the version that is safe to
    await before Slack fires.
 
@@ -10593,30 +10670,48 @@ async function nonIcpModelReport({ days } = {}) {
       });
     }
 
-    /* Panel 2. ONLY LEADS THE SYSTEM ACTUALLY ACTED ON.
+    /* Panel 2. ONLY LEADS THE SYSTEM ACTED ON, AND SPLIT BY WHAT ACTED.
 
-       IT COUNTED EVERY LEAD WITH A CACHED VERDICT UNTIL 15 SEPT 2026,
-       AND THAT WAS TWO CLAIMS IN ONE COLUMN. Most of the cache is
-       Monday's backfill of historical domains, so the row read
-       "Insurance 19" in a week when five insurance leads were blocked.
-       The small print explained it; the number is what gets quoted, and
-       a number that needs a footnote to not be wrong is wrong.
+       TWO SEPARATE CORRECTIONS, 15 SEPT 2026, and the second is the one
+       that could have cost a decision.
 
-       The standing cache is still reported -- see cacheInventory below
-       -- but as DOMAINS, all time, in its own block, where it cannot be
-       read as this week's activity. */
+       ONE. It counted every lead with a cached verdict, so most of the
+       cache -- a backfill of historical domains -- landed in a table
+       headed as this week's activity and it read "Insurance 19" in a
+       week with five insurance blocks.
+
+       TWO. THE INDUSTRY WAS TAKEN FROM WHICHEVER CANDIDATE DOMAIN
+       HAPPENED TO HAVE A VERDICT, not from the domain that actually
+       blocked the lead. Three of the eight "Insurance" rows were
+       farmersagent.com blocks -- a domain with no verdict at all --
+       filed under Insurance because the lead's WEBSITE was farmers.com.
+       Harmless there because both are insurance. On a lead whose email
+       is a brokerage and whose website is a software company, it files
+       a block under the wrong industry, and a wrong industry in this
+       table is something somebody acts on without knowing it is wrong.
+
+       So: the verdict for the DECIDING domain, or nothing. The
+       fallback is gone. A block we could not categorise says so.
+
+       AND THE GROUPS ARE BY SOURCE, because "Insurance 8 / Blocks" read
+       as the model having categorised and blocked eight leads when the
+       model has blocked nobody at all. The ladder said so plainly and
+       this table hid it. An empty "Blocked by the model" group is the
+       most informative thing on the panel and it renders even when
+       empty. */
     if (lead.non_icp_blocked === true || lead.non_icp_llm_flagged === true) {
-      const v = byDomain.get(lead.non_icp_reason)
-        || verdicts.find((x) => x.source === 'llm' && x.business_type)
-        || null;
-      /* A brand-list block on an unreadable domain has no business type
-         at all -- beckygerig.remax.com is the case -- and it belongs in
-         its own bucket rather than being dropped or guessed at. */
-      const key = (v && v.business_type) ? v.business_type : '_no_verdict';
-      if (!industry.has(key)) {
-        industry.set(key, { business_type: key, leads: 0, domains: new Set(), confs: [] });
+      const group = lead.non_icp_blocked === true
+        ? (lead.non_icp_source === 'llm' ? 'blocked_model' : 'blocked_list')
+        : 'meta_only';
+      /* THE DECIDING DOMAIN ONLY. non_icp_reason holds the domain that
+         blocked or flagged, for both mechanisms. No fallback. */
+      const v = byDomain.get(lead.non_icp_reason) || null;
+      const key = (v && v.source === 'llm' && v.business_type) ? v.business_type : '_uncategorised';
+      const gk = group + '|' + key;
+      if (!industry.has(gk)) {
+        industry.set(gk, { group, business_type: key, leads: 0, domains: new Set(), confs: [] });
       }
-      const row = industry.get(key);
+      const row = industry.get(gk);
       row.leads++;
       if (v) row.domains.add(v.domain);
       if (v && v.confidence != null) row.confs.push(Number(v.confidence));
@@ -10724,20 +10819,42 @@ async function nonIcpModelReport({ days } = {}) {
         { key: 'not_decided',   label: 'Not decided',            n: ladder.not_decided,   ours: internalIn.not_decided,   pct: nonIcpPct(ladder.not_decided,   total) },
       ],
     },
-    /* ACTED ON, in the window, counted as LEADS. This is the number
-       that gets quoted, so it means exactly one thing. */
-    industries: [...industry.values()]
-      .map((r) => ({
-        business_type: r.business_type,
-        label: r.business_type === '_no_verdict'
-          ? 'No readable verdict'
-          : (NON_ICP_BUSINESS_TYPES[r.business_type] || {}).label || r.business_type,
-        action: r.business_type === '_no_verdict' ? 'block' : nonIcpTypeAction(r.business_type),
-        leads: r.leads,
-        domains: r.domains.size,
-        median_confidence: nonIcpMedian(r.confs),
-      }))
-      .sort((a, b) => b.leads - a.leads),
+    /* ACTED ON, in the window, counted as LEADS, GROUPED BY WHAT ACTED.
+
+       ALL THREE GROUPS ARE ALWAYS PRESENT, empty ones included. An
+       empty "Blocked by the model" is the single most informative row
+       on this panel -- it is how you see at a glance that the model has
+       turned nobody away -- and a group that vanishes when it is empty
+       cannot say that. */
+    industries: [
+      { key: 'blocked_list',
+        label: 'Blocked by the brand-domain list',
+        note: 'A string comparison against NON_ICP_DOMAINS. The industry below is the model\u2019s reading of the SAME domain that blocked them, shown for context \u2014 it played no part in the block.' },
+      { key: 'blocked_model',
+        label: 'Blocked by the model',
+        note: 'The model read the company\u2019s own site and it fell into one of the two blocking types.' },
+      { key: 'meta_only',
+        label: 'Meta withheld by the model \u2014 not blocked',
+        note: 'These leads booked, went to Salesforce and are dialled as normal. Only the conversion events were withheld.' },
+    ].map((g) => ({
+      ...g,
+      leads: [...industry.values()].filter((r) => r.group === g.key).reduce((a, r) => a + r.leads, 0),
+      rows: [...industry.values()]
+        .filter((r) => r.group === g.key)
+        .map((r) => ({
+          business_type: r.business_type,
+          /* NOT "No readable verdict", which read as a category the
+             model returned. It is the absence of one. */
+          label: r.business_type === '_uncategorised'
+            ? 'Not categorised \u2014 no verdict for the domain that blocked them'
+            : (NON_ICP_BUSINESS_TYPES[r.business_type] || {}).label || r.business_type,
+          uncategorised: r.business_type === '_uncategorised',
+          leads: r.leads,
+          domains: r.domains.size,
+          median_confidence: nonIcpMedian(r.confs),
+        }))
+        .sort((a, b) => b.leads - a.leads),
+    })),
     /* THE STANDING CACHE, kept because it is the forward-looking
        exposure and genuinely useful -- but in its own block, counted in
        DOMAINS, with no window and no rate, so it cannot be read as this
@@ -11980,7 +12097,11 @@ app.post('/submit', async (req, res) => {
         evidence_quote: nonIcp.evidence_quote || null,
         model_id: nonIcp.model_id || null, prompt_version: nonIcp.prompt_version || null,
         first_name, last_name, email, phone, company, website, sell_to,
-        hear_about_us: hearAboutUsFinal, about_business });
+        /* Display only -- the column keeps the placeholder the upgrade
+           looks for. A blocked lead has no Salesforce record, so this
+           post is the only place a human would ever see this value. */
+        hear_about_us: slackPartnerHearLabel(hearAboutUsFinal, ps.ps_partner_key),
+        about_business });
       /* Salesforce: deliberately NOT pushed. Swapnil, 11 Sept 2026 -- a
          blocked lead is not a lead an AE should find in their queue. This is
          the whole of "no Salesforce for blocked leads"; nothing was changed
