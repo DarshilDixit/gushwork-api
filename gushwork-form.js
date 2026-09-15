@@ -358,6 +358,71 @@
     }
     /* Whether this page asks the question at all. Everything below is a
        no-op when it does not. */
+    /* ── THE HIDDEN STATE IS A CLASS, NEVER AN INLINE STYLE ─────
+       Webflow cannot store an inline style: the Designer converts one
+       into a generated combo class and the Data API rejects a style
+       attribute outright (both tried, 15 Sept 2026). So every wrapper
+       this code reveals is hidden by a CLASS in the published CSS, and
+       the old empty-string display assignment could not reveal anything
+       -- it removed an inline declaration that had never existed.
+
+       Toggling the class is also what makes the reveal animatable:
+       display does not transition, opacity and transform do. With the
+       hidden state expressed as a class, the Webflow stylesheet owns the
+       animation and this file owns only the decision.
+
+       MUST MATCH THE PUBLISHED MARKUP. is-hidden is the combo class on
+       .field-wrapper in Webflow. A test pins the literal in both form
+       files, but no test in this repo can see Webflow's CSS -- if it is
+       ever renamed there, rename it here in the same change. */
+    const HIDDEN_CLASS = 'is-hidden';
+
+    function setWrapHidden(wrap, hidden) {
+      if (!wrap) return;
+      wrap.classList.toggle(HIDDEN_CLASS, hidden);
+      /* Migration guard. Earlier builds drove these wrappers with an
+         inline display; an inline none outranks the class and would pin
+         the field shut forever. removeProperty, not an empty-string
+         assignment, because that assignment is the bug this replaces and
+         a lint bans it. */
+      if (wrap.style && wrap.style.display) wrap.style.removeProperty('display');
+      /* SELF-HEALING, and not belt-and-braces. #about-business-wrap is
+         hidden by .field-wrapper.about-biz-wrap { display:none } until
+         the Webflow CSS catches up, and that class is not this one -- so
+         dropping HIDDEN_CLASS alone would leave the textarea shut and we
+         would have swapped one silent non-reveal for another. Inline
+         block wins, at the cost of no enter transition on that field
+         until about-biz-wrap loses its display:none. */
+      if (!hidden && typeof getComputedStyle === 'function') {
+        try {
+          if (getComputedStyle(wrap).display === 'none') wrap.style.display = 'block';
+        } catch (e) { /* no layout engine (tests) -- the class is enough */ }
+      }
+    }
+
+    /* ── SELL-TO IS ADDRESSED BY ID, NOT BY NAME ────────────────
+       Webflow derives a radio's name attribute from the FIELD LABEL, so
+       the published markup carries name="Who-do-you-sell-to". The old
+       selector keyed on a sell-to name therefore matched nothing on
+       every page this has ever run on: it read as the primary lookup
+       while the id fallbacks beside it did all the work. Ids are ours
+       and do not move when somebody edits the label text. */
+    const SELL_TO_IDS = ['sell-b2b', 'sell-b2c', 'sell-mixed'];
+    const SELL_TO_SELECTOR = '#sell-b2b, #sell-b2c, #sell-mixed';
+    const SELL_TO_VALUES = { 'sell-b2b': 'B2B', 'sell-b2c': 'B2C', 'sell-mixed': 'Mixed' };
+
+    function sellToChecked() {
+      for (var i = 0; i < SELL_TO_IDS.length; i++) {
+        var el = document.getElementById(SELL_TO_IDS[i]);
+        if (el && el.checked) return el;
+      }
+      return null;
+    }
+    function sellToValue() {
+      var el = sellToChecked();
+      return el ? (el.value || SELL_TO_VALUES[el.id] || '') : '';
+    }
+
     /* ABOUT-BUSINESS FOLLOWS THE AI-CRM TICK.
 
        CLEARED ON UNTICK, AND THE ELEMENT IS CLEARED, NOT THE STATE.
@@ -374,19 +439,7 @@
       var wrap = document.getElementById('about-business-wrap');
       if (!wrap) return;
       var show = wantsCrm();
-      /* 'block', NEVER ''. Webflow CANNOT STORE AN INLINE STYLE -- the
-         Designer converts one into a generated combo class, and the API
-         rejects a style attribute outright (tried, 15 Sept 2026). So both
-         wrappers are hidden by a CLASS: .field-wrapper.is-hidden here and
-         .field-wrapper.about-biz-wrap on the textarea.
-
-         Setting '' only REMOVES an inline declaration. There was never
-         one, so the class keeps winning and the field never appears.
-         about-business shipped that way in PR 75 and could not have been
-         revealed on /demo at all. .field-wrapper is margin-bottom and
-         nothing else, so 'block' is its natural display and beats the
-         class without changing layout. */
-      wrap.style.display = show ? 'block' : 'none';
+      setWrapHidden(wrap, !show);
       if (!show) {
         var el = document.getElementById('about-business');
         if (el) el.value = '';
@@ -412,28 +465,16 @@
        nobody can see is the one way this reveal could break the form. */
     function needsVisible() {
       var wrap = document.getElementById('needs-wrap');
-      return !!wrap && wrap.style.display !== 'none';
+      /* Reads the CLASS, so it is correct from first paint. The old
+         inline-style read returned true before init had run, i.e.
+         "visible" while the question was still hidden. */
+      return !!wrap && !wrap.classList.contains(HIDDEN_CLASS);
     }
     function syncNeedsVisibility() {
       var wrap = document.getElementById('needs-wrap');
       if (!wrap) return;
-      var chosen = !!(document.querySelector('input[name="sell-to"]:checked')
-        || (document.getElementById('sell-b2b') || {}).checked
-        || (document.getElementById('sell-b2c') || {}).checked
-        || (document.getElementById('sell-mixed') || {}).checked);
-      /* 'block', NEVER ''. Webflow CANNOT STORE AN INLINE STYLE -- the
-         Designer converts one into a generated combo class, and the API
-         rejects a style attribute outright (tried, 15 Sept 2026). So both
-         wrappers are hidden by a CLASS: .field-wrapper.is-hidden here and
-         .field-wrapper.about-biz-wrap on the textarea.
-
-         Setting '' only REMOVES an inline declaration. There was never
-         one, so the class keeps winning and the field never appears.
-         about-business shipped that way in PR 75 and could not have been
-         revealed on /demo at all. .field-wrapper is margin-bottom and
-         nothing else, so 'block' is its natural display and beats the
-         class without changing layout. */
-      wrap.style.display = chosen ? 'block' : 'none';
+      var chosen = !!sellToChecked();
+      setWrapHidden(wrap, !chosen);
       /* A stale error under a hidden question reads as an error about
          the thing above it. */
       if (!chosen) hideError('needs-error');
@@ -854,7 +895,7 @@
         valid = false;
       } else hideError('needs-error');
 
-      const sellTo = document.querySelector('input[name="sell-to"]:checked')?.value || (document.getElementById('sell-b2b')?.checked ? 'B2B' : '') || (document.getElementById('sell-b2c')?.checked ? 'B2C' : '') || (document.getElementById('sell-mixed')?.checked ? 'Mixed' : '');
+      const sellTo = sellToValue();
 
       if (!sellTo) {
         showError('sell-error', 'Please select who you sell to.');
@@ -2730,7 +2771,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       syncAboutBusiness();
       /* The first change handler this form has ever had on sell-to. It
          only shows and hides -- nothing about the verdict moved. */
-      document.querySelectorAll('input[name="sell-to"], #sell-b2b, #sell-b2c, #sell-mixed')
+      document.querySelectorAll(SELL_TO_SELECTOR)
         .forEach(function (el) { el.addEventListener('change', syncNeedsVisibility); });
       syncNeedsVisibility();
 

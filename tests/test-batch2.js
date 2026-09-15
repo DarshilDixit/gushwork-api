@@ -2767,10 +2767,11 @@ async function section12() {
        It fires at Next. These three assertions are what keep it there. */
     ok(`21: ${name} reveals the question only once sell-to is answered`,
        /function syncNeedsVisibility\(\)/.test(f)
-       /* The VALUE is section 25's business, not this one's -- pinning the
-          literal here is what let the '' reveal bug sit green. This asserts
+       /* The MECHANISM is section 26's business, not this one's -- pinning
+          the literal here is what let the '' reveal bug sit green, and it
+          broke again when the reveal moved to a class toggle. This asserts
           only what this section is about: the reveal is gated on `chosen`. */
-       && /wrap\.style\.display = chosen \? '[a-z-]+' : 'none';/.test(f), name);
+       && /setWrapHidden\(wrap, !chosen\);/.test(f), name);
     ok(`21: ${name} only demands an answer once the question is visible`,
        /needsAsked\(\) && needsVisible\(\) && !selectedNeeds\(\)\.length/.test(f), name);
     /* THE GATE STAYS AT THE NEXT CLICK. The sell-to change handler may
@@ -3070,8 +3071,8 @@ async function section12() {
   }
 
   /* And the two reveals specifically, by name, so deleting the functions
-     cannot quietly satisfy the lint above. Each must assign a real CSS
-     display keyword on its showing branch. */
+     cannot quietly satisfy the lint above. Each must route through
+     setWrapHidden -- see section 26 for why the mechanism is a class. */
   const REVEALS = [
     ['syncAboutBusiness', 'about-business-wrap'],
     ['syncNeedsVisibility', 'needs-wrap'],
@@ -3084,18 +3085,142 @@ async function section12() {
       if (start === -1) continue;
       /* The function body, to its closing brace at the same indent. */
       const body = text.slice(start, start + 2000);
-      const assign = body.match(/\.style\.display\s*=\s*([^;]+);/);
-      ok(`25: ${fn} assigns style.display`, !!assign, fn);
-      if (!assign) continue;
-      const shown = assign[1].split('?')[1] ? assign[1].split('?')[1].split(':')[0].trim()
-                                            : assign[1].trim();
-      ok(`25: ${fn} reveals with a named display value, not '' (got ${shown})`,
-         /^'(block|flex|inline-flex|inline-block|grid)'$/.test(shown), shown);
+      /* The reveal goes through setWrapHidden and NOTHING in these two
+         functions touches style.display directly any more. Both halves
+         matter: the first that the mechanism is the class, the second
+         that no one has quietly re-added an inline override beside it. */
+      ok(`25: ${fn} reveals via setWrapHidden`,
+         /setWrapHidden\(wrap, !\w+\);/.test(body), fn);
+      ok(`25: ${fn} does not touch style.display directly`,
+         !/\.style\.display\s*=/.test(body), fn);
       /* It must still be the right element -- a reveal pointed at the
          wrong wrapper would pass everything above. */
       ok(`25: ${fn} still targets #${domId}`,
          body.indexOf(`'${domId}'`) !== -1, domId);
     }
+  }
+}
+
+/* ============================================================
+   26. THE REVEAL IS A CLASS TOGGLE, AND BOTH FILES AGREE ON THE CLASS
+
+   The question did not appear on staging. Every static layer checked
+   out -- markup, ids, served JS, CSS -- because the mechanism itself was
+   wrong: Webflow cannot store an inline style, so both wrappers are
+   hidden by a CLASS, and driving them through style.display meant this
+   code and the page disagreed about what "hidden" even was.
+
+   The class is now the mechanism. That makes the reveal animatable
+   (display does not transition; opacity and transform do) and it makes
+   needsVisible correct from first paint rather than only after init.
+
+   THE CEILING, STATED: no test in this repo can see Webflow's CSS. This
+   pins the literal in both form files and pins that they agree with each
+   other -- it CANNOT prove the published stylesheet uses the same name.
+   If is-hidden is renamed in Webflow, these assertions stay green and
+   the field stops revealing. That is the same gap as every other
+   Webflow-coupled value here, and naming it is the best available.
+   ============================================================ */
+{
+  const FORM_FILES = ['gushwork-form.js', 'gushwork-form-popup.js'];
+  const lifted = {};
+
+  for (const file of FORM_FILES) {
+    const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    lifted[file] = text;
+
+    const m = text.match(/const HIDDEN_CLASS = '([^']+)';/);
+    ok(`26: ${file} declares HIDDEN_CLASS`, !!m, file);
+    eq(`26: ${file} HIDDEN_CLASS is the class the markup carries`,
+       m && m[1], 'is-hidden');
+
+    /* The toggle must use the CONSTANT. A literal here would be a second
+       copy of the name, which is how the three sync pairs in CLAUDE.md
+       each drifted. */
+    ok(`26: ${file} toggles the constant, not a literal`,
+       /classList\.toggle\(HIDDEN_CLASS, hidden\)/.test(text), file);
+    ok(`26: ${file} needsVisible reads the class`,
+       /!wrap\.classList\.contains\(HIDDEN_CLASS\)/.test(text), file);
+
+    /* The dead selector is gone from CODE. A comment naming it is the
+       point -- it records why ids are the lookup. */
+    const codeHits = text.split('\n').filter((l) => {
+      const t = l.trim();
+      return l.includes('name="sell-to"') && !t.startsWith('*') && !t.startsWith('/*');
+    });
+    eq(`26: ${file} has no code keyed on the dead sell-to name`, codeHits, []);
+
+    /* Sell-to is addressed by id, and the listener uses the same set the
+       reader does -- otherwise the handler binds to radios whose state
+       nothing reads. */
+    ok(`26: ${file} listener uses SELL_TO_SELECTOR`,
+       /querySelectorAll\(SELL_TO_SELECTOR\)/.test(text), file);
+    const ids = text.match(/const SELL_TO_IDS = \[([^\]]+)\]/);
+    const sel = text.match(/const SELL_TO_SELECTOR = '([^']+)'/);
+    ok(`26: ${file} declares both SELL_TO_IDS and SELL_TO_SELECTOR`, !!ids && !!sel, file);
+    if (ids && sel) {
+      const fromIds = ids[1].split(',').map((x) => '#' + x.trim().replace(/'/g, '')).join(', ');
+      eq(`26: ${file} selector and id list are the same set`, sel[1], fromIds);
+    }
+  }
+
+  /* The two forked files must agree on the class, or a fix lands on half
+     the traffic -- the fork hazard CLAUDE.md opens with. */
+  const cls = FORM_FILES.map((f) => (lifted[f].match(/const HIDDEN_CLASS = '([^']+)';/) || [])[1]);
+  eq('26: both form files agree on HIDDEN_CLASS', cls[0], cls[1]);
+
+  /* ── EXECUTED, not read ──────────────────────────────────────
+     Lifting setWrapHidden and driving it is the only part of this
+     section that can tell you the toggle actually works. The stub mirrors
+     the published shape: a wrapper whose hidden state is a class, with no
+     inline style, exactly as Webflow emits it. */
+  {
+    const text = lifted['gushwork-form.js'];
+    const i = text.indexOf('function setWrapHidden(');
+    ok('26: setWrapHidden is liftable', i !== -1);
+    let depth = 0, end = -1;
+    for (let k = text.indexOf('{', i); k < text.length; k++) {
+      if (text[k] === '{') depth++;
+      else if (text[k] === '}') { depth--; if (depth === 0) { end = k + 1; break; } }
+    }
+    const src = `const HIDDEN_CLASS = 'is-hidden';\n` + text.slice(i, end) +
+                '\nreturn setWrapHidden;';
+    const setWrapHidden = new Function('getComputedStyle', src)(undefined);
+
+    const mk = (classes) => {
+      const set = new Set(classes);
+      return {
+        style: { display: '', removeProperty(k) { if (k === 'display') this.display = ''; } },
+        classList: {
+          contains: (c) => set.has(c),
+          toggle: (c, force) => { if (force) set.add(c); else set.delete(c); },
+        },
+        has: (c) => set.has(c),
+      };
+    };
+
+    const w = mk(['field-wrapper', 'is-hidden']);
+    ok('26: starts hidden, as the markup ships it', w.has('is-hidden'));
+    setWrapHidden(w, false);
+    ok('26: revealing removes the class', !w.has('is-hidden'));
+    setWrapHidden(w, true);
+    ok('26: hiding restores the class', w.has('is-hidden'));
+
+    /* The migration guard: a legacy inline display:none must not survive
+       a reveal, or the class toggle is decorative and the field stays
+       shut -- which is the bug this whole section exists for. */
+    const legacy = mk(['field-wrapper', 'is-hidden']);
+    legacy.style.display = 'none';
+    setWrapHidden(legacy, false);
+    ok('26: a legacy inline display is cleared on reveal',
+       legacy.style.display === '' && !legacy.has('is-hidden'),
+       JSON.stringify(legacy.style.display));
+
+    /* And it must not invent an inline style when there was none --
+       that would defeat the CSS transition the class exists to enable. */
+    const clean = mk(['field-wrapper', 'is-hidden']);
+    setWrapHidden(clean, false);
+    eq('26: no inline display is introduced on a clean reveal', clean.style.display, '');
   }
 }
 
