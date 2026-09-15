@@ -1262,3 +1262,52 @@ call instead of twelve full-block rewrites, and the stale-page class of bug
 disappears because there is one place to change. It needs an SRI hash and a
 migration off the freeform tags, so it is a decision, not a tidy-up — but it is
 the one worth making before the next form release.
+
+---
+
+## Production is one accidental publish away from v5.13.0 — read before Thursday
+
+**16 September 2026.** Production `www.gushwork.ai` is on `4e9d39e6` / **v5.12.0**
+and carries no needs markup — verified by fetching all twelve pages, not
+assumed. The server half of PR #75 is deployed and **inert**: with no
+`product_interest` on the request, `canonicalProductInterest` returns null and
+both resolvers fall through to the page default, so `leads.product` is `aeo`,
+`Product__c` is `aeo` and Meta gets `['aeo']` — identical to before the merge.
+Executed, not reasoned about.
+
+**But the Webflow design tree is ahead of production in two ways at once,** and
+that is the part worth knowing. The twelve page footers have been re-pinned to
+`f275e1e` (v5.13.0) and `/demo` now carries the hidden needs markup. **Any
+publish of the site — for any unrelated reason — ships both halves to real
+visitors together.**
+
+What a visitor would actually get, walked through rather than asserted: the
+question stays hidden (the reveal was broken until this fix), the mandatory
+check is skipped because `needsVisible()` is false, `product_interest` sends
+empty and canonicalises to null, and the RH router keeps its 6138 default. So
+**no lead is blocked and no data changes** — but production silently moves from
+a known-good pin to one whose new feature is present and inert.
+
+**Rolling that back costs twelve page edits**, because the pin lives per page
+and `set_page_freeform_code` replaces a whole block. There is no one-line
+revert. If a publish is likely this week, either accept v5.13.0 deliberately or
+re-pin back to `4e9d39e6` first — do not discover this mid-incident.
+
+## `/ai-demo` carries the same suppressed-event bug, deliberately left alone
+
+The card embed on `/ai-demo` is byte-identical to the one `/demo` had: it sets
+`radio.checked` in script, which fires no `change`, and because the card is a
+`<label>` wrapping its radio the assignment also **pre-empts the browser's own
+activation** so the native `change` never fires either. The embed steals the
+state change rather than merely failing to announce it.
+
+It is harmless there today only because `/ai-demo` has **no needs markup at
+all** — nothing is listening for that event. Left untouched on instruction.
+**If `/ai-demo` ever gets a needs question, or any other feature that listens
+for a sell-to `change`, it will hit exactly this wall**, and the symptom will
+again be "the markup is right, the JS is right, nothing happens".
+
+The general lesson, since it cost most of a day: **when a page's own embeds
+write to form state, our JS is only half the system.** The form file was
+correct throughout. Reading it more carefully would never have found this;
+reading the page's embeds would have found it in minutes.
