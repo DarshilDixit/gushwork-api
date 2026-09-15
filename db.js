@@ -591,6 +591,28 @@ async function initDB() {
          runs on every deploy, and after this column exists a NULL means
          "unrecognised page", which must not quietly become aeo. */
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS product TEXT`,
+      /* WHAT THEY ACTUALLY TICKED, as opposed to product, which is the
+         single slug everything downstream routes on.
+
+         TWO COLUMNS BECAUSE THERE ARE TWO QUESTIONS. "Which calendar,
+         which Meta event, which Salesforce picklist value" has exactly
+         one answer and must stay single-valued -- Product__c is a
+         RESTRICTED picklist and three predicates compare product = 'crm'
+         with plain equality. "What did this person say they want" can be
+         both, and folding it into product would break every one of those
+         at once.
+
+         Canonical form: lowercase slugs, sorted, comma-joined. One
+         formatter produces it so 'crm,aeo' and 'aeo,crm' cannot both
+         exist. Today: 'aeo', 'crm', 'aeo,crm'.
+
+         NULL MEANS "WE NEVER ASKED", and that is the honest value for
+         every row outside /demo -- /ai-demo, the ad landers, and all
+         5,289 rows that predate the question. Deliberately NOT
+         backfilled: a boot migration runs on every deploy, and inferring
+         a selection from the page would put a guess in a column whose
+         whole point is that somebody told us. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS product_interest TEXT`,
       /* Free text from the About-your-business textarea, added Sept 2026.
          Capped at 1000 chars at parse time — the same number as the
          maxlength on the textarea, so what the visitor can see on screen is

@@ -1506,11 +1506,33 @@ function finish() {
   }
   ok('product: index.js defines no catalogue of its own',
      !/const PRODUCTS\s*=/.test(src) && !/predicted_ltv/.test(src));
-  ok('product: both routes resolve from page_url and nothing else',
-     (src.match(/resolveProduct\(\{ page_url \}\)/g) || []).length === 2);
-  /* The column holds a slug this code resolved, never a string a page sent.
-     A hidden field would let any page write anything into the column. */
-  ok('product: nothing reads req.body.product', !/req\.body\.product/.test(src));
+  /* BOTH ROUTES RESOLVE FROM THE SAME TWO INPUTS, and Meta is handed the
+     second one so it resolves identically. Before 15 Sept 2026 product was
+     a pure function of the page and this read `{ page_url }`; the moment a
+     checkbox can decide it, a route that forgot the selection would store
+     one slug and fire another with nothing anywhere to reconcile them. */
+  ok('product: both routes resolve from page_url AND the selection',
+     (src.match(/resolveProduct\(\{ page_url, product_interest \}\)/g) || []).length === 2);
+  ok('product: the selection reaches Meta, so the event cannot diverge',
+     /pushStartTrialToMeta\(\{[^}]*product_interest/.test(src)
+     && /pushFormEventsToMeta\(\{[^}]*product_interest/.test(src));
+  /* THE COLUMN HOLDS A SLUG THIS CODE RESOLVED, never a string a page
+     sent. product is never read from the body at all -- a hidden field
+     would otherwise let any page write anything into it.
+
+     product_interest IS read from the body, because a checkbox is the
+     only way to know what somebody ticked. What makes that safe is that
+     it goes through canonicalProductInterest, which drops anything that
+     is not a slug we sell. That matters beyond tidiness: the value
+     reaches a RESTRICTED Salesforce picklist, and an unknown string
+     there is INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST, which
+     sfUnknownFields does not retry -- the whole Lead is lost, not the
+     one field. */
+  ok('product: nothing reads a page-supplied product slug',
+     !/req\.body\.product\b/.test(src));
+  ok('product: the selection is read from the body ONLY through the canonicaliser',
+     (src.match(/req\.body\.product_interest/g) || []).length === 2
+     && (src.match(/canonicalProductInterest\(req\.body\.product_interest\)/g) || []).length === 2);
 }
 
 /* ============================================================
@@ -1790,8 +1812,14 @@ function finish() {
   const sfsrc = fs.readFileSync(path.join(__dirname, '..', 'salesforce.js'), 'utf8');
   ok('sf: product maps to Product__c',            /product: 'Product__c',/.test(sfsrc));
   ok('sf: about_business maps to About_Business__c', /about_business: 'About_Business__c',/.test(sfsrc));
-  ok('sf: /submit passes both',
-     /pushToSalesforce\(\{first_name,last_name,email,phone,company,website,sell_to,product,about_business,/.test(src));
+  /* SALESFORCE GETS THE RICHER VALUE. Product__c carries three values --
+     aeo, crm and aeo,crm, added and verified against the live org on
+     15 Sept 2026 -- so a both-ticked lead shows what they asked for, not
+     just the calendar they were routed to. Falls back to product where
+     nothing was ticked, which is every page but /demo and every lead
+     before the question existed. */
+  ok('sf: /submit passes the selection, falling back to the routing slug',
+     /pushToSalesforce\(\{first_name,last_name,email,phone,company,website,sell_to,product:\(product_interest\|\|product\),about_business,/.test(src));
   /* Narrow on purpose: a blanket strip-anything-and-retry would quietly
      post half a lead forever. */
   ok('sf: only the two unknown-field codes trigger the retry',

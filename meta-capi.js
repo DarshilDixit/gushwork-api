@@ -107,10 +107,54 @@ function noteDefaultedPath(pathname) {
   );
 }
 
+/* ── WHAT THEY TICKED ────────────────────────────────────────────────
+   The slugs are the SAME strings as PRODUCTS' keys, deliberately: the
+   checkbox value, leads.product_interest, the Salesforce Product__c
+   picklist value and the Meta content_ids are all one vocabulary, so
+   there is no mapping table anywhere to drift.
+
+   CANONICAL means lowercase, known, deduped and SORTED. Sorting is what
+   makes 'aeo,crm' a single comparable value instead of two spellings of
+   one answer -- the Salesforce picklist is restricted and would reject
+   'crm,aeo' outright, losing the whole record.
+
+   Unknown values are DROPPED rather than stored. The input is a form
+   field: anything that is not a product we sell is not a product they
+   asked for. */
+const PRODUCT_INTEREST_SLUGS = Object.keys(PRODUCTS);
+
+function canonicalProductInterest(raw) {
+  if (raw == null) return null;
+  const parts = (Array.isArray(raw) ? raw : String(raw).split(','))
+    .map((x) => String(x).trim().toLowerCase())
+    .filter((x) => PRODUCT_INTEREST_SLUGS.includes(x));
+  const uniq = [...new Set(parts)].sort();
+  return uniq.length ? uniq.join(',') : null;
+}
+
 /* EXACT pathname match, never a prefix or substring test — '/ai-demo'
    contains 'demo', and a looser match would put CRM leads on the AEO
-   product or the other way round. */
-function resolveProduct({ page_url } = {}) {
+   product or the other way round.
+
+   WHAT THEY TICKED OUTRANKS THE PAGE THEY TICKED IT ON, which is the
+   entire point of the question: somebody who saw a CRM ad, did not
+   click, searched and landed on /demo is a CRM lead on an AEO page, and
+   the page is the thing that was wrong about them.
+
+   CRM WINS A BOTH-TICKED SELECTION. This is the ROUTING slug -- one
+   calendar, one Salesforce picklist value, one Meta event -- and it
+   agrees with the booking router by construction. The fuller answer
+   lives in leads.product_interest, which keeps both.
+
+   Selection is ignored where it is absent, so /ai-demo, the ad landers
+   and every historical lead resolve exactly as they did before. */
+function resolveProduct({ page_url, product_interest } = {}) {
+  const ticked = canonicalProductInterest(product_interest);
+  if (ticked) return ticked.includes('crm') ? 'crm' : 'aeo';
+  return resolveProductFromPage({ page_url });
+}
+
+function resolveProductFromPage({ page_url } = {}) {
   if (!page_url || typeof page_url !== 'string') return null;
   let pathname;
   try {
@@ -234,7 +278,14 @@ function buildEventData(eventName, payload, options = {}) {
      array would let one caller mutate every future event. */
   const slug = PRODUCT_EXCLUDED_EVENTS.includes(eventName)
     ? null
-    : resolveProduct({ page_url: payload.page_url });
+    /* THE SELECTION IS PASSED IN, NOT RE-DERIVED FROM THE PAGE.
+       This function used to read page_url alone, which was safe only
+       while product was a pure function of the page. The moment a
+       checkbox can decide it, a /demo lead who ticks AI-CRM stores
+       'crm' and would have fired 'aeo' -- the column and the event
+       disagreeing with nothing anywhere to reconcile them. A test
+       drives both and fails if they differ. */
+    : resolveProduct({ page_url: payload.page_url, product_interest: payload.product_interest });
   if (slug) {
     eventData.custom_data.content_ids   = [...PRODUCTS[slug].content_ids];
     eventData.custom_data.content_type  = 'product';
@@ -423,6 +474,8 @@ module.exports = {
      about which product a lead came from. */
   PRODUCTS,
   PRODUCT_PATHS,
+  PRODUCT_INTEREST_SLUGS,
+  canonicalProductInterest,
   DEFAULT_PRODUCT,
   PRODUCT_EXCLUDED_EVENTS,
   resolveProduct,

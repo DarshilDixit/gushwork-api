@@ -9,7 +9,7 @@ const { Pool }  = require('pg');
 const { pool, initDB } = require('./db');
 const { sendConversion, fetchPartnership, sendAction, fetchCustomer } = require('./partnerstack');
 const { pushToSalesforce, findSFLeadByEmail, updateSFLead, updateOpportunityFields, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails } = require('./salesforce');
-const { pushFormEventsToMeta, pushStartTrialToMeta, resolveProduct, setMetaOutcomeReporter } = require('./meta-capi');
+const { pushFormEventsToMeta, pushStartTrialToMeta, resolveProduct, canonicalProductInterest, setMetaOutcomeReporter } = require('./meta-capi');
 const createLeadMagnetRouter = require('./lead-magnet');
 
 const app  = express();
@@ -304,6 +304,10 @@ async function initAWSTable() {
          table, not Railway, so a product they cannot see is a product they
          cannot report on. Same slug, resolved once at write time. */
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS product TEXT`,
+      /* Mirrored for the same reason as product: the nightly jobs in the
+         other repo read this table, not Railway. Additive -- nothing over
+         there selects it yet, and NULL keeps meaning "we never asked". */
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS product_interest TEXT`,
       /* Free text from the About-your-business textarea, capped at 1000
          chars server side. Mirrors leads.about_business. */
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS about_business TEXT`,
@@ -344,8 +348,14 @@ function syncToAWS(data) {
        ps_signup_sent_at, ps_signup_verified_at, ps_qualified_sent_at, hear_about_us_raw, product, about_business,
        /* For the DIALER, not for us -- nothing in this repo reads these back
           off the mirror. See the migration comment above. */
-       non_icp_blocked, non_icp_reason, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,NOW())
+       non_icp_blocked, non_icp_reason,
+       /* APPENDED, NOT INSERTED. Every existing placeholder keeps its
+          number; only $61 is new and NOW() stays last. Renumbering a
+          60-placeholder statement by hand is the one edit here that
+          fails silently, by binding the right values to the wrong
+          columns. */
+       product_interest, updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,NOW())
     ON CONFLICT (session_id) DO UPDATE SET
       page_url                = COALESCE(EXCLUDED.page_url,                gw_form_leads.page_url),
       email                   = COALESCE(EXCLUDED.email,                   gw_form_leads.email),
@@ -425,6 +435,7 @@ function syncToAWS(data) {
       /* COALESCE for the same reason as the Railway side: a later partial
          sync must not blank a slug an earlier write already resolved. */
       product                 = COALESCE(EXCLUDED.product,                 gw_form_leads.product),
+      product_interest        = COALESCE(EXCLUDED.product_interest,        gw_form_leads.product_interest),
       /* COALESCE: the textarea is a step-2 field, so /partial syncs a NULL
          first and /submit fills it. An overwrite would blank it back. */
       about_business          = COALESCE(EXCLUDED.about_business,          gw_form_leads.about_business),
@@ -477,7 +488,8 @@ function syncToAWS(data) {
     data.ps_signup_sent_at       || null,   data.ps_signup_verified_at     || null,
     data.ps_qualified_sent_at    || null,   data.hear_about_us_raw         || null,
     data.product                 || null,   data.about_business            || null,
-    data.non_icp_blocked         ?? false,  data.non_icp_reason            || null
+    data.non_icp_blocked         ?? false,  data.non_icp_reason            || null,
+    data.product_interest        || null                 /* $61, appended */
   ]).then(() => {
     console.log(`[AWS] ✅ Synced session ${data.session_id}`);
   }).catch(err => {
@@ -1458,6 +1470,11 @@ function slackNonIcpBlocked(d) {
     { label: '🏢 Company',    value: d.company   },
     { label: '📞 Phone',      value: d.phone     },
     { label: '🎯 Sells to',   value: d.sell_to   },
+    /* A blocked lead is never pushed to Salesforce and is not on the SDR
+       list, so this post is the only surface either of these is seen on.
+       "Asked for" is omitted where the question was not asked. */
+    { label: '📦 Product',    value: d.product   },
+    { label: '🧾 Asked for',  value: d.product_interest },
     { label: '💬 Heard about us', value: d.hear_about_us },
   ]);
   if (lf) blocks.push(lf);
@@ -1548,6 +1565,13 @@ function slackSubmit(d) {
        read, and bFields drops empty values, so an untagged lead simply
        has no Product line rather than an empty one. */
     { label: '📦 Product',          value: d.product       },
+    /* WHAT THEY TICKED, beside the slug we routed on. They differ on a
+       both-ticked lead -- product is 'crm' because that is the calendar
+       they get, product_interest is 'aeo,crm' because that is what they
+       said. Printing only the first would hide half the answer from the
+       AE taking the call. Omitted entirely where the question was not
+       asked, which is every page but /demo. */
+    { label: '🧾 Asked for',        value: d.product_interest },
   ]);
   if (lf) blocks.push(lf);
   /* ONLY when they had already booked, and directly under the fields it
@@ -11683,11 +11707,16 @@ app.post('/partial', async (req, res) => {
   const psIdentity = await partnerIdentityNoNetwork(ps.ps_partner_key);
   const psHear = partnerHearAboutUs({ hear_about_us, ps, identity: psIdentity });
   const hearAboutUsFinal = psHear || hear_about_us;
-  /* Which product this form is selling, from the page the form is on. The
-     SAME resolver that decides the Meta content_ids, so the stored slug and
-     the event can never disagree. Never the raw page_url, and never anything
-     a page author typed: null when the page is not one we recognise. */
-  const product = resolveProduct({ page_url });
+  /* WHAT THEY TICKED, canonicalised. Unknown values are dropped, so a
+     tampered field cannot put a slug into a restricted Salesforce
+     picklist. NULL means the question was not asked -- every page but
+     /demo, and every lead before this shipped. */
+  const product_interest = canonicalProductInterest(req.body.product_interest);
+  /* Which product this form is selling. The SAME resolver that decides
+     the Meta content_ids, given the SAME two inputs, so the stored slug
+     and the event cannot disagree. Selection outranks the page; CRM wins
+     a both-ticked selection because this is the single routing slug. */
+  const product = resolveProduct({ page_url, product_interest });
 
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
@@ -11720,8 +11749,8 @@ app.post('/partial', async (req, res) => {
         SELECT email, company, website, phone, first_name, last_name, sell_to, booking_uid, step_reached
           FROM leads WHERE session_id = $1
       )
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business,non_icp_blocked,non_icp_reason,non_icp_source,non_icp_checked_at,non_icp_llm_flagged)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW(),$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45)
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business,non_icp_blocked,non_icp_reason,non_icp_source,non_icp_checked_at,non_icp_llm_flagged,product_interest)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW(),$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46)
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -11771,6 +11800,11 @@ app.post('/partial', async (req, res) => {
            moves through step 1; a later call must not blank a slug an earlier
            one resolved. Same reason as the ps_ columns above. */
         product               = COALESCE(EXCLUDED.product,               leads.product),
+        /* COALESCEd like product. The selection is made once at step 1
+           and /partial fires again afterwards -- the "actually we're
+           B2B" button calls savePartial(1) a second time -- so a later
+           call carrying nothing must not erase it. */
+        product_interest      = COALESCE(EXCLUDED.product_interest,      leads.product_interest),
         /* COALESCE for the same reason as product: the textarea is a step-2
            field, so /partial writes NULL and /submit fills it in. */
         about_business        = COALESCE(EXCLUDED.about_business,        leads.about_business),
@@ -11810,14 +11844,14 @@ app.post('/partial', async (req, res) => {
         (SELECT p.step_reached FROM prev p) AS prev_step_reached,
         leads.email, leads.company, leads.website, leads.phone,
         leads.first_name, leads.last_name, leads.sell_to, leads.step_reached
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business,nonIcp.blocked===true,(nonIcp.blocked||nonIcp.llm_flagged)?nonIcp.reason:null,nonIcpStamp(nonIcp).source,nonIcpStamp(nonIcp).checked_at,nonIcp.llm_flagged===true]);
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business,nonIcp.blocked===true,(nonIcp.blocked||nonIcp.llm_flagged)?nonIcp.reason:null,nonIcpStamp(nonIcp).source,nonIcpStamp(nonIcp).checked_at,nonIcp.llm_flagged===true,product_interest]);
 
     /* After the write, off the response path. Never awaited. */
     recordLeadFieldChanges(session_id, upsert.rows[0], '/partial', { arrived_step: step_reached });
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/partial] Enrichment sync failed (non-blocking):', err.message));
 
-    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false,hear_about_us_raw:hear_about_us,product,about_business,non_icp_blocked:nonIcp.blocked===true,non_icp_reason:nonIcp.blocked?nonIcp.reason:null,...ps});
+    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed:false,hear_about_us_raw:hear_about_us,product,product_interest,about_business,non_icp_blocked:nonIcp.blocked===true,non_icp_reason:nonIcp.blocked?nonIcp.reason:null,...ps});
 
     // StartTrial fires ONLY for qualified (B2B) leads on BUSINESS emails —
     // free-mailbox leads (gmail/yahoo/...) are skipped so Meta optimises
@@ -11844,7 +11878,7 @@ app.post('/partial', async (req, res) => {
     if (nonIcp.suppress_meta) {
       console.log(`[/partial] ⏭ StartTrial suppressed — non-ICP/${nonIcp.source} (${nonIcp.reason}): ${email}`);
     } else if (!disqualified && isBusinessEmail) {
-      pushStartTrialToMeta({session_id,email,sell_to,page_url,fbc,fbp,landing_page}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => { console.warn('[/partial] Meta CAPI StartTrial failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (StartTrial)', err.message); });
+      pushStartTrialToMeta({session_id,email,sell_to,page_url,fbc,fbp,landing_page,product_interest}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => { console.warn('[/partial] Meta CAPI StartTrial failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (StartTrial)', err.message); });
     } else if (!disqualified) {
       console.log(`[/partial] ⏭ StartTrial skipped — ${freeMatch && !freeMatch.exact ? `likely typo of free provider ${freeMatch.domain}` : 'free email domain'}: ${email}`);
     }
@@ -11898,8 +11932,9 @@ app.post('/submit', async (req, res) => {
   const psIdentity = await partnerIdentityNoNetwork(ps.ps_partner_key);
   const psHear = partnerHearAboutUs({ hear_about_us, ps, identity: psIdentity });
   const hearAboutUsFinal = psHear || hear_about_us;
-  // Same resolver the Meta payload uses — see /partial.
-  const product = resolveProduct({ page_url });
+  // Same resolver and the same two inputs the Meta payload uses — see /partial.
+  const product_interest = canonicalProductInterest(req.body.product_interest);
+  const product = resolveProduct({ page_url, product_interest });
 
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
@@ -11957,8 +11992,8 @@ app.post('/submit', async (req, res) => {
         SELECT email, company, website, phone, first_name, last_name, sell_to, booking_uid, step_reached
           FROM leads WHERE session_id = $1
       )
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business,non_icp_blocked,non_icp_reason,non_icp_source,non_icp_checked_at,non_icp_llm_flagged)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW(),$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44)
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business,non_icp_blocked,non_icp_reason,non_icp_source,non_icp_checked_at,non_icp_llm_flagged,product_interest)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW(),$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45)
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -12011,6 +12046,11 @@ app.post('/submit', async (req, res) => {
            whole statement fails with a 42601 syntax error. This line shipped
            as // and took every /submit down with it. */
         product               = COALESCE(EXCLUDED.product,               leads.product),
+        /* COALESCEd like product. The selection is made once at step 1
+           and /partial fires again afterwards -- the "actually we're
+           B2B" button calls savePartial(1) a second time -- so a later
+           call carrying nothing must not erase it. */
+        product_interest      = COALESCE(EXCLUDED.product_interest,      leads.product_interest),
         /* COALESCE for the same reason as product, and a BLOCK comment for
            the same reason as the line above. */
         about_business        = COALESCE(EXCLUDED.about_business,        leads.about_business),
@@ -12049,7 +12089,7 @@ app.post('/submit', async (req, res) => {
            (Meta, Slack, the response) must read the row rather than the
            in-memory verdict or the block silently lifts itself. */
         leads.non_icp_blocked, leads.non_icp_reason, leads.non_icp_llm_flagged, leads.non_icp_source
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business,nonIcp.blocked===true,(nonIcp.blocked||nonIcp.llm_flagged)?nonIcp.reason:null,nonIcpStamp(nonIcp).source,nonIcpStamp(nonIcp).checked_at,nonIcp.llm_flagged===true]);
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business,nonIcp.blocked===true,(nonIcp.blocked||nonIcp.llm_flagged)?nonIcp.reason:null,nonIcpStamp(nonIcp).source,nonIcpStamp(nonIcp).checked_at,nonIcp.llm_flagged===true,product_interest]);
 
     /* After the write, off the response path. Never awaited. */
     const identityDiff = diffLeadIdentityFields(upsert.rows[0], { arrived_step: 2 });
@@ -12057,7 +12097,7 @@ app.post('/submit', async (req, res) => {
 
     await pool.query(`UPDATE leads SET enriched_city=e.enriched_city,enriched_state=e.enriched_state,enriched_country=e.enriched_country,enriched_seniority=e.enriched_seniority,enriched_departments=e.enriched_departments,enriched_email_status=e.enriched_email_status,enriched_founded_year=e.enriched_founded_year,enriched_annual_revenue=e.enriched_annual_revenue,enriched_funding_events=e.enriched_funding_events,enriched_alexa_ranking=e.enriched_alexa_ranking,enriched_keywords=e.enriched_keywords,enriched_org_hq=e.enriched_org_hq,enriched_total_funding=e.enriched_total_funding,enriched_funding_stage=e.enriched_funding_stage,updated_at=NOW() FROM enrichment_data e WHERE leads.session_id=e.session_id AND leads.session_id=$1`, [session_id]).catch(err => console.warn('[/submit] Enrichment sync failed (non-blocking):', err.message));
 
-    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true,hear_about_us_raw:hear_about_us,product,about_business,non_icp_blocked:upsert.rows[0]?.non_icp_blocked===true,non_icp_reason:upsert.rows[0]?.non_icp_reason||null,...ps});
+    syncToAWS({session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us:hearAboutUsFinal,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,disqualified,disqualified_reason,step_reached:2,completed:true,hear_about_us_raw:hear_about_us,product,product_interest,about_business,non_icp_blocked:upsert.rows[0]?.non_icp_blocked===true,non_icp_reason:upsert.rows[0]?.non_icp_reason||null,...ps});
 
     /* The EFFECTIVE block, read back from the row after the sticky OR --
        never the in-memory verdict. See the RETURNING comment above. */
@@ -12097,6 +12137,10 @@ app.post('/submit', async (req, res) => {
         evidence_quote: nonIcp.evidence_quote || null,
         model_id: nonIcp.model_id || null, prompt_version: nonIcp.prompt_version || null,
         first_name, last_name, email, phone, company, website, sell_to,
+        /* Same reason the partner label is here: a blocked lead is never
+           pushed to Salesforce and is not on the SDR list, so this post
+           is the only place either value is ever seen. */
+        product, product_interest,
         /* Display only -- the column keeps the placeholder the upgrade
            looks for. A blocked lead has no Salesforce record, so this
            post is the only place a human would ever see this value. */
@@ -12111,9 +12155,22 @@ app.post('/submit', async (req, res) => {
       console.log(`[/submit] ⏭ Meta CAPI Lead suppressed — non-ICP (${nonIcpReason}): ${email}`);
       console.log(`[/submit] 🚫 Lead blocked: ${email} | session: ${session_id} | matched: ${nonIcpReason}`);
     } else if (!alreadySubmitted) {
-      slackSubmit({identity_changes:identityDiff.changes,changed_after_booking:identityDiff.wasBooked,first_name,last_name,email,phone,company,website,sell_to,product,about_business,hear_about_us:hearAboutUsFinal,ps_partner_key:ps.ps_partner_key,ps_partner_name:(psIdentity||{}).name,ps_partner_email:(psIdentity||{}).email,ps_click_at:ps.ps_click_at,hear_about_us_raw:hear_about_us,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,elv_status:elv?.status||null,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
+      slackSubmit({identity_changes:identityDiff.changes,changed_after_booking:identityDiff.wasBooked,first_name,last_name,email,phone,company,website,sell_to,product, product_interest,about_business,hear_about_us:hearAboutUsFinal,ps_partner_key:ps.ps_partner_key,ps_partner_name:(psIdentity||{}).name,ps_partner_email:(psIdentity||{}).email,ps_click_at:ps.ps_click_at,hear_about_us_raw:hear_about_us,landing_page,previous_page,page_url,referrer,utm_source,utm_medium,utm_campaign,utm_content,prefill_source,website_check_failed,website_check_reason,elv_status:elv?.status||null,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_email_status:enrich.enriched_email_status,enriched_founded_year:enrich.enriched_founded_year,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_funding_events:enrich.enriched_funding_events,enriched_alexa_ranking:enrich.enriched_alexa_ranking,enriched_keywords:enrich.enriched_keywords,enriched_org_hq:enrich.enriched_org_hq,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage});
 
-      pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,product,about_business,hear_about_us:hearAboutUsFinal,hear_about_us_raw:hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'form completed', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
+      /* SALESFORCE GETS WHAT THEY TICKED, not the routing slug.
+         Product__c is a RESTRICTED picklist and now carries exactly three
+         values -- aeo, crm and aeo,crm -- added and verified against the
+         live org on 15 Sept 2026. product_interest is already
+         canonicalised to one of those, so an unknown string cannot reach
+         it; anything else would be rejected as
+         INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST, which sfUnknownFields
+         does NOT retry, and the whole Lead would be lost rather than the
+         one field.
+
+         Falls back to product where nothing was ticked, so /ai-demo, the
+         ad landers and every historical lead send exactly what they send
+         today. */
+      pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,product:(product_interest||product),about_business,hear_about_us:hearAboutUsFinal,hear_about_us_raw:hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'form completed', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
 
       // Meta CAPI Lead — suppressed when the website check failed (temporary
       // non-blocking mode still lets the lead through, but keeps the Lead
@@ -12125,7 +12182,7 @@ app.post('/submit', async (req, res) => {
       if (nonIcpSuppressMeta) {
         console.log(`[/submit] ⏭ Meta CAPI Lead suppressed — non-ICP/model flagged (${nonIcpReason}): ${email}`);
       } else if (isWebsiteVerified({ website_check_failed, website_check_reason })) {
-        pushFormEventsToMeta({session_id,email,phone,first_name,last_name,company,website,sell_to,page_url,fbc,fbp,landing_page,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_seniority:enrich.enriched_seniority,enriched_funding_stage:enrich.enriched_funding_stage}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => { console.warn('[/submit] Meta CAPI failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (Lead)', err.message); });
+        pushFormEventsToMeta({session_id,email,phone,first_name,last_name,company,website,sell_to,page_url,fbc,fbp,landing_page,product_interest,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_seniority:enrich.enriched_seniority,enriched_funding_stage:enrich.enriched_funding_stage}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => { console.warn('[/submit] Meta CAPI failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (Lead)', err.message); });
       } else {
         console.log(`[/submit] ⏭ Meta CAPI Lead skipped — website not verified (${website_check_reason || 'failed'}): ${email}`);
       }
