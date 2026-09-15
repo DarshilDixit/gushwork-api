@@ -1097,6 +1097,18 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
          off the lead columns it is indistinguishable from the row
          above. Only the join can split them. */
       L({ session_id: 'e', email: 'e@nosite.test', website: 'https://nosite.test' }),
+      /* NEVER TRIED -- no verdict row of ANY kind, not even a failure.
+         Distinct from the row above, which has a failure row, and the
+         distinction is the whole point of keeping never-tried out of
+         the scrape rate: this domain is one the warm path has not
+         reached, not one the scraper could not read. Without a lead in
+         this state the two denominators are identical and a mutation
+         merging them changes nothing. */
+      L({ session_id: 'f', email: 'f@untouched.test', website: 'https://untouched.test' }),
+      /* OURS. Counted in the ladder like everything else, and reported
+         alongside so a quotable figure exists. */
+      L({ session_id: 'g', email: 'agent@allstate.com', website: 'https://allstate.com',
+          non_icp_blocked: true, non_icp_source: 'domain_list', non_icp_reason: 'allstate.com' }),
     ];
     S.reportVerdicts = [
       { domain: 'kw.test', business_type: 'real_estate', blocking: true, confidence: 0.97,
@@ -1129,28 +1141,42 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
 
     const by = {};
     for (const row of (d.ladder && d.ladder.rows) || []) by[row.key] = row.n;
-    ok('report: the brand-list block lands in blocked_list',  by.blocked_list === 1,  JSON.stringify(by));
+    ok('report: the brand-list block lands in blocked_list',  by.blocked_list === 2,  JSON.stringify(by));
     ok('report: the model block lands in blocked_model',      by.blocked_model === 1, JSON.stringify(by));
     ok('report: the flagged-not-blocked lead lands in meta_only', by.meta_only === 1, JSON.stringify(by));
     ok('report: the judged-and-cleared lead lands in checked_clear', by.checked_clear === 1, JSON.stringify(by));
     /* THE ONE THE LEAD COLUMNS CANNOT ANSWER. A failure row is not a
        verdict, so this lead is undecided however stamped it looks. */
-    ok('report: a lead with only a FAILURE row is not decided',   by.not_decided === 1, JSON.stringify(by));
+    ok('report: a lead with only a FAILURE row is not decided',   by.not_decided === 2, JSON.stringify(by));
 
     /* EXHAUSTIVE AND MUTUALLY EXCLUSIVE. This is the property the whole
        panel rests on and the one a deleted branch breaks silently. */
     const sum = Object.values(by).reduce((a, b) => a + b, 0);
     ok('report: the five rows sum to the lead total',
-       sum === d.ladder.total && d.ladder.total === 5, sum + ' vs ' + (d.ladder && d.ladder.total));
+       sum === d.ladder.total && d.ladder.total === 7, sum + ' vs ' + (d.ladder && d.ladder.total));
+
+    /* OURS, COUNTED ALONGSIDE AND NEVER SUBTRACTED. The ladder still
+       totals every lead -- that is the property it exists for -- and
+       the internal count rides beside it so a quotable figure exists
+       without a filter. */
+    ok('report: our own test submissions are counted, not removed',
+       d.ladder.ours === 1 && by.blocked_list === 2, JSON.stringify({ ours: d.ladder.ours, by }));
+    const blRow = d.ladder.rows.find((r) => r.key === 'blocked_list');
+    ok('report: the row says how many of its own are ours', blRow && blRow.ours === 1, JSON.stringify(blRow));
+    ok('report: the decision row is flagged as ours',
+       (d.decisions || []).filter((x) => x.is_internal).length === 1,
+       JSON.stringify((d.decisions || []).map((x) => [x.email, x.is_internal])));
 
     /* Panel 3: both actioned populations, and nothing else. */
     const acts = (d.decisions || []).map((x) => x.action).sort();
     ok('report: decisions carries exactly the blocked and suppressed leads',
-       JSON.stringify(acts) === JSON.stringify(['blocked_list', 'blocked_model', 'meta_only']),
+       JSON.stringify(acts) === JSON.stringify(['blocked_list', 'blocked_list', 'blocked_model', 'meta_only']),
        JSON.stringify(acts));
-    ok('report: each decision carries its evidence quote',
-       (d.decisions || []).every((x) => !!x.evidence_quote),
-       JSON.stringify((d.decisions || []).map((x) => x.evidence_quote)));
+    /* The allstate row has no verdict of its own, so it legitimately
+       has no quote -- every OTHER decision must carry one. */
+    ok('report: each decision with a verdict carries its evidence quote',
+       (d.decisions || []).filter((x) => x.business_type).every((x) => !!x.evidence_quote),
+       JSON.stringify((d.decisions || []).map((x) => [x.email, x.evidence_quote])));
 
     /* Panel 2: ACTED ON ONLY, and the action per industry is read from
        NON_ICP_BUSINESS_TYPES so a change to the six-industry scope
@@ -1182,7 +1208,7 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     /* A brand-list block on an unreadable domain has no business type
        and must still be counted somewhere rather than dropped. */
     ok('report: a block with no readable verdict gets its own row',
-       !!ind._no_verdict === false || ind._no_verdict.leads > 0, JSON.stringify(Object.keys(ind)));
+       ind._no_verdict && ind._no_verdict.leads === 1, JSON.stringify(Object.keys(ind)));
 
     /* THE CACHE IS A SEPARATE CLAIM, in its own block, counted in
        companies and carrying no rate. */
@@ -1198,13 +1224,21 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
        one of those four is a scrape failure. */
     const w = d.scrape.window;
     ok('report: the scrape rate is scoped to the window, not the cache',
-       w && w.total === 5 && w.answered === 5, JSON.stringify(w));
+       w && w.total === 7, JSON.stringify(w));
     ok('report: the unreadable domain is counted as unreadable',
        w && (w.thin + w.unreachable + w.other) === 1, JSON.stringify(w));
+    /* NEVER-TRIED IS OUTSIDE THE DENOMINATOR. Six domains have an
+       answer, one of them unreadable, so the rate is 1/6 and not 1/7.
+       untouched.test is a domain the warm path has not reached; putting
+       it in the denominator would make a quiet day read as a working
+       scraper and a busy one as a broken scraper. */
+    ok('report: never-tried is excluded from the answered denominator',
+       w && w.no_verdict === 2 && w.answered === 5, JSON.stringify(w));
+    /* 1 of the 5 ANSWERED, not 1 of all 7. Folding never-tried in
+       would read 14.3% here -- a rate that moves when the warm path
+       falls behind rather than when the scraper struggles. */
     ok('report: the rate is computed over answered domains only',
        w && w.unreadable_pct === 20, JSON.stringify(w));
-    ok('report: never-tried is reported separately and is not in the rate',
-       w && typeof w.no_verdict === 'number', JSON.stringify(w));
 
     /* Panel 4: the unreadable domain arrives WITH its lead attached,
        which is the only form in which it is actionable. */
