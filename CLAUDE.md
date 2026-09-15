@@ -860,11 +860,24 @@ before the max-height animation does, which reads as a dead pause. If a third
 card or a taller textarea ever lands here, re-measure rather than just raising
 the number.
 
-**The cards wrap fluidly, with no media query.** `.radio-wrap.is-needs` is
-`flex: 1 1 200px` with `min-width: 200px`, and the row carries
-`.radio-holder.is-needs-row { flex-wrap: wrap }`. Two cards plus the 14px gap
-need 414px; below that they stack and each grows to the full width. The base
-`.radio-wrap` and `.radio-holder` are **untouched** — they are shared with 36
+**The cards NEVER wrap — they hold 50/50 at every width, like the sell-to
+row.** `.radio-wrap.is-needs` is `flex: 1 1 0%` with `min-width: 0`, and the
+row is the plain `.radio-holder`, whose default `flex-wrap` is `nowrap`. An
+even share rather than `calc(50% - Npx)` because **the gap is not constant**:
+`.radio-holder` is 14px at main and 8px at `tiny`, so any hardcoded half is
+wrong at one breakpoint or the other. `flex-basis: 0` divides whatever is left
+after the gap, whatever the gap is.
+
+**A `min-width` here is a bug, not a safety net, and it shipped once.** A
+200px minimum demanded 408px of row where 390px viewports only give 319px, so
+the cards stacked on mobile. Measured at 390: the row is ~319px, each card
+~155.5px, leaving ~99.5px of text after the 16px checkbox, its 12px gap and
+28px of padding. "Custom AI CRM" at 12px is ~85px and fits on one line; the
+10px subtitle wraps to two, exactly as the sell-to subtitles already do in
+76.5px. At 320px each card is ~120px and the title wraps to two lines — still
+renders, same as sell-to. There is no realistic width where wrapping helps.
+
+The base `.radio-wrap` and `.radio-holder` are **untouched** — shared with 36
 elements on other pages.
 
 **THE `sell_to` GATE IS CLIENT-SIDE ONLY, and the CRM product is excepted
