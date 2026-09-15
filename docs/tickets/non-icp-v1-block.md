@@ -724,7 +724,16 @@ failure is an awkward call, not a lost lead or a wrong charge.
 **Urgent if:** a blocked lead is actually dialled, or the rate rises above a
 couple a month.
 
-### 2. No health row for the warehouse dependency
+### 2. No health row for the warehouse dependency — CLOSED 14 Sept 2026
+
+**Shipped.** The `nonicpllm` row in `runHealthChecks` reports red on
+`bypassFailed > 0` — "N blocks failed open, the customer bypass could not
+run" — and it is checked FIRST, before every other signal, because it is
+the only state where the layer looks perfectly healthy and blocks nobody.
+Green additionally requires an in-process success, not a row in the table,
+so a warm cache cannot make a dead layer look fine.
+
+*Original text, for the reasoning:*
 
 A warehouse outage **silently disables the block** — `nonIcpVerdict` fails open
 when the customer bypass cannot run, which is the correct direction and
@@ -736,7 +745,22 @@ working it reports red, never green.
 
 **Urgent if:** you want to know the block is *on* as opposed to merely *enabled*.
 
-### 3. `non_icp_checked_at`
+### 3. `non_icp_checked_at` — CLOSED 14 Sept 2026
+
+**Shipped**, alongside `non_icp_source` and `non_icp_llm_flagged`. It is
+stamped **only when something was actually decided** — never for
+`check_failed` or `disabled`.
+
+**One thing to know before reading it as a measurement.** `nonIcpStamp`
+treats a plain no-match as decided, so a lead whose brand-list check
+missed and whose model verdict was a cache miss gets `checked_at` set with
+`non_icp_source` null. That bucket therefore mixes "the model read their
+site and had no objection" with "the model never had a verdict for this
+lead". Splitting them needs the verdict table, which is what
+`/monitor/non-icp` joins to for its last two ladder rows — see the Model
+tab. On 15 Sept that was 23 of 27 leads in one bucket.
+
+*Original text, for the reasoning:*
 
 Only the two specified columns shipped. "When was this decided" is answerable
 only from `updated_at`, which moves for unrelated reasons.
@@ -803,13 +827,32 @@ blocked lead cannot convert. The tail is in-ICP franchise and advisor networks �
 forever, so a re-key means new keys convert *alongside* old ones rather than
 replacing them.
 
-### 7. The LLM flagging layer — waiting on an API key from Punit
+### 7. The LLM flagging layer — LIVE since 15 Sept 2026, ~02:00 IST
+
+**Built and switched on.** `NON_ICP_LLM_ENABLED`, `NON_ICP_LLM_BLOCK` and
+`NON_ICP_LLM_META` are all `true` on Railway, running `claude-opus-5`
+against prompt `v1-2026-09-14` with a 0.75 confidence floor. Blocking is
+decided in code from `NON_ICP_BUSINESS_TYPES`, never by the model, and
+covers **two** types; Meta suppression covers **six**.
+
+**V1 IS NOT RETIRED AND IS NOT BEING RETIRED** — see the CORRECTION at the
+end of this file. The first morning live produced one block, and it was
+the brand list: `beckygerig@thegerigteam.net` on `beckygerig.remax.com`,
+where the model could read **neither** `thegerigteam.net` (text=0) nor
+`beckygerig.com` (fetch failed). A national-brand realtor the scraper
+cannot read, caught only because the list is still there. That is the
+CORRECTION instantiated on day one.
+
+**Observability is `/monitor/non-icp` and the Model tab** — the five-state
+ladder, per-industry actions, every decision with its evidence quote, and
+the scrape blind spot. See the probation section above for the open
+question it exists to answer.
+
+*Original text:*
 
 The six-rule flagger is what V1 is a stopgap for. It reads the company's website
 with a model and covers all five rule-6 industries plus agencies, nonprofits,
 publishers and sub-$1,000 tickets.
-
-**Blocked on an API key from Punit.** Nothing to build here until that lands.
 
 When it does, two things from tonight carry into its scoping:
 
@@ -861,6 +904,69 @@ Overview card, or the Blocked tab count.
 domain but their website is not."* One or two is the expected shape of a captive
 agent with their own site. **A steady stream means decision 2 (OR logic) is
 worth revisiting** — that is exactly the signal it was made visible for.
+
+---
+
+## THE FOUR META-ONLY INDUSTRIES ARE ON PROBATION — decide after a week
+
+**Added 15 September 2026, first morning of V2 live.** This is the open
+question the Model tab's industry panel exists to answer, written down so
+the decision gets made on a week of evidence rather than on the three
+leads below.
+
+`NON_ICP_BUSINESS_TYPES` gives six industries `suppresses: true` and only
+two `blocks: true`. The four that suppress Meta and never block are
+**restaurant_food, spa_salon, home_services and print_sign**. A lead in
+one of them books, reaches Salesforce, appears on the SDR list and is
+dialled exactly as today — the only thing that changes is that Meta stops
+hearing about the conversion.
+
+**On the first night live, all three meta-only suppressions looked like
+real prospects**, and Darshil's read on 15 Sept was that none of the three
+is obviously non-ICP:
+
+| Domain | Judged | Conf | What the page said | Outcome |
+|---|---|---|---|---|
+| `pfifashions.com` | print_sign | 0.82 | "Screen Printing Embroidery DTF Heat Transfers **Promotional Products** Private Labeling" | completed, **booked** |
+| `smartsolarsolution.org` | home_services | 0.82 | "Residential Solar Installation" | completed, **booked**, clarified to B2B |
+| `gocatenv.com` | home_services | 0.85 | "asbestos and mold removal/remediation services" — serves **homes and businesses** | completed, **booked**, clarified to B2B |
+
+`pfifashions.com` is the sharpest of the three: a B2B apparel decorator
+selling promotional products to companies, which is a business that buys
+exactly what we sell, and `print_sign` caught it. Two of the three
+actively pressed "actually we're B2B". All three booked.
+
+**Three is not a pattern and no scope is being changed on it.** What is
+being changed is that the question is now answerable: the Model tab's
+**By industry** panel reports leads and distinct companies per type with
+the action each one takes, and the **decisions** panel carries the
+evidence quote on every suppressed lead.
+
+**The decision to make, after a week of that panel:** should those four
+industries keep suppressing Meta at all, or should suppression narrow to
+the two that also block? Each one is a separate call — a restaurant and a
+promotional-products supplier are not the same business, and they are in
+the same list today only because rule 6 of the Non-ICP doc names them
+together.
+
+**What would settle it either way:**
+
+- **Keep suppressing** if the suppressed leads in a type mostly do not
+  book, or book and do not attend — the same measurement that justified
+  the block in the first place.
+- **Stop suppressing** if they book and attend at roughly the overall
+  rate. Then the suppression is removing real conversion signal from the
+  ad algorithm for nothing, which is a cost, not a safe default.
+
+**Do not reach for the middle option first.** Raising
+`NON_ICP_LLM_CONFIDENCE_FLOOR` would drop `pfifashions` at 0.82 and keep
+`gocatenv` at 0.85, which is a tuning knob standing in for a scope
+decision and would leave the same question unanswered next month.
+
+**Turning it off is one variable:** `NON_ICP_LLM_META=false` on Railway
+stops all Meta suppression by the model layer without touching blocking.
+Narrowing it to the two blocking types is a `suppresses` edit in
+`NON_ICP_BUSINESS_TYPES`, one line per industry, no migration.
 
 ### The browser walkthrough is DONE — do not re-run it
 

@@ -247,6 +247,19 @@ delete the file.
   `temperature` cannot be pinned on current models (it is rejected). **Two
   TTLs**: a real verdict lasts 180 days, a failure row six hours, so a brief
   outage cannot pin a domain to "could not check" until spring.
+- **The model layer's dashboard surface is `/monitor/non-icp` and the
+  **Model** tab** — separate from **Blocked**, deliberately. Blocked means
+  one thing, "we turned these people away", and a flagged-not-blocked lead
+  is not that. Four panels: a five-state ladder that is mutually exclusive
+  and exhaustive and **sums to the lead total**, per-industry actions read
+  from `NON_ICP_BUSINESS_TYPES` rather than restated, every decision with
+  its evidence quote, and the scrape blind spot. The join from lead to
+  verdict is done **in JavaScript**, through `nonIcpCandidateDomains`, so
+  there is no second domain normaliser beside `partnerStackCustomerKey`.
+  The scrape panel reports **latest outcome per domain, never a historical
+  rate** — `nonIcpWriteVerdictRow` is `ON CONFLICT DO UPDATE`, so a domain
+  that failed and later succeeded overwrites its own failure — and it says
+  so on screen, not only in a comment.
 - **`leads.non_icp_source` / `non_icp_checked_at` / `non_icp_llm_flagged`** —
   provenance for the block. `non_icp_reason` holds a domain for **both**
   mechanisms, so without `non_icp_source` a reader cannot tell a string
@@ -672,6 +685,35 @@ query explaining the incident behind it. A backtick in that comment — writing
 the error surfaces as `SyntaxError: missing ) after argument list` pointing at the
 `pool.query(` line, not at the comment. Four of these happened in one sitting. Use
 plain words inside SQL comments, and run `node --check index.js` before committing.
+
+**THE `sell_to` GATE IS CLIENT-SIDE ONLY, and the CRM product is excepted
+from it.** B2C or Mixed at step 1 sets `disqualified` and shows a terminal
+step — in `gushwork-form.js` and `gushwork-form-popup.js`. The server
+receives the boolean and believes it; it never decides. So "allow B2C on
+the CRM product" could only be built in the two form files, as
+`B2C_ALLOWED_PATHS`, matched against the pathname the same way
+`resolveProduct` normalises it.
+
+That makes **FOUR copies of the CRM path set**: `PRODUCT_PATHS` in
+`meta-capi.js`, `index.js` importing it, and one in each form file.
+`tests/test-batch2.js` section 21 lifts all three files and asserts they
+agree. Add a product page to the catalogue without adding it to the forms
+and the visitor is disqualified on a page the server has already decided
+is CRM — nothing else in the repo would say so.
+
+**Two `sell_to ILIKE 'B2B%'` predicates exist and they MOVE TOGETHER** —
+`/monitor/sdr` and the `noBooking` card in `/monitor/metrics` that counts
+it. Both carry `OR product = 'crm'`, because a CRM lead who answers B2C is
+no longer disqualified and would otherwise drop out of the SDR list
+silently: present in every headline number, absent from the one surface
+anybody acts on. Same shape as the `SDR_SEARCH_COLUMNS` /
+`SDR_SEARCH_FIELDS` pair.
+
+**A CRM B2C lead now fires Meta, can fire a $50 PartnerStack conversion,
+and is pushed to Salesforce.** All three follow from the lead no longer
+being disqualified, and all three were authorised explicitly on 15 Sept
+2026 — the non-ICP reasoning is about AEO and does not transfer to CRM.
+Measured exposure is about two leads a day.
 
 **`gushwork-form-popup.js` is a FORK of `gushwork-form.js`, not a sibling.**
 The Ads file exists only to present the booking step as a fullscreen modal
