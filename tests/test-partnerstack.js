@@ -647,9 +647,71 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   ok('v6: a late-resolved identity is mirrored to AWS',
      /function syncPartnerIdentityToAWS[\s\S]{0,400}?UPDATE gw_form_leads/.test(src));
 
+  /* ── THE UNRESOLVED KEY IN SLACK ────────────────────────────────
+     A blocked lead is never pushed to Salesforce and is not on the SDR
+     list, so its Slack post is the ONLY human-facing record it has --
+     and it fires before the deferred API lookup that resolves a brand
+     new partner key. On 15 Sept 2026 that post read
+     "Heard about us: Partner - cd34e586561e", a bare hex string, for a
+     key that resolved to "Reviews Guide" seconds later.
+
+     DISPLAY ONLY. The stored column must keep the exact
+     "Partner - <key>" placeholder, because upgradePartnerHearAboutUs
+     matches on that precise string to replace it. A test for that is
+     below, and it is the half that would turn a cosmetic fix into a
+     permanent one. */
+  {
+    const L = (new Function(
+      liftLine(src, 'const PS_HEAR_PREFIX =') + '\n' +
+      lift(src, 'function slackPartnerHearLabel(') + '\n return slackPartnerHearLabel;'))();
+
+    const raw = 'Partner - cd34e586561e';
+    const out = L(raw, 'cd34e586561e');
+    ok('v7b: a bare key is replaced with words', out !== raw && !/^Partner - [0-9a-f]+$/.test(out), out);
+    ok('v7b: it says the name is not resolved YET, not that there is none',
+       /not resolved yet/i.test(out), out);
+    /* The key stays visible. It is the only thing that ties the post to
+       the row if somebody does need to chase it. */
+    ok('v7b: the key is still printed, so the post stays falsifiable',
+       out.includes('cd34e586561e'), out);
+
+    /* EVERYTHING ELSE IS LEFT ALONE. */
+    eq('v7b: a resolved NAME is untouched',
+       L('Partner - Reviews Guide', 'cd34e586561e'), 'Partner - Reviews Guide');
+    eq('v7b: a resolved EMAIL is untouched',
+       L('Partner - partners@reviews.guide', 'cd34e586561e'), 'Partner - partners@reviews.guide');
+    eq('v7b: a human referral is untouched',
+       L('Referral - jane@acme.com', 'cd34e586561e'), 'Referral - jane@acme.com');
+    eq('v7b: free text a visitor typed is untouched',
+       L('A friend told me', 'cd34e586561e'), 'A friend told me');
+    eq('v7b: no partner key means no rewrite', L('Partner - x', null), 'Partner - x');
+    /* A DIFFERENT key must not match: only the exact placeholder for
+       THIS lead's key is the unresolved case. */
+    eq('v7b: another partner key in the string is not the unresolved case',
+       L('Partner - 785ec78e1ee4688', 'cd34e586561e'), 'Partner - 785ec78e1ee4688');
+  }
+  /* AND IT IS DISPLAY ONLY. The stored value still goes through
+     hearAboutUsFinal; only the Slack payload is relabelled. If the
+     column were rewritten, upgradePartnerHearAboutUs would stop
+     recognising its own placeholder and the row would keep the key
+     forever -- fixing the symptom by causing the disease. */
+  ok('v7b: only the Slack payload is relabelled, never the stored column',
+     /hear_about_us: slackPartnerHearLabel\(hearAboutUsFinal, ps\.ps_partner_key\)/.test(src)
+     && !/hearAboutUsFinal = slackPartnerHearLabel/.test(src));
+  ok('v7b: the upgrade still matches on the raw placeholder it wrote',
+     /const weaker = \[PS_HEAR_PREFIX \+ ps\.ps_partner_key\]/.test(src));
+  /* ONE post carries it. The normal lead post is replaced by the
+     blocked post, so there is no lead that gets both. */
+  eq('v7b: exactly one call site', (src.match(/slackPartnerHearLabel\(/g) || []).length, 2);
+
   /* Step 7. A human referral outranks an affiliate link. */
   {
-    const fn = src.slice(src.indexOf('function partnerHearAboutUs'), src.indexOf('async function upgradePartnerHearAboutUs'));
+    /* THE OPEN PAREN IS LOAD-BEARING. Without it this marker
+       prefix-matches any later-named function that starts with the same
+       text -- which happened on 15 Sept 2026 and lifted a span
+       containing a second PS_HEAR_PREFIX declaration, crashing the
+       suite rather than failing it. */
+    const fn = src.slice(src.indexOf('function partnerHearAboutUs('), src.indexOf('async function upgradePartnerHearAboutUs'));
     const H = (new Function(
       liftLine(src, 'const PS_HEAR_PREFIX =') + '\n' +
       lift(src, 'function partnerDisplayName(') + '\n' +
