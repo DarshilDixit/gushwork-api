@@ -14,9 +14,20 @@ report six weeks later. Anyone who reads `Non-ICP-flagging-rules` and then reads
 ## STATUS — read this first
 
 **Live in production since 11 September 2026.** `NON_ICP_BLOCK=true` on the
-`gushwork-api` Railway service. Form pinned in Webflow at
-`4b419c392256754c105c86791d2a854dd5ca6fed`, **v5.11.0** / **v5.11.0-ads**, all
-12 form pages verified on that SHA.
+`gushwork-api` Railway service.
+
+**PIN SUPERSEDED — re-verified 15 September 2026.** This paragraph used to
+name `4b419c392256754c105c86791d2a854dd5ca6fed` / **v5.11.0**. That is no
+longer what is live and has not been since PR #72 merged on 15 Sept. Every
+form page is pinned to **`4e9d39e68a5a9ad8b0724eeebad9938a1f9e1ec4`**, form
+**v5.12.0**, which is *newer* — the stamp went stale, the deploy did not.
+Verified twice and independently: by reading each page's footer custom code
+through the Webflow API, and by the published-page `curl` sweep. All twelve
+form pages agree on that one SHA; none is unpinned.
+
+Leaving the old SHA standing would have been worse than useless — the next
+reader comparing production against this file would have found a mismatch and
+concluded the re-pin had been missed.
 
 ### What is live
 
@@ -968,6 +979,56 @@ stops all Meta suppression by the model layer without touching blocking.
 Narrowing it to the two blocking types is a `suppresses` edit in
 `NON_ICP_BUSINESS_TYPES`, one line per industry, no migration.
 
+---
+
+## VALUE OPTIMISATION IS NOT SWITCHABLE ON — and the blocker is not the config
+
+**Added 15 September 2026, alongside the `predicted_ltv` config.** Recorded
+here so nobody reads "the numbers are now env vars" as "we are ready to
+turn value optimisation on".
+
+All three `predicted_ltv` values — AEO 12000, CRM 5000, combined 15000 —
+are now `META_LTV_AEO`, `META_LTV_CRM` and `META_LTV_AEO_CRM` on Railway,
+so real numbers are a variable change rather than a deploy. **All three are
+still PROVISIONAL and none of them is measured.**
+
+**Today they change nothing.** Verified against the Marketing API on
+15 Sept 2026: all seven active ad sets are `optimization_goal =
+OFFSITE_CONVERSIONS`, which is count-based. Value optimisation would show
+as `VALUE`. So `predicted_ltv` is carried, recorded and reported, and it
+does not influence delivery at all.
+
+### The actual prerequisite: closed-won revenue joined back to leads
+
+`predicted_ltv` is a **prediction of what a person is worth**. Switching a
+campaign to value optimisation makes Meta bid against that number — so a
+number nobody has validated against realised revenue is a number that
+reshapes spend on a guess.
+
+We cannot validate it, and the reason is not this repo:
+
+- **`Customer_Status__c` has been unmaintained since June 2026.** It is the
+  field that would say which leads became customers.
+- **There is no revenue in the warehouse to join to.** `gw_prod` has no
+  closed-won amount per account that can be tied back to a form lead —
+  the same gap that blocked the retention analysis.
+
+Until a lead can be joined to what it actually earned, the three numbers
+are placeholders that feel precise. **The work is the revenue join, not
+the config**, and it is out of this repo.
+
+### What the new column buys in the meantime
+
+`leads.meta_predicted_ltv` records **what was actually sent for each
+lead**, NULL where no Meta event fired. Because the config can move, the
+number on a historical event and the number in the config will disagree
+the moment anybody tunes it — and without the column there is no way back
+to what was reported for a cohort. That reconstruction is exactly what
+somebody needs in front of them before flipping a campaign to value.
+
+**So the sequence is: revenue join → validate the three numbers against it
+→ then consider value optimisation.** Not the other way round.
+
 ### The browser walkthrough is DONE — do not re-run it
 
 All of it has now been walked by a human. Recorded so week one does not chase a
@@ -1073,3 +1134,84 @@ that V1 contradicts a dated document, so the next reader would not have to guess
 which was current. It then did the same thing one layer up: put an inference in
 the same bullet as a ruling and left no way to tell them apart. Attribute the
 sentence, not the paragraph.
+
+---
+
+## The Webflow SHA sweep could be automated — `set_page_freeform_code`
+
+**Recorded 15 September 2026. Not built, not run. Do this after the
+`product_interest` form change ships, not before.**
+
+The two stale pages found on 10 Sept were stale because the jsDelivr pin
+does not only live in Project Settings. Webflow lets an individual **page**
+carry its own `<script src>` in its head or footer custom code, and a
+Project-Settings republish never touches it. Nothing in this repo can see
+that, which is why the fix was a `curl` loop over 14 public URLs, reading
+back what the CDN happened to serve.
+
+The Webflow MCP server exposes that block directly:
+
+- `data_scripts_tool > get_page_freeform_code` — read a page's head/footer
+  custom code (`page_id`, optional `location`)
+- `data_scripts_tool > set_page_freeform_code` — replace one block's full
+  content
+- `data_pages_tool > list_pages` — enumerate every page and its id
+
+Confirmed present on the Gushwork site (`65c292289fb0ea1ff3a84bd3`) on
+15 Sept 2026. `get_page_freeform_code` was **not** called; only the tool
+surface was read.
+
+**Why this is better than the curl sweep, and it is not a small margin.**
+The curl loop reads the *published* page, so it answers "what is a visitor
+getting right now" — which is the right question after a republish and the
+wrong one before. It also cannot distinguish a page-level pin from the
+Project-Settings one, because both arrive as a `<script src>` in the same
+HTML. Reading the freeform block names the pin's **location**, which is the
+fact you actually need to fix it. And it finds a page carrying a pin that
+is not in the 14-page list at all — the sweep's real blind spot, since that
+list is maintained by hand.
+
+**Shape it as read-then-report, never write-then-hope.** Enumerate pages,
+read both blocks on each, extract every `gushwork-api@<sha>`, and print the
+ones that are not the SHA just pinned — plus, separately, any page with a
+`<script src>` naming this repo and **no** `@sha`, which is worse than
+stale for the reason the deploy section already gives. That is a read-only
+tool and it closes the gap on its own. Writing the new SHA back through
+`set_page_freeform_code` is a second, later decision: it **replaces the
+block's full content**, so it needs the read first, a diff, and a human
+looking at it. A bad write there serves broken code to real visitors with
+no error anywhere, which is the same failure mode as a missed re-pin,
+arriving faster.
+
+**MEASURED 15 SEPT 2026 — there is no site-level pin, and that changes the
+shape of the job.** The paragraph above was written expecting the
+Project-Settings block to hold the pin and page blocks to be the exception. It
+is the other way round, and the reading proves it: across all 81 pages, the
+site-wide head and footer blocks contain **no `gushwork-api` tag**, there are
+**zero registered scripts**, and all twelve pins sit in individual pages'
+footer blocks. `CLAUDE.md` said Project Settings and has been corrected.
+
+The inventory, by reading rather than by list:
+
+| Pages | SHA | File |
+|---|---|---|
+| `/demo`, `/ai-demo` | `4e9d39e6` (v5.12.0) | `gushwork-form.js` |
+| `/start`, `/start-now`, `/seo-leads`, `/lead-gen`, the four industry landers, the two SEO landers — ten in all | `4e9d39e6` (v5.12.0) | `gushwork-form-popup.js` |
+| **`/start-old`** | **`d493e92e` — 26 June, v4.4-era** | `gushwork-form.js` |
+| `/careers`, `/meeting-booked` | none | — tags removed, as recorded above |
+
+**`/start-old` is the blind spot arriving on schedule.** It is not in the
+fourteen-path `curl` sweep, so no run of that sweep could ever have reported
+it. It currently 404s, which is why it has sat there since June doing no harm
+— and also why nothing would have surfaced it. Publishing that page would
+serve a June form to real visitors, three months of fixes missing, with
+nothing anywhere saying so. Decide whether to delete the page or re-pin it;
+leaving it is fine only as long as it stays unpublished, which is not a
+property anyone is watching.
+
+**What it does not solve.** The site-level block is a different scope from the
+page-level ones. `get_site_freeform_code` / `set_site_freeform_code` cover it,
+so both halves are reachable — but they are two different calls, and
+conflating them is how you would "verify" the sweep while reading the wrong
+one. Today the site-level block is empty of pins; that is a fact with a date
+on it, not a permanent property, so a sweep should keep checking both.

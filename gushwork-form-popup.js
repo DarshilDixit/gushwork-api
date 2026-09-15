@@ -1,7 +1,7 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.12.0-ads  (ADS PAGE VERSION)
+  GUSHWORK — MULTI-STEP FORM  v5.13.0-ads  (ADS PAGE VERSION)
 
-  Tracks /demo v5.12.0. Full feature parity with /demo, EXCEPT the
+  Tracks /demo v5.13.0. Full feature parity with /demo, EXCEPT the
   booking step, which keeps the Ads page's fullscreen modal
   presentation — opened after step 2 — instead of /demo's inline
   column render, AND the close affordances that modal needs (v5.7.2).
@@ -9,6 +9,12 @@
   port of gushwork-form.js and should be kept in step with it. A
   modal needs a way out and an inline column does not, so this
   section has no /demo counterpart to track.
+
+  v5.13.0-ads — "What do you need?" ported from /demo v5.13.0,
+    identical. No page this fork serves carries the markup, so every
+    piece of it is inert here -- carried for parity, because the two
+    files have silently diverged before and reasoning about which page
+    serves which is exactly how that happened.
 
   v5.12.0-ads — the CRM product (/ai-demo) allows B2C and Mixed.
     Ported from /demo v5.12.0, identical. /ai-demo serves
@@ -176,6 +182,7 @@
       'email-error': 'email',
       'disq-error': 'disq-waitlist',
       'sell-error': 'radio-wrap',
+      'needs-error': 'needs-wrap',
       'first-name-error': 'first-name',
       'last-name-error': 'last-name',
       'company-error': 'company',
@@ -621,6 +628,20 @@
        other page has no attribute and keeps 6138. */
     const RH_ROUTER_ID_DEFAULT = '6138';
     function rhRouterId() {
+      /* THE SELECTION OUTRANKS THE PAGE, and the id still lives in
+         Webflow rather than here. /demo carries data-rh-router-crm and
+         no data-rh-router, so an AI-CRM tick routes to the CRM team and
+         everything else keeps the 6138 default. Both ticked counts as
+         CRM, matching the product slug the server stores.
+
+         Read at use time for the same reason the line below is: this
+         runs at booking, long after DOMContentLoaded. A missing
+         attribute degrades to the page default, which is today's
+         behaviour, rather than to a wrong team. */
+      if (wantsCrm()) {
+        var crm = document.querySelector('[data-rh-router-crm]')?.getAttribute('data-rh-router-crm');
+        if (crm) return crm;
+      }
       return document.querySelector('[data-rh-router]')?.getAttribute('data-rh-router')
         || RH_ROUTER_ID_DEFAULT;
     }
@@ -656,6 +677,129 @@
        the same normalisation resolveProduct does, so /ai-demo/ and
        /AI-Demo cannot disagree with the server about what they are. */
     const B2C_ALLOWED_PATHS = ['/ai-demo'];
+
+    /* ── WHAT DO YOU NEED? ────────────────────────────────────────
+       /demo ONLY. The page is a bad proxy for intent: somebody who saw
+       a CRM ad, did not click, searched and landed here is a CRM lead
+       on the general page, and nothing in the URL says so.
+
+       THE VALUES ARE THE PRODUCT SLUGS THEMSELVES. The checkbox value,
+       leads.product_interest, the Salesforce Product__c picklist and
+       the Meta content_ids are one vocabulary, so there is no mapping
+       table anywhere to drift.
+
+       ABSENT EVERYWHERE ELSE, and that is deliberate: /ai-demo visitors
+       already declared themselves by being there, and the ad landers
+       are out of scope. No checkboxes in the markup means no selection,
+       which means the server resolves from the page exactly as before
+       and product_interest stays NULL -- "we never asked". */
+    const NEEDS_SLUGS = ['aeo', 'crm'];
+    function selectedNeeds() {
+      var picked = [];
+      var boxes = document.querySelectorAll('input[name="needs"]:checked');
+      for (var i = 0; i < boxes.length; i++) {
+        if (NEEDS_SLUGS.indexOf(boxes[i].value) !== -1) picked.push(boxes[i].value);
+      }
+      /* Individual ids as a fallback, mirroring how sell-to is read --
+         a Webflow checkbox that loses its name attribute still counts. */
+      if (!picked.length) {
+        NEEDS_SLUGS.forEach(function (s) {
+          var el = document.getElementById('need-' + s);
+          if (el && el.checked) picked.push(s);
+        });
+      }
+      /* SORTED AND DEDUPED HERE TOO. The server canonicalises again and
+         is the authority, but sending 'crm,aeo' would make the two
+         disagree in the logs for no reason. */
+      return picked.filter(function (v, i, a) { return a.indexOf(v) === i; }).sort();
+    }
+    /* Whether this page asks the question at all. Everything below is a
+       no-op when it does not. */
+    /* ABOUT-BUSINESS FOLLOWS THE AI-CRM TICK.
+
+       CLEARED ON UNTICK, AND THE ELEMENT IS CLEARED, NOT THE STATE.
+       about_business is read at step 2 with getField('about-business'),
+       which reads the DOM -- so hiding a populated textarea would still
+       submit whatever is in it, storing text for a product they did not
+       ask for. Wiping formState alone would not help for the same
+       reason.
+
+       NO WRAPPER MEANS NO-OP. /ai-demo has the field permanently visible
+       and no #about-business-wrap, so this leaves that page exactly as
+       it is. */
+    function syncAboutBusiness() {
+      var wrap = document.getElementById('about-business-wrap');
+      if (!wrap) return;
+      var show = wantsCrm();
+      /* 'block', NEVER ''. Webflow CANNOT STORE AN INLINE STYLE -- the
+         Designer converts one into a generated combo class, and the API
+         rejects a style attribute outright (tried, 15 Sept 2026). So both
+         wrappers are hidden by a CLASS: .field-wrapper.is-hidden here and
+         .field-wrapper.about-biz-wrap on the textarea.
+
+         Setting '' only REMOVES an inline declaration. There was never
+         one, so the class keeps winning and the field never appears.
+         about-business shipped that way in PR 75 and could not have been
+         revealed on /demo at all. .field-wrapper is margin-bottom and
+         nothing else, so 'block' is its natural display and beats the
+         class without changing layout. */
+      wrap.style.display = show ? 'block' : 'none';
+      if (!show) {
+        var el = document.getElementById('about-business');
+        if (el) el.value = '';
+        formState.about_business = '';
+      }
+    }
+
+    /* ── THE QUESTION APPEARS AFTER SELL-TO ──────────────────────
+       Progressive reveal, for space: the form should not look heavy
+       before anyone has answered anything. Decided 15 Sept 2026.
+
+       THE GATE IS UNAFFECTED, and that is worth stating because it
+       nearly was not. The B2C exception is decided in handleStep1Next,
+       at the NEXT CLICK -- there is no change handler on the sell-to
+       radios and showStep('step-disqualified') is reached from nowhere
+       else. So the checkboxes are read one line above the gate in the
+       same call, and revealing them late cannot make the exception
+       arrive too late to apply. Had the gate fired on selection, a B2C
+       click would have jumped to the DQ step before these were even
+       visible and the exception could never have run.
+
+       MANDATORY ONLY ONCE VISIBLE. Demanding an answer to a question
+       nobody can see is the one way this reveal could break the form. */
+    function needsVisible() {
+      var wrap = document.getElementById('needs-wrap');
+      return !!wrap && wrap.style.display !== 'none';
+    }
+    function syncNeedsVisibility() {
+      var wrap = document.getElementById('needs-wrap');
+      if (!wrap) return;
+      var chosen = !!(document.querySelector('input[name="sell-to"]:checked')
+        || (document.getElementById('sell-b2b') || {}).checked
+        || (document.getElementById('sell-b2c') || {}).checked
+        || (document.getElementById('sell-mixed') || {}).checked);
+      /* 'block', NEVER ''. Webflow CANNOT STORE AN INLINE STYLE -- the
+         Designer converts one into a generated combo class, and the API
+         rejects a style attribute outright (tried, 15 Sept 2026). So both
+         wrappers are hidden by a CLASS: .field-wrapper.is-hidden here and
+         .field-wrapper.about-biz-wrap on the textarea.
+
+         Setting '' only REMOVES an inline declaration. There was never
+         one, so the class keeps winning and the field never appears.
+         about-business shipped that way in PR 75 and could not have been
+         revealed on /demo at all. .field-wrapper is margin-bottom and
+         nothing else, so 'block' is its natural display and beats the
+         class without changing layout. */
+      wrap.style.display = chosen ? 'block' : 'none';
+      /* A stale error under a hidden question reads as an error about
+         the thing above it. */
+      if (!chosen) hideError('needs-error');
+    }
+
+    function needsAsked() {
+      return !!document.querySelector('input[name="needs"], #need-aeo, #need-crm');
+    }
+    function wantsCrm() { return selectedNeeds().indexOf('crm') !== -1; }
     function b2cAllowedHere() {
       var p = (window.location.pathname || '').toLowerCase().replace(/\/+$/, '') || '/';
       return B2C_ALLOWED_PATHS.indexOf(p) !== -1;
@@ -677,6 +821,7 @@
       email: '',
       website: '',
       sell_to: '',
+      product_interest: '',
       first_name: '',
       last_name: '',
       phone: '',
@@ -1070,6 +1215,14 @@
         showError('email-error', 'Please use your work email.');
         valid = false;
       } else hideError('email-error');
+
+      /* MANDATORY, and only where the question exists. needsAsked() is
+         false on every page but /demo, so this adds no gate anywhere it
+         was not asked for -- including every page this fork serves. */
+      if (needsAsked() && needsVisible() && !selectedNeeds().length) {
+        showError('needs-error', 'Please tell us what you need.');
+        valid = false;
+      } else hideError('needs-error');
 
       const sellTo = document.querySelector('input[name="sell-to"]:checked')?.value || (document.getElementById('sell-b2b')?.checked ? 'B2B' : '') || (document.getElementById('sell-b2c')?.checked ? 'B2C' : '') || (document.getElementById('sell-mixed')?.checked ? 'Mixed' : '');
 
@@ -2667,6 +2820,8 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
         hideEmailSuggestion();
         formState.email = email;
         formState.sell_to = sellTo;
+        formState.product_interest = selectedNeeds().join(',');
+        syncAboutBusiness();
         localStorage.setItem('gw_email', formState.email);
 
         /* B2C AND MIXED ARE ORDINARY ANSWERS ON A B2C-ALLOWED PAGE.
@@ -2674,7 +2829,11 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
            the recorded state and the step the visitor sees can never
            disagree -- two independent copies of this condition is how a
            lead gets marked disqualified and shown step 2 anyway. */
-        const gateOnSellTo = (sellTo === 'B2C' || sellTo === 'Mixed') && !b2cAllowedHere();
+        /* PATH OR SELECTION. Ticking AI-CRM unlocks the B2C exception
+           exactly as being on /ai-demo does -- the product is what the
+           exception is about, and the page was only ever a proxy for it. */
+        const crmChosen = b2cAllowedHere() || wantsCrm();
+        const gateOnSellTo = (sellTo === 'B2C' || sellTo === 'Mixed') && !crmChosen;
 
         if (gateOnSellTo) {
           formState.disqualified = true;
@@ -2967,6 +3126,20 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
     function initButtons() {
       const btn1 = document.getElementById('step-1-next');
       const btn2 = document.getElementById('step-2-next');
+      /* The field follows the tick immediately, not only at the Next
+         click -- otherwise somebody ticks AI-CRM, sees nothing appear,
+         and the textarea shows up a step later with no explanation.
+         Also runs once now, so a page that somehow loads pre-ticked is
+         in the right state from the start. */
+      document.querySelectorAll('input[name="needs"], #need-aeo, #need-crm')
+        .forEach(function (el) { el.addEventListener('change', syncAboutBusiness); });
+      syncAboutBusiness();
+      /* The first change handler this form has ever had on sell-to. It
+         only shows and hides -- nothing about the verdict moved. */
+      document.querySelectorAll('input[name="sell-to"], #sell-b2b, #sell-b2c, #sell-mixed')
+        .forEach(function (el) { el.addEventListener('change', syncNeedsVisibility); });
+      syncNeedsVisibility();
+
       const btnDq = document.getElementById('step-disqualified-next');
 
       if (btn1)
@@ -3017,6 +3190,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       'email-error': 'email',
       'disq-error': 'disq-waitlist',
       'sell-error': 'radio-wrap',
+      'needs-error': 'needs-wrap',
       'first-name-error': 'first-name',
       'last-name-error': 'last-name',
       'company-error': 'company',
@@ -3096,7 +3270,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.12.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.13.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

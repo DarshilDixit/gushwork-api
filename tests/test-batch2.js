@@ -1094,13 +1094,45 @@ function finish() {
     catch (e) { return { threw: true, custom_data: {}, error: e.message }; }
   };
 
-  // ── The catalogue itself. These numbers move ad spend; pin them.
-  eq('product: the catalogue has exactly two products',
-     Object.keys(META.PRODUCTS).sort(), ['aeo', 'crm']);
-  eq('product: aeo is content_ids [aeo], predicted_ltv 12000',
-     META.PRODUCTS.aeo, { content_ids: ['aeo'], predicted_ltv: 12000 });
-  eq('product: crm is content_ids [crm], predicted_ltv 5000',
-     META.PRODUCTS.crm, { content_ids: ['crm'], predicted_ltv: 5000 });
+  /* ── The catalogue. THREE KEYS, and the third is not a product you
+     can tick -- 'aeo,crm' is what ticking both produces. content_ids is
+     an array by design, which is how ONE event covers both products:
+     two events would count one person twice, and every active ad set
+     optimises on conversion count. */
+  eq('product: the catalogue has three event slugs, including the combined one',
+     Object.keys(META.PRODUCTS).sort(), ['aeo', 'aeo,crm', 'crm']);
+  eq('product: aeo carries one content id', META.PRODUCTS.aeo, { content_ids: ['aeo'] });
+  eq('product: crm carries one content id', META.PRODUCTS.crm, { content_ids: ['crm'] });
+  eq('product: the combined slug carries BOTH content ids',
+     META.PRODUCTS['aeo,crm'], { content_ids: ['aeo', 'crm'] });
+  /* And the tickable vocabulary is NOT the catalogue keys. Deriving one
+     from the other would let 'aeo,crm' through as a single checkbox
+     value and into the restricted Salesforce picklist as a duplicate. */
+  eq('product: only aeo and crm are tickable',
+     META.PRODUCT_INTEREST_SLUGS.slice().sort(), ['aeo', 'crm']);
+
+  /* ── PREDICTED LTV IS CONFIG ──────────────────────────────────────
+     All three are PROVISIONAL and all three are env-settable, so real
+     numbers from the agency are a Railway change rather than a deploy.
+     The defaults are pinned because they move ad spend the day anyone
+     switches a campaign to value optimisation. */
+  eq('product: the three provisional defaults', META.PREDICTED_LTV,
+     { aeo: 12000, crm: 5000, 'aeo,crm': 15000 });
+  /* COMBINED IS 15000, NOT THE 17000 SUM. predicted_ltv predicts what
+     the PERSON is worth; the sum asserts they buy both at full price
+     with certainty. */
+  ok('product: combined is not the naive sum of the parts',
+     META.PREDICTED_LTV['aeo,crm'] !== META.PREDICTED_LTV.aeo + META.PREDICTED_LTV.crm,
+     String(META.PREDICTED_LTV['aeo,crm']));
+  ok('product: combined is above the higher single product',
+     META.PREDICTED_LTV['aeo,crm'] > Math.max(META.PREDICTED_LTV.aeo, META.PREDICTED_LTV.crm));
+  /* Every catalogue key must have a number, or an event fires without
+     the field and the cohort becomes unreconstructable. */
+  for (const k of Object.keys(META.PRODUCTS)) {
+    ok(`product: ${k} has a predicted_ltv`, Number.isFinite(META.predictedLtvFor(k)), k);
+  }
+  eq('product: an unknown slug has no ltv rather than a wrong one',
+     META.predictedLtvFor('enterprise'), null);
 
   /* AEO is the DEFAULT and the exceptions are listed. An AEO allowlist
      would rot: the form is already on a dozen pages and new SEO landers
@@ -1504,13 +1536,40 @@ function finish() {
     ok('product: it imports the push functions from the same module',
        names.includes('pushFormEventsToMeta') && names.includes('pushStartTrialToMeta'), names.join(','));
   }
+  /* index.js may READ the ltv for the column it persists, but must not
+     declare a catalogue or a number of its own -- the bare identifier,
+     not the meta_predicted_ltv column name that legitimately appears. */
   ok('product: index.js defines no catalogue of its own',
-     !/const PRODUCTS\s*=/.test(src) && !/predicted_ltv/.test(src));
-  ok('product: both routes resolve from page_url and nothing else',
-     (src.match(/resolveProduct\(\{ page_url \}\)/g) || []).length === 2);
-  /* The column holds a slug this code resolved, never a string a page sent.
-     A hidden field would let any page write anything into the column. */
-  ok('product: nothing reads req.body.product', !/req\.body\.product/.test(src));
+     !/const PRODUCTS\s*=/.test(src)
+     && !/const PREDICTED_LTV\s*=/.test(src)
+     && !/[^_]predicted_ltv\s*[:=]\s*\d/.test(src));
+  /* BOTH ROUTES RESOLVE FROM THE SAME TWO INPUTS, and Meta is handed the
+     second one so it resolves identically. Before 15 Sept 2026 product was
+     a pure function of the page and this read `{ page_url }`; the moment a
+     checkbox can decide it, a route that forgot the selection would store
+     one slug and fire another with nothing anywhere to reconcile them. */
+  ok('product: both routes resolve from page_url AND the selection',
+     (src.match(/resolveProduct\(\{ page_url, product_interest \}\)/g) || []).length === 2);
+  ok('product: the selection reaches Meta, so the event cannot diverge',
+     /pushStartTrialToMeta\(\{[^}]*product_interest/.test(src)
+     && /pushFormEventsToMeta\(\{[^}]*product_interest/.test(src));
+  /* THE COLUMN HOLDS A SLUG THIS CODE RESOLVED, never a string a page
+     sent. product is never read from the body at all -- a hidden field
+     would otherwise let any page write anything into it.
+
+     product_interest IS read from the body, because a checkbox is the
+     only way to know what somebody ticked. What makes that safe is that
+     it goes through canonicalProductInterest, which drops anything that
+     is not a slug we sell. That matters beyond tidiness: the value
+     reaches a RESTRICTED Salesforce picklist, and an unknown string
+     there is INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST, which
+     sfUnknownFields does not retry -- the whole Lead is lost, not the
+     one field. */
+  ok('product: nothing reads a page-supplied product slug',
+     !/req\.body\.product\b/.test(src));
+  ok('product: the selection is read from the body ONLY through the canonicaliser',
+     (src.match(/req\.body\.product_interest/g) || []).length === 2
+     && (src.match(/canonicalProductInterest\(req\.body\.product_interest\)/g) || []).length === 2);
 }
 
 /* ============================================================
@@ -1790,8 +1849,14 @@ function finish() {
   const sfsrc = fs.readFileSync(path.join(__dirname, '..', 'salesforce.js'), 'utf8');
   ok('sf: product maps to Product__c',            /product: 'Product__c',/.test(sfsrc));
   ok('sf: about_business maps to About_Business__c', /about_business: 'About_Business__c',/.test(sfsrc));
-  ok('sf: /submit passes both',
-     /pushToSalesforce\(\{first_name,last_name,email,phone,company,website,sell_to,product,about_business,/.test(src));
+  /* SALESFORCE GETS THE RICHER VALUE. Product__c carries three values --
+     aeo, crm and aeo,crm, added and verified against the live org on
+     15 Sept 2026 -- so a both-ticked lead shows what they asked for, not
+     just the calendar they were routed to. Falls back to product where
+     nothing was ticked, which is every page but /demo and every lead
+     before the question existed. */
+  ok('sf: /submit passes the selection, falling back to the routing slug',
+     /pushToSalesforce\(\{first_name,last_name,email,phone,company,website,sell_to,product:\(product_interest\|\|product\),about_business,/.test(src));
   /* Narrow on purpose: a blanket strip-anything-and-retry would quietly
      post half a lead forever. */
   ok('sf: only the two unknown-field codes trigger the retry',
@@ -2677,8 +2742,13 @@ async function section12() {
      lead gets marked disqualified and shown step 2 anyway -- the state
      we record and the screen the visitor sees disagreeing. */
   for (const [name, f] of [['/demo', formA], ['ads', formB]]) {
-    ok(`21: ${name} computes the gate once`,
-       /const gateOnSellTo = \(sellTo === 'B2C' \|\| sellTo === 'Mixed'\) && !b2cAllowedHere\(\);/.test(f), name);
+    /* PATH OR SELECTION since 15 Sept 2026. Ticking AI-CRM unlocks the
+       B2C exception exactly as being on /ai-demo does -- the exception is
+       about the product, and the page was only ever a proxy for it.
+       Still computed ONCE and used for both the flag and the step. */
+    ok(`21: ${name} computes the gate once, from path OR selection`,
+       /const crmChosen = b2cAllowedHere\(\) \|\| wantsCrm\(\);/.test(f)
+       && /const gateOnSellTo = \(sellTo === 'B2C' \|\| sellTo === 'Mixed'\) && !crmChosen;/.test(f), name);
     ok(`21: ${name} flags disqualified from that one value`,
        /if \(gateOnSellTo\) \{\s*formState\.disqualified = true;/.test(f), name);
     ok(`21: ${name} chooses the step from that same one value`,
@@ -2687,6 +2757,45 @@ async function section12() {
        half the decision is still gating CRM. */
     eq(`21: ${name} has no leftover raw B2C condition`,
        (f.match(/sellTo === 'B2C' \|\| sellTo === 'Mixed'/g) || []).length, 1);
+    /* ── PROGRESSIVE REVEAL, AND WHY IT IS SAFE ─────────────────
+       The question appears only once sell-to is answered. That is a
+       layout decision, but it would have been a correctness bug if the
+       B2C gate fired on SELECTION rather than at the Next click: a B2C
+       click would jump to the DQ step before the checkboxes existed and
+       the CRM exception could never apply.
+
+       It fires at Next. These three assertions are what keep it there. */
+    ok(`21: ${name} reveals the question only once sell-to is answered`,
+       /function syncNeedsVisibility\(\)/.test(f)
+       /* The VALUE is section 25's business, not this one's -- pinning the
+          literal here is what let the '' reveal bug sit green. This asserts
+          only what this section is about: the reveal is gated on `chosen`. */
+       && /wrap\.style\.display = chosen \? '[a-z-]+' : 'none';/.test(f), name);
+    ok(`21: ${name} only demands an answer once the question is visible`,
+       /needsAsked\(\) && needsVisible\(\) && !selectedNeeds\(\)\.length/.test(f), name);
+    /* THE GATE STAYS AT THE NEXT CLICK. The sell-to change handler may
+       only show and hide -- if it ever calls showStep or touches
+       disqualified, the reveal has become a verdict. */
+    {
+      const handler = (f.match(/function syncNeedsVisibility\(\)[\s\S]*?\n    \}/) || [''])[0];
+      ok(`21: ${name} the sell-to handler never decides anything`,
+         !/showStep|disqualified|savePartial/.test(handler), name);
+    }
+    /* The STATEMENT, not the string -- the comment above it names the
+       step too, and counting mentions would make prose a test failure. */
+    ok(`21: ${name} the DQ step is still reached from exactly one place`,
+       (f.match(/if \(gateOnSellTo\) showStep\('step-disqualified'\);/g) || []).length === 1, name);
+
+    /* about_business follows the CRM tick, and is cleared on untick --
+       the ELEMENT, not just the state, because it is read from the DOM
+       at step 2 and a hidden populated textarea would still submit. */
+    ok(`21: ${name} clears the about-business element on untick`,
+       /function syncAboutBusiness\(\)/.test(f)
+       && /if \(el\) el\.value = '';/.test(f)
+       && /formState\.about_business = '';/.test(f), name);
+    ok(`21: ${name} does nothing where there is no wrapper`,
+       /var wrap = document\.getElementById\('about-business-wrap'\);\s*\n\s*if \(!wrap\) return;/.test(f), name);
+
     /* Normalised the same way resolveProduct normalises, so /ai-demo/
        and /AI-Demo cannot disagree with the server about what they are. */
     ok(`21: ${name} lowercases and strips the trailing slash`,
@@ -2833,6 +2942,161 @@ async function section12() {
   ok('23: the ladder counts ours alongside rather than removing them',
      /const internalIn = \{/.test(rep) && /ladder\[bucket\]\+\+;/.test(rep) && /if \(mine\) internalIn\[bucket\]\+\+;/.test(rep));
   ok('23: every decision row says whether it is ours', /is_internal: mine/.test(rep));
+}
+
+/* ============================================================
+   24. NOTHING OUTSIDE THE SALESFORCE PICKLIST CAN EVER BE PUSHED
+
+   Product__c is a RESTRICTED picklist carrying exactly three values --
+   aeo, crm and aeo,crm -- added and verified against the live org on
+   15 Sept 2026. An unknown value there returns
+   INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST, and sfUnknownFields retries
+   only INVALID_FIELD and INVALID_FIELD_FOR_INSERT_UPDATE. So a bad
+   value does not cost us the field, it costs us THE WHOLE LEAD, with a
+   critical alert saying "This lead is NOT in Salesforce. Add it
+   manually."
+
+   product_interest is the only thing that reaches that field which
+   originates in a form body, so the canonicaliser is the only thing
+   standing between a tampered checkbox and a lost lead. A mutation that
+   dropped its allow-list filter SURVIVED the whole suite before this
+   section existed.
+   ============================================================ */
+{
+  const capi = require('../meta-capi');
+  const canonicalProductInterest = capi.canonicalProductInterest;
+  const PRODUCT_INTEREST_SLUGS = capi.PRODUCT_INTEREST_SLUGS;
+
+  /* What Salesforce will accept. Written out rather than derived, so
+     adding a product without adding its picklist value fails HERE
+     rather than in production on the first both-ticked lead. */
+  const SF_PRODUCT_PICKLIST = ['aeo', 'crm', 'aeo,crm'];
+
+  eq('24: the slug vocabulary is exactly the catalogue keys',
+     PRODUCT_INTEREST_SLUGS.slice().sort(), ['aeo', 'crm']);
+
+  /* EVERY non-empty sorted subset of the slugs must be in the picklist.
+     This is what breaks the day a third product is added: the new
+     combinations will not be there, and Salesforce would reject them. */
+  const subsets = [];
+  const S2 = PRODUCT_INTEREST_SLUGS.slice().sort();
+  for (let mask = 1; mask < (1 << S2.length); mask++) {
+    subsets.push(S2.filter((_, i) => mask & (1 << i)).join(','));
+  }
+  for (const v of subsets) {
+    ok(`24: "${v}" is a value Salesforce will accept`, SF_PRODUCT_PICKLIST.includes(v), v);
+  }
+  eq('24: and the picklist has no values the form cannot produce',
+     SF_PRODUCT_PICKLIST.slice().sort(), subsets.slice().sort());
+
+  /* ADVERSARIAL INPUT, EXECUTED. The field is a form body: anything can
+     arrive in it. Every one of these must come back null or a picklist
+     value -- never a passthrough. */
+  const hostile = [
+    'crm; DROP TABLE leads', 'aeo,crm,enterprise', 'ENTERPRISE', 'crm,,,', ',',
+    'aeo crm', 'crm\naeo', '  CRM  ', 'aeo,CRM', 'crm,aeo', ['crm', 'enterprise'],
+    ['<script>'], 'null', 'undefined', '0', 0, 1, true, false, {}, [], null, undefined,
+    'a'.repeat(500), 'aeo,'.repeat(50) + 'crm',
+  ];
+  for (const h of hostile) {
+    let out;
+    try { out = canonicalProductInterest(h); } catch (e) { out = 'THREW: ' + e.message; }
+    const safe = out === null || SF_PRODUCT_PICKLIST.includes(out);
+    /* String(): JSON.stringify(undefined) is undefined, not a string. */
+    ok(`24: hostile input cannot reach the picklist — ${String(JSON.stringify(h)).slice(0, 34)}`,
+       safe, 'got ' + JSON.stringify(out));
+  }
+
+  /* And the guarantee stated directly: the ONLY values this function can
+     ever return are null or a picklist member. */
+  const seen = new Set(hostile.concat(subsets).concat(['aeo', 'crm'])
+    .map((h) => { try { return canonicalProductInterest(h); } catch { return 'THREW'; } }));
+  const bad = [...seen].filter((v) => v !== null && !SF_PRODUCT_PICKLIST.includes(v));
+  eq('24: the canonicaliser emits nothing outside the picklist', bad, []);
+}
+
+/* ============================================================
+   25. A REVEAL MUST NAME A DISPLAY VALUE, NEVER ''
+
+   syncAboutBusiness shipped in PR 75 as:
+
+       wrap.style.display = show ? '' : 'none';
+
+   and could not have revealed anything on /demo. #about-business-wrap is
+   hidden by a CLASS (.field-wrapper.about-biz-wrap { display:none }), and
+   '' does not set display to its default -- it REMOVES the inline
+   declaration. There was never one, so the class kept winning and the
+   textarea stayed hidden for every AI-CRM lead. syncNeedsVisibility was
+   written the same way and would have failed the same way.
+
+   IT IS A CLASS BECAUSE WEBFLOW GIVES NO CHOICE. The Designer converts an
+   inline style into a generated combo class, and the Data API rejects a
+   style attribute outright -- both confirmed by attempt on 15 Sept 2026.
+   So every wrapper this code reveals is hidden by a class, always, and ''
+   can never reveal any of them.
+
+   WHY THIS IS A LINT AND NOT A DRIVEN TEST. The bug lives in the
+   interaction between our JavaScript and CSS that is not in this repo at
+   all -- it is in Webflow. A stubbed DOM has no stylesheet, so
+   style.display = '' followed by reading style.display returns '' and
+   every behavioural assertion passes. There is no fixture that makes this
+   visible: the suite cannot see the rule that wins. Same ceiling as the
+   SQL lint in section 13 -- a source assertion cannot tell you whether a
+   query parses, and no DOM test here can tell you which rule applied.
+
+   So this bans the SHAPE. Any empty-string display assignment in either
+   form file fails, whatever it is called and whoever writes it next.
+   ============================================================ */
+{
+  const FORM_FILES = ['gushwork-form.js', 'gushwork-form-popup.js'];
+
+  for (const file of FORM_FILES) {
+    const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    const lines = text.split('\n');
+
+    /* Any assignment to .style.display whose value is an empty string --
+       plain (= '') or either branch of a ternary (? '' : / : ''). Quotes
+       both ways, because a future edit may not match the house style. */
+    const offenders = [];
+    lines.forEach((line, i) => {
+      if (!/\.style\.display\s*=/.test(line)) return;
+      const rhs = line.slice(line.indexOf('.style.display') + '.style.display'.length)
+        .replace(/^\s*=/, '');
+      if (/(^|[?:]\s*)(''|"")\s*(:|;|$)/.test(rhs.trim())) {
+        offenders.push(`${file}:${i + 1}: ${line.trim().slice(0, 80)}`);
+      }
+    });
+    eq(`25: ${file} never reveals with an empty display string`, offenders, []);
+  }
+
+  /* And the two reveals specifically, by name, so deleting the functions
+     cannot quietly satisfy the lint above. Each must assign a real CSS
+     display keyword on its showing branch. */
+  const REVEALS = [
+    ['syncAboutBusiness', 'about-business-wrap'],
+    ['syncNeedsVisibility', 'needs-wrap'],
+  ];
+  for (const file of FORM_FILES) {
+    const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    for (const [fn, domId] of REVEALS) {
+      const start = text.indexOf(`function ${fn}(`);
+      ok(`25: ${file} declares ${fn}`, start !== -1, fn);
+      if (start === -1) continue;
+      /* The function body, to its closing brace at the same indent. */
+      const body = text.slice(start, start + 2000);
+      const assign = body.match(/\.style\.display\s*=\s*([^;]+);/);
+      ok(`25: ${fn} assigns style.display`, !!assign, fn);
+      if (!assign) continue;
+      const shown = assign[1].split('?')[1] ? assign[1].split('?')[1].split(':')[0].trim()
+                                            : assign[1].trim();
+      ok(`25: ${fn} reveals with a named display value, not '' (got ${shown})`,
+         /^'(block|flex|inline-flex|inline-block|grid)'$/.test(shown), shown);
+      /* It must still be the right element -- a reveal pointed at the
+         wrong wrapper would pass everything above. */
+      ok(`25: ${fn} still targets #${domId}`,
+         body.indexOf(`'${domId}'`) !== -1, domId);
+    }
+  }
 }
 
 /* ============================================================ */

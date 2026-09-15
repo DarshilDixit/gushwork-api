@@ -149,19 +149,35 @@ the Webflow CSS/JS embeds, not these two files. Don't confuse the two.
 ### Deploying a form change — the Webflow step
 
 **A `git push` does NOT ship a form change.** The two form files reach production
-through a `<script src>` in **Webflow → Project Settings → Custom Code**, and that
-URL names an immutable commit SHA:
+through a `<script src>` that names an immutable commit SHA:
 
 ```
 https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@<40-char-sha>/gushwork-form.js
 https://cdn.jsdelivr.net/gh/DarshilDixit/gushwork-api@<40-char-sha>/gushwork-form-popup.js
 ```
 
+**THE TAGS ARE PER-PAGE, NOT IN PROJECT SETTINGS — CORRECTED 15 SEPT 2026.**
+This section used to say the tags live in **Project Settings → Custom Code**.
+They do not, and have not for as long as anyone can check. Measured by reading
+all 81 pages through the Webflow API on 15 Sept: the site-wide head and footer
+blocks contain **no `gushwork-api` tag at all**, there are **zero registered
+scripts**, and every pin lives in an individual page's **before-`</body>`**
+footer block. Twelve pages carry one.
+
+That is not a detail, it is the whole reason a page goes stale. There is no
+single place to edit, so "update both script tags" is **twelve page edits**,
+and a Project-Settings republish genuinely cannot touch any of them. Anyone
+following the old wording would look in Project Settings, find nothing, and
+either give up or ADD a tag there — which would load the form script twice, at
+two different SHAs, with no error anywhere.
+
 So shipping a form fix is **two** steps, and the second one is outside this repo:
 
 1. Merge to `main` as usual.
-2. Take the new `main` SHA (`git rev-parse HEAD`) and update **both** script tags
-   in Webflow, then republish.
+2. Take the new `main` SHA (`git rev-parse HEAD`) and update the script tag in
+   **each page's footer custom code**, then republish. Both files move together
+   even though no page carries both — `/demo` and `/ai-demo` carry
+   `gushwork-form.js`, the ten ad landers carry `gushwork-form-popup.js`.
 
 Miss step 2 and the fix is in `main`, the tests pass, Railway has redeployed — and
 every real lead is still running the old file. Nothing in this repo will tell you.
@@ -173,6 +189,15 @@ take. Pinning removes the purge from the process entirely.
 
 **Use the full 40-character SHA.** Short SHAs work today but are ambiguous as the
 repo grows, and a collision resolves to the wrong file rather than erroring.
+
+**The `curl` sweep below has a blind spot the API closes.** Its page list is
+maintained by hand, so it cannot find a page carrying a pin that nobody
+remembered to add to it. Reading every page's footer block found exactly that:
+**`/start-old` is pinned to `d493e92e`, a 26 June commit** — v4.4-era, months
+behind. It is a 404 today and therefore harmless, which is also why no sweep
+would ever have caught it. Publish that page and it serves June's form to real
+visitors. Prefer the API sweep; see the section at the end of
+`docs/tickets/non-icp-v1-block.md`.
 
 **AND SWEEP EVERY PAGE, not just the two you changed.** The pin lives in a
 `<script src>`, and Webflow lets a *page* carry its own script tag that a
@@ -585,6 +610,26 @@ table — so a scope error arrives as a tidy "Could not load:" message, not a
 crash, and **a probe for a thrown error misses it entirely.** Assert on what
 the user sees.
 
+**THE WEBFLOW DESIGNER SERVES A STALE TREE AFTER A HEADLESS WRITE, AND
+THAT MAKES A SNAPSHOT LIE.** The MCP data tools write through the API; the
+open Designer session renders from its own in-memory copy and does not
+reload. On 15 Sept 2026 `element_snapshot_tool` returned **"Element not
+found"** for markup that had just been created and could be read back
+through `query_elements` in the same minute. Worse than the error is the
+quiet case: after the element exists, a **style** change made through the
+API kept rendering at its old value, so the snapshot showed a stale layout
+with no error at all.
+
+`switch_page` to another page and back forces the reload; `select_element`
+on the new element confirms the canvas can see it. Do that before every
+snapshot you intend to treat as evidence.
+
+This is the repo's oldest lesson wearing a picture instead of an
+assertion. "It rendered" and "I photographed what is actually there" are
+different claims, and the gap between them is a screenshot of the previous
+state pasted under the word *verified*. A snapshot is only evidence if the
+canvas was refreshed after the last write.
+
 **A GUARD ADDED TO THE OBVIOUS SITE MISSES ITS SIBLINGS. This happened three
 times in one night, to the same column.** `leads.disqualified` has **fourteen
 call sites** across routes, crons, sweeps, health checks and metrics queries,
@@ -705,6 +750,91 @@ query explaining the incident behind it. A backtick in that comment — writing
 the error surfaces as `SyntaxError: missing ) after argument list` pointing at the
 `pool.query(` line, not at the comment. Four of these happened in one sitting. Use
 plain words inside SQL comments, and run `node --check index.js` before committing.
+
+**"What do you need?" ON `/demo` ONLY — and `product` vs `product_interest`
+are two columns because they answer two questions.** Two mandatory
+checkboxes (`aeo`, `crm`) revealed after `sell_to` is answered. The values
+in the markup ARE the product slugs, so the checkbox, `product_interest`,
+the Salesforce picklist and the Meta `content_ids` are one vocabulary with
+no mapping table to drift.
+
+- **`leads.product` stays SINGLE-VALUED** — the routing slug. One calendar,
+  one Meta event, one Salesforce picklist value. CRM wins a both-ticked
+  selection. Widening it would break `Product__c` (a restricted picklist)
+  and the three `product = 'crm'` equality predicates at once.
+- **`leads.product_interest` holds what they ticked** — canonical: lowercase,
+  known slugs only, deduped, **sorted**. `'aeo'`, `'crm'`, `'aeo,crm'`.
+  **NULL means "we never asked"** and is the honest value for every page but
+  `/demo`. Never backfilled.
+- **Salesforce gets `product_interest ?? product`.** `Product__c` carries
+  three values — `aeo`, `crm`, `aeo,crm` — added and verified against the
+  live org on 15 Sept 2026.
+
+**THE ROUTING SLUG AND THE EVENT SLUG ARE DIFFERENT FUNCTIONS.**
+`resolveProduct` answers "which calendar, which Salesforce picklist value"
+and must be single — `crm` for a both-ticked lead. `resolveEventProduct`
+answers "what did we tell Meta this conversion was", and a both-ticked lead
+is honestly **both**: `content_ids: ['aeo','crm']` on **one** event.
+
+**One event, never two.** Deduplication is documented as cross-source only
+(*"Does not deduplicate events when only using one event source"*), and every
+active ad set optimises on conversion **count** — so two events would count
+one person twice and corrupt exactly what they bid on.
+
+**The Meta event must match `product_interest`, not `product`** — the same
+rule `Product__c` already follows. They agree on every lead except the
+both-ticked one, which is the only place the invariant is visible, and the
+divergence test exists for that row.
+
+**`predicted_ltv` is CONFIG: `META_LTV_AEO` / `META_LTV_CRM` /
+`META_LTV_AEO_CRM`**, defaults 12000 / 5000 / **15000**, all PROVISIONAL.
+Combined is 15000 and **not** the 17000 sum: it predicts what the *person* is
+worth, where the sum would assert they buy both at full price with certainty.
+An unreadable env var falls back to the default and warns once — a `NaN` in a
+payload is worse than a stale number.
+
+**`leads.meta_predicted_ltv` records what was actually sent**, NULL where no
+Meta event fired. The config can move; without this there is no way back to
+what was reported for a cohort, which is exactly what you need before
+switching anything to value optimisation. **That switch is blocked on closed-won
+revenue joined back to leads, not on the config** — see the value-optimisation
+section in `docs/tickets/non-icp-v1-block.md`.
+
+**`resolveProduct` TAKES THE SELECTION AND THE PAGE, AND BOTH THE COLUMN AND
+THE META EVENT MUST BE RESOLVED FROM BOTH.** `buildEventData` read `page_url`
+alone, which was correct only while product was a pure function of the page.
+With a checkbox deciding it, a `/demo` lead ticking AI-CRM stores `crm` and
+would fire `aeo` — the dashboard saying one thing and Facebook optimising for
+another, **with no error anywhere**. `tests/test-non-icp-routes.js` drives
+`/submit` across four selections and compares the bound column against the
+`content_ids` that actually reached `graph.facebook.com`.
+
+**An unknown `product_interest` loses the whole LEAD, not the field.**
+`Product__c` is restricted; an unknown value is
+`INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST`, which `sfUnknownFields` does
+**not** retry. `canonicalProductInterest` dropping unknown slugs is the only
+thing between a tampered checkbox and a lost lead — `test-batch2.js` §24
+executes it against 24 adversarial inputs and enumerates every slug subset
+against the picklist, so adding a third product without adding its
+combinations to Salesforce fails there rather than in production.
+
+**THE B2C GATE FIRES AT THE NEXT CLICK, NOT ON SELECTION**, and the
+progressive reveal depends on that. There is no change handler on the
+`sell_to` radios that decides anything, `handleStep1Next` has exactly two
+triggers, and `showStep('step-disqualified')` is reached from one statement
+inside it — so the checkboxes are read one line above the gate in the same
+call. Had it fired on selection, a B2C click would jump to the DQ step before
+the checkboxes were visible and the CRM exception could never apply. Four
+assertions hold it there, including one that the sell-to change handler never
+calls `showStep`, `savePartial` or touches `disqualified`.
+
+**Webflow markup this depends on, `/demo` only:** `#needs-wrap`
+(`display:none`), `#need-aeo` / `#need-crm` with `name="needs"` and
+`value="aeo"`/`"crm"`, `#needs-error`, `#about-business-wrap`
+(`display:none`), and `data-rh-router-crm="6804"` on the form wrapper —
+**and NOT `data-rh-router`**, whose absence is what keeps the 6138 AEO
+default. No markup means no selection, the server resolves from the page as
+before, and `product_interest` stays NULL. `/ai-demo` is untouched.
 
 **THE `sell_to` GATE IS CLIENT-SIDE ONLY, and the CRM product is excepted
 from it.** B2C or Mixed at step 1 sets `disqualified` and shows a terminal

@@ -47,7 +47,7 @@ const S = { fetches: [], slackPayloads: [], leadRow: null, writes: [], psBlocked
             /* /monitor/non-icp's two inputs, set per scenario. null means
                "this suite is not driving the report", so every other
                scenario keeps the stub's existing behaviour. */
-            reportLeads: null, reportVerdicts: null };
+            reportLeads: null, reportVerdicts: null, metaPayloads: [] };
 
 /* ── stub pg ──────────────────────────────────────────────────────
    Both pools (Railway and the AWS warehouse) come through here.
@@ -59,34 +59,57 @@ function stubQuery(q, params) {
   const flat = (typeof q === 'string' ? q : (q && q.text) || '').replace(/\s+/g, ' ').trim();
   S.writes.push({ flat, params });
 
-  /* The two leads upserts. Echo back what was bound for the FIVE non-ICP
-     placeholders, which are appended in this order at both call sites:
+  /* The two leads upserts. Echo back what was bound, so the route reads
+     the same effective block a real Postgres would have returned after
+     the sticky OR.
 
-        non_icp_blocked, non_icp_reason, non_icp_source,
-        non_icp_checked_at, non_icp_llm_flagged
+     RESOLVED BY COLUMN NAME, NOT BY COUNTING FROM THE END.
 
-     so the route reads the same effective block a real Postgres would have
-     returned after the sticky OR.
+     It counted five back from the end until 15 Sept 2026, and the
+     comment here called that "a known fragility" because it had already
+     broken once -- when the V2 columns were appended, this stub silently
+     started reading non_icp_checked_at as non_icp_blocked, a Date, which
+     is truthy, so it did not even fail the way you would expect. It then
+     broke a second time the moment product_interest was appended.
 
-     COUNTED FROM THE END, AND THAT IS A KNOWN FRAGILITY. It broke once
-     already, when the V2 columns were appended and this stub silently
-     started reading non_icp_checked_at as non_icp_blocked -- a Date, which
-     is truthy, so it did not even fail the way you would expect. The names
-     are asserted below rather than only the offsets, so the next append
-     fails loudly here instead of somewhere downstream. */
+     Twice is enough. The column list and the VALUES list are now walked
+     together: each column is paired with its value token, and a token of
+     the form $N reads params[N-1]. Literals (true, false, NOW(), the
+     bare 2 for step_reached) are skipped rather than miscounted. Append,
+     insert or reorder anything and this keeps working. */
   if (/INSERT INTO leads \(/.test(flat)) {
     const p = params || [];
-    const cols = (flat.match(/INSERT INTO leads \(([^)]*)\)/) || [])[1] || '';
-    const tail = cols.split(',').slice(-5).map(s => s.trim());
-    if (tail.join(',') !== 'non_icp_blocked,non_icp_reason,non_icp_source,non_icp_checked_at,non_icp_llm_flagged') {
-      throw new Error('leads upsert column tail moved — this stub decodes by position: ' + tail.join(','));
+    const cols = ((flat.match(/INSERT INTO leads \(([^)]*)\)/) || [])[1] || '')
+      .split(',').map((x) => x.trim());
+    /* DEPTH-SCANNED, not regexed. The VALUES list contains NOW(), whose
+       parens end any lazy [^)]* match at the wrong place -- which is how
+       a 48-column statement read as 30 tokens. */
+    const vi = flat.indexOf('VALUES (');
+    let depth = 0, end = -1;
+    for (let k = vi + 7; k < flat.length; k++) {
+      if (flat[k] === '(') depth++;
+      else if (flat[k] === ')') { depth--; if (depth === 0) { end = k; break; } }
     }
+    const vals = (end === -1 ? '' : flat.slice(vi + 8, end))
+      .replace(/NOW\(\)/g, 'NOW').split(',').map((x) => x.trim());
+    if (cols.length !== vals.length) {
+      throw new Error('leads upsert: ' + cols.length + ' columns but ' + vals.length +
+                      ' value tokens — the statement could not bind');
+    }
+    const bound = (name) => {
+      const i = cols.indexOf(name);
+      if (i === -1) throw new Error('leads upsert lost the column ' + name);
+      const m = /^\$(\d+)$/.exec(vals[i]);
+      return m ? p[Number(m[1]) - 1] : vals[i];
+    };
     return { rows: [{
-      non_icp_blocked:     p[p.length - 5] === true,
-      non_icp_reason:      p[p.length - 4] || null,
-      non_icp_source:      p[p.length - 3] || null,
-      non_icp_checked_at:  p[p.length - 2] || null,
-      non_icp_llm_flagged: p[p.length - 1] === true,
+      non_icp_blocked:     bound('non_icp_blocked') === true,
+      non_icp_reason:      bound('non_icp_reason') || null,
+      non_icp_source:      bound('non_icp_source') || null,
+      non_icp_checked_at:  bound('non_icp_checked_at') || null,
+      non_icp_llm_flagged: bound('non_icp_llm_flagged') === true,
+      product:             bound('product') || null,
+      product_interest:    bound('product_interest') || null,
       prev_booked: false, step_reached: 2,
     }], rowCount: 1 };
   }
@@ -146,6 +169,32 @@ function stubQuery(q, params) {
   if (/UPDATE leads SET ps_signup_sent_at = NOW/.test(flat)) return { rows: [{ session_id: 'x' }], rowCount: 1 };
   return { rows: [], rowCount: 0 };
 }
+/* WHAT A NAMED COLUMN WAS BOUND TO, for assertions about a recorded
+   write. The suite decoded these by slicing the last five params until
+   15 Sept 2026, which broke the moment product_interest was appended --
+   the same positional fragility the stub itself had, in the assertions
+   rather than the fake. One helper, resolved by name, used by both. */
+function boundCols(write) {
+  const flat = (write && write.flat) || '';
+  const p = (write && write.params) || [];
+  const cols = ((flat.match(/INSERT INTO leads \(([^)]*)\)/) || [])[1] || '')
+    .split(',').map((x) => x.trim());
+  const vi = flat.indexOf('VALUES (');
+  let depth = 0, end = -1;
+  for (let k = vi + 7; k < flat.length; k++) {
+    if (flat[k] === '(') depth++;
+    else if (flat[k] === ')') { depth--; if (depth === 0) { end = k; break; } }
+  }
+  const vals = (end === -1 ? '' : flat.slice(vi + 8, end))
+    .replace(/NOW\(\)/g, 'NOW').split(',').map((x) => x.trim());
+  const out = {};
+  cols.forEach((c, i) => {
+    const m = /^\$(\d+)$/.exec(vals[i] || '');
+    out[c] = m ? p[Number(m[1]) - 1] : vals[i];
+  });
+  return out;
+}
+
 class StubClient { async query(q, p) { return stubQuery(q, p); } release() {} }
 class StubPool {
   async connect() { return new StubClient(); }
@@ -174,7 +223,12 @@ global.fetch = async function (url, opts) {
   const j = (o) => ({ ok: true, status: 200, json: async () => o, text: async () => JSON.stringify(o) });
   if (/oauth2\/token/.test(u))        return j({ access_token: 'stub', instance_url: 'https://stub.my.salesforce.com' });
   if (/salesforce\.com/.test(u))      return j({ id: '00Qstub', success: true });
-  if (/graph\.facebook\.com/.test(u)) return j({ events_received: 1 });
+  if (/graph\.facebook\.com/.test(u)) {
+    /* THE BODY, not just the URL. The one thing worth asserting about a
+       Meta call is what content_ids it carried, and a URL cannot say. */
+    try { S.metaPayloads.push(JSON.parse(opts && opts.body)); } catch (_) {}
+    return j({ events_received: 1 });
+  }
   if (/partnerlinks\.io/.test(u))     return { ok: true, status: 200, text: async () => '', json: async () => ({}) };
   return j({});
 };
@@ -223,7 +277,7 @@ const post = async (p, body) => {
   let j = null; try { j = await r.json(); } catch (_) {}
   return { status: r.status, body: j };
 };
-const reset = () => { S.fetches = []; S.slackPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; };
+const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; };
 const metaFired      = () => S.fetches.some((u) => /graph\.facebook\.com/.test(u));
 const salesforceHit  = () => S.fetches.some((u) => /\/sobjects\//.test(u));
 const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') || true);
@@ -271,9 +325,9 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     ok('partial: responds ok', r.status === 200, String(r.status));
     const ins = S.writes.find((w) => /INSERT INTO leads \(/.test(w.flat));
     ok('partial: wrote the lead row', !!ins);
-    /* The five non-ICP placeholders, counted off the end in the order the
-       column tail declares them. See the decoding note in stubQuery. */
-    const np = ins ? ins.params.slice(-5) : [];
+    /* The five non-ICP columns, resolved BY NAME. See boundCols. */
+    const b = boundCols(ins);
+    const np = [b.non_icp_blocked, b.non_icp_reason, b.non_icp_source, b.non_icp_checked_at, b.non_icp_llm_flagged];
     ok('partial: stamped non_icp_blocked = true', np[0] === true, String(np[0]));
     ok('partial: stamped the matched domain',    np[1] === 'kw.com', String(np[1]));
     /* PROVENANCE. A domain-list block must say so, because the two
@@ -992,7 +1046,8 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
       sell_to: 'B2B', step_reached: 1, page_url: 'https://www.gushwork.ai/demo' });
     await sleep(400);
     const ins = S.writes.find((w) => /INSERT INTO leads \(/.test(w.flat));
-    const np = ins ? ins.params.slice(-5) : [];
+    const b = boundCols(ins);
+    const np = [b.non_icp_blocked, b.non_icp_reason, b.non_icp_source, b.non_icp_checked_at, b.non_icp_llm_flagged];
     ok('LLM/partial: stamped non_icp_blocked', np[0] === true, String(np[0]));
     ok('LLM/partial: source says llm, not domain_list', np[2] === 'llm', String(np[2]));
     ok('LLM/partial: stamped the model flag', np[4] === true, String(np[4]));
@@ -1102,7 +1157,8 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
       step_reached: 1, page_url: 'https://www.gushwork.ai/demo' });
     await sleep(400);
     const ins = S.writes.find((w) => /INSERT INTO leads \(/.test(w.flat));
-    const np = ins ? ins.params.slice(-5) : [];
+    const b = boundCols(ins);
+    const np = [b.non_icp_blocked, b.non_icp_reason, b.non_icp_source, b.non_icp_checked_at, b.non_icp_llm_flagged];
     ok('META-ONLY: NOT stamped as blocked', np[0] === false, String(np[0]));
     ok('META-ONLY: IS stamped as model-flagged', np[4] === true, String(np[4]));
     ok('META-ONLY: StartTrial still suppressed', !metaFired(),
@@ -1396,6 +1452,75 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     ok('report: the flags block says what is actually switched on',
        d.flags && typeof d.flags.llm_block === 'boolean' && typeof d.flags.llm_meta === 'boolean',
        JSON.stringify(d.flags));
+  }
+
+  /* ========================================================
+     THE STORED COLUMN AND THE META EVENT MUST NOT DIVERGE.
+
+     This is the sharpest failure mode the product question introduces,
+     and it is completely silent. buildEventData resolved the slug from
+     page_url alone, which was correct only while product was a pure
+     function of the page. The moment a checkbox can decide it, a /demo
+     lead who ticks AI-CRM stores 'crm' and fires 'aeo' -- the dashboard
+     says one thing, Facebook optimises for another, and nothing
+     anywhere reconciles them. No error, no alert, no red row.
+
+     So: drive /submit for real, read what was BOUND to leads.product,
+     read what content_ids actually went to graph.facebook.com, and
+     require them to be the same string.
+     ======================================================== */
+  for (const [label, needs, wantProduct, wantIds, wantLtv] of [
+    ['AI-CRM only on /demo',  'crm',     'crm', ['crm'],        5000],
+    /* THE ONE THAT SEPARATES THE TWO SLUGS. Routing must pick one
+       calendar, so product is 'crm'. The event is honestly BOTH, so
+       content_ids carries both ids -- and it must follow
+       product_interest, not product, exactly as Salesforce already
+       does. These agree on every other lead, which is why this row is
+       the only place the invariant is visible. */
+    ['both ticked on /demo',  'aeo,crm', 'crm', ['aeo', 'crm'], 15000],
+    ['Lead Gen only on /demo','aeo',     'aeo', ['aeo'],        12000],
+    ['nothing ticked',         '',       'aeo', ['aeo'],        12000],
+  ]) {
+    reset();
+    const sid = '00000000-0000-4000-8000-0000000000c' + (needs.length % 9);
+    await realFetch(BASE + '/submit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sid, email: 'x@cleanbiz.test', website: 'https://cleanbiz.test',
+        company: 'Clean', first_name: 'A', last_name: 'B', sell_to: 'B2B',
+        page_url: 'https://www.gushwork.ai/demo',
+        product_interest: needs,
+      }),
+    });
+    await sleep(600);
+
+    const ins = S.writes.find((w) => /INSERT INTO leads \(/.test(w.flat));
+    const stored = ins ? boundCols(ins).product : undefined;
+    ok(`divergence[${label}]: stored product is ${wantProduct}`, stored === wantProduct, String(stored));
+
+    const lead = S.metaPayloads.find((p) => (p.data || []).some((e) => e.event_name === 'Lead'));
+    const ev = lead && lead.data.find((e) => e.event_name === 'Lead');
+    const ids = ev && ev.custom_data && ev.custom_data.content_ids;
+    ok(`divergence[${label}]: Meta fired a Lead event`, !!ev, JSON.stringify(S.metaPayloads).slice(0, 120));
+    /* THE ASSERTION THAT MATTERS, and its shape changed on 15 Sept 2026
+       when both-ticked became one event carrying both ids. It is no
+       longer "Meta matches leads.product" -- routing picks one calendar
+       and the event does not have to. It is "Meta matches what they
+       TICKED", the same rule Salesforce's Product__c already follows. */
+    const storedInterest = ins ? boundCols(ins).product_interest : undefined;
+    ok(`divergence[${label}]: Meta content_ids match what they TICKED`,
+       !!ids && JSON.stringify(ids) === JSON.stringify(wantIds),
+       'ticked=' + storedInterest + ' meta=' + JSON.stringify(ids));
+    ok(`divergence[${label}]: the stored interest is what drove the event`,
+       (storedInterest || null) === (needs || null), String(storedInterest));
+    /* predicted_ltv came from config and is PERSISTED, so a cohort can
+       be reconstructed after somebody tunes the number. */
+    ok(`divergence[${label}]: the event carries predicted_ltv ${wantLtv}`,
+       ev && ev.custom_data && ev.custom_data.predicted_ltv === wantLtv,
+       String(ev && ev.custom_data && ev.custom_data.predicted_ltv));
+    const storedLtv = ins ? Number(boundCols(ins).meta_predicted_ltv) : undefined;
+    ok(`divergence[${label}]: and the row records the SAME number we sent`,
+       storedLtv === wantLtv, 'stored=' + storedLtv + ' sent=' + wantLtv);
   }
 
   loud();
