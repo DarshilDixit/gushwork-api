@@ -43,7 +43,11 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* Scenario state, reset between runs. */
-const S = { fetches: [], slackPayloads: [], leadRow: null, writes: [], psBlocked: false, verdict: null };
+const S = { fetches: [], slackPayloads: [], leadRow: null, writes: [], psBlocked: false, verdict: null,
+            /* /monitor/non-icp's two inputs, set per scenario. null means
+               "this suite is not driving the report", so every other
+               scenario keeps the stub's existing behaviour. */
+            reportLeads: null, reportVerdicts: null };
 
 /* ── stub pg ──────────────────────────────────────────────────────
    Both pools (Railway and the AWS warehouse) come through here.
@@ -85,6 +89,26 @@ function stubQuery(q, params) {
       non_icp_llm_flagged: p[p.length - 1] === true,
       prev_booked: false, step_reached: 2,
     }], rowCount: 1 };
+  }
+  /* ── /monitor/non-icp's three reads ──────────────────────────────
+     MATCHED BEFORE THE GENERIC BRANCHES BELOW, and that ordering is
+     load-bearing: the report's verdict query also opens with
+     "SELECT domain, business_type, blocking" but binds an ARRAY of
+     domains rather than one, so the single-domain branch below would
+     silently return nothing and the report would read as a cold cache
+     for every lead. */
+  if (/FROM non_icp_domain_verdicts WHERE domain = ANY/.test(flat)) {
+    const want = new Set((params || [])[0] || []);
+    const rows = (S.reportVerdicts || []).filter((v) => want.has(v.domain));
+    return { rows, rowCount: rows.length };
+  }
+  if (/FROM leads l WHERE l\.created_at >=/.test(flat)) {
+    const rows = S.reportLeads || [];
+    return { rows, rowCount: rows.length };
+  }
+  if (/SELECT scrape_status, source, COUNT\(\*\)::int/.test(flat)) {
+    return { rows: [{ scrape_status: 'ok', source: 'llm', n: 7 },
+                     { scrape_status: 'unreachable', source: 'llm_unreachable', n: 3 }], rowCount: 2 };
   }
   /* The model layer's verdict cache. S.verdict is the row the classifier
      would have written; null means a cold cache, which must block nobody. */
@@ -195,7 +219,7 @@ const post = async (p, body) => {
   let j = null; try { j = await r.json(); } catch (_) {}
   return { status: r.status, body: j };
 };
-const reset = () => { S.fetches = []; S.slackPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; };
+const reset = () => { S.fetches = []; S.slackPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; };
 const metaFired      = () => S.fetches.some((u) => /graph\.facebook\.com/.test(u));
 const salesforceHit  = () => S.fetches.some((u) => /\/sobjects\//.test(u));
 const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') || true);
@@ -952,6 +976,123 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     const txt = JSON.stringify(S.slackPayloads);
     ok('META-ONLY: Slack says Meta was withheld, NOT that it would have blocked',
        /Meta events withheld/.test(txt) && !/Would have been blocked/.test(txt), txt.slice(0, 200));
+  }
+
+  /* ========================================================
+     THE LADDER ON /monitor/non-icp, DRIVEN WITH REAL ROWS.
+
+     The four panels are only worth reading because the ladder is
+     mutually exclusive and exhaustive: five rows that sum to the lead
+     total, exactly like the stage ladder. Nothing asserted that, and a
+     mutation deleting the meta_only branch outright SURVIVED the whole
+     suite -- the route still answered 200 and the tab still painted,
+     with one population silently folded into another.
+
+     So this drives the real route with crafted leads and verdicts and
+     checks where each one lands. The five inputs below are one of each
+     state, plus the case the lead columns cannot answer on their own.
+     ======================================================== */
+  {
+    reset();
+    const now = new Date().toISOString();
+    const L = (over) => ({
+      session_id: 's', email: 'x@ex.test', website: null, company: null,
+      first_name: null, last_name: null, created_at: now, product: 'aeo',
+      booked: false, completed: true, non_icp_blocked: false, non_icp_reason: null,
+      non_icp_source: null, non_icp_llm_flagged: false, non_icp_checked_at: now, ...over,
+    });
+    S.reportLeads = [
+      L({ session_id: 'a', email: 'a@kw.test',     website: 'https://kw.test',
+          non_icp_blocked: true, non_icp_source: 'domain_list', non_icp_reason: 'kw.test' }),
+      L({ session_id: 'b', email: 'b@realty.test', website: 'https://realty.test',
+          non_icp_blocked: true, non_icp_source: 'llm', non_icp_reason: 'realty.test' }),
+      L({ session_id: 'c', email: 'c@solar.test',  website: 'https://solar.test',
+          non_icp_llm_flagged: true, non_icp_source: 'llm', non_icp_reason: 'solar.test', booked: true }),
+      /* Judged, and the model had no objection. */
+      L({ session_id: 'd', email: 'd@saas.test',   website: 'https://saas.test' }),
+      /* NOT DECIDED, and this is the case the lead row alone cannot
+         answer: non_icp_checked_at is stamped (nonIcpStamp sets it for
+         any verdict that is not check_failed or disabled, including a
+         plain no-match) while no verdict for this domain exists. Read
+         off the lead columns it is indistinguishable from the row
+         above. Only the join can split them. */
+      L({ session_id: 'e', email: 'e@nosite.test', website: 'https://nosite.test' }),
+    ];
+    S.reportVerdicts = [
+      { domain: 'kw.test', business_type: 'real_estate', blocking: true, confidence: 0.97,
+        evidence_quote: 'We are a brokerage', reason: 'brokerage', source: 'llm',
+        model_id: 'm', prompt_version: 'v1', scrape_status: 'ok', error: null,
+        page_url_used: 'https://kw.test', page_text_chars: 900, checked_at: now },
+      { domain: 'realty.test', business_type: 'real_estate', blocking: true, confidence: 0.96,
+        evidence_quote: 'Homes for sale', reason: 'brokerage', source: 'llm',
+        model_id: 'm', prompt_version: 'v1', scrape_status: 'ok', error: null,
+        page_url_used: 'https://realty.test', page_text_chars: 800, checked_at: now },
+      { domain: 'solar.test', business_type: 'home_services', blocking: false, confidence: 0.82,
+        evidence_quote: 'Residential Solar Installation', reason: 'installer', source: 'llm',
+        model_id: 'm', prompt_version: 'v1', scrape_status: 'ok', error: null,
+        page_url_used: 'https://solar.test', page_text_chars: 700, checked_at: now },
+      { domain: 'saas.test', business_type: 'software_technology', blocking: false, confidence: 0.95,
+        evidence_quote: 'A SaaS platform', reason: 'saas', source: 'llm',
+        model_id: 'm', prompt_version: 'v1', scrape_status: 'ok', error: null,
+        page_url_used: 'https://saas.test', page_text_chars: 600, checked_at: now },
+      /* A failure row, which is NOT a verdict: nosite.test stays "not
+         decided" and also shows up in the unreadable list. */
+      { domain: 'nosite.test', business_type: null, blocking: false, confidence: null,
+        evidence_quote: null, reason: null, source: 'llm_unreachable',
+        model_id: 'm', prompt_version: 'v1', scrape_status: 'thin', error: 'text=0',
+        page_url_used: null, page_text_chars: null, checked_at: now },
+    ];
+
+    const r = await realFetch(BASE + '/monitor/non-icp?days=7&token=stub', { signal: AbortSignal.timeout(20000) });
+    const d = await r.json();
+    ok('report: answers 200', r.status === 200, String(r.status));
+
+    const by = {};
+    for (const row of (d.ladder && d.ladder.rows) || []) by[row.key] = row.n;
+    ok('report: the brand-list block lands in blocked_list',  by.blocked_list === 1,  JSON.stringify(by));
+    ok('report: the model block lands in blocked_model',      by.blocked_model === 1, JSON.stringify(by));
+    ok('report: the flagged-not-blocked lead lands in meta_only', by.meta_only === 1, JSON.stringify(by));
+    ok('report: the judged-and-cleared lead lands in checked_clear', by.checked_clear === 1, JSON.stringify(by));
+    /* THE ONE THE LEAD COLUMNS CANNOT ANSWER. A failure row is not a
+       verdict, so this lead is undecided however stamped it looks. */
+    ok('report: a lead with only a FAILURE row is not decided',   by.not_decided === 1, JSON.stringify(by));
+
+    /* EXHAUSTIVE AND MUTUALLY EXCLUSIVE. This is the property the whole
+       panel rests on and the one a deleted branch breaks silently. */
+    const sum = Object.values(by).reduce((a, b) => a + b, 0);
+    ok('report: the five rows sum to the lead total',
+       sum === d.ladder.total && d.ladder.total === 5, sum + ' vs ' + (d.ladder && d.ladder.total));
+
+    /* Panel 3: both actioned populations, and nothing else. */
+    const acts = (d.decisions || []).map((x) => x.action).sort();
+    ok('report: decisions carries exactly the blocked and suppressed leads',
+       JSON.stringify(acts) === JSON.stringify(['blocked_list', 'blocked_model', 'meta_only']),
+       JSON.stringify(acts));
+    ok('report: each decision carries its evidence quote',
+       (d.decisions || []).every((x) => !!x.evidence_quote),
+       JSON.stringify((d.decisions || []).map((x) => x.evidence_quote)));
+
+    /* Panel 2: the action per industry is read from NON_ICP_BUSINESS_TYPES,
+       so a change to the six-industry scope cannot be described here as
+       one thing and applied there as another. */
+    const ind = {};
+    for (const i of d.industries || []) ind[i.business_type] = i.action;
+    ok('report: real_estate is shown as blocking',      ind.real_estate === 'block', JSON.stringify(ind));
+    ok('report: home_services is shown as Meta-only',   ind.home_services === 'meta', JSON.stringify(ind));
+    ok('report: software_technology takes no action',   ind.software_technology === 'none', JSON.stringify(ind));
+
+    /* Panel 4: the unreadable domain arrives WITH its lead attached,
+       which is the only form in which it is actionable. */
+    const un = (d.scrape && d.scrape.unreadable) || [];
+    ok('report: the unreadable domain is listed with its lead',
+       un.length === 1 && un[0].domain === 'nosite.test' && un[0].email === 'e@nosite.test',
+       JSON.stringify(un));
+    ok('report: the scrape panel says it is latest-outcome, not a rate',
+       (d.scrape.notes || []).some((n) => /not a historical rate/i.test(n)),
+       JSON.stringify(d.scrape.notes));
+    ok('report: the flags block says what is actually switched on',
+       d.flags && typeof d.flags.llm_block === 'boolean' && typeof d.flags.llm_meta === 'boolean',
+       JSON.stringify(d.flags));
   }
 
   loud();
