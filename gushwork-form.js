@@ -1,5 +1,20 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.13.0  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.14.0  (/demo PAGE VERSION - thru github/jsdlivr)
+
+  v5.14.0 — the phone flag follows the visitor's IP, and asks in time.
+    initialCountry was hardcoded 'us' and corrected afterwards by
+    setCountry, so the field asserted a country nobody had checked and
+    could overwrite one the visitor had picked themselves. Now
+    initialCountry 'auto' with geoIpLookup, which waits for the answer
+    instead of guessing. The lookup also FIRES AT PARSE TIME rather than
+    after the three serial script loads that gate initPhoneInputs --
+    measured at 0.30s of serial loading before a 0.22s lookup could even
+    begin, and seconds on mobile. intl-tel-input re-sets the flag when the
+    answer lands, but only while the input is still empty, so anyone who
+    started typing under a US flag kept it and stored a +1 number.
+    Memoised per page. Falls back to 'us' on every failure path -- blocked,
+    non-200, a 200 with no country, a hang, or an unusable sessionStorage --
+    and a failure is never cached, so one blip cannot pin the session.
 
   v5.13.0 — "What do you need?" on /demo, Lead Gen and AI-CRM.
     Mandatory multi-select on step 1. Ticking AI-CRM unlocks the B2C
@@ -2989,7 +3004,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.13.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.14.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

@@ -1,7 +1,7 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.13.0-ads  (ADS PAGE VERSION)
+  GUSHWORK — MULTI-STEP FORM  v5.14.0-ads  (ADS PAGE VERSION)
 
-  Tracks /demo v5.13.0. Full feature parity with /demo, EXCEPT the
+  Tracks /demo v5.14.0. Full feature parity with /demo, EXCEPT the
   booking step, which keeps the Ads page's fullscreen modal
   presentation — opened after step 2 — instead of /demo's inline
   column render, AND the close affordances that modal needs (v5.7.2).
@@ -9,6 +9,11 @@
   port of gushwork-form.js and should be kept in step with it. A
   modal needs a way out and an inline column does not, so this
   section has no /demo counterpart to track.
+
+  v5.14.0-ads — the phone flag follows the visitor's IP, and asks in time.
+    Ported from /demo v5.14.0, identical. This fork DOES serve the phone
+    field, so unlike most recent ports this one is live here rather than
+    carried for parity: every Google Ads lander gets the same fix.
 
   v5.13.0-ads — "What do you need?" ported from /demo v5.13.0,
     identical. No page this fork serves carries the markup, so every
@@ -3407,7 +3412,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.13.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.14.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
