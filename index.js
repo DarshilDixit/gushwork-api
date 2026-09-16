@@ -8,7 +8,7 @@ const rateLimit = require('express-rate-limit');
 const { Pool }  = require('pg');
 const { pool, initDB } = require('./db');
 const { sendConversion, fetchPartnership, sendAction, fetchCustomer } = require('./partnerstack');
-const { pushToSalesforce, findSFLeadByEmail, updateSFLead, updateOpportunityFields, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails } = require('./salesforce');
+const { pushToSalesforce, findSFLeadByEmail, updateSFLead, updateOpportunityFields, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails , sfIsRetryable} = require('./salesforce');
 const { pushFormEventsToMeta, pushStartTrialToMeta, resolveProduct, resolveEventProduct, predictedLtvFor, canonicalProductInterest, setMetaOutcomeReporter } = require('./meta-capi');
 const createLeadMagnetRouter = require('./lead-magnet');
 
@@ -1033,6 +1033,9 @@ const FAILURE_MONITORS = {
      Its own source so the impact text can say that, and -- the reason this
      matters more -- so recordSuccess below can reset ITS streak without
      touching the money path's. */
+  /* The retry sweep itself failing is different from a lead failing to
+     sync: it means the recovery mechanism is down, so nothing is healing. */
+  'Salesforce sync': { alertAfter: 3, impact: 'The Salesforce retry sweep is not running, so a failed write is no longer healing itself. Leads that failed during an outage will stay missing until someone adds them by hand.' },
   'PartnerStack SF read': { alertAfter: 3, impact: 'Qualified demos cannot be read out of Salesforce, so the $50 qualification is not firing while this lasts. Nothing is lost: the poll retries every couple of minutes and the query has no date bound, so it picks up everything it missed once Salesforce answers again.' },
 };
 const FAILURE_BUFFER_TTL_MS = 6 * 60 * 60 * 1000; // stale failures expire, so a slow trickle never accumulates
@@ -1177,6 +1180,40 @@ setMetaOutcomeReporter((outcome) => {
    The window buffer (3 in 6 hours) is deliberately NOT reset by recordSuccess,
    so failures interleaved with successes still alert through the trickle path.
    Lowering the streak can only ever reduce noise, never hide a real outage. */
+
+/* ── RECORDING WHETHER A SALESFORCE WRITE LANDED ─────────────────────
+   Nothing recorded this until 16 Sept 2026, so "which leads are missing from
+   Salesforce" had no answer and recovery was a human reading Slack.
+
+   Fire-and-forget, always. A lead is worth more than a verdict, and it is
+   certainly worth more than our bookkeeping about a lead -- so neither of
+   these is ever awaited on a request path and both swallow their own errors.
+   A failure to RECORD a failure must not become a second failure. */
+function markSalesforceSynced(session_id) {
+  if (!session_id) return;
+  pool.query(
+    `UPDATE leads
+        SET sf_synced_at = NOW(), sf_sync_failed_at = NULL,
+            sf_sync_error = NULL, sf_sync_retryable = NULL, updated_at = NOW()
+      WHERE session_id = $1`, [session_id])
+    .catch((e) => console.warn('[SF sync] could not mark synced (ignored):', e.message));
+}
+
+function markSalesforceFailed(session_id, err) {
+  if (!session_id) return;
+  const retryable = sfIsRetryable(err);
+  /* attempts counts what the SWEEP will spend, so the first, original failure
+     leaves it at 0 -- the sweep has not tried anything yet. Incrementing here
+     would give every lead one fewer retry than the budget says. */
+  pool.query(
+    `UPDATE leads
+        SET sf_sync_failed_at = NOW(), sf_synced_at = NULL,
+            sf_sync_error = $2, sf_sync_retryable = $3, updated_at = NOW()
+      WHERE session_id = $1`,
+    [session_id, String((err && err.message) || err || '').slice(0, 500), retryable])
+    .catch((e) => console.warn('[SF sync] could not mark failed (ignored):', e.message));
+  console.warn(`[SF sync] ${session_id} marked FAILED (${retryable ? 'retryable' : 'terminal'})`);
+}
 
 /* ── WHAT A SALESFORCE WRITE FAILURE ACTUALLY MEANS ──────────────────
    SIX call sites raise this -- three "Lead not created" and three "Booking
@@ -11528,6 +11565,143 @@ function startPartnerStackSfStateRefresh() {
   console.log(`[PartnerStack] SF state refresh started (boot + every ${PS_SF_REFRESH_INTERVAL_MS / 60000} min)`);
 }
 
+/* ── THE SALESFORCE RETRY SWEEP ──────────────────────────────────────
+   On 16 Sept 2026 a Salesforce maintenance window dropped a lead that had
+   BOOKED A DEMO, and the only trace was a Slack alert telling a human to add
+   it by hand. Nothing retried and nothing recorded, so the recovery cost was
+   one manual Salesforce record per lost lead. Ten instead of one and that is
+   somebody's afternoon.
+
+   WHAT IT RETRIES, and every clause is load-bearing:
+
+   1. sf_sync_failed_at IS NOT NULL -- a write we actually WATCHED fail.
+      NOT "leads with no sf_synced_at", which every row in history has. The
+      columns are not backfilled precisely so this can key off an observation
+      instead of an inference; the alternative would have queued thousands of
+      re-pushes on the first boot after deploy.
+
+   2. sf_synced_at IS NULL -- not since landed, including by a later booking
+      push or a hand-recovery.
+
+   3. sf_sync_retryable IS TRUE -- classified at the moment of failure by
+      sfIsRetryable. A converted lead or a rejected picklist value fails
+      identically forever; retrying it burns the budget and refills the queue
+      with things no retry can clear. Default is terminal, so an error nobody
+      has classified is left for a human rather than hammered.
+
+   4. non_icp_blocked IS NOT TRUE -- THE ONE THAT WOULD HAVE BEEN MISSED.
+      A blocked lead is deliberately absent from Salesforce (Swapnil,
+      11 Sept 2026). This sweep is a NEW consumer of that rule, and a second
+      column meaning "we rejected this lead" silently re-scopes every
+      consumer of the first -- the lesson CLAUDE.md records from the
+      PartnerStack conversion that cost money. Without this clause the sweep
+      would cheerfully push every realtor we turned away.
+
+   5. submitted_at IS NOT NULL -- they actually filled the form in. The same
+      rule backfill-sf.js uses, and for the same reason: completed does NOT
+      mean submitted in this schema.
+
+   6. attempts < the budget, and a backoff so a long outage is not hammered.
+
+   FIRE AND FORGET, bounded, and it reuses pushToSalesforce rather than
+   reimplementing the write -- so a lead recovered here is byte-identical to
+   one that succeeded first time. */
+const SF_RETRY_INTERVAL_MS = 10 * 60 * 1000;
+const SF_RETRY_MAX_ATTEMPTS = Number(process.env.SF_RETRY_MAX_ATTEMPTS) || 5;
+/* Long enough that a maintenance window is over before the first retry, and
+   that we are not racing the original push. */
+const SF_RETRY_BACKOFF_MIN = Number(process.env.SF_RETRY_BACKOFF_MIN) || 10;
+const SF_RETRY_BATCH = 25;
+let _sfRetryRunning = false;
+
+async function runSalesforceRetrySweep() {
+  if (_sfRetryRunning) { console.log('[SF retry] already running — skipping this tick'); return; }
+  _sfRetryRunning = true;
+  try {
+    const { rows } = await pool.query(
+      `SELECT session_id, email, first_name, last_name, phone, company, website, sell_to,
+              product, product_interest, about_business, hear_about_us, hear_about_us_raw,
+              page_url, landing_page, referrer, utm_source, utm_medium, utm_campaign,
+              utm_content, utm_term, fbc, fbp, booking_uid, start_time, event_type,
+              enriched_title, enriched_company_size, enriched_industry, enriched_linkedin,
+              enriched_seniority, enriched_departments, enriched_city, enriched_state,
+              enriched_country, enriched_annual_revenue, enriched_total_funding,
+              enriched_funding_stage, enriched_founded_year, sf_sync_attempts
+         FROM leads
+        WHERE sf_sync_failed_at IS NOT NULL
+          AND sf_synced_at IS NULL
+          AND sf_sync_retryable IS TRUE
+          AND non_icp_blocked IS NOT TRUE
+          AND submitted_at IS NOT NULL
+          AND COALESCE(sf_sync_attempts, 0) < $1
+          AND sf_sync_failed_at < NOW() - ($2 || ' minutes')::interval
+        ORDER BY sf_sync_failed_at ASC
+        LIMIT ${SF_RETRY_BATCH}`,
+      [SF_RETRY_MAX_ATTEMPTS, String(SF_RETRY_BACKOFF_MIN)]
+    );
+    if (!rows.length) return;
+    console.log(`[SF retry] ${rows.length} lead(s) to re-push`);
+
+    for (const l of rows) {
+      /* Claimed BEFORE the call, so two overlapping sweeps cannot both spend
+         an attempt on the same lead and so a crash mid-push still costs one
+         attempt rather than looping forever. */
+      await pool.query(
+        `UPDATE leads SET sf_sync_attempts = COALESCE(sf_sync_attempts, 0) + 1, updated_at = NOW()
+          WHERE session_id = $1`, [l.session_id]);
+      try {
+        await pushToSalesforce({
+          first_name: l.first_name, last_name: l.last_name, email: l.email, phone: l.phone,
+          company: l.company, website: l.website, sell_to: l.sell_to,
+          product: (l.product_interest || l.product), about_business: l.about_business,
+          hear_about_us: l.hear_about_us, hear_about_us_raw: l.hear_about_us_raw,
+          page_url: l.page_url, landing_page: l.landing_page, referrer: l.referrer,
+          utm_source: l.utm_source, utm_medium: l.utm_medium, utm_campaign: l.utm_campaign,
+          utm_content: l.utm_content, utm_term: l.utm_term, fbc: l.fbc, fbp: l.fbp,
+          booking_uid: l.booking_uid, start_time: l.start_time, event_type: l.event_type,
+          enriched_title: l.enriched_title, enriched_company_size: l.enriched_company_size,
+          enriched_industry: l.enriched_industry, enriched_linkedin: l.enriched_linkedin,
+          enriched_seniority: l.enriched_seniority, enriched_departments: l.enriched_departments,
+          enriched_city: l.enriched_city, enriched_state: l.enriched_state,
+          enriched_country: l.enriched_country,
+          enriched_annual_revenue: l.enriched_annual_revenue,
+          enriched_total_funding: l.enriched_total_funding,
+          enriched_funding_stage: l.enriched_funding_stage,
+          enriched_founded_year: l.enriched_founded_year,
+          step_reached: 2, booked: !!l.booking_uid,
+        });
+        markSalesforceSynced(l.session_id);
+        console.log(`[SF retry] ✅ recovered ${l.email}`);
+      } catch (err) {
+        markSalesforceFailed(l.session_id, err);
+        console.warn(`[SF retry] ⛔ still failing for ${l.email}: ${err.message}`);
+        /* The LAST attempt is the one worth paging about: up to here the
+           sweep is quietly doing its job and an alert per tick would train
+           people to ignore it. */
+        if ((l.sf_sync_attempts || 0) + 1 >= SF_RETRY_MAX_ATTEMPTS) {
+          alertOps('critical', 'Salesforce', 'Retries exhausted — lead still missing', {
+            'Email': l.email,
+            'Attempts': `${SF_RETRY_MAX_ATTEMPTS}`,
+            'Error': err.message,
+            'Impact': 'This lead is NOT in Salesforce and the automatic retry has given up. Add it manually.',
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[SF retry] sweep failed:', err.message);
+    recordFailure('Salesforce sync', 'retry sweep', err.message);
+  } finally {
+    _sfRetryRunning = false;
+  }
+}
+
+function startSalesforceRetrySweep() {
+  const t = setInterval(runSalesforceRetrySweep, SF_RETRY_INTERVAL_MS);
+  if (t.unref) t.unref();
+  console.log(`[SF retry] Sweep started (every ${SF_RETRY_INTERVAL_MS / 60000} min, max ${SF_RETRY_MAX_ATTEMPTS} attempts, ${SF_RETRY_BACKOFF_MIN} min backoff)`);
+}
+
 function startPartnerStackQualificationPoll() {
   const t = setInterval(runPartnerStackQualificationPoll, PS_QUALIFY_INTERVAL_MS);
   if (t.unref) t.unref();
@@ -12546,7 +12720,12 @@ app.post('/submit', async (req, res) => {
          Falls back to product where nothing was ticked, so /ai-demo, the
          ad landers and every historical lead send exactly what they send
          today. */
-      pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,product:(product_interest||product),about_business,hear_about_us:hearAboutUsFinal,hear_about_us_raw:hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); salesforceFailureAlert('lead', err, { 'Email': email, 'Stage': 'form completed' }); });
+      pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,product:(product_interest||product),about_business,hear_about_us:hearAboutUsFinal,hear_about_us_raw:hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false})
+        /* BOTH OUTCOMES ARE RECORDED, not just the failure. A success stamp is
+           what lets anyone ask which leads are missing from Salesforce, and it
+           is what clears a lead out of the retry sweep once it lands. */
+        .then(() => markSalesforceSynced(session_id))
+        .catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); markSalesforceFailed(session_id, err); salesforceFailureAlert('lead', err, { 'Email': email, 'Stage': 'form completed' }); });
 
       // Meta CAPI Lead — suppressed when the website check failed (temporary
       // non-blocking mode still lets the lead through, but keeps the Lead
@@ -13313,6 +13492,10 @@ async function start() {
       auditStartupConfig();
       startHeartbeat();
       startPartnerStackCacheWarm();
+      /* An outage that drops a Salesforce write now heals itself. Started
+         alongside the other sweeps rather than on the request path -- a lead
+         must never wait on our bookkeeping about a lead. */
+      startSalesforceRetrySweep();
       startPartnerStackQualificationPoll();
       startPartnerStackConversionVerify();
       startPartnerStackConversionRecheck();

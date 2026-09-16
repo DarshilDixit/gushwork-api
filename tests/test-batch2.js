@@ -3361,6 +3361,101 @@ section12()
          sent[3].sev === 'warning' && /booking is missing/.test(sent[3].f.Impact));
     }
   })
+  .then(async () => {
+    /* ══ THE SALESFORCE RETRY SWEEP ═══════════════════════════════════
+       A maintenance window on 16 Sept 2026 dropped a BOOKED lead and the
+       only trace was a Slack alert. Nothing retried and nothing recorded,
+       so recovery was one manual Salesforce record per lost lead. */
+    const idx2 = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+    const dbSrc = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
+    const { sfIsRetryable } = require('../salesforce.js');
+
+    /* ── 1. What may be retried, and what may never be ─────────────────
+       EXECUTED. Getting this wrong in the generous direction is expensive:
+       a sweep that retries terminal failures burns its budget and refills
+       the queue with entries no retry can clear. */
+    const retry = (m, extra) => sfIsRetryable(Object.assign(new Error(m), extra || {}));
+    ok('sfretry: a maintenance window is retryable', retry('Salesforce is down for maintenance (HTTP 503).'));
+    ok('sfretry: a non-JSON body is retryable', retry('returned HTTP 502 with a non-JSON body: NON_JSON_RESPONSE'));
+    ok('sfretry: a dead socket is retryable', retry('ECONNRESET') && retry('fetch failed'));
+    ok('sfretry: a token 5xx is retryable', retry('Salesforce token error: 503 — <html>'));
+    ok('sfretry: a CONVERTED lead is NEVER retried', !retry('CANNOT_UPDATE_CONVERTED_LEAD'));
+    ok('sfretry: and the flag beats a retryable-looking message',
+       !retry('down for maintenance', { sfConvertedLead: true }));
+    ok('sfretry: a restricted-picklist rejection is terminal',
+       !retry('INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST'));
+    ok('sfretry: a validation failure is terminal', !retry('REQUIRED_FIELD_MISSING'));
+    /* THE DEFAULT IS TERMINAL. An error nobody has classified is left for a
+       human rather than hammered — the lead is never lost by that, because
+       the alert still fires and the row keeps its error text. */
+    ok('sfretry: an UNKNOWN error defaults to terminal, not retryable',
+       !retry('something nobody has ever seen before'));
+    ok('sfretry: null and empty do not throw', !sfIsRetryable(null) && !sfIsRetryable(undefined));
+
+    /* ── 2. The columns, and that history is NOT backfilled ───────────── */
+    for (const col of ['sf_synced_at', 'sf_sync_failed_at', 'sf_sync_attempts',
+                       'sf_sync_error', 'sf_sync_retryable']) {
+      ok(`sfretry/db: ${col} is added IF NOT EXISTS`,
+         new RegExp('ADD COLUMN IF NOT EXISTS ' + col + '\\b').test(dbSrc));
+    }
+    /* A migration that backfilled history would have queued thousands of
+       re-pushes on the first boot. The sweep keys off an OBSERVED failure
+       precisely so it does not have to guess about the past. */
+    ok('sfretry/db: nothing backfills the new columns',
+       !/UPDATE leads SET sf_synced_at/i.test(dbSrc));
+    ok('sfretry/db: the sweep index is PARTIAL, so it stays small',
+       /leads_sf_sync_failed_idx[\s\S]{0,160}WHERE sf_sync_failed_at IS NOT NULL/.test(dbSrc));
+
+    /* ── 3. The sweep query's guards ──────────────────────────────────
+       Executed against a real Postgres shadow separately; these pin the
+       clauses so none can be dropped silently. */
+    const sweep = idx2.slice(idx2.indexOf('async function runSalesforceRetrySweep'),
+                             idx2.indexOf('function startSalesforceRetrySweep'));
+    ok('sfretry/sql: it retries only writes we WATCHED fail',
+       /sf_sync_failed_at IS NOT NULL/.test(sweep));
+    ok('sfretry/sql: not ones that have since landed',
+       /sf_synced_at IS NULL/.test(sweep));
+    ok('sfretry/sql: only failures classified retryable',
+       /sf_sync_retryable IS TRUE/.test(sweep));
+    /* THE CLAUSE THAT WOULD HAVE BEEN MISSED. A blocked lead is deliberately
+       absent from Salesforce; this sweep is a NEW consumer of that rule, and
+       a second column meaning "we rejected this lead" silently re-scopes
+       every consumer of the first. */
+    ok('sfretry/sql: a NON-ICP BLOCKED lead is never pushed by the sweep',
+       /non_icp_blocked IS NOT TRUE/.test(sweep));
+    ok('sfretry/sql: only leads that actually submitted, not merely completed',
+       /submitted_at IS NOT NULL/.test(sweep) && !/completed\s*=\s*true/.test(sweep));
+    ok('sfretry/sql: attempts are bounded', /sf_sync_attempts, 0\) < \$1/.test(sweep));
+    ok('sfretry/sql: and a backoff keeps it off a live outage',
+       /sf_sync_failed_at < NOW\(\) - \(\$2/.test(sweep));
+
+    /* ── 4. Shape: claim before push, reuse the real writer ──────────── */
+    ok('sfretry: the attempt is claimed BEFORE the push, not after',
+       sweep.indexOf('sf_sync_attempts = COALESCE') < sweep.indexOf('await pushToSalesforce'));
+    ok('sfretry: it reuses pushToSalesforce rather than reimplementing the write',
+       /await pushToSalesforce\(/.test(sweep));
+    ok('sfretry: success clears the row out of the sweep',
+       /markSalesforceSynced\(l\.session_id\)/.test(sweep));
+    ok('sfretry: it only pages once retries are EXHAUSTED, not every tick',
+       />= SF_RETRY_MAX_ATTEMPTS/.test(sweep) && /Retries exhausted/.test(sweep));
+    ok('sfretry: one at a time — a slow run cannot race itself',
+       /_sfRetryRunning/.test(sweep));
+
+    /* ── 5. Both outcomes are recorded on the live path ──────────────── */
+    ok('sfretry: /submit records a SUCCESS, not just a failure',
+       /\.then\(\(\) => markSalesforceSynced\(session_id\)\)/.test(idx2));
+    ok('sfretry: and records the failure with its classification',
+       /markSalesforceFailed\(session_id, err\)/.test(idx2));
+    ok('sfretry: marking is fire-and-forget — a lead never waits on bookkeeping',
+       /markSalesforceSynced\(session_id\) \{[\s\S]{0,400}\.catch\(/.test(idx2)
+       || /could not mark synced \(ignored\)/.test(idx2));
+    /* The first failure must leave attempts at 0, or every lead gets one
+       fewer retry than the budget claims. */
+    ok('sfretry: the original failure does not spend a retry attempt',
+       !/markSalesforceFailed[\s\S]{0,600}sf_sync_attempts = COALESCE\(sf_sync_attempts, 0\) \+ 1/.test(idx2));
+    ok('sfretry: the sweep is started at boot', /startSalesforceRetrySweep\(\);/.test(idx2));
+  })
+  .catch((err) => { ok('sfretry: the retry-sweep section completed', false, err && err.message); })
   .catch((err) => { ok('sf: the Salesforce outage section completed', false, err && err.message); })
   .then(() => {
     console.log('');

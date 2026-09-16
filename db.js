@@ -724,6 +724,38 @@ async function initDB() {
          start refusing leads nobody decided to refuse. Same lesson as the
          V1 incident, arriving one column earlier. */
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS non_icp_llm_flagged BOOLEAN DEFAULT FALSE`,
+
+      /* ── SALESFORCE SYNC STATE ────────────────────────────────────────
+         Until 16 Sept 2026 nothing recorded whether a Salesforce write had
+         landed. A maintenance window that afternoon dropped
+         gregory.ingalls@gmail.com -- a BOOKED demo -- and the only trace was
+         a Slack alert. There was no way to ask "which leads are missing from
+         Salesforce", so recovery meant a human reading alerts and retyping
+         records by hand. Ten leads instead of one and that does not scale.
+
+         FOUR COLUMNS, and the pair of stamps is deliberate: sf_synced_at is
+         when a write last SUCCEEDED, sf_sync_failed_at is when one last
+         FAILED. Two observations, two columns -- the same reasoning as
+         ps_signup_verified_at against ps_signup_recheck_at. A single
+         nullable "ok" boolean cannot tell "never tried" from "tried and
+         failed", and never-tried is the state every historical row is in.
+
+         NOTHING IS BACKFILLED, and that is the whole point. Every row that
+         predates this has all four NULL, which reads as "we never observed
+         this one" -- true, and not "it failed". The retry sweep keys off
+         sf_sync_failed_at IS NOT NULL, so it can only ever retry a write we
+         actually watched fail. Inferring that history had failed would have
+         queued thousands of re-pushes on the first boot. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS sf_synced_at TIMESTAMPTZ`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS sf_sync_failed_at TIMESTAMPTZ`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS sf_sync_attempts INTEGER DEFAULT 0`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS sf_sync_error TEXT`,
+      /* Whether the last failure can ever succeed on a retry. A converted
+         lead or a rejected picklist value will fail identically forever, and
+         a sweep that keeps trying them burns its attempt budget and fills the
+         queue with things no retry can fix -- the shape the "booked but no
+         qualification" check was rejected for. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS sf_sync_retryable BOOLEAN`,
       `CREATE INDEX IF NOT EXISTS leads_non_icp_llm_flagged_idx ON leads (non_icp_llm_flagged) WHERE non_icp_llm_flagged IS TRUE`,
 
       /* ── The model verdict cache — one row per registrable domain ────
@@ -778,6 +810,12 @@ async function initDB() {
       /* The eligibility check reads a 90-day window of leads to find prior
          contact on the same domain. created_at was unindexed. */
       `CREATE INDEX IF NOT EXISTS leads_created_at_idx ON leads (created_at)`,
+      /* The retry sweep's only index. PARTIAL, so it stays tiny: it covers
+         exactly the rows that are candidates -- a write we watched fail and
+         have not since seen succeed. */
+      `CREATE INDEX IF NOT EXISTS leads_sf_sync_failed_idx
+         ON leads (sf_sync_failed_at)
+         WHERE sf_sync_failed_at IS NOT NULL AND sf_synced_at IS NULL`,
       /* "One conversion per domain, EVER" enforced by the database rather than
          by a SELECT-then-send in application code, which races: two submits for
          the same domain arriving together both see no stamp and both fire, and
