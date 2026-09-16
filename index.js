@@ -1225,9 +1225,17 @@ function markSalesforceFailed(session_id, err) {
    one was the dangerous half.
 
    mdorf@performancemediastrategies.com converted to a Contact, Account and
-   Opportunity on 29 June and booked again on 16 Sept. They are in Salesforce
-   as a CUSTOMER. Adding them by hand creates a duplicate against a live
-   Account, which is worse than doing nothing at all.
+   Opportunity on 29 June and booked again on 16 Sept. Adding them by hand
+   creates a duplicate against a live Account, which is worse than doing
+   nothing at all.
+
+   AND "CONVERTED" IS NOT "CUSTOMER", which this alert said until 16 Sept.
+   Converting a Lead in Salesforce creates a Contact and an Account, usually
+   with an Opportunity -- it records that the lead was QUALIFIED, not that
+   they bought anything. That Opportunity can sit at any stage. The one
+   behind this very incident reads StageName "Demo Completed" with
+   IsWon false and IsClosed false: an open deal mid-pipeline, not a customer.
+   Calling them a customer in the alert tells an AE the deal is done.
 
    ONE function rather than six edits, for the reason this repo keeps
    relearning: a guard added to the obvious site misses its siblings. The
@@ -1241,12 +1249,12 @@ function salesforceFailureAlert(kind, err, ctx) {
   const severity = (converted || unavailable) ? 'warning'
                  : (kind === 'lead' ? 'critical' : 'warning');
 
-  const title = converted   ? 'Already a customer — nothing written'
+  const title = converted   ? 'Lead already converted — nothing written'
               : unavailable ? 'Salesforce unavailable — write skipped'
               : (kind === 'lead' ? 'Lead not created' : 'Booking not recorded');
 
   const impact = converted
-    ? 'This person IS in Salesforce, as a converted Contact/Account/Opportunity. Do NOT add them manually — that creates a duplicate against a live account. Log the booking against the existing Contact, and tell whoever owns that account.'
+    ? 'This person IS in Salesforce — their Lead was converted to a Contact and Account, usually with an Opportunity. Converted does NOT mean they are a customer: that Opportunity can be at any stage, including open or lost. Do NOT add them manually — that creates a duplicate against a live account. Log the booking against the existing Contact, and tell whoever owns it.'
     : unavailable
     ? 'Salesforce was down when we tried. Nothing is wrong with this lead — it just was not written. Re-run it once Salesforce is back.'
     : (kind === 'lead'

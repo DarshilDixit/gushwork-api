@@ -3344,6 +3344,19 @@ section12()
          !/not created/i.test(sent[0].title), sent[0].title);
       ok('sfalert/converted: the impact says they ARE in Salesforce',
          /IS in Salesforce/.test(sent[0].f.Impact));
+      /* CONVERTED IS NOT CUSTOMER. Converting a Lead creates a Contact and an
+         Account, usually with an Opportunity -- it records that the lead was
+         QUALIFIED, not that they bought. The Opportunity behind the incident
+         that produced this alert reads IsWon false, IsClosed false, stage
+         "Demo Completed": an open deal mid-pipeline. Telling an AE they are
+         already a customer says the deal is done. */
+      ok('sfalert/converted: it is NOT called a customer',
+         !/customer/i.test(sent[0].title) && !/as a customer/i.test(sent[0].f.Impact),
+         sent[0].title + ' | ' + sent[0].f.Impact.slice(0, 90));
+      ok('sfalert/converted: and it says outright that converted is not customer',
+         /does NOT mean they are a customer/i.test(sent[0].f.Impact));
+      ok('sfalert/converted: the title names the real state — converted',
+         /converted/i.test(sent[0].title), sent[0].title);
       ok('sfalert/converted: and explicitly says do NOT add them manually',
          /do NOT add them manually/i.test(sent[0].f.Impact));
       ok('sfalert/converted: downgraded from critical — nothing is lost',
