@@ -3468,6 +3468,58 @@ section12()
        !/markSalesforceFailed[\s\S]{0,600}sf_sync_attempts = COALESCE\(sf_sync_attempts, 0\) \+ 1/.test(idx2));
     ok('sfretry: the sweep is started at boot', /startSalesforceRetrySweep\(\);/.test(idx2));
   })
+  .then(async () => {
+    /* ══ THE FORMULA'S MISSING INPUT ══════════════════════════════════
+       Lead.Source_Bucket__c is a Salesforce FORMULA reading utm_source__c
+       and How_Did_You_Hear__c. We have always written the first and never
+       the second, so the ~14 branches keying off what the visitor told us
+       read an empty field and fell to "Others". Measured: 763 of 2,539
+       leads (30%) bucketed wrong; "Others" 871 -> 108 once fixed.
+
+       Its value is also what lands on the Opportunity at conversion —
+       verified, 1,626 of 1,729 identical — so this one field decides
+       channel attribution all the way to closed-won. */
+    const sfSrc2 = fs.readFileSync(path.join(__dirname, '..', 'salesforce.js'), 'utf8');
+    const a = sfSrc2.indexOf('const STANDARD_FIELD_MAP');
+    const b = sfSrc2.indexOf('async function pushToSalesforce');
+    const build = new Function(sfSrc2.slice(a, b) + '; return buildLeadFields;')();
+
+    const out = build({ email: 'a@b.com', hear_about_us: 'Facebook (Paid)', utm_source: 'facebook' });
+    ok('hdyh: How_Did_You_Hear__c is written', out.How_Did_You_Hear__c === 'Facebook (Paid)', JSON.stringify(out.How_Did_You_Hear__c));
+    ok('hdyh: hear_about_us__c is STILL written — the mirror adds, never replaces',
+       out.hear_about_us__c === 'Facebook (Paid)');
+    /* They must be provably identical. Two fields that can disagree about
+       one answer is worse than one field that is empty. */
+    ok('hdyh: the two are identical', out.How_Did_You_Hear__c === out.hear_about_us__c);
+
+    /* Absent, not empty-string. An empty string would make the formula's
+       LOWER() comparisons run against "" and land in a bucket by accident;
+       a missing key leaves the field untouched. */
+    const none = build({ email: 'a@b.com' });
+    ok('hdyh: omitted entirely when the visitor answered nothing',
+       !('How_Did_You_Hear__c' in none) && !('hear_about_us__c' in none));
+    const blank = build({ email: 'a@b.com', hear_about_us: '' });
+    ok('hdyh: an empty answer is omitted too, not written as ""',
+       !('How_Did_You_Hear__c' in blank));
+
+    /* The real values that were falling into "Others" — these are the
+       branches the formula could never reach. */
+    for (const [said, why] of [['Referral','Referral'], ['linkedin','LinkedIn'],
+                               ['chatgpt.com','AI / LLM'], ['Friend','Referral']]) {
+      const r = build({ email: 'x@y.com', hear_about_us: said });
+      ok(`hdyh: "${said}" now reaches the formula (would bucket ${why})`,
+         r.How_Did_You_Hear__c === said);
+    }
+
+    /* The mirror is declared once. A second CUSTOM_FIELD_MAP entry would be
+       a place to forget. */
+    ok('hdyh: it is a MIRROR, not a duplicated map entry',
+       /const MIRROR_FIELDS = \{/.test(sfSrc2)
+       && (sfSrc2.match(/How_Did_You_Hear__c/g) || []).length <= 3);
+    ok('hdyh: mirrors are applied after the custom-field loop, so truncation is inherited',
+       sfSrc2.indexOf('MIRROR_FIELDS)') > sfSrc2.indexOf('CUSTOM_FIELD_MAP)'));
+  })
+  .catch((err) => { ok('hdyh: the How_Did_You_Hear section completed', false, err && err.message); })
   .catch((err) => { ok('sfretry: the retry-sweep section completed', false, err && err.message); })
   .catch((err) => { ok('sf: the Salesforce outage section completed', false, err && err.message); })
   .then(() => {

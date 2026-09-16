@@ -115,6 +115,38 @@ const CUSTOM_FIELD_MAP = {
   step_reached: 'step_reached__c',
 };
 
+/* ── ONE ANSWER, TWO SALESFORCE FIELDS ───────────────────────────────
+   Salesforce computes Lead.Source_Bucket__c — the field every channel
+   report keys off, and the value that is copied onto the Opportunity at
+   conversion. It is a FORMULA, and it reads exactly two inputs:
+
+       utm_source__c          <- we have always written this
+       How_Did_You_Hear__c    <- we have NEVER written this, in any commit
+
+   So the ~14 branches that key off what the visitor TOLD us — Referral,
+   LinkedIn, Email, AI/LLM, Organic Search, PR/Media — have been reading an
+   empty field on every lead this service has ever created. Only the two
+   utm_source branches (Google, Meta) ever fired. Everything else fell to
+   "Others".
+
+   Something outside this repo used to populate it: 83-89% of our leads
+   through April-June 2026, then 3% in July and 0% since. Source_Bucket_New__c
+   died in the same month, which is how we know it was one upstream writer
+   rather than two. Measured on 90 days of real leads, 763 of 2,539 (30%) are
+   bucketed wrong today, and "Others" would fall from 871 to 108.
+
+   We already hold the answer — it is the same string we put in
+   hear_about_us__c. Writing it to both costs nothing and does not wait on
+   anyone else fixing the upstream job.
+
+   A MIRROR RATHER THAN A SECOND MAP ENTRY, because CUSTOM_FIELD_MAP is
+   srcKey -> sfKey and cannot express one source feeding two targets. Putting
+   it here keeps the two values provably identical: there is no second place
+   to forget to update. */
+const MIRROR_FIELDS = {
+  hear_about_us: 'How_Did_You_Hear__c',
+};
+
 // Fields that have a max length enforced by SF
 const FIELD_MAX_LENGTHS = {
   landing_page: 255,
@@ -144,6 +176,16 @@ function buildLeadFields(payload) {
       if (FIELD_MAX_LENGTHS[srcKey]) {
         value = value.substring(0, FIELD_MAX_LENGTHS[srcKey]);
       }
+      lead[sfKey] = value;
+    }
+  }
+
+  /* Mirrors last, so they inherit exactly what the loop above produced —
+     including any truncation — and cannot drift from their source field. */
+  for (const [srcKey, sfKey] of Object.entries(MIRROR_FIELDS)) {
+    if (payload[srcKey] !== undefined && payload[srcKey] !== null && payload[srcKey] !== '') {
+      let value = String(payload[srcKey]);
+      if (FIELD_MAX_LENGTHS[srcKey]) value = value.substring(0, FIELD_MAX_LENGTHS[srcKey]);
       lead[sfKey] = value;
     }
   }
