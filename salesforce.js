@@ -214,6 +214,60 @@ function sfUnknownFields(result) {
    Returns the parsed JSON when the body IS json, and otherwise a synthetic
    error shaped like Salesforce's own error array, so sfUnknownFields and the
    callers keep working unchanged. */
+/* ── CAN THIS FAILURE EVER SUCCEED ON A RETRY? ───────────────────────
+   A retry sweep is only worth having if it knows what NOT to retry.
+
+   RETRYABLE means the write failed for a reason outside this lead: a
+   maintenance window, a 5xx, a dropped connection, an expired token. Those
+   succeed the moment Salesforce is back, which is exactly the case that cost
+   a booked demo on 16 Sept 2026.
+
+   TERMINAL means the same request will be refused identically forever.
+   CANNOT_UPDATE_CONVERTED_LEAD is the clearest: the Lead is converted and
+   will never be updatable again. A restricted-picklist rejection and a
+   validation rule are the same shape -- the data has to change first, and no
+   number of retries changes data.
+
+   Getting this wrong in the generous direction is the expensive one. A sweep
+   that retries terminal failures burns its attempt budget, re-alerts forever,
+   and fills the queue with entries no retry can clear -- which is precisely
+   why the "booked but no ps_qualified_sent_at" check was rejected in the
+   PartnerStack work. So the default is TERMINAL: a failure we do not
+   recognise is not retried, it is left for a human, and it keeps its error
+   text so that human can see what it was.
+
+   Unrecognised-means-terminal is the conservative direction here BECAUSE the
+   lead is never lost by it -- the alert still fires and the row still carries
+   sf_sync_failed_at, so nothing disappears. The opposite default would retry
+   a poison record until it exhausted its attempts. */
+const SF_RETRYABLE_ERROR_CODES = new Set([
+  'SALESFORCE_UNAVAILABLE',   // our own: the maintenance page
+  'NON_JSON_RESPONSE',        // our own: any other non-JSON body
+  'SERVER_UNAVAILABLE',       // Salesforce's own 503 code
+  'UNABLE_TO_LOCK_ROW',       // transient row contention
+  'REQUEST_LIMIT_EXCEEDED',   // API limit, clears on its own
+  'QUERY_TIMEOUT',
+  'OPERATION_TOO_LARGE',
+]);
+
+/* Matched on the THROWN message too, because five of the six call sites only
+   ever see err.message -- the structured result never reaches them. */
+const SF_RETRYABLE_MESSAGE = /down for maintenance|SALESFORCE_UNAVAILABLE|NON_JSON_RESPONSE|SERVER_UNAVAILABLE|UNABLE_TO_LOCK_ROW|REQUEST_LIMIT_EXCEEDED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|fetch failed|network|timeout|HTTP 5\d\d|Salesforce token error: 5\d\d/i;
+
+function sfIsRetryable(err) {
+  if (!err) return false;
+  /* A converted lead is terminal no matter what else the text says. Checked
+     FIRST so a message that happens to contain a retryable word cannot
+     promote it. */
+  if (err.sfConvertedLead === true) return false;
+  const msg = String(err.message || err || '');
+  if (/CANNOT_UPDATE_CONVERTED_LEAD/i.test(msg)) return false;
+  for (const code of SF_RETRYABLE_ERROR_CODES) {
+    if (msg.includes(code)) return true;
+  }
+  return SF_RETRYABLE_MESSAGE.test(msg);
+}
+
 /* ── A CONVERTED LEAD IS NOT A FAILED WRITE ──────────────────────────
    findSFLeadByEmail takes the NEWEST Lead for an address with no
    IsConverted filter, so a returning visitor whose Lead was converted to a
@@ -808,4 +862,4 @@ async function findEnrichmentByEmails(emails) {
   }
 }
 
-module.exports = { pushToSalesforce, findSFLeadByEmail, updateSFLead, updateOpportunityFields, getSalesforceToken, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails, SF_EMAIL_BATCH, sfConvertedLeadError };
+module.exports = { pushToSalesforce, findSFLeadByEmail, updateSFLead, updateOpportunityFields, getSalesforceToken, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails, SF_EMAIL_BATCH, sfConvertedLeadError, sfIsRetryable };
