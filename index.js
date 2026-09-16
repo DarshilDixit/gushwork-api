@@ -5075,10 +5075,26 @@ app.get('/monitor', (req, res) => {
   'a.download="lead-magnet-"+etDay(new Date())+".csv";a.click();}' +
   'async function loadAll(){set("lupd","Refreshing...");var ok=await checkApi();if(!ok){document.getElementById("alerts").innerHTML="<div class=\\"alertbox ae\\"><span>x</span><span>API offline.</span></div>";set("lupd","API offline");return;}checkElv();' +
   'try{var r=await fetch(API+"/monitor/metrics"+TP,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
-  'set("m-total",d.peopleTotal);set("m-totals",d.total+" sessions \\u00B7 "+d.todayCount+" in last 24h");' +
-  'set("m-comp",d.peopleCompleted);set("m-cpct",pct(d.peopleCompleted,d.peopleTotal)+" of people \\u00B7 "+d.completed+" sessions");' +
-  'set("m-book",d.peopleBooked);set("m-bpct",pct(d.peopleBooked,d.peopleCompleted)+" of completed \\u00B7 "+d.booked+" sessions");' +
-  'set("m-disq",d.peopleDisqualified);set("m-dsq","B2C / Mixed \\u00B7 "+d.disqualified+" sessions");' +
+  /* ── "leads", NOT "sessions" ───────────────────────────────────────
+     Every number in these four sub-lines is COUNT(*) FROM leads. None of
+     them counts a row in form_sessions, and the dashboard reports the real
+     session count elsewhere -- 21,232 against these 5,344 on 16 Sept 2026.
+     The same word meant two populations four times apart, on one screen.
+
+     That is verbatim the thing the Definitions section in CLAUDE.md was
+     written to stop: "a chart called sessions that counted leads". The big
+     number on each card is people (deduped by lower(email)) and the sub-line
+     is the undeduped row count, so "leads" is also what makes the pair
+     readable -- 4,878 people across 5,344 leads says exactly what the dedup
+     did, where "5,344 sessions" invited the reader to think the site saw
+     5,344 form sessions.
+
+     The non-ICP cards below already got this right ("16 leads · 11 people").
+     These four are simply older than that rule. */
+  'set("m-total",d.peopleTotal);set("m-totals",d.total+" leads \\u00B7 "+d.todayCount+" in last 24h");' +
+  'set("m-comp",d.peopleCompleted);set("m-cpct",pct(d.peopleCompleted,d.peopleTotal)+" of people \\u00B7 "+d.completed+" leads");' +
+  'set("m-book",d.peopleBooked);set("m-bpct",pct(d.peopleBooked,d.peopleCompleted)+" of completed \\u00B7 "+d.booked+" leads");' +
+  'set("m-disq",d.peopleDisqualified);set("m-dsq","B2C / Mixed \\u00B7 "+d.disqualified+" leads");' +
   /* THE UNIT IS IN THE TEXT, on both halves. The big number is LEADS
      and the sub-line is PEOPLE, and until 15 Sept 2026 neither said so.
      Next to the Blocked tab's "5 excluding our own tests" -- which is
@@ -5088,7 +5104,10 @@ app.get('/monitor', (req, res) => {
   'set("m-nonicp",d.nonIcpBlocked);set("m-nonicp-sub",(d.nonIcpBlocked||0)+" leads \\u00B7 "+(d.peopleNonIcp||0)+" people \\u00B7 counted in every total");' +
   'set("m-metaonly",d.nonIcpMetaOnly);set("m-metaonly-sub",(d.nonIcpMetaOnly||0)+" leads \\u00B7 "+(d.peopleMetaOnly||0)+" people \\u00B7 booked and dialled as normal");' +
   'renderProductRow(d.productBreakdown);' +
-  'set("m-nb",d.peopleNoBooking);set("m-nbs",d.completedNoBookingSessions+" completed sessions w/o booking");' +
+  /* Same correction: completed_no_booking_sessions is COUNT(*) FROM leads
+     FILTER (completed AND booking_uid IS NULL). The field keeps its name so
+     the payload contract does not move; only the label is fixed. */
+  'set("m-nb",d.peopleNoBooking);set("m-nbs",d.completedNoBookingSessions+" completed leads w/o booking");' +
   'set("m-rec",d.recoveredBookings);set("m-pend",d.pendingPartials);set("m-mail",d.loopsSent);' +
   'set("recon","Sessions = form visits \\u00B7 People = distinct emails. "+d.completedNoBookingSessions+" completed sessions without a booking \\u2192 "+d.noBookingUid+" actionable people after dedup, cross-session bookings & B2B filter.");' +
   'set("h-enr",d.enriched);set("h-tit",d.enrichTitlePct!==undefined?d.enrichTitlePct+"%":"\\u2014");set("h-fun",d.enrichFundingPct!==undefined?d.enrichFundingPct+"%":"\\u2014");set("h-loc",d.enrichLocationPct!==undefined?d.enrichLocationPct+"%":"\\u2014");' +

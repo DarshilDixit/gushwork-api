@@ -869,6 +869,37 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
            [{ session_id: 's3', email: 'c@y.com', non_icp_blocked: false }], 'b')));
     }
 
+    /* ── THE OVERVIEW SUB-LINES SAY WHAT THEY COUNT ──────────────────
+       Every number in those sub-lines is COUNT(*) FROM leads, and the
+       dashboard reports the real session count elsewhere -- 21,232 against
+       5,344 on 16 Sept 2026. Calling the lead count "sessions" made one word
+       mean two populations four times apart on one screen, which is verbatim
+       what the Definitions section exists to prevent.
+
+       Pinned on the SOURCE of the inline script rather than by rendering,
+       because the claim is about the words next to a number, and a renderer
+       test would pass just as happily with either word in it. */
+    {
+      const sub = js.slice(js.indexOf('set("m-total"'), js.indexOf('set("m-mail"'));
+      ok('overview: the headline sub-line counts LEADS and says so',
+         /d\.total\+" leads/.test(sub), sub.slice(0, 200));
+      ok('overview: completed, booked and disqualified say leads too',
+         /d\.completed\+" leads"/.test(sub)
+         && /d\.booked\+" leads"/.test(sub)
+         && /d\.disqualified\+" leads"/.test(sub));
+      /* The negative is the assertion that matters: none of these COUNT(*)
+         figures may be called sessions again. */
+      ok('overview: no lead count is labelled "sessions"',
+         !/(d\.total|d\.completed|d\.booked|d\.disqualified)\+" sessions/.test(sub), sub.slice(0, 300));
+      const nb = js.slice(js.indexOf('set("m-nb"'), js.indexOf('set("m-nb"') + 200);
+      ok('overview: completed-without-booking says leads',
+         /completed leads w\/o booking/.test(nb) && !/completed sessions w\/o booking/.test(nb), nb.slice(0, 160));
+      /* And the units that were already right stay right -- the non-ICP pair
+         is the pattern the four older cards were brought in line with. */
+      ok('overview: the non-ICP card still names both units explicitly',
+         /leads \\u00B7 "\+d\.peopleNonIcp\+" people/.test(js) || /leads .{0,12}people/.test(js));
+    }
+
     if (scope && scope.escq) {
       ok('dashboard/escq: an apostrophe is escaped, so a single-quoted attribute survives',
          scope.escq("O'Brien Marketing").indexOf("'") === -1,
