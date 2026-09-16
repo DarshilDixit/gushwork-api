@@ -97,6 +97,14 @@ Object.assign(process.env, {
   PORT: String(PORT), DATABASE_URL: 'postgres://stub/stub',
   ALLOWED_ORIGIN: 'https://www.gushwork.ai', MONITOR_TOKEN: 'tok',
   SLACK_WEBHOOK_URL: SLACK_LEAD, SLACK_ALERTS_WEBHOOK_URL: SLACK_OPS,
+  /* The v2 pair, so the partner-identity resolver actually reaches for the
+     API and the stubbed fetch can see it. Without credentials
+     fetchPartnership returns no_credentials before it ever calls out, and an
+     `if (false)` around the whole deferred block would be indistinguishable
+     from correct code -- which is exactly what happened: that mutation
+     SURVIVED until this was set. Basic auth, per docs/partnerstack.md; the
+     tracking token is a different scheme and deliberately absent. */
+  PARTNERSTACK_PUBLIC_KEY: 'pk_test', PARTNERSTACK_SECRET_KEY: 'sk_test',
 });
 
 const realLog = console.log, realWarn = console.warn, realErr = console.error;
@@ -516,6 +524,13 @@ const NO_CHANGE  = Object.assign({}, CHANGED, { prev_email: CHANGED.email, prev_
        !!up && /ps_partner_name\s*=\s*COALESCE\(leads\.ps_partner_name/.test(up.flat));
     ok('partial/identity: nor a resolved email',
        !!up && /ps_partner_email\s*=\s*COALESCE\(leads\.ps_partner_email/.test(up.flat));
+    /* AND IT MUST NOT CALL OUT WHEN IT ALREADY KNOWS. /partial fires
+       repeatedly through step 1; a partner whose name is already in hand
+       must cost nothing. The guard is `!psIdentity` and this is what pins
+       it -- dropping the guard would hammer PartnerStack on every tick. */
+    ok('partial/identity: an ALREADY-resolved partner does not call the API at all',
+       !withPartner.sent.some((x) => /api\.partnerstack\.com\/api\/v2\/partnerships/.test(x.url)),
+       'outbound: ' + JSON.stringify(withPartner.sent.map((x) => x.url)));
   }
 
   /* And when the peek MISSES -- the first ever lead from a brand-new partner
@@ -535,6 +550,17 @@ const NO_CHANGE  = Object.assign({}, CHANGED, { prev_email: CHANGED.email, prev_
        newPartner.status === 200);
     ok('partial/identity: an unresolved partner produces no unhandled rejection',
        unhandled === 0);
+    /* THE REACHABILITY ASSERTION. Everything above is true of code that never
+       runs: an `if (false)` around the deferred block binds the same nulls,
+       answers the same 200 and rejects nothing, and it SURVIVED the mutation
+       run until this line existed. The only proof is the call going out.
+
+       This is the whole point of the change -- before it, a partner lead that
+       stopped at step 1 never resolved at all, because the resolver was
+       reachable from /submit and nowhere else. */
+    ok('partial/identity: a brand-new key actually reaches the PartnerStack API',
+       newPartner.sent.some((x) => /api\.partnerstack\.com\/api\/v2\/partnerships\/KEY_BRAND_NEW/.test(x.url)),
+       'outbound: ' + JSON.stringify(newPartner.sent.map((x) => x.url)));
   }
 
   console.log('');
