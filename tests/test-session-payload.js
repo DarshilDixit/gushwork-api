@@ -136,6 +136,135 @@ try {
   ok('both files send an identical key set', false, err.message);
 }
 
+/* ── COUNTRY FROM THE VISITOR'S IP — EXECUTED, both files ─────────────
+   The phone field showed a US flag to a visitor in India. country.is was
+   never the problem: checked live on 16 Sept 2026 it answered an Indian IP
+   with {"country":"IN"} in 300ms and sends access-control-allow-origin: *.
+   initialCountry was hardcoded 'us' and corrected afterwards by setCountry,
+   so the field asserted a country nobody had checked and then overrode
+   whatever the visitor had picked in the meantime.
+
+   EXECUTED rather than read, because every interesting property here is
+   behavioural: what the callback receives, whether it can fire twice,
+   whether a failure is cached, and whether it fires at all when the network
+   never answers. A source assertion sees a fetch and a callback and can tell
+   you none of that. */
+function driveLookup(file, opts) {
+  const o = opts || {};
+  const src = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+  const store = Object.assign({}, o.store || {});
+  const sessionStorage = {
+    getItem: (k) => { if (o.storageThrows) throw new Error('denied'); return k in store ? store[k] : null; },
+    setItem: (k, v) => { if (o.storageThrows) throw new Error('denied'); store[k] = v; },
+  };
+  const timers = [];
+  const setTimeout_ = (fn, ms) => { timers.push({ fn, ms }); return timers.length; };
+  const fetch_ = () => (o.fetch ? o.fetch() : Promise.reject(new Error('offline')));
+
+  /* The three constants come from the file too, so the test uses the real
+     cache key and the real timeout rather than numbers of its own. */
+  const consts = src.split('\n').filter((l) => /^\s*var GEO_[A-Z_]+\s*=/.test(l)).join('\n');
+  ok(`${file}: the geo constants were found to lift`, consts.split('\n').length === 3, consts);
+
+  const fn = new Function('fetch', 'sessionStorage', 'setTimeout', 'String',
+    consts + '\n' + lift(src, 'lookupCountry')
+    + '\n return lookupCountry;')(fetch_, sessionStorage, setTimeout_, String);
+
+  const got = [];
+  fn((cc) => got.push(cc));
+  return { got, store, timers, flushTimers: () => timers.forEach((t) => t.fn()) };
+}
+
+/* Async because the lookup resolves on a microtask. This is a CommonJS
+   file, so a top-level await is a hard error -- the summary moves inside. */
+(async () => {
+for (const file of ['gushwork-form.js', 'gushwork-form-popup.js']) {
+  const tag = file.replace('gushwork-form', 'form').replace('.js', '');
+
+  /* THE BUG, as a test: a visitor in India must get 'in', not 'us'. */
+  {
+    const r = driveLookup(file, { fetch: () => Promise.resolve({ ok: true, json: async () => ({ ip: '1.2.3.4', country: 'IN' }) }) });
+    await new Promise((res) => setImmediate(res));
+    eq(`${tag}/geo: an Indian IP resolves to 'in', lowercased`, r.got[0], 'in');
+    eq(`${tag}/geo: and it is cached for the rest of the session`, r.store.gw_phone_country, 'in');
+    eq(`${tag}/geo: the callback fires exactly once`, r.got.length, 1);
+    /* The timeout must not then fire a SECOND callback with the fallback --
+       that would drag a correctly-resolved Indian visitor back to the US. */
+    r.flushTimers();
+    eq(`${tag}/geo: a late timeout cannot override a real answer`, r.got.join(','), 'in');
+  }
+
+  /* A cached value answers synchronously and costs no round trip. */
+  {
+    let called = 0;
+    const r = driveLookup(file, { store: { gw_phone_country: 'de' }, fetch: () => { called++; return Promise.reject(new Error('x')); } });
+    eq(`${tag}/geo: a cached country answers immediately`, r.got[0], 'de');
+    eq(`${tag}/geo: and does not call country.is again`, called, 0);
+  }
+
+  /* A failure falls back to 'us' -- and must NOT be cached, or one blip
+     pins the whole session to the wrong country. */
+  {
+    const r = driveLookup(file, { fetch: () => Promise.reject(new Error('offline')) });
+    await new Promise((res) => setImmediate(res));
+    eq(`${tag}/geo: a failed lookup falls back to 'us'`, r.got[0], 'us');
+    eq(`${tag}/geo: a failure is NOT cached`, r.store.gw_phone_country, undefined);
+  }
+
+  /* A 200 THAT CARRIES NO COUNTRY. This is the only path that reaches the
+     cache write with an empty value, so it is the only thing that can catch
+     a cache guard that has been loosened -- caching the fallback here would
+     pin the whole session to the US after one malformed response. The
+     rejected-fetch case below never reaches that line at all, which is why
+     it survived the mutation run on its own. */
+  {
+    const r = driveLookup(file, { fetch: () => Promise.resolve({ ok: true, json: async () => ({ ip: '1.2.3.4' }) }) });
+    await new Promise((res) => setImmediate(res));
+    eq(`${tag}/geo: a 200 with no country still falls back to 'us'`, r.got[0], 'us');
+    eq(`${tag}/geo: and that fallback is NOT written to the cache`, r.store.gw_phone_country, undefined);
+  }
+
+  /* An HTTP error is a failure, not a country. */
+  {
+    const r = driveLookup(file, { fetch: () => Promise.resolve({ ok: false, status: 503, json: async () => ({}) }) });
+    await new Promise((res) => setImmediate(res));
+    eq(`${tag}/geo: a 503 falls back rather than resolving to nothing`, r.got[0], 'us');
+  }
+
+  /* THE REASON THE TIMEOUT EXISTS. With initialCountry 'auto', a callback
+     that never arrives leaves the field with NO country at all -- worse than
+     the wrong one. A hung request must still produce a flag. */
+  {
+    const r = driveLookup(file, { fetch: () => new Promise(() => {}) });
+    eq(`${tag}/geo: a hung lookup has not answered yet`, r.got.length, 0);
+    r.flushTimers();
+    eq(`${tag}/geo: but the timeout guarantees a country`, r.got[0], 'us');
+    eq(`${tag}/geo: and still only once`, r.got.length, 1);
+  }
+
+  /* Privacy modes throw on sessionStorage access outright. */
+  {
+    const r = driveLookup(file, { storageThrows: true, fetch: () => Promise.resolve({ ok: true, json: async () => ({ country: 'FR' }) }) });
+    await new Promise((res) => setImmediate(res));
+    eq(`${tag}/geo: an unusable sessionStorage does not break the lookup`, r.got[0], 'fr');
+  }
+
+  /* The options the library is actually given. Behaviour above proves the
+     lookup; these two lines are what wire it in, and 'us' coming back would
+     restore the whole defect. */
+  {
+    const src = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    const opts = src.slice(src.indexOf('window.intlTelInput(input, {'), src.indexOf('input._iti = iti;'));
+    ok(`${tag}/geo: initialCountry is 'auto', never a hardcoded country`,
+       /initialCountry: 'auto'/.test(opts) && !/initialCountry: 'us'/.test(opts));
+    ok(`${tag}/geo: geoIpLookup is wired to the real lookup`,
+       /geoIpLookup: lookupCountry/.test(opts));
+    /* The override race: setCountry must not be called behind the visitor. */
+    ok(`${tag}/geo: nothing calls setCountry after init any more`,
+       !/\.setCountry\(/.test(src));
+  }
+}
+
 console.log('');
 if (failures.length) {
   console.log('  FAILURES:');
@@ -145,3 +274,4 @@ console.log(`  passed: ${pass}`);
 console.log(`  failed: ${fail}`);
 console.log('');
 process.exit(fail ? 1 : 0);
+})();
