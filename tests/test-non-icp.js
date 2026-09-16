@@ -745,9 +745,17 @@ const results7 = (async () => {
   ok('dash: the client default is "included"',
      src.includes('<option value="">Blocked: included</option>'));
   ok('dash: the row carries the columns it needs to mark',
-     leadsRoute.includes('l.non_icp_blocked, l.non_icp_reason'));
+     leadsRoute.includes('l.non_icp_blocked, l.non_icp_reason, l.non_icp_source'));
+  /* non_icp_SOURCE, added 16 Sept 2026. non_icp_reason holds a DOMAIN for both
+     mechanisms, so a blocked row reading kw.com was identical whether the
+     brand-list string comparison or the model produced it -- and the Blocked
+     tab is exactly where somebody reviewing a specific block needs to know
+     which. Selecting it is what makes that possible; the row and the CSV both
+     consume it. */
+  ok('dash: and the source, so a row can say WHICH mechanism blocked it',
+     leadsRoute.includes('l.non_icp_source'));
   ok('dash: the CSV export carries them too',
-     leadsRoute.includes("'disqualified','non_icp_blocked','non_icp_reason','step_reached'"));
+     leadsRoute.includes("'disqualified','non_icp_blocked','non_icp_reason','non_icp_source','step_reached'"));
 
   /* ONE row builder, both tabs -- the Blocked tab gets the expandable
      panel for free and cannot drift from All Leads. */
