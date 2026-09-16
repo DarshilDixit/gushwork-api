@@ -1529,6 +1529,68 @@ the affiliate terms — we just cannot enforce it here yet.
 and not on `gw_form_leads`. The dialer cannot see whether a lead was verified.
 Known, not fixed here.
 
+**THE CHANNEL ATTRIBUTION LOGIC LIVES IN SALESFORCE, NOT IN THIS REPO — AND WE
+FEED IT.** `Lead.Source_Bucket__c` is a **formula field**. There is no stored
+value; it recomputes every time anyone reads it, from exactly two inputs:
+
+| Input | Written by |
+|---|---|
+| `utm_source__c` | this repo, from the ad click |
+| `How_Did_You_Hear__c` | this repo, via `MIRROR_FIELDS` in `salesforce.js` |
+
+So **nothing in this repo decides a bucket, and nothing in this repo can be
+grepped to find out what one means.** The logic is Salesforce metadata, read and
+written through the Tooling API on `CustomField` `Source_Bucket` /
+`TableEnumOrId='Lead'`. Read it there before reasoning about attribution.
+
+**The consequence that will bite: `hear_about_us` is not just a display string.**
+It is a production input to somebody else's reporting. Changing its format,
+prefixing it, or reusing it for a new purpose silently re-buckets leads with **no
+error anywhere** — the formula keeps returning a value, it is just the wrong one.
+The `Partner - <key>` and `Referral - <email>` placeholders already flow into it,
+which is exactly the kind of prefix that can start matching a branch by accident.
+
+**`How_Did_You_Hear__c` had NO writer at all until 17 Sept 2026.** Whatever
+populated it upstream — most likely the Clientell managed package — stopped in
+July 2026, and no commit in this repo had ever written it. Every lead that was
+not a paid ad click therefore fell through the whole formula to `Others`.
+Coverage was 37%; writing it took it to 70%.
+
+**The formula matched two-letter substrings with no word boundary, and filling
+the field made that fire more often.** `CONTAINS(..., "li")` sent "client",
+"while", "link" and the name "Jolian" to **LinkedIn**; `CONTAINS(..., "ig")` and
+`CONTAINS(..., "book")` sent "Right here", "SIG Investor" and "TEST BOOKING" to
+**Meta**, from a branch sitting eight above Invalid/Test. Fixed and deployed
+16 Sept 2026 (UTC): the short tokens are now space-padded, `_` and `-` are
+normalised to spaces with `SUBSTITUTE` first so `meta_ads` and `diag-test` still
+match, and Invalid/Test moved to the top of the ladder.
+
+**Verify a formula change by REPLAYING IT, not by reading it.** Implement both
+the old and new logic in JS, run them over every real record, and require the
+**old** one to disagree with live Salesforce **zero** times before trusting what
+the new one predicts. That harness caught three regressions that a careful read
+of the formula did not: space-padding alone broke `meta_ads`, `Testing` and
+`diag-test`. A formula recomputes on read, so a bad deploy silently rewrites all
+of history at once — and so does a good one, which is why no backfill is needed
+after fixing it.
+
+**`Source_Bucket_New__c` IS NOT A NEWER VERSION OF `Source_Bucket__c`.** The name
+says otherwise and that reading is wrong. It is a writable restricted picklist on
+**Opportunity** — `Outbound | Cold Email | Meta | Philly | Others` — and it
+answers *which sales motion won the deal*, where the formula answers *which
+inbound channel the person arrived from*. That is why it has no Google bucket.
+It is **live**: 210 Opportunities in the 60 days to 17 Sept 2026, most recent the
+day before. Do not "consolidate" or delete it; outbound reporting runs on it.
+
+**A converted Lead does not always have an Opportunity, so
+`ConvertedOpportunityId` is the WRONG join for "did this lead become a deal".**
+Whoever converts can tick "do not create an opportunity", normally because the
+Account already has one. 37 of our converted Website leads are in that state and
+36 of them do have an Opportunity — reachable only through
+`ConvertedAccountId`. A backfill keyed on `ConvertedOpportunityId` silently skips
+every one of them, which is how 13 blank Opportunity buckets were missed on the
+first pass.
+
 **Known open bug:** the duplicate-booking guard looks up the *newest* lead row per
 email and asks whether that row has a booking. A second form submission creates a
 newer row, so the same person can take two calendar slots. Known, deferred by the
