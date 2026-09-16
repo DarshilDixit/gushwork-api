@@ -9,6 +9,11 @@ the code, not from anyone's recollection. Line numbers are as of
 `gw_form_leads` mirror and the Meta pixel, and at least one item here
 (`submitted_at` as an event-time fallback) is only visible if you read both.
 
+**Extended 17 Sept 2026** with items 15-17 and six Decided entries, from the
+Source Bucket investigation. Those items **cross into Salesforce**, which this
+file was previously scoped away from — they are here because nothing else in
+either repo records them, and because half of each one is our code.
+
 Everything fixed on 8 Sept is deliberately absent. This file is what is still
 true, split into **open** — someone has to decide or do something — and
 **decided** — settled, recorded so it is not re-litigated. A thing that was
@@ -362,6 +367,74 @@ list is ever restructured.
 
 ---
 
+### 15. `How_Did_You_Hear__c` has no writer outside our own form — 1,078 Opportunities show it
+
+**This item and the two below cross into Salesforce, which this file was
+previously scoped away from.** They are recorded here because nothing else in
+either repo records them, and because half of each one is our code.
+
+`Lead.Source_Bucket__c` is a Salesforce **formula** with exactly two inputs:
+`utm_source__c` and `How_Did_You_Hear__c`. Since 17 Sept 2026 this repo writes
+both, via `MIRROR_FIELDS` in `salesforce.js` — see the Decided section below.
+That closes the hole **for leads that come through our form and nothing else**.
+
+Every other lead in the org — outbound, imports, manual entry — still has no
+writer for `How_Did_You_Hear__c`. Measured 17 Sept 2026:
+
+| | |
+|---|---|
+| Our Website leads with an answer | **2,497 of 3,559 (70%)**, up from 37% |
+| Opportunities org-wide with a **blank** `Source_Bucket__c` | **1,078** |
+| Opportunities traceable to a Website lead with a blank bucket | **0** |
+
+So the 1,078 are entirely the non-form population, and they are roughly **17x
+the size of everything fixed in this session**.
+
+**The decision this needs is not ours to take.** Two shapes, and they lead
+different places:
+
+1. **Restart or replace the dead upstream writer.** Whatever populated
+   `How_Did_You_Hear__c` before July 2026 — almost certainly the Clientell
+   managed package — stopped. If it comes back with us also writing, there are
+   **two writers on one field** and last-write-wins decides attribution.
+2. **Accept that the formula is an inbound-only measure** and let outbound keep
+   using `Source_Bucket_New__c`, which it already does (see Decided).
+
+Option 2 is probably right and costs nothing, but it means "blank" stops being
+a defect and starts being a category, which the dashboards have to say out loud.
+
+### 16. Three Accounts carry duplicate Opportunities, and one bucket stays blank
+
+Found while backfilling. `robert.parish@compass.com`'s Account has **three**
+Opportunities, all named some casing of "COMPASS- Inbound", all at Demo
+Completed — created 15 April and two more on 20 April:
+
+```
+(BLANK)   Demo Completed   2026-04-15   COMPASS- Inbound
+Meta      Demo Completed   2026-04-20   Compass- Inbound
+Meta      Demo Completed   2026-04-20   COMPASS- Inbound
+```
+
+Two more Accounts are in the same shape: `bob@renewalbuilders.com` (2
+Opportunities) and `anusha.nambiar@karix.com` (3).
+
+The backfill **deliberately refused to write** to any of them — with more than
+one Opportunity on an Account there is no way to tell which one the lead became,
+and guessing would file revenue against the wrong record. So one blank remains,
+by choice, and it is the only Website-lead Opportunity still blank.
+
+The real defect is the duplicates, not the blank field. Fixing the blank without
+deduping just makes three wrong records look tidy. Needs whoever owns those
+Accounts. (Aside: `compass.com` is a national brokerage and is on
+`NON_ICP_DOMAINS` today — that block did not exist in April.)
+
+### 17. A deactivated Salesforce user owns live records
+
+Jess Pinote is deactivated and still owns Mark Dorf's Opportunity and Contact.
+Ownership does not transfer on deactivation, so those records have no live owner
+and drop out of any owner-scoped view or assignment rule. Untouched; needs a
+human to reassign.
+
 ## Decided
 
 Recorded so they are not reopened. Each has a reason, not just an outcome.
@@ -430,6 +503,122 @@ and from nothing else. A known distortion, left in because excluding them
 moves every historical number at once.
 
 ---
+
+### The channel formula lives in SALESFORCE, and this repo feeds it
+
+Settled 17 Sept 2026, after the Source Bucket investigation that began with a
+Slack thread about leads bucketing as `Others`.
+
+`Lead.Source_Bucket__c` is a **formula field** — no stored value, recomputed on
+every read — held as Salesforce metadata on `CustomField` `Source_Bucket` /
+`TableEnumOrId='Lead'`. The chain, one value under four names:
+
+```
+Webflow "How did you hear about us?"
+  -> leads.hear_about_us              our Postgres column
+  -> How_Did_You_Hear__c              Salesforce, written by MIRROR_FIELDS in salesforce.js
+  -> Source_Bucket__c                 the FORMULA (+ utm_source__c), recomputes on read
+  -> Opportunity.Source_Bucket__c     copied at lead conversion, then FROZEN as text
+```
+
+**No copy of the formula is committed to this repo, deliberately.** A committed
+copy cannot be enforced and goes stale the moment someone edits it in Setup,
+which is the failure mode half this file is about. CLAUDE.md records how to read
+the live one instead.
+
+**The last hop is why converted leads behaved differently.** The Opportunity
+value is plain text taken at conversion time and does not follow the formula
+afterwards — so fixing the formula fixed every Lead retroactively and every
+Opportunity had to be backfilled by hand.
+
+What was done, 17 Sept 2026:
+
+| | |
+|---|---|
+| `How_Did_You_Hear__c` coverage | 37% -> **70%** (2,497 of 3,559) |
+| Leads backfilled | **1,179 of 1,180** (one `CANNOT_UPDATE_CONVERTED_LEAD`) |
+| Opportunities corrected | 278 + 63 blanks + 12 account-route = **353** |
+| Closed-won Opportunities touched | **0** |
+
+Stage 1, the `How_Did_You_Hear__c` write and backfill (Website leads):
+Others 767->498, Meta 1341->2515, Google 120->238, LinkedIn 0->111,
+Referral 0->91, Email 0->38, Organic Search 0->24.
+
+### The formula's substring matching was a real bug, and it was fixed
+
+The formula matched two- and four-letter substrings with **no word boundary**,
+so free text routed by accident: `CONTAINS(..., "li")` sent "client", "while",
+"link" and the name "Jolian" to **LinkedIn**; `CONTAINS(..., "ig")` and
+`CONTAINS(..., "book")` sent "Right here", "SIG Investor" and "TEST BOOKING" to
+**Meta**, from a branch eight above Invalid/Test.
+
+It was mostly harmless while the field was **empty**. Filling it to 70% is
+exactly what made it fire, which is the generalisable part: *raising coverage on
+an input amplifies every precision bug in whatever consumes it.*
+
+Fixed and deployed 16-17 Sept 2026. Short tokens are space-padded; `_` and `-`
+are normalised to spaces with `SUBSTITUTE` **first**, so `meta_ads` and
+`diag-test` still match; Invalid/Test moved to the top of the ladder. Two
+additions bundled after: `"coworker"` joins the Referral synonyms, and
+`utm_source` containing `chatgpt` maps to AI / LLM **from the last branch before
+Others**, so a referrer never overrides what the person actually said.
+
+Net effect on all 4,708 leads carrying either input: LinkedIn 124->113,
+Meta 2600->2594, Referral 95->99, AI / LLM 10->13, Invalid / Test 10->11,
+Others 806->815. Every single move was a correction.
+
+### How a formula change gets verified here: REPLAY it, do not read it
+
+The method that worked, and the only reason three regressions did not ship:
+
+1. Implement the **old** logic in JS and run it over every real record.
+2. Require it to disagree with live Salesforce **zero** times. Until that holds,
+   the harness is wrong and anything it predicts is worthless.
+3. Only then trust what the **new** logic predicts, and diff the two.
+
+Validated at 4,708 leads, 0 drift, before and after each deploy. It caught three
+regressions a careful reading of the formula did not: naive space-padding broke
+`meta_ads`, `Testing` and `diag-test`.
+
+A formula recomputes on read, so a bad deploy silently rewrites all of history at
+once — and so does a good one, which is why **no backfill is needed after fixing
+a formula**, only after fixing the Opportunity text copies.
+
+### `Source_Bucket_New__c` is NOT a newer version of `Source_Bucket__c` — and it stays
+
+The name invites that reading and it is wrong. It is a writable restricted
+picklist on **Opportunity** — `Outbound | Cold Email | Meta | Philly | Others` —
+answering *which sales motion won the deal*, where the formula answers *which
+inbound channel the person arrived from*. That is why it has no Google bucket.
+
+It is **live**, not dead weight: 210 Opportunities in the 60 days to 17 Sept
+2026, most recent the day before — Others 123, Outbound 75, Cold Email 8,
+Meta 4, touched by Neil Clientell (117), Growth Gushwork (42), Sriram and several
+AEs. An earlier read of this file's author said it was abandoned; that was
+measured on **Lead**, where it genuinely is dead, and was wrong about Opportunity.
+Do not consolidate or delete it.
+
+### `ConvertedOpportunityId` is the WRONG join for "did this lead become a deal"
+
+Whoever converts a Lead can tick "do not create a new opportunity", normally
+because the Account already has one. **37** of our converted Website leads are in
+that state and **36 of them do have an Opportunity** — reachable only through
+`ConvertedAccountId`.
+
+A backfill keyed on `ConvertedOpportunityId` silently skips every one, which is
+how 12 blank Opportunity buckets were missed on the first pass. The 37 break down
+as: 21 already correct, 2 hand-set and left alone, 12 filled via the Account
+route, 3 on multi-Opportunity Accounts (item 16), 1 with nothing attached — and
+that last one is our own `darshil.dixit@gushwork.com` test. **No real lead is
+stranded**, and an earlier claim in this session that these were "permanently
+wrong and invisible to revenue reporting" was wrong on both counts.
+
+### `utm_source` has 17 distinct values, and the two-letter ones are standalone
+
+Checked before word-bounding them, because padding `"fb"` would have broken live
+Meta attribution had the real values looked like `fbads`. They do not:
+facebook 1855, google 163, **ig 134**, **fb 51**, linkedin 47, cold_email 35,
+email 23, chatgpt.com 6, cold_email/ 5, meta 2, and seven one-off hostnames.
 
 ## Lesson
 
