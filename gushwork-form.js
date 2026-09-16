@@ -199,6 +199,70 @@
       });
     });
 
+    /* ── COUNTRY FROM THE VISITOR'S IP ────────────────────────────────
+       country.is is the right API and it is working: free, CORS-friendly
+       (it sends access-control-allow-origin: *), and it answered an Indian
+       IP correctly in 300ms when this was checked on 16 Sept 2026. Do NOT
+       switch to ipinfo — it 406s browser requests.
+
+       What was wrong was the WIRING. initialCountry was hardcoded to 'us'
+       and the flag was corrected afterwards by setCountry, which is two
+       separate problems:
+
+         1. A guaranteed wrong-flag window, not a flash. The three scripts
+            above load lazily one after another, and only THEN does the
+            lookup go out — so a visitor in India saw a US flag for as long
+            as all of that took, which is long enough to read and to act on.
+            If the lookup then failed, the flag stayed US and their number
+            was stored as +1.
+
+         2. A silent override. setCountry fired unconditionally, so a visitor
+            who opened the dropdown and picked their own country before the
+            lookup landed had that choice overwritten underneath them, with
+            no event and no warning.
+
+       initialCountry 'auto' with geoIpLookup is the library's own answer to
+       both: it waits for the callback rather than asserting a country nobody
+       checked, and nothing overrides the visitor afterwards. Cached in
+       sessionStorage so only the first page load in a session pays for the
+       round trip, and a timeout guarantees the callback fires — with 'auto',
+       a callback that never arrives leaves the field with no country at all. */
+    var GEO_CACHE_KEY  = 'gw_phone_country';
+    var GEO_TIMEOUT_MS = 2500;
+    var GEO_FALLBACK   = 'us';
+
+    function lookupCountry(callback) {
+      var cached = null;
+      /* sessionStorage throws outright in some privacy modes, so every read
+         and write here is guarded and an unavailable store just means the
+         lookup runs again. */
+      try { cached = sessionStorage.getItem(GEO_CACHE_KEY); } catch (e) {}
+      if (cached) { callback(cached); return; }
+
+      var settled = false;
+      function settle(cc) {
+        if (settled) return;
+        settled = true;
+        callback(cc || GEO_FALLBACK);
+      }
+      /* A hung lookup must never leave the input without a country. */
+      setTimeout(function () { settle(GEO_FALLBACK); }, GEO_TIMEOUT_MS);
+
+      fetch('https://api.country.is')
+        .then(function (r) {
+          if (!r.ok) throw new Error('country.is ' + r.status);
+          return r.json();
+        })
+        .then(function (data) {
+          var cc = data && data.country ? String(data.country).toLowerCase() : '';
+          /* Cached only on a REAL answer. Caching the fallback would pin the
+             rest of the session to the US after one blip. */
+          if (cc) { try { sessionStorage.setItem(GEO_CACHE_KEY, cc); } catch (e) {} }
+          settle(cc);
+        })
+        .catch(function () { settle(GEO_FALLBACK); });
+    }
+
     function initPhoneInputs() {
       if (typeof $ === 'undefined' || typeof window.intlTelInput === 'undefined') return;
       $('input[ms-code-phone-number]').each(function () {
@@ -206,7 +270,11 @@
         var preferredCountries = $(input).attr('ms-code-phone-number').split(',');
         var iti = window.intlTelInput(input, {
           preferredCountries: preferredCountries,
-          initialCountry: 'us', // shown before country.is lookup resolves
+          /* 'auto' defers the flag until lookupCountry answers, so the field
+             never shows a country nobody checked. Was 'us', which asserted
+             one on every visitor on earth. */
+          initialCountry: 'auto',
+          geoIpLookup: lookupCountry,
           dropdownContainer: document.body, // fix: render outside form stacking context
           utilsScript: 'https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/utils.js',
         });
@@ -224,22 +292,13 @@
         setTimeout(syncFloatLabel, 500);
         input.addEventListener('countrychange', syncFloatLabel);
 
-        // Country detection via country.is (free, CORS-friendly).
-        // Don't switch to ipinfo — it 406s browser requests.
-        fetch('https://api.country.is')
-          .then(function (r) {
-            if (!r.ok) throw new Error('country.is ' + r.status);
-            return r.json();
-          })
-          .then(function (data) {
-            if (data && data.country) {
-              try {
-                iti.setCountry(data.country.toLowerCase());
-              } catch (e) {}
-              syncFloatLabel();
-            }
-          })
-          .catch(function () {}); // lookup failed — fallback stays 'us'
+        /* The flag now arrives asynchronously, so the label has to re-sync
+           when it lands as well as on the fixed timers above. The rejection
+           handler is not optional: an unhandled rejection here would surface
+           as a console error on every page load that has no phone field. */
+        if (iti.promise && typeof iti.promise.then === 'function') {
+          iti.promise.then(syncFloatLabel, function () {});
+        }
 
         input.addEventListener('change', function () {
           if (typeof intlTelInputUtils !== 'undefined') input.value = iti.getNumber(intlTelInputUtils.numberFormat.NATIONAL);
