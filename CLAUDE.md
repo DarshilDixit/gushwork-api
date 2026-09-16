@@ -248,6 +248,12 @@ nothing and it is the only thing that makes the banner mean something. The
 version lives in the `Form initialised v…` string in both files and must move in
 both, like everything else in the fork.
 
+**A TEST PINS THAT STRING, so the bump is three edits, not two.**
+`tests/test-partnerstack.js` asserts the banner reads the current version in
+both files. Bump the files without bumping the assertion and the bar goes red
+on `main` — which has happened here before, and sat there for days as a red bar
+nobody read rather than as a caught bug. Do all three in one commit.
+
 **And when the version did not move, these two are what actually discriminate:**
 
 1. **The SHA in the page HTML** — `curl` the page and read `gushwork-api@<sha>`.
