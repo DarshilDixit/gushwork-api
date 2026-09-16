@@ -785,6 +785,7 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
            + ' checkHealth: typeof checkHealth === "function" ? checkHealth : null,'
            + ' showTab: typeof showTab === "function" ? showTab : null,'
            + ' esc: typeof esc === "function" ? esc : null,'
+           + ' escq: typeof escq === "function" ? escq : null,'
            + ' et: typeof et === "function" ? et : null,'
            + ' enrichPanel: typeof enrichPanel === "function" ? enrichPanel : null,'
            + ' stageBadge: typeof stageBadge === "function" ? stageBadge : null,'
@@ -800,11 +801,35 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     } catch (err) { evalErr = err; }
     ok('dashboard: the inline script evaluates without throwing', !evalErr, evalErr && evalErr.message);
 
+    /* escq exists because every HTML attribute here is SINGLE-quoted while
+       esc escapes only & < > and the double quote. Two attribute values carry
+       text a human can put an apostrophe in -- the ack note, typed into a
+       prompt(), and a partner display name arriving from PartnerStack as
+       first_name plus last_name. O'Brien ends the attribute early and the
+       rest of the tooltip becomes markup.
+
+       Asserting the OUTPUT, not that the function exists: "it is defined" is
+       one level short of the thing that actually matters, which is the whole
+       lesson of the Model tab's confident zero. */
+    if (scope && scope.escq) {
+      ok('dashboard/escq: an apostrophe is escaped, so a single-quoted attribute survives',
+         scope.escq("O'Brien Marketing").indexOf("'") === -1,
+         'got ' + JSON.stringify(scope.escq("O'Brien Marketing")));
+      ok('dashboard/escq: and it escapes it as a numeric entity',
+         scope.escq("O'Brien") === 'O&#39;Brien',
+         'got ' + JSON.stringify(scope.escq("O'Brien")));
+      ok('dashboard/escq: it still does everything esc does',
+         scope.escq('<b>&"x"</b>') === scope.esc('<b>&"x"</b>'));
+      /* The bug it prevents, stated as the assertion: esc alone does NOT. */
+      ok('dashboard/escq: esc alone would have left the apostrophe in place',
+         scope.esc("O'Brien").indexOf("'") !== -1);
+    }
+
     if (scope) {
       /* THE SCOPE CHECK. leadRowsHtml was declared INSIDE loadLeads, so it
          was reachable from All Leads and undefined from Blocked. A name
          that is not visible at top level cannot be shared between tabs. */
-      for (const nm of ['leadRowsHtml', 'esc', 'et', 'enrichPanel', 'stageBadge',
+      for (const nm of ['leadRowsHtml', 'esc', 'escq', 'et', 'enrichPanel', 'stageBadge',
                         'showTab', 'loadLeads', 'loadBlocked', 'loadSDR',
                         'loadDupes', 'loadLM', 'loadPartners', 'checkHealth',
                         /* The Model tab's own helpers. Every one is used by
