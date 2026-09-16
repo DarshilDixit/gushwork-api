@@ -113,6 +113,26 @@ function liftTemplate(s, decl) {
   return s.slice(i + 1, end);
 }
 
+/* THE REAL escq, LIFTED — not a copy.
+
+   Every HTML attribute in the dashboard is single-quoted, and esc escapes
+   only & < > and the double quote. escq adds the apostrophe, so a partner
+   named O'Brien or a hand-typed acknowledgement note cannot end an attribute
+   early and turn the rest of a tooltip into markup.
+
+   The slices below start well past where esc and escq are declared and inject
+   esc as a parameter instead, so escq is simply absent from those scopes --
+   and an absent function inside a tab loader does not crash, it is caught and
+   painted as "Could not load:". That is the failure mode CLAUDE.md names: a
+   probe for a thrown error misses it entirely. Prepending the real source
+   keeps the harness honest without duplicating the implementation. */
+const ESCQ_CLIENT = eval(
+  src.slice(src.indexOf("'function escq(s)"), src.indexOf("'async function checkApi()"))
+     .replace(/\+\s*$/, ''));
+function withEscq(c) {
+  return (/escq\(/.test(c) && !/function escq/.test(c)) ? ESCQ_CLIENT + c : c;
+}
+
 function liftLine(s, decl) {
   const i = s.indexOf('\n' + decl);
   if (i === -1) throw new Error('not found: ' + decl);
@@ -935,7 +955,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   {
     const i = src.indexOf("'var partnerRows=[],pSort=");
     const j = src.indexOf("'function debounce()");
-    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const client = withEscq(eval(src.slice(i, j).replace(/\+\s*$/, '')));
     const els = {};
     const mkEl = () => ({ textContent: '', innerHTML: '', style: {}, querySelectorAll: () => [], options: [], appendChild(o) { this.options.push(o); }, value: '' });
     const doc = { getElementById: (id) => (els[id] = els[id] || mkEl()), createElement: () => ({ value: '', textContent: '' }) };
@@ -984,7 +1004,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   {
     const i = src.indexOf("'var partnerRows=[],pSort=");
     const j = src.indexOf("'function debounce()");
-    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const client = withEscq(eval(src.slice(i, j).replace(/\+\s*$/, '')));
     const els = {};
     const mkEl = () => ({ textContent: '', innerHTML: '', style: {}, querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
     const doc = { getElementById: (id) => (els[id] = els[id] || mkEl()), createElement: () => ({ value: '', textContent: '' }) };
@@ -1183,6 +1203,38 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        count. */
     ok('ladderA: no-customer-key leads are counted separately, as leads',
        /ps_xid IS NOT NULL AND ps_customer_key IS NULL/.test(fn) && /noCustomerKeyLeads/.test(fn));
+    /* ── THE BLEND, PINNED AT THE QUERY ───────────────────────────────
+       The executed assertions further down drive a fixture, so they cannot
+       see the SQL: reverting this to MAX(ps_partner_key) survived the
+       mutation run because the fake pool returns the same rows either way.
+       These read the query, which is the only thing that can catch it.
+
+       THE BUG: partner identity was MAX(ps_partner_key), MAX(ps_partner_name)
+       and MAX(ps_partner_email), three aggregates resolved independently over
+       a group keyed by DOMAIN. A domain can carry leads from two partners --
+       allstate.com did on 16 Sept 2026 -- and the three then return fields
+       belonging to two different people: the name said Test Account, the key
+       and the email said Reviews Guide. */
+    /* codeOnly on every one of the three. The comment directly above this
+       query in index.js NAMES the construct it exists to prevent, so a raw
+       match fails against correct code -- the house's own recurring trap. */
+    ok('ladderA/identity: partner identity is NOT three independent MAX() calls',
+       !/MAX\(ps_partner_key\)/.test(codeOnly(fn))
+       && !/MAX\(ps_partner_name\)/.test(codeOnly(fn))
+       && !/MAX\(ps_partner_email\)/.test(codeOnly(fn)));
+    ok('ladderA/identity: one authoritative key is picked per domain',
+       /ARRAY_AGG\(ps_partner_key ORDER BY/.test(fn));
+    /* THE ORDER IS THE MONEY ORDER. PartnerStack credits the partner on the
+       session that claimed the conversion, so ps_signup_sent_at outranks
+       recency; the earliest claim is the tie-break for a domain that has not
+       converted yet. Ordering by created_at alone would name the wrong
+       partner for any domain whose first lead was not the one that converted. */
+    ok('ladderA/identity: and the pick prefers whoever actually holds the conversion',
+       /ORDER BY \(ps_signup_sent_at IS NOT NULL\) DESC, created_at ASC/.test(fn));
+    ok('ladderA/identity: every partner on the domain is carried so contention can be shown',
+       /ARRAY_AGG\(DISTINCT ps_partner_key\)/.test(fn)
+       && /COUNT\(DISTINCT ps_partner_key\)/.test(fn));
+
     /* EXECUTED. Asserting the field name exists passes even when the value is
        hardcoded to 0 — a mutation survived on exactly that, which would hide
        the unit seam rather than surface it. */
@@ -1203,13 +1255,29 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
            the mutation. Deliberately different numbers, so only one source can
            produce them. */
         if (q.includes('AS needs_attention')) return { rows: [{ needs_attention: '5', acknowledged: '1' }] };
+        /* Identity lives on the KEY, and this is the query that reads it.
+           Deliberately returns a name for a key that NO domain row below
+           carries on its own -- that is the abc.com shape, where the name was
+           resolved on some other domain's row and the table printed hex. */
+        if (q.includes('GROUP BY ps_partner_key')) return { rows: [
+          { key: 'KEY_ALPHA', name: 'Alpha Partners', email: 'a@alpha.test' },
+          { key: 'KEY_BETA',  name: null,             email: 'b@beta.test'  },
+        ] };
         return q.includes('ps_customer_key IS NULL')
           ? { rows: [{ leads: '7' }] }
           : { rows: [
-              { customer_key: 'a.com', state: 'qualified' },
-              { customer_key: 'b.com', state: 'conversion_failed' },
-              { customer_key: 'c.com', state: 'qualification_failed' },
-              { customer_key: 'd.com', state: 'skipped' }] };
+              /* One partner, name resolvable only via the key map. */
+              { customer_key: 'a.com', state: 'qualified',
+                partner_key: 'KEY_ALPHA', partner_keys: ['KEY_ALPHA'], partner_key_count: '1' },
+              /* TWO partners on one domain -- the allstate.com shape. */
+              { customer_key: 'b.com', state: 'conversion_failed',
+                partner_key: 'KEY_ALPHA', partner_keys: ['KEY_ALPHA', 'KEY_BETA'], partner_key_count: '2' },
+              /* A key with an email but no name: the middle rung. */
+              { customer_key: 'c.com', state: 'qualification_failed',
+                partner_key: 'KEY_BETA', partner_keys: ['KEY_BETA'], partner_key_count: '1' },
+              /* A key nothing has resolved: must fall all the way to the key. */
+              { customer_key: 'd.com', state: 'skipped',
+                partner_key: 'KEY_GHOST', partner_keys: ['KEY_GHOST'], partner_key_count: '1' }] };
       } };
       const L = (new Function('pool', 'console',
         liftLine(src, 'const PS_LADDER_FAILED =') + '\n' +
@@ -1219,6 +1287,9 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
         liftLine(src, 'let _psSfLastRead =') + '\n' +
         liftLine(src, 'const PS_SF_STATES =') + '\n' +
         liftTemplate(src, 'const PS_LADDER_SQL =') + '\n' +
+        lift(src, 'function partnerDisplayName(') + '\n' +
+        lift(src, 'async function partnerIdentityByKey(') + '\n' +
+        lift(src, 'function attachPartnerIdentity(') + '\n' +
         lift(src, 'async function partnerLifecycle(') +
         '\n return partnerLifecycle;'))(fakePool, { warn() {}, log() {} });
       const out = await L();
@@ -1234,6 +1305,60 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
          Object.values(out.byState).reduce((a, b) => a + b, 0), out.totalDomains);
       ok('ladderA: no-key leads are NOT folded into the domain total',
          out.totalDomains === 4 && out.noCustomerKeyLeads === 7);
+
+      /* ── PARTNER IDENTITY ON THE PER-DOMAIN TABLE ──────────────────
+         These execute the resolver against the fixture above rather than
+         reading the query text, because the bug they pin was not a missing
+         field -- every field was present and populated. It was three
+         independent MAX() calls over a group keyed by DOMAIN returning three
+         fields belonging to two different partners. A source assertion sees
+         a name, an email and a key and cannot tell you they disagree. */
+      const dom = {};
+      for (const d of out.domains) dom[d.customer_key] = d;
+
+      /* THE abc.com SHAPE. The fixture gives a.com the key KEY_ALPHA and no
+         name of its own; the name exists only on the key. Reading identity
+         off this domain's own rows -- what the code did -- renders the raw
+         hex key on a dashboard that shows the name for that same key one
+         table lower. */
+      eq('ladderA/identity: a name resolved on the KEY reaches a domain that lacks it',
+         dom['a.com'].partner_display, 'Alpha Partners');
+      ok('ladderA/identity: and it is NOT the raw key',
+         dom['a.com'].partner_display !== 'KEY_ALPHA');
+
+      /* THE DISPLAY CHAIN, all three rungs, on one table.
+         name -> email -> key, the same chain Slack and hear_about_us use. */
+      eq('ladderA/identity: a key with an email but no name shows the email',
+         dom['c.com'].partner_display, 'b@beta.test');
+      eq('ladderA/identity: a key nothing resolved falls back to the key itself',
+         dom['d.com'].partner_display, 'KEY_GHOST');
+
+      /* THE BLEND ITSELF. b.com carries two partners. Whatever is shown, the
+         name, the email and the key must all describe ONE of them -- the
+         production row on 16 Sept 2026 showed Test Account's name beside
+         Reviews Guide's key and Reviews Guide's email. */
+      eq('ladderA/identity: a two-partner domain resolves to ONE authoritative key',
+         dom['b.com'].partner_key, 'KEY_ALPHA');
+      eq('ladderA/identity: and its name belongs to THAT key, not another partner',
+         dom['b.com'].partner_display, 'Alpha Partners');
+      eq('ladderA/identity: and its email belongs to that key too',
+         dom['b.com'].partner_email, 'a@alpha.test');
+      ok('ladderA/identity: name, email and key all describe the same partner',
+         dom['b.com'].partner_email === 'a@alpha.test'
+         && dom['b.com'].partner_display === 'Alpha Partners'
+         && dom['b.com'].partner_key === 'KEY_ALPHA');
+
+      /* CONTENTION IS SURFACED, not resolved silently. PartnerStack credits
+         one partner per customer key for the life of the account, so the
+         second claimant can never be paid for that domain. */
+      eq('ladderA/identity: the second partner on a contended domain is carried, not dropped',
+         (dom['b.com'].partner_others || []).length, 1);
+      eq('ladderA/identity: and it is named, not shown as a bare key',
+         dom['b.com'].partner_others[0], 'b@beta.test');
+      eq('ladderA/identity: the contention count is a NUMBER, not a pg bigint string',
+         typeof dom['b.com'].partner_key_count, 'number');
+      eq('ladderA/identity: an uncontended domain reports no others',
+         (dom['a.com'].partner_others || []).length, 0);
     }
     /* Was a reduce over byState; PR1.8 made it a filter over the domains so it
        can also exclude acknowledged failures. The property is unchanged: only
@@ -2199,7 +2324,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   {
     const i = src.indexOf("'function psPanel(l){");
     const j = src.indexOf('  /* Loaded on its OWN cadence');
-    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const client = withEscq(eval(src.slice(i, j).replace(/\+\s*$/, '')));
     const F = (new Function('esc', 'et', 'wlabel', client + '; return {enrichPanel,psPanel};'))(
       (x) => String(x == null ? '' : x), (x) => String(x == null ? '' : x), (x) => String(x));
     const html = F.enrichPanel({ ps_partner_key: 'k1', ps_partner_name: 'Jane', company: 'Acme',
@@ -2323,7 +2448,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   {
     const i = src.indexOf("'var partnerRows=[],pSort=");
     const j = src.indexOf("'function debounce()");
-    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const client = withEscq(eval(src.slice(i, j).replace(/\+\s*$/, '')));
     const els = {};
     const mk = () => ({ textContent: '', innerHTML: '', style: {}, className: '', querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
     const doc = { getElementById: (id) => (els[id] = els[id] || mk()), createElement: () => ({ value: '', textContent: '' }) };
@@ -2442,7 +2567,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   {
     const i = src.indexOf("'var partnerRows=[],pSort=");
     const j = src.indexOf("'function debounce()");
-    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const client = withEscq(eval(src.slice(i, j).replace(/\+\s*$/, '')));
     const els = {};
     const mk = () => ({ textContent: '', innerHTML: '', style: {}, className: '', querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
     const doc = { getElementById: (id) => (els[id] = els[id] || mk()), createElement: () => ({ value: '', textContent: '' }) };
@@ -2536,7 +2661,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   {
     const i = src.indexOf("'function psPanel(l){");
     const j = src.indexOf('  /* Loaded on its OWN cadence');
-    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const client = withEscq(eval(src.slice(i, j).replace(/\+\s*$/, '')));
     const P = (new Function('esc', 'et', 'wlabel', client + '; return {psPanel};'))(
       (x) => String(x == null ? '' : x), (x) => String(x == null ? '' : x), (x) => String(x));
     ok('rawH UI: the panel renders it', P.psPanel({ ps_partner_key: 'k', hear_about_us_raw: 'Facebook (Paid)' }).includes('Facebook (Paid)'));
@@ -2642,7 +2767,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   {
     const i = src.indexOf("'var partnerRows=[],pSort=");
     const j = src.indexOf("'function debounce()");
-    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const client = withEscq(eval(src.slice(i, j).replace(/\+\s*$/, '')));
     const els = {};
     const mk = () => ({ textContent: '', innerHTML: '', style: {}, className: '', querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
     const doc = { getElementById: (id) => (els[id] = els[id] || mk()), createElement: () => ({ value: '', textContent: '' }) };
@@ -2743,7 +2868,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   {
     const i = src.indexOf("'var partnerRows=[],pSort=");
     const j = src.indexOf("'function debounce()");
-    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const client = withEscq(eval(src.slice(i, j).replace(/\+\s*$/, '')));
     const els = {};
     const mk = () => ({ textContent: '', innerHTML: '', style: {}, className: '', querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
     const doc = { getElementById: (id) => (els[id] = els[id] || mk()), createElement: () => ({ value: '', textContent: '' }) };
@@ -2851,7 +2976,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   {
     const i = src.indexOf("'var partnerRows=[],pSort=");
     const j = src.indexOf("'function debounce()");
-    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const client = withEscq(eval(src.slice(i, j).replace(/\+\s*$/, '')));
     const els = {};
     const mk = () => ({ textContent: '', innerHTML: '', style: {}, className: '', querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
     const doc = { getElementById: (id) => (els[id] = els[id] || mk()), createElement: () => ({ value: '', textContent: '' }) };
@@ -2943,7 +3068,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   {
     const i = src.indexOf("'var partnerRows=[],pSort=");
     const j = src.indexOf("'function debounce()");
-    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const client = withEscq(eval(src.slice(i, j).replace(/\+\s*$/, '')));
     const els = {};
     const mk = () => ({ textContent: '', innerHTML: '', style: {}, className: '', querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
     const doc = { getElementById: (id) => (els[id] = els[id] || mk()), createElement: () => ({ value: '', textContent: '' }) };
@@ -3084,7 +3209,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   {
     const i = src.indexOf("'var partnerRows=[],pSort=");
     const j = src.indexOf("'function debounce()");
-    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const client = withEscq(eval(src.slice(i, j).replace(/\+\s*$/, '')));
     const els = {};
     const mk = () => ({ textContent: '', innerHTML: '', style: {}, className: '', querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
     const doc = { getElementById: (id) => (els[id] = els[id] || mk()), createElement: () => ({ value: '', textContent: '' }) };
@@ -3130,7 +3255,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   {
     const i = src.indexOf("'var partnerRows=[],pSort=");
     const j = src.indexOf("'function debounce()");
-    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const client = withEscq(eval(src.slice(i, j).replace(/\+\s*$/, '')));
     const els = {};
     const mk = () => ({ textContent: '', innerHTML: '', style: {}, className: '', querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
     const doc = { getElementById: (id) => (els[id] = els[id] || mk()), createElement: () => ({ value: '', textContent: '' }) };
@@ -3188,7 +3313,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   {
     const i = src.indexOf("'var partnerRows=[],pSort=");
     const j = src.indexOf("'function debounce()");
-    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const client = withEscq(eval(src.slice(i, j).replace(/\+\s*$/, '')));
     const els = {};
     const mk = () => ({ textContent: '', innerHTML: '', style: {}, className: '', querySelectorAll: () => [], options: [], appendChild() {}, value: '' });
     const doc = { getElementById: (id) => (els[id] = els[id] || mk()), createElement: () => ({ value: '', textContent: '' }) };
@@ -3252,7 +3377,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   {
     const i = src.indexOf("'function psPanel(l){");
     const j = src.indexOf("'function debounce()");
-    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const client = withEscq(eval(src.slice(i, j).replace(/\+\s*$/, '')));
     const F = (new Function('esc', 'et', 'wlabel', client + '; return { psPanel };'))(
       (x) => String(x == null ? '' : x), (x) => String(x == null ? '' : x), (x) => String(x));
     eq('v9: an organic lead renders no partner panel', F.psPanel({}), '');
@@ -3396,8 +3521,98 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     /* A failed read must not read as "nobody ticked anything". */
     ok('v21: an unreadable Salesforce stops the poll rather than concluding zero',
        /if \(!sf\.ok\)/.test(fn) && /NOT concluding that nothing is ticked/.test(fn));
-    ok('v21: and that read failure is recorded',
-       /recordFailure\('PartnerStack', 'qualified-demo read'/.test(fn));
+    /* ── THE STREAK COUNTER, EXECUTED ─────────────────────────────────
+       recordSuccess('PartnerStack') was called NOWHERE, so the only thing
+       that ever reset that streak was an alert firing: "N consecutive
+       failures" actually meant "N failures since the last alert, ever". The
+       Slack post on 16 Sept 2026 read "8 in a row" for a Salesforce
+       maintenance window that, in the Railway log for the same window,
+       failed about ten times in thirty-five reads and never twice in a row.
+
+       DRIVEN, because this is a stateful mechanism and every part of it is
+       invisible to a source assertion: the call sites were all present and
+       correct, and the streak still never fell. */
+    {
+      const alerts = [];
+      const H = (new Function('alertOps', 'isAuthFailure', 'AUTH_FAILURE_GUIDANCE', 'console',
+        liftLine(src, 'const FAILURE_BUFFER_TTL_MS') + '\n' +
+        liftLine(src, 'const _failBuffers') + '\n' +
+        liftLine(src, 'const _failStreaks') + '\n' +
+        liftLine(src, 'const CONSECUTIVE_FAILURE_ALERT') + '\n' +
+        lift(src, 'const FAILURE_MONITORS =') + '\n' +
+        lift(src, 'function recordSuccess(') + '\n' +
+        lift(src, 'function recordFailure(') + '\n' +
+        'return { recordFailure, recordSuccess, streaks: _failStreaks, buffers: _failBuffers };'))(
+          (sev, source, title, d) => { alerts.push({ sev, source, title, d }); return true; },
+          () => false, {}, { warn() {}, log() {} });
+
+      /* A success must clear the streak. This is the whole defect. */
+      H.recordFailure('PartnerStack SF read', 'qualified-demo read', 'http_503');
+      H.recordFailure('PartnerStack SF read', 'qualified-demo read', 'http_503');
+      eq('streak: two failures leave a streak of 2', H.streaks.get('PartnerStack SF read'), 2);
+      H.recordSuccess('PartnerStack SF read');
+      eq('streak: a SUCCESS resets it to 0 — the bug was that nothing ever did',
+         H.streaks.get('PartnerStack SF read'), 0);
+
+      /* And the alert must not fire on an intermittent outage. Two failures,
+         a success, two more: never three in a row, so nothing consecutive
+         happened and nothing should claim it did. */
+      alerts.length = 0;
+      H.streaks.clear(); H.buffers.clear();
+      for (let i = 0; i < 6; i++) {
+        H.recordFailure('PartnerStack SF read', 'qualified-demo read', 'http_503');
+        H.recordFailure('PartnerStack SF read', 'qualified-demo read', 'http_503');
+        H.recordSuccess('PartnerStack SF read');
+      }
+      ok('streak: an intermittent outage never reports CONSECUTIVE failures',
+         !alerts.some((a) => a.title === 'Consecutive failures'),
+         'reported: ' + JSON.stringify(alerts.map((a) => a.title)));
+      /* It still alerts -- through the trickle path, which recordSuccess
+         deliberately does NOT reset. Reducing noise must not mean going
+         silent. */
+      ok('streak: but a repeated failure still alerts through the window path',
+         alerts.some((a) => a.title === 'Repeated failures'),
+         'reported: ' + JSON.stringify(alerts.map((a) => a.title)));
+
+      /* THE SPLIT. A successful read must not wipe a streak of conversion
+         failures -- the poll runs every two minutes, so a shared streak
+         would mean three conversion failures could essentially never reach
+         the threshold. */
+      H.streaks.clear(); H.buffers.clear();
+      H.recordFailure('PartnerStack', 'acme.com (conversion)', 'http_400');
+      H.recordFailure('PartnerStack', 'acme.com (conversion)', 'http_400');
+      H.recordSuccess('PartnerStack SF read');
+      eq('streak: a successful Salesforce READ does not clear the MONEY path streak',
+         H.streaks.get('PartnerStack'), 2);
+      H.recordSuccess('PartnerStack');
+      eq('streak: only a money-path success clears the money-path streak',
+         H.streaks.get('PartnerStack'), 0);
+    }
+
+    /* The three places a success is actually reported. Source-level, because
+       the executed test above proves the mechanism and these pin the wiring. */
+    ok('streak: a landed conversion reports success',
+       /Conversion sent[\s\S]{0,400}?recordSuccess\('PartnerStack'\)/.test(src));
+    ok('streak: a landed qualification reports success',
+       /Qualification sent[\s\S]{0,200}?recordSuccess\('PartnerStack'\)/.test(src));
+    ok('streak: a successful qualified-demo read reports success',
+       /recordSuccess\('PartnerStack SF read'\)/.test(fn));
+    /* REACHABILITY, not just presence: it must sit AFTER the !sf.ok guard
+       returns, or it would reset the streak on a failed read too. */
+    ok('streak: the read success is recorded after the failure guard returns, not before',
+       fn.indexOf("recordSuccess('PartnerStack SF read')") > fn.indexOf('if (!sf.ok)'));
+
+    /* ITS OWN SOURCE, and the source is the point rather than a rename.
+       A failed READ retries on its own two minutes later; the 'PartnerStack'
+       impact line talks about conversions whose attempts are exhausted. On
+       16 Sept 2026 a Salesforce maintenance window sent that line to Slack
+       for a failure with nothing to act on. Separating the source is also
+       what lets recordSuccess reset this streak without touching the money
+       path's -- see the streak assertions below. */
+    ok('v21: and that read failure is recorded under the SF-read source',
+       /recordFailure\('PartnerStack SF read', 'qualified-demo read'/.test(fn));
+    ok('v21: the read failure is NOT filed under the money-path source',
+       !/recordFailure\('PartnerStack', 'qualified-demo read'/.test(fn));
     ok('v10: an unmatchable Opportunity is logged, not silently dropped',
        /no usable domain/.test(fn));
 
@@ -3540,7 +3755,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   {
     const i = src.indexOf("'async function loadPartnerGaps()");
     const j = src.indexOf("'function debounce()");
-    const client = eval(src.slice(i, j).replace(/\+\s*$/, ''));
+    const client = withEscq(eval(src.slice(i, j).replace(/\+\s*$/, '')));
     const els = {};
     const doc = { getElementById: (id) => (els[id] = els[id] || { textContent: '', innerHTML: '', style: {} }) };
     const mk = (payload) => (new Function('API', 'TP', 'esc', 'et', 'fetch', 'AbortSignal', 'document',
