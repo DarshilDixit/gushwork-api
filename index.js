@@ -1014,6 +1014,26 @@ const FAILURE_MONITORS = {
      train people to ignore the row. */
   'Non-ICP model': { alertAfter: 3, impact: 'Websites are not being classified, so the model layer is blocking and Meta-suppressing nobody. No lead is lost — but the long tail of realtors and agencies is getting through as it did before September.' },
   'PartnerStack': { alertAfter: 3, impact: 'An affiliate is not being credited, or the money path cannot be verified. Claims are released, so most of these retry — but nothing retries a conversion whose attempts are exhausted.' },
+  /* ADDED 16 Sept 2026, and it is a SPLIT rather than a new check.
+
+     Salesforce ran a maintenance window that morning and served its own
+     "We are down for maintenance" HTML with a 503 to roughly one read in
+     three. Every one of those was recorded against 'PartnerStack', so the
+     alert that went out carried the money-path impact line above -- "nothing
+     retries a conversion whose attempts are exhausted" -- for a failure that
+     retries completely on its own two minutes later. The reader is told to
+     act on a $50 that is not at risk.
+
+     A failed READ is the opposite shape to a failed SEND. The poll returns
+     before it claims anything, the next tick picks up whatever it missed, and
+     findQualifiedDemoOpportunities has no date bound so nothing ages out of
+     the window while Salesforce is unreachable. Nothing is lost and there is
+     nothing to do but wait.
+
+     Its own source so the impact text can say that, and -- the reason this
+     matters more -- so recordSuccess below can reset ITS streak without
+     touching the money path's. */
+  'PartnerStack SF read': { alertAfter: 3, impact: 'Qualified demos cannot be read out of Salesforce, so the $50 qualification is not firing while this lasts. Nothing is lost: the poll retries every couple of minutes and the query has no date bound, so it picks up everything it missed once Salesforce answers again.' },
 };
 const FAILURE_BUFFER_TTL_MS = 6 * 60 * 60 * 1000; // stale failures expire, so a slow trickle never accumulates
 const _failBuffers = new Map(); // source -> [{ id, error, at }]
@@ -1132,6 +1152,31 @@ function recordSuccess(source) {
 setMetaOutcomeReporter((outcome) => {
   if (outcome && outcome.ok) recordSuccess('Meta CAPI');
 });
+
+/* THE SAME BUG, FOUND IN PARTNERSTACK ON 16 SEPT 2026 -- the comment above
+   was written about Meta and was true of PartnerStack the whole time.
+
+   recordSuccess('PartnerStack') was called NOWHERE, so the only thing that
+   ever reset that streak was an alert firing. "8 in a row" on the Slack post
+   that morning was not 8 in a row: the Railway log for the same window shows
+   roughly ten failures scattered through thirty-five reads, never more than
+   two consecutive, with successes in between the whole time. The number is
+   read by a human deciding whether to act, and it overstated a transient
+   outage as a sustained one.
+
+   Reset on the two things that mean the money path is working -- a conversion
+   that landed and a qualification that landed. Not on a successful read:
+   that is a different dependency answering a different question, and folding
+   it in would let a two-minute poll wipe a genuine streak of conversion
+   failures before it could ever reach three. That is why the read has its own
+   source in FAILURE_MONITORS.
+
+   Success only, for the reason given above: failures already arrive through
+   recordFailure at each call site, and reporting from both would double-count.
+
+   The window buffer (3 in 6 hours) is deliberately NOT reset by recordSuccess,
+   so failures interleaved with successes still alert through the trickle path.
+   Lowering the streak can only ever reduce noise, never hide a real outage. */
 
 function recordFailure(source, id, error) {
   try {
@@ -4237,6 +4282,21 @@ app.get('/monitor', (req, res) => {
      never notice being off by one. */
   'function etDayShift(n){var p=etDay(new Date()).split("-");var d=new Date(Date.UTC(+p[0],+p[1]-1,+p[2],12,0,0));d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10);}' +
   'function esc(s){if(!s)return"";return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}' +
+  /* ATTRIBUTE-SAFE, and it has to be a second function rather than a fix to
+     esc. Every HTML attribute in this dashboard is written with SINGLE quotes,
+     because the markup is built inside double-quoted client JS strings which
+     are themselves inside single-quoted server JS strings -- the quote
+     characters are already spoken for two levels up. esc does not escape an
+     apostrophe, so any single-quoted attribute carrying free text ends early
+     at the first one.
+
+     Two values reach an attribute that a human can put an apostrophe in: the
+     acknowledgement note, typed into a prompt() by whoever clicked ack, and a
+     partner display name, which comes from PartnerStack as first_name plus
+     last_name -- O'Brien is an ordinary surname. Both render into title='...'.
+
+     Escaping the apostrophe too is the whole fix; nothing else changes. */
+  'function escq(s){return esc(s).replace(/\'/g,"&#39;");}' +
   'async function checkApi(){try{var r=await fetch(API+"/health",{signal:AbortSignal.timeout(5000)});if(r.ok){document.getElementById("apidot").className="dot dot-green";document.getElementById("apist").textContent="API online";badge("s-api","Online","bg");return true;}throw new Error("HTTP "+r.status);}catch(e){document.getElementById("apidot").className="dot dot-red";document.getElementById("apist").textContent="API offline";badge("s-api","Offline","br");return false;}}' +
   'async function checkElv(){try{var r=await fetch(API+"/monitor/elv-health"+TP,{signal:AbortSignal.timeout(5000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();var age=(d.minutesSinceLastCheck!=null&&d.minutesSinceLastCheck>=60)?" \\u00b7 last check "+Math.round(d.minutesSinceLastCheck/60)+"h ago":"";if(d.state==="degraded"){badge("s-elv","Degraded \\u2014 "+d.rate+"% of "+d.checks+" inconclusive"+age,"br");}else if(d.state==="insufficient_data"){if(d.rate>=50||d.consecutiveInconclusive>=2){badge("s-elv","Low traffic \\u2014 "+d.rate+"% of "+d.checks+" inconclusive"+age,"ba");}else{badge("s-elv","Quiet \\u2014 "+d.checks+" checks, "+d.rate+"% inconclusive"+age,"bx");}}else{badge("s-elv","Healthy ("+d.rate+"% inconclusive)","bg");}}catch(e){badge("s-elv","Could not check","br");}}' +
   /* SEVEN LIVE CHECKS, one round trip. Deliberately NOT on the 60-second
@@ -4500,7 +4560,10 @@ app.get('/monitor', (req, res) => {
   'function tbl(title,rows,note){if(!rows.length)return "";' +
   'var t="<div class=\'psm\'>"+title+" ("+rows.length+")"+(note?" — "+note:"")+"</div><table class=\'pst\'>";' +
   't+=rows.map(function(g){return "<tr><td><code>"+esc(g.customer_key)+"</code></td>"' +
-  '+"<td>"+esc(g.partner_name||g.partner_key||"—")+"</td>"' +
+  /* Was name-then-key, skipping the email rung that Slack, the dashboard
+     and hear_about_us all use. An email tells an SDR who they are dealing
+     with; a hex key tells them nothing they can search for. */
+  '+"<td>"+esc(g.partner_display||g.partner_name||g.partner_email||g.partner_key||"—")+"</td>"' +
   '+"<td>"+esc(g.email||"—")+"</td>"' +
   '+"<td class=\'psna\'>"+esc(et(g.met_at||g.first_seen))+"</td></tr>";}).join("");' +
   'return t+"</table>";}' +
@@ -4664,9 +4727,18 @@ app.get('/monitor', (req, res) => {
 
   'return "<tr><td><code>"+esc(x.customer_key)+"</code></td>"' +
   '+"<td><span class=\'pschip"+(bad?" bad":"")+"\'>"+esc((lbl[x.state]||x.state))+"</span></td>"' +
-  '+"<td>"+esc(x.partner_name||x.partner_email||x.partner_key||"—")+"</td>"' +
+  /* partner_display is the server's name-then-email-then-key chain, the
+     same one Slack and hear_about_us use. The fallbacks behind it are kept
+     so a payload from an older deploy still renders something. */
+  '+"<td>"+esc(x.partner_display||x.partner_name||x.partner_email||x.partner_key||"—")' +
+  /* TWO PARTNERS ON ONE DOMAIN IS A FACT, NOT A TIE TO BREAK QUIETLY.
+     PartnerStack pays once per customer key for the life of the account, so
+     exactly one of them can ever be credited and the other never can. The
+     old table picked one with three independent MAX() calls and said
+     nothing. */
+  '+((x.partner_key_count>1)?("<span class=\'pschip bad\' title=\'This domain was claimed by "+x.partner_key_count+" partners: "+escq([x.partner_display].concat(x.partner_others||[]).join(", "))+". PartnerStack credits ONE partner per domain for the life of the account, so only the one shown can ever be paid for it. Shown is whoever holds the conversion, or the earliest claim if none was sent.\'>"+(x.partner_key_count-1)+" other partner"+((x.partner_key_count-1)>1?"s":"")+"</span>"):"")+"</td>"' +
   '+"<td"+(x.sf_state==="create_errored"?" class=\'psattn\'":"")+">"+esc(sfs)+"</td>"' +
-  '+"<td class=\'psna\'>"+esc(det||"—")+(x.acknowledged?(" <span class=\'pschip\' title=\'Acknowledged"+(x.ack_note?": "+esc(x.ack_note):"")+". Still shown and still red \u2014 it just no longer counts as needing attention.\'>ack\'d</span>"):"")+"</td>"' +
+  '+"<td class=\'psna\'>"+esc(det||"—")+(x.acknowledged?(" <span class=\'pschip\' title=\'Acknowledged"+(x.ack_note?": "+escq(x.ack_note):"")+". Still shown and still red \u2014 it just no longer counts as needing attention.\'>ack\'d</span>"):"")+"</td>"' +
   /* Only offered where there is a failure to acknowledge. */
   '+"<td>"+(bad?("<button class=\'btn\' data-ack=\'"+esc(x.customer_key)+"\' data-on=\'"+(x.acknowledged?"0":"1")+"\'>"+(x.acknowledged?"un-ack":"ack")+"</button>"):"")+"</td>"' +
   '+"<td class=\'psna\' style=\'white-space:nowrap\'>"+esc(et(x.last_seen))+"</td></tr>";}).join("");wireAck();}}' +
@@ -8793,6 +8865,10 @@ async function runPartnerStackSignup({ session_id, email, website, company, phon
 
   if (result.ok) {
     console.log(`[PartnerStack] ✅ Conversion sent: ${ps.ps_customer_key} | xid=${ps.ps_xid} | ${email}`);
+    /* The money path is working, so the consecutive-failure streak is stale.
+       Nothing reset it before this, which is what made "N in a row" mean
+       "N since the last alert, ever". */
+    recordSuccess('PartnerStack');
     /* The mirror could not answer "did this convert?" at all before this —
        see syncPartnerStackStampToAWS. Awaited, so a later release can never
        overtake it against the same row. */
@@ -9413,10 +9489,14 @@ async function runPartnerStackQualificationPoll() {
     const sf = await findQualifiedDemoOpportunities();
     if (!sf.ok) {
       console.warn(`[PartnerStack] Qualification poll could not read Salesforce (${sf.reason}) — NOT concluding that nothing is ticked`);
-      recordFailure('PartnerStack', 'qualified-demo read', sf.reason +
+      recordFailure('PartnerStack SF read', 'qualified-demo read', sf.reason +
         (sf.totalSize ? ` (${sf.fetched} of ${sf.totalSize})` : ''));
       return;
     }
+    /* THE READ WORKED. Without this the streak only ever fell when an alert
+       fired, so a Salesforce maintenance window that dropped one read in
+       three reported itself as eight consecutive failures. */
+    recordSuccess('PartnerStack SF read');
     const opps = sf.records;
     if (!opps.length) return;
 
@@ -9645,6 +9725,7 @@ async function sendQualificationForDomain(customerKey, matchedEmail) {
 
   if (result.ok) {
     console.log(`[PartnerStack] ✅ Qualification sent: ${customerKey}`);
+    recordSuccess('PartnerStack');
     await syncPartnerStackStampToAWS(claimedSession, 'ps_qualified_sent_at', new Date());
     await clearPartnerStackFailure('qualify', claimedSession);
     return;
@@ -9739,8 +9820,15 @@ async function partnerRevenueGaps() {
      malformed row would take the whole query down. */
   const qualifyCandidates = await pool.query(`
     SELECT ps_customer_key                       AS customer_key,
-           MAX(ps_partner_key)                   AS partner_key,
-           MAX(ps_partner_name)                  AS partner_name,
+           /* Same authoritative pick as the ladder, for the same reason: two
+              independent MAXes over a group keyed by DOMAIN can return a name
+              and a key belonging to different partners. Name and email are
+              attached from the key afterwards. */
+           (ARRAY_AGG(ps_partner_key ORDER BY (ps_signup_sent_at IS NOT NULL) DESC, created_at ASC)
+              FILTER (WHERE ps_partner_key IS NOT NULL AND ps_partner_key <> ''))[1] AS partner_key,
+           ARRAY_REMOVE(ARRAY_AGG(DISTINCT ps_partner_key), NULL) AS partner_keys,
+           COUNT(DISTINCT ps_partner_key)
+             FILTER (WHERE ps_partner_key IS NOT NULL AND ps_partner_key <> '') AS partner_key_count,
            MAX(email)                            AS email,
            MIN(CASE WHEN start_time ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
                     THEN start_time::timestamptz END) AS met_at
@@ -9762,6 +9850,11 @@ async function partnerRevenueGaps() {
      ORDER BY 5
      LIMIT 200
   `);
+
+  /* Check A's rows ARE the ladder's rows, so they already carry a resolved
+     partner. These are this card's own query and need the same treatment --
+     otherwise the two halves of one card label partners differently. */
+  attachPartnerIdentity(qualifyCandidates.rows, await partnerIdentityByKey());
 
   let missingOpportunity = [];
   let opportunityCheck = { ok: false, reason: 'not_run' };
@@ -9885,14 +9978,106 @@ const PS_LADDER_LIMIT    = 500;
    failure is the likelier explanation than a slow tick. */
 const PS_SF_STALE_MIN    = 45;
 
+/* ── ONE PLACE A PARTNER KEY BECOMES A NAME, for the dashboard ───────
+   partnerIdentityNoNetwork answers this for ONE key on the lead path and is
+   cached per process. This is the bulk form the monitor routes need: every
+   key at once, so a table of domains can be labelled without a query per row.
+
+   WHY IT EXISTS AT ALL. The per-domain table used to read ps_partner_name off
+   the rows OF THAT DOMAIN, so abc.com rendered the raw hex key
+   785ec78e1ee4688 while the table immediately below it on the same screen
+   showed that exact key as "Test Account". The name was resolved the whole
+   time -- just on a different domain's rows, because the API call that
+   resolves it lands after the first lead from a partner and only writes the
+   row it was called for. Identity belongs to the KEY, not to the domain.
+
+   Same shape as the bug CLAUDE.md records for Slack: the in-memory peek that
+   posted a raw key even though the database already had the name.
+
+   MAX() is correct HERE and was wrong where this came from, which is worth
+   saying plainly because the two look identical. Grouping by the key means
+   every row in a group is the same partner, so MAX picks between a name and
+   a null. Grouping by DOMAIN does not: a domain can carry leads from two
+   partners, and three independent MAX() calls then return three fields from
+   two different people. Measured on production 16 Sept 2026 -- one key, one
+   name, one email, for every key in the table. */
+async function partnerIdentityByKey() {
+  const { rows } = await pool.query(
+    `SELECT ps_partner_key        AS key,
+            MAX(ps_partner_name)  AS name,
+            MAX(ps_partner_email) AS email
+       FROM leads
+      WHERE ps_partner_key IS NOT NULL AND ps_partner_key <> ''
+      GROUP BY ps_partner_key`);
+  const byKey = new Map();
+  for (const r of rows) byKey.set(r.key, { name: r.name, email: r.email });
+  return byKey;
+}
+
+/* Attach the resolved identity to rows that carry a partner_key, plus the
+   contention marker. ONE function so the per-domain table and the revenue-gap
+   card cannot label the same partner two different ways -- the display chain
+   is name then email then raw key, everywhere, which is what
+   partnerDisplayName is for. The gap card skipped the email rung entirely
+   before this. */
+function attachPartnerIdentity(rows, byKey) {
+  for (const r of rows) {
+    /* COUNT() arrives from node-postgres as a STRING, because a bigint does
+       not fit a JS number. The renderer compares it against 1 and subtracts
+       from it, and both of those happen to coerce -- right up until someone
+       writes === or template-joins it. Made a number once, here. */
+    r.partner_key_count = Number(r.partner_key_count) || 0;
+    const identity = r.partner_key ? byKey.get(r.partner_key) : null;
+    r.partner_name  = identity ? identity.name  : null;
+    r.partner_email = identity ? identity.email : null;
+    r.partner_display = partnerDisplayName(identity, r.partner_key);
+    /* EVERY OTHER PARTNER THAT CLAIMED THIS DOMAIN. PartnerStack pays once
+       per customer key for the life of the account, so two partners on one
+       domain means exactly one of them can ever be credited and the other
+       never can. That is a fact somebody has to see, not a tie to break
+       quietly -- allstate.com carried Test Account and Reviews Guide on
+       16 Sept 2026 and the table showed one of them with no hint of the
+       other. */
+    r.partner_others = (r.partner_keys || [])
+      .filter((k) => k && k !== r.partner_key)
+      .map((k) => partnerDisplayName(byKey.get(k), k));
+  }
+  return rows;
+}
+
 async function partnerLifecycle() {
   const [domains, noKey, sfState, failedTotals] = await Promise.all([
     pool.query(`
       SELECT ps_customer_key                    AS customer_key,
              ${PS_LADDER_SQL}                   AS state,
-             MAX(ps_partner_key)                AS partner_key,
-             MAX(ps_partner_name)               AS partner_name,
-             MAX(ps_partner_email)              AS partner_email,
+             /* ONE PARTNER PER ROW, NOT THREE INDEPENDENT MAXES.
+
+                This was MAX(ps_partner_key), MAX(ps_partner_name) and
+                MAX(ps_partner_email), each resolved on its own over a group
+                of leads that share a DOMAIN but need not share a partner.
+                On 16 Sept 2026 allstate.com carried leads from two partners
+                and the three aggregates picked different winners: the name
+                came back Test Account, while the key and the email both came
+                back Reviews Guide. The row on screen described a partner who
+                does not exist, and the per-partner table directly below it
+                showed Reviews Guide owning one lead and zero domains.
+
+                So: pick ONE authoritative key here and derive the name and
+                the email from it in JavaScript, through partnerIdentityByKey.
+
+                THE ORDER IS THE MONEY ORDER. A conversion is claimed by the
+                session that submits first and PartnerStack pays once per
+                customer key for the life of the account, so the partner who
+                carries ps_signup_sent_at is the one who was actually
+                credited. Absent that, the earliest partner-bearing lead is
+                the one that would win the claim next. */
+             (ARRAY_AGG(ps_partner_key ORDER BY (ps_signup_sent_at IS NOT NULL) DESC, created_at ASC)
+                FILTER (WHERE ps_partner_key IS NOT NULL AND ps_partner_key <> ''))[1] AS partner_key,
+             /* Every partner that claimed this domain, so the renderer can
+                say so. Only one of them can ever be paid. */
+             ARRAY_REMOVE(ARRAY_AGG(DISTINCT ps_partner_key), NULL) AS partner_keys,
+             COUNT(DISTINCT ps_partner_key)
+               FILTER (WHERE ps_partner_key IS NOT NULL AND ps_partner_key <> '') AS partner_key_count,
              MAX(email)                         AS email,
              MAX(ps_signup_fail_reason)         AS signup_fail_reason,
              MAX(ps_qualify_fail_reason)        AS qualify_fail_reason,
@@ -9954,6 +10139,12 @@ async function partnerLifecycle() {
         ) d
        WHERE d.state = ANY($1)`, [PS_LADDER_FAILED]).catch(() => ({ rows: [null] })),
   ]);
+
+  /* Name and email come from the KEY, not from this domain's own rows.
+     abc.com had a partner key whose name was resolved on a different
+     domain's row, so the table printed the raw hex string while the table
+     below it printed Test Account for that identical key. */
+  attachPartnerIdentity(domains.rows, await partnerIdentityByKey());
 
   const sfByDomain = new Map(sfState.rows.map((r) => [r.customer_key, r]));
   for (const d of domains.rows) {
@@ -11716,9 +11907,18 @@ app.post('/partial', async (req, res) => {
      step 1 and drops would otherwise have no partner on the row at all —
      including for the drop-off recovery cron. */
   const ps = readPartnerStackPayload(req.body, { email, website });
-  /* Step 7. peek only — never an API call here. The identity resolver runs
-     after res.json(); a brand-new partner key lands as the key and is upgraded
-     in place once the name arrives. */
+  /* Step 7. Peek only — memory then the database, never an API call on the
+     request path. Whatever it finds is written to ps_partner_name and
+     ps_partner_email in the upsert below, which is new as of 16 Sept 2026:
+     this route resolved the name, spent it on hear_about_us and then dropped
+     it, so the dashboard read a raw hex key off a row whose own
+     hear_about_us said "Partner - Test Account".
+
+     When the peek MISSES -- the first ever lead from a brand-new partner --
+     the API resolver runs after res.json() below and upgrades the row in
+     place. Before that existed here, a partner lead that stopped at step 1
+     never resolved at all, because runPartnerStackIdentity was reachable
+     from /submit and nowhere else. */
   const psIdentity = await partnerIdentityNoNetwork(ps.ps_partner_key);
   const psHear = partnerHearAboutUs({ hear_about_us, ps, identity: psIdentity });
   const hearAboutUsFinal = psHear || hear_about_us;
@@ -11780,8 +11980,8 @@ app.post('/partial', async (req, res) => {
         SELECT email, company, website, phone, first_name, last_name, sell_to, booking_uid, step_reached
           FROM leads WHERE session_id = $1
       )
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business,non_icp_blocked,non_icp_reason,non_icp_source,non_icp_checked_at,non_icp_llm_flagged,product_interest,meta_predicted_ltv)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW(),$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47)
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business,non_icp_blocked,non_icp_reason,non_icp_source,non_icp_checked_at,non_icp_llm_flagged,product_interest,meta_predicted_ltv,ps_partner_name,ps_partner_email)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW(),$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49)
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -11866,7 +12066,28 @@ app.post('/partial', async (req, res) => {
            time anything looked -- which is the whole point of having it
            rather than reading updated_at. */
         non_icp_source        = COALESCE(leads.non_icp_source,           EXCLUDED.non_icp_source),
-        non_icp_checked_at    = COALESCE(leads.non_icp_checked_at,       EXCLUDED.non_icp_checked_at)
+        non_icp_checked_at    = COALESCE(leads.non_icp_checked_at,       EXCLUDED.non_icp_checked_at),
+        /* THE NAME WE ALREADY HAD, WRITTEN DOWN. Measured on production
+           16 Sept 2026: of ten partner leads, the six that reached /submit
+           all carried a resolved partner name and the four that stopped at
+           step 1 all carried none. A clean split, because
+           runPartnerStackIdentity is called from /submit and nowhere else.
+
+           The dashboard reads these two columns, so a step-1 partner lead
+           rendered as a raw hex key -- abc.com showed 785ec78e1ee4688
+           directly above a table listing that same key as Test Account.
+
+           The route had already resolved it. The psIdentity peek a few lines
+           up feeds hear_about_us, which is why the very same row reads
+           Partner - Test Account while the column beside it is null. The
+           value was in hand and thrown away.
+
+           COALESCE with EXISTING first, like hear_about_us_raw above:
+           /partial fires repeatedly through step 1 and the no-network peek
+           can miss on a later call after hitting on an earlier one. A
+           resolved name must never be blanked by a subsequent tick. */
+        ps_partner_name       = COALESCE(leads.ps_partner_name,          EXCLUDED.ps_partner_name),
+        ps_partner_email      = COALESCE(leads.ps_partner_email,         EXCLUDED.ps_partner_email)
       RETURNING
         (SELECT p.email      FROM prev p) AS prev_email,
         (SELECT p.company    FROM prev p) AS prev_company,
@@ -11879,7 +12100,7 @@ app.post('/partial', async (req, res) => {
         (SELECT p.step_reached FROM prev p) AS prev_step_reached,
         leads.email, leads.company, leads.website, leads.phone,
         leads.first_name, leads.last_name, leads.sell_to, leads.step_reached
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business,nonIcp.blocked===true,(nonIcp.blocked||nonIcp.llm_flagged)?nonIcp.reason:null,nonIcpStamp(nonIcp).source,nonIcpStamp(nonIcp).checked_at,nonIcp.llm_flagged===true,product_interest,meta_predicted_ltv]);
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business,nonIcp.blocked===true,(nonIcp.blocked||nonIcp.llm_flagged)?nonIcp.reason:null,nonIcpStamp(nonIcp).source,nonIcpStamp(nonIcp).checked_at,nonIcp.llm_flagged===true,product_interest,meta_predicted_ltv,psIdentity?.name||null,psIdentity?.email||null]);
 
     /* After the write, off the response path. Never awaited. */
     recordLeadFieldChanges(session_id, upsert.rows[0], '/partial', { arrived_step: step_reached });
@@ -11920,6 +12141,24 @@ app.post('/partial', async (req, res) => {
 
     console.log(`[/partial] ✅ Saved session ${session_id} | step ${step_reached} | disqualified: ${disqualified} | non-ICP: ${nonIcp.blocked ? nonIcp.reason : 'no'} | email ${email}`);
     res.json({ ok: true });
+
+    /* Off the critical path, exactly like /submit's copy: the lead is no
+       longer waiting and a third-party lookup must never be in front of one.
+
+       ONLY when the no-network peek missed. That condition is what keeps this
+       cheap -- /partial fires repeatedly through step 1, and a partner whose
+       name is already known short-circuits in memory or in the upsert above
+       without touching PartnerStack at all. A brand-new key costs one API
+       call per partner per process, because resolvePartnerIdentity caches the
+       hit (and deliberately does not cache a failure).
+
+       Fire-and-forget with a catch. An unhandled rejection here would take
+       the process down over a partner's display name. */
+    if (ps.ps_partner_key && !psIdentity) {
+      runPartnerStackIdentity({ session_id, ps })
+        .then(identity => upgradePartnerHearAboutUs({ session_id, email, ps, identity }))
+        .catch(err => console.warn('[PartnerStack] Partner identity failed at step 1 (non-blocking):', err.message));
+    }
   } catch (err) { console.error('[/partial]', err.message); res.status(500).json({ error: 'Partial save failed' }); }
 });
 
@@ -12041,8 +12280,8 @@ app.post('/submit', async (req, res) => {
         SELECT email, company, website, phone, first_name, last_name, sell_to, booking_uid, step_reached
           FROM leads WHERE session_id = $1
       )
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business,non_icp_blocked,non_icp_reason,non_icp_source,non_icp_checked_at,non_icp_llm_flagged,product_interest,meta_predicted_ltv)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW(),$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46)
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business,non_icp_blocked,non_icp_reason,non_icp_source,non_icp_checked_at,non_icp_llm_flagged,product_interest,meta_predicted_ltv,ps_partner_name,ps_partner_email)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW(),$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48)
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -12123,7 +12362,15 @@ app.post('/submit', async (req, res) => {
            time anything looked -- which is the whole point of having it
            rather than reading updated_at. */
         non_icp_source        = COALESCE(leads.non_icp_source,           EXCLUDED.non_icp_source),
-        non_icp_checked_at    = COALESCE(leads.non_icp_checked_at,       EXCLUDED.non_icp_checked_at)
+        non_icp_checked_at    = COALESCE(leads.non_icp_checked_at,       EXCLUDED.non_icp_checked_at),
+        /* Same two columns as /partial, and the same EXISTING-first COALESCE.
+           runPartnerStackIdentity still stamps them after res.json() and is
+           still the only thing that can resolve a brand-new partner key --
+           this just means a row is not left blank when that deferred call
+           fails, since the peek above usually already knows the answer. It
+           can never overwrite what the resolver wrote. */
+        ps_partner_name       = COALESCE(leads.ps_partner_name,          EXCLUDED.ps_partner_name),
+        ps_partner_email      = COALESCE(leads.ps_partner_email,         EXCLUDED.ps_partner_email)
       RETURNING
         (SELECT p.email      FROM prev p) AS prev_email,
         (SELECT p.company    FROM prev p) AS prev_company,
@@ -12142,7 +12389,7 @@ app.post('/submit', async (req, res) => {
            (Meta, Slack, the response) must read the row rather than the
            in-memory verdict or the block silently lifts itself. */
         leads.non_icp_blocked, leads.non_icp_reason, leads.non_icp_llm_flagged, leads.non_icp_source
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business,nonIcp.blocked===true,(nonIcp.blocked||nonIcp.llm_flagged)?nonIcp.reason:null,nonIcpStamp(nonIcp).source,nonIcpStamp(nonIcp).checked_at,nonIcp.llm_flagged===true,product_interest,meta_predicted_ltv]);
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business,nonIcp.blocked===true,(nonIcp.blocked||nonIcp.llm_flagged)?nonIcp.reason:null,nonIcpStamp(nonIcp).source,nonIcpStamp(nonIcp).checked_at,nonIcp.llm_flagged===true,product_interest,meta_predicted_ltv,psIdentity?.name||null,psIdentity?.email||null]);
 
     /* After the write, off the response path. Never awaited. */
     const identityDiff = diffLeadIdentityFields(upsert.rows[0], { arrived_step: 2 });

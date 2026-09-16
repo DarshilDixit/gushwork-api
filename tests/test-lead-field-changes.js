@@ -39,7 +39,7 @@ const PORT = 41239;
 const BASE = `http://127.0.0.1:${PORT}`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const S = { queries: [], failChanges: false, upsertRow: null, submittedAt: null };
+const S = { queries: [], failChanges: false, upsertRow: null, submittedAt: null, partnerIdentity: null };
 let unhandled = 0;
 process.on('unhandledRejection', () => { unhandled++; });
 
@@ -53,6 +53,13 @@ function stubQuery(q, params) {
   if (/WITH prev AS/i.test(flat) && /INSERT INTO leads/i.test(flat)) {
     S.queries.push({ kind: 'upsert', flat, params });
     return { rows: [S.upsertRow], rowCount: 1 };
+  }
+  /* The no-network identity peek: memory, then this. /partial resolves the
+     partner name HERE and, before 16 Sept 2026, spent it on hear_about_us and
+     never wrote it to the columns the dashboard reads. */
+  if (/SELECT ps_partner_name, ps_partner_email FROM leads WHERE ps_partner_key/i.test(flat)) {
+    S.queries.push({ kind: 'identity_peek', flat, params });
+    return { rows: S.partnerIdentity ? [S.partnerIdentity] : [], rowCount: S.partnerIdentity ? 1 : 0 };
   }
   if (/SELECT submitted_at FROM leads/i.test(flat)) return { rows: [{ submitted_at: S.submittedAt }], rowCount: 1 };
   if (/UPDATE leads SET ps_signup_sent_at = NOW/i.test(flat)) return { rows: [{ session_id: 'x' }], rowCount: 1 };
@@ -127,13 +134,15 @@ const BODY = {
   page_url: 'https://www.gushwork.ai/demo', website_check_reason: 'resolved',
 };
 
-async function drive(route, upsertRow, failChanges, submittedAt) {
+async function drive(route, upsertRow, failChanges, submittedAt, opts) {
+  const o = opts || {};
   S.queries = []; S.upsertRow = upsertRow; S.failChanges = failChanges; logged = []; sent = [];
   S.submittedAt = submittedAt === undefined ? null : submittedAt;
+  S.partnerIdentity = o.partnerIdentity || null;
   const res = await realFetch(BASE + route, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Origin: 'https://www.gushwork.ai', 'User-Agent': 'suite/1.0' },
-    body: JSON.stringify(Object.assign({ step: 1 }, BODY)),
+    body: JSON.stringify(Object.assign({ step: 1 }, BODY, o.body || {})),
   });
   let body = null;
   try { body = await res.json(); } catch { /* non-JSON */ }
@@ -460,6 +469,73 @@ const NO_CHANGE  = Object.assign({}, CHANGED, { prev_email: CHANGED.email, prev_
      /session_id="\+encodeURIComponent\(sid\)/.test(page));
   ok('dashboard: an unreadable log renders as unavailable, never as no changes',
      /Change log unavailable/.test(page) && /not the same as no changes/.test(page));
+
+  /* ── PARTNER IDENTITY IS WRITTEN AT STEP 1 ────────────────────────
+     DRIVEN, not read. Measured on production 16 Sept 2026: of ten partner
+     leads, the six that reached /submit all carried a resolved partner name
+     and the four that stopped at step 1 all carried none -- a clean split,
+     because runPartnerStackIdentity was reachable from /submit and nowhere
+     else. The dashboard reads these two columns, so a step-1 partner lead
+     rendered as a raw hex key.
+
+     The route already KNEW the name: the same peek feeds hear_about_us, so
+     the row read "Partner - Alpha Partners" with a null ps_partner_name
+     beside it. A source assertion sees the peek and the write and cannot
+     tell you the value never travelled between them -- so this binds the
+     parameters and reads them back. */
+  {
+    quiet();
+    const withPartner = await drive('/partial', NOT_BOOKED, false, null, {
+      body: { ps_xid: 'xid_test', ps_partner_key: 'KEY_ALPHA' },
+      partnerIdentity: { ps_partner_name: 'Alpha Partners', ps_partner_email: 'a@alpha.test' },
+    });
+    loud();
+    const up = withPartner.queries.find((q) => q.kind === 'upsert');
+    ok('partial/identity: the peek that resolves the partner actually ran',
+       withPartner.queries.some((q) => q.kind === 'identity_peek'));
+    ok('partial/identity: the upsert writes ps_partner_name',
+       !!up && /ps_partner_name/.test(up.flat));
+    ok('partial/identity: the upsert writes ps_partner_email',
+       !!up && /ps_partner_email/.test(up.flat));
+    /* THE VALUE, not just the column. A column in the statement with a null
+       bound to it is the bug wearing a passing assertion. */
+    ok('partial/identity: the resolved NAME is bound as a parameter',
+       !!up && (up.params || []).includes('Alpha Partners'));
+    ok('partial/identity: the resolved EMAIL is bound as a parameter',
+       !!up && (up.params || []).includes('a@alpha.test'));
+    /* Appended at the END of the column list precisely so no existing
+       placeholder renumbered. If someone reorders them, this says so. */
+    eq('partial/identity: name is the second-to-last bound parameter',
+       (up.params || [])[(up.params || []).length - 2], 'Alpha Partners');
+    eq('partial/identity: email is the last bound parameter',
+       (up.params || [])[(up.params || []).length - 1], 'a@alpha.test');
+    /* EXISTING-first COALESCE: /partial fires repeatedly through step 1 and a
+       later tick whose peek misses must not blank a name an earlier one
+       resolved. */
+    ok('partial/identity: a later tick cannot blank a resolved name',
+       !!up && /ps_partner_name\s*=\s*COALESCE\(leads\.ps_partner_name/.test(up.flat));
+    ok('partial/identity: nor a resolved email',
+       !!up && /ps_partner_email\s*=\s*COALESCE\(leads\.ps_partner_email/.test(up.flat));
+  }
+
+  /* And when the peek MISSES -- the first ever lead from a brand-new partner
+     -- step 1 must still reach for the API, or that lead never resolves at
+     all. This is the half that runs after res.json(). */
+  {
+    quiet();
+    const newPartner = await drive('/partial', NOT_BOOKED, false, null, {
+      body: { ps_xid: 'xid_test', ps_partner_key: 'KEY_BRAND_NEW' },
+      partnerIdentity: null,
+    });
+    loud();
+    const up = newPartner.queries.find((q) => q.kind === 'upsert');
+    ok('partial/identity: an unresolvable key still binds nulls rather than throwing',
+       !!up && (up.params || [])[(up.params || []).length - 2] === null);
+    ok('partial/identity: and the route still answered 200',
+       newPartner.status === 200);
+    ok('partial/identity: an unresolved partner produces no unhandled rejection',
+       unhandled === 0);
+  }
 
   console.log('');
   if (failures.length) {
