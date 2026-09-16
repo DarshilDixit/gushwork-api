@@ -786,6 +786,8 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
            + ' showTab: typeof showTab === "function" ? showTab : null,'
            + ' esc: typeof esc === "function" ? esc : null,'
            + ' escq: typeof escq === "function" ? escq : null,'
+           + ' nonIcpSourceShort: typeof nonIcpSourceShort === "function" ? nonIcpSourceShort : null,'
+           + ' nonIcpSourceWhy: typeof nonIcpSourceWhy === "function" ? nonIcpSourceWhy : null,'
            + ' et: typeof et === "function" ? et : null,'
            + ' enrichPanel: typeof enrichPanel === "function" ? enrichPanel : null,'
            + ' stageBadge: typeof stageBadge === "function" ? stageBadge : null,'
@@ -799,6 +801,7 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
            + ' mdlBar: typeof mdlBar === "function" ? mdlBar : null };'
       )(...Object.values(sandbox));
     } catch (err) { evalErr = err; }
+    const eq2 = (n, a, b) => ok(n, a === b, `got ${JSON.stringify(a)}, expected ${JSON.stringify(b)}`);
     ok('dashboard: the inline script evaluates without throwing', !evalErr, evalErr && evalErr.message);
 
     /* escq exists because every HTML attribute here is SINGLE-quoted while
@@ -811,6 +814,53 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
        Asserting the OUTPUT, not that the function exists: "it is defined" is
        one level short of the thing that actually matters, which is the whole
        lesson of the Model tab's confident zero. */
+    /* ── WHICH MECHANISM BLOCKED THIS LEAD ────────────────────────────
+       non_icp_reason holds a DOMAIN for both mechanisms, so a blocked row
+       reading kw.com looked identical whether a string comparison or a model
+       produced it. Three real states exist in production -- domain_list, llm,
+       and NULL for the eight leads blocked between the 11 Sept brand list and
+       the 14 Sept model layer.
+
+       Asserting the OUTPUT of the labels, and that the ROW actually paints
+       them, because "the helper is defined" is one level short of the thing
+       that matters -- the lesson of the Model tab's confident zero. */
+    if (scope && scope.nonIcpSourceShort && scope.nonIcpSourceWhy && scope.leadRowsHtml) {
+      eq2('blocked/source: the model reads as "model"', scope.nonIcpSourceShort('llm'), 'model');
+      eq2('blocked/source: the brand list reads as "list"', scope.nonIcpSourceShort('domain_list'), 'list');
+      /* NULL MUST NOT CLAIM TO BE THE LIST. The ladder counts it there and is
+         right to, but that is an inference about when the row was written;
+         the row itself never recorded it. */
+      eq2('blocked/source: an unrecorded source says so rather than claiming the list',
+          scope.nonIcpSourceShort(null), 'unrecorded');
+      ok('blocked/source: and the explanation says why it is still a list block',
+         /only thing that could block/.test(scope.nonIcpSourceWhy(null)));
+      ok('blocked/source: the model explanation points at the evidence quote',
+         /evidence quote/.test(scope.nonIcpSourceWhy('llm')));
+      ok('blocked/source: the list explanation says it is re-derivable',
+         /re-derive/.test(scope.nonIcpSourceWhy('domain_list')));
+
+      /* PAINTED, not just computed. The visible chip is Blocked-tab only (ns
+         "b"); All Leads keeps the marker in the tooltip so the shared renderer
+         does not clutter a table where the column means nothing. */
+      const rowsB = scope.leadRowsHtml([{ session_id: 's1', email: 'a@kw.com',
+        non_icp_blocked: true, non_icp_reason: 'kw.com', non_icp_source: 'llm' }], 'b');
+      ok('blocked/source: the Blocked row paints a visible chip naming the model',
+         />model</.test(rowsB), rowsB.slice(0, 400));
+      const rowsL = scope.leadRowsHtml([{ session_id: 's1', email: 'a@kw.com',
+        non_icp_blocked: true, non_icp_reason: 'kw.com', non_icp_source: 'llm' }], 'l');
+      ok('blocked/source: All Leads does NOT paint the chip, only the tooltip',
+         !/>model</.test(rowsL) && /Blocked by: model/.test(rowsL));
+      const rowsN = scope.leadRowsHtml([{ session_id: 's2', email: 'b@x.com',
+        non_icp_blocked: true, non_icp_reason: 'x.com', non_icp_source: null }], 'b');
+      ok('blocked/source: an unrecorded source paints as unrecorded, not as list',
+         />unrecorded</.test(rowsN) && !/>list</.test(rowsN));
+      /* A lead that is NOT blocked must gain nothing at all. */
+      const rowsClean = scope.leadRowsHtml([{ session_id: 's3', email: 'c@y.com',
+        non_icp_blocked: false, non_icp_source: null }], 'b');
+      ok('blocked/source: an unblocked lead gets no chip and no blocked tooltip',
+         !/unrecorded|Blocked by:/.test(rowsClean));
+    }
+
     if (scope && scope.escq) {
       ok('dashboard/escq: an apostrophe is escaped, so a single-quoted attribute survives',
          scope.escq("O'Brien Marketing").indexOf("'") === -1,
@@ -829,7 +879,8 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
       /* THE SCOPE CHECK. leadRowsHtml was declared INSIDE loadLeads, so it
          was reachable from All Leads and undefined from Blocked. A name
          that is not visible at top level cannot be shared between tabs. */
-      for (const nm of ['leadRowsHtml', 'esc', 'escq', 'et', 'enrichPanel', 'stageBadge',
+      for (const nm of ['leadRowsHtml', 'esc', 'escq', 'nonIcpSourceShort', 'nonIcpSourceWhy',
+                        'et', 'enrichPanel', 'stageBadge',
                         'showTab', 'loadLeads', 'loadBlocked', 'loadSDR',
                         'loadDupes', 'loadLM', 'loadPartners', 'checkHealth',
                         /* The Model tab's own helpers. Every one is used by

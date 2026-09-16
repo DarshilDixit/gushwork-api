@@ -3394,7 +3394,12 @@ app.get('/monitor/leads', async (req, res) => {
       l.product, l.product_interest, l.about_business,
       l.completed, l.booking_uid, l.booked_at, l.start_time, l.end_time,
       l.disqualified, l.disqualified_reason, l.step_reached,
-      l.non_icp_blocked, l.non_icp_reason,
+      /* non_icp_source, because non_icp_reason holds a DOMAIN for both
+         mechanisms and is therefore identical whichever one fired. Without
+         it the Blocked tab shows kw.com and cannot say whether that was a
+         string comparison anyone can re-derive from a list, or a model
+         reading a website -- which is the whole reason the column exists. */
+      l.non_icp_blocked, l.non_icp_reason, l.non_icp_source,
       l.loops_sent, l.created_at, l.submitted_at, l.page_url,
       l.landing_page, l.previous_page, l.website_check_failed, l.website_check_reason,
       l.elv_status, l.elv_checked_at,
@@ -3438,7 +3443,7 @@ app.get('/monitor/leads', async (req, res) => {
       const allRows = await pool.query(baseSelect + ` ${orderBy}`, params);
       const cols = [
         'email','first_name','last_name','company','website','phone','sell_to','product','product_interest','about_business','hear_about_us','hear_about_us_raw',
-        'completed','booking_uid','disqualified','non_icp_blocked','non_icp_reason','step_reached','created_at','submitted_at','booked_at',
+        'completed','booking_uid','disqualified','non_icp_blocked','non_icp_reason','non_icp_source','step_reached','created_at','submitted_at','booked_at',
         'utm_source','utm_medium','utm_campaign','utm_term','referrer','prefill_source',
         'landing_page','previous_page','page_url','website_check_failed','website_check_reason','prior_attempts','prior_disqualified',
         'elv_status','unverifiable_pair','is_internal',
@@ -4877,8 +4882,27 @@ app.get('/monitor', (req, res) => {
      the two tabs again and the symptom is a click that does nothing,
      which is invisible to any check that only asks whether the row
      rendered. */
+  /* WHICH MECHANISM BLOCKED THIS LEAD. Three real states in production, not
+     two: domain_list, llm, and NULL for the eight leads blocked between the
+     11 Sept brand list and the 14 Sept model layer, before the column
+     existed.
+
+     The Model tab's ladder counts NULL as a list block, which is correct by
+     construction -- the model could not block anything before it shipped --
+     but that is an INFERENCE, and a per-row label is exactly where this repo
+     refuses to present an inference as a record. So the row says what was
+     actually stored, and the tooltip explains why the ladder is still right
+     to count it with the list. */
+  'function nonIcpSourceShort(src){return src==="llm"?"model":(src==="domain_list"?"list":"unrecorded");}' +
+  'function nonIcpSourceWhy(src){'
+  + 'if(src==="llm")return "Decided by the model reading the company website. Re-check it against the evidence quote on the Model tab.";'
+  + 'if(src==="domain_list")return "Matched the brand-domain list (NON_ICP_DOMAINS) -- a plain string comparison you can re-derive by reading the list.";'
+  + 'return "Not recorded. This lead was blocked before non_icp_source existed, when the brand list was the only thing that could block -- so it was a list block, but the row does not say so itself.";}' +
+  /* TOP LEVEL, like every other shared helper. leadRowsHtml renders both All
+     Leads and Blocked, so anything it calls has to be visible to both -- the
+     scope bug that made Blocked rows silently unexpandable. */
   'function leadRowsHtml(leads,ns){return leads.map(function(l){var sid=esc(l.session_id),key=esc(ns||"x")+"-"+sid,name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\\u2014",src=l.utm_source?esc(l.utm_source)+(l.utm_medium?" / "+esc(l.utm_medium):""):(l.referrer?"referral":"\\u2014");' +
-  'return"<tr"+(l.non_icp_blocked?" style=\\"background:#fff7ed\\"":"")+"><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+key+"\',\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.is_internal?"<span title=\\"One of our own test submissions. Counted in every total, like everything else \\u2014 use the filter to take them out of a number you are about to quote.\\" style=\\"color:#6b7280\\">&#129514; </span>":"")+(l.non_icp_blocked?"<span title=\\"Blocked \\u2014 non-ICP ("+esc(l.non_icp_reason||"")+"). Still counted in every total.\\" style=\\"color:#c2410c\\">&#128683; </span>":"")+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+esc(l.product||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
+  'return"<tr"+(l.non_icp_blocked?" style=\\"background:#fff7ed\\"":"")+"><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+key+"\',\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.is_internal?"<span title=\\"One of our own test submissions. Counted in every total, like everything else \\u2014 use the filter to take them out of a number you are about to quote.\\" style=\\"color:#6b7280\\">&#129514; </span>":"")+(l.non_icp_blocked?"<span title=\\"Blocked \\u2014 non-ICP ("+esc(l.non_icp_reason||"")+"). Blocked by: "+esc(nonIcpSourceShort(l.non_icp_source))+". "+esc(nonIcpSourceWhy(l.non_icp_source))+" Still counted in every total.\\" style=\\"color:#c2410c\\">&#128683; </span>":"")+((l.non_icp_blocked&&ns==="b")?"<span class=\\"pschip\\" title=\\""+esc(nonIcpSourceWhy(l.non_icp_source))+"\\">"+esc(nonIcpSourceShort(l.non_icp_source))+"</span> ":"")+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+esc(l.product||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
   '"<tr class=\\"erow\\" id=\\"er-"+key+"\\" style=\\"display:none\\"><td></td><td colspan=\\"10\\">"+enrichPanel(l)+"<div id=\\"lc-"+key+"\\"></div></td></tr>";}).join("");}' +
   'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,product=document.getElementById("fproduct").value,interest=document.getElementById("finterest").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
   'var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"page="+curPage+"&stage="+stage+"&sort="+curSort+"&dir="+curDir;' +
