@@ -184,21 +184,6 @@
     link.href = 'https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/css/intlTelInput.min.css';
     document.head.appendChild(link);
 
-    function loadScript(src, onload) {
-      const s = document.createElement('script');
-      s.src = src;
-      s.onload = onload;
-      document.head.appendChild(s);
-    }
-
-    loadScript('https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js', function () {
-      loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/intlTelInput.min.js', function () {
-        loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/utils.js', function () {
-          initPhoneInputs();
-        });
-      });
-    });
-
     /* ── COUNTRY FROM THE VISITOR'S IP ────────────────────────────────
        country.is is the right API and it is working: free, CORS-friendly
        (it sends access-control-allow-origin: *), and it answered an Indian
@@ -230,23 +215,35 @@
     var GEO_CACHE_KEY  = 'gw_phone_country';
     var GEO_TIMEOUT_MS = 2500;
     var GEO_FALLBACK   = 'us';
+    /* Memoised for the page, so several phone inputs share ONE lookup and a
+       late caller never re-fetches. Named GEO_* like the constants above
+       because that is the prefix the test harness lifts. */
+    var GEO_VALUE      = null;
+    var GEO_WAITING    = null;
+
+    /* First answer wins, and is broadcast to everyone already waiting. */
+    function geoSettle(cc) {
+      if (GEO_VALUE) return;
+      GEO_VALUE = cc || GEO_FALLBACK;
+      var waiting = GEO_WAITING || [];
+      GEO_WAITING = [];
+      for (var i = 0; i < waiting.length; i++) waiting[i](GEO_VALUE);
+    }
 
     function lookupCountry(callback) {
+      if (GEO_VALUE) { callback(GEO_VALUE); return; }
+      if (GEO_WAITING) { GEO_WAITING.push(callback); return; }
+      GEO_WAITING = [callback];
+
       var cached = null;
       /* sessionStorage throws outright in some privacy modes, so every read
          and write here is guarded and an unavailable store just means the
          lookup runs again. */
       try { cached = sessionStorage.getItem(GEO_CACHE_KEY); } catch (e) {}
-      if (cached) { callback(cached); return; }
+      if (cached) { geoSettle(cached); return; }
 
-      var settled = false;
-      function settle(cc) {
-        if (settled) return;
-        settled = true;
-        callback(cc || GEO_FALLBACK);
-      }
       /* A hung lookup must never leave the input without a country. */
-      setTimeout(function () { settle(GEO_FALLBACK); }, GEO_TIMEOUT_MS);
+      setTimeout(function () { geoSettle(GEO_FALLBACK); }, GEO_TIMEOUT_MS);
 
       fetch('https://api.country.is')
         .then(function (r) {
@@ -258,10 +255,50 @@
           /* Cached only on a REAL answer. Caching the fallback would pin the
              rest of the session to the US after one blip. */
           if (cc) { try { sessionStorage.setItem(GEO_CACHE_KEY, cc); } catch (e) {} }
-          settle(cc);
+          geoSettle(cc);
         })
-        .catch(function () { settle(GEO_FALLBACK); });
+        .catch(function () { geoSettle(GEO_FALLBACK); });
     }
+
+    /* ── START IT NOW, NOT AFTER THE SCRIPTS ──────────────────────────
+       THIS LINE IS THE FIX, and without it the flag stays wrong for as long
+       as the CDN takes. initPhoneInputs runs at the END of three SERIAL
+       script loads -- jQuery, then intlTelInput, then utils.js, each waiting
+       on the previous onload -- and only then did anything ask where the
+       visitor is. Measured on a fast connection on 16 Sept 2026: 0.30s of
+       serial script loading before a 0.22s lookup could even start, and that
+       is the good case. On mobile it is seconds.
+
+       intl-tel-input does self-heal when the answer finally lands -- its
+       handleAutoCountry re-sets the flag on every instance -- but ONLY while
+       the input is still empty. Somebody who reaches step 2 and starts typing
+       an Indian number under a US flag KEEPS the US flag, and the number is
+       stored as +1. That is the window this closes.
+
+       Firing here moves the lookup into the same instant the stylesheet and
+       the first script tag are injected, so it resolves in parallel with the
+       downloads instead of after them. By the time initPhoneInputs runs,
+       GEO_VALUE is normally already set and lookupCountry answers instantly.
+
+       The empty callback is deliberate: this call exists for its side effect
+       of populating GEO_VALUE. */
+    lookupCountry(function () {});
+
+    function loadScript(src, onload) {
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = onload;
+      document.head.appendChild(s);
+    }
+
+    loadScript('https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js', function () {
+      loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/intlTelInput.min.js', function () {
+        loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/utils.js', function () {
+          initPhoneInputs();
+        });
+      });
+    });
+
 
     function initPhoneInputs() {
       if (typeof $ === 'undefined' || typeof window.intlTelInput === 'undefined') return;
