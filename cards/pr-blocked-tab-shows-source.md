@@ -26,28 +26,54 @@ The split was visible on the Model tab's ladder (11 list / 5 model) but nowhere
 per-row. It reads as an omission rather than a decision: the Blocked tab predates
 the model layer.
 
-## Three states in production, not two
+## What it looks like
+
+The Blocked tab's email column now carries one of **two** words:
 
 ```
-domain_list    3   15-16 Sept
-llm            5   15-16 Sept
-(null)         8   11-14 Sept
+EMAIL                            DOMAIN THAT MATCHED        WHY
+agent@allstate.com               allstate.com               🚫 [Brand list]
+tl@assurance-network.com         assurance-network.com      🚫 [AI check]
+nick@steadfastlifehealth.com     steadfastlifehealth.com    🚫 [AI check]
+beckygerig@thegerigteam.net      remax.com                  🚫 [Brand list]
+dporter1@farmersagent.com        farmersagent.com           🚫 [Brand list]
+...
+totals: Brand list 11 · AI check 5   (16 blocked leads)
 ```
 
-The nulls are leads blocked between the **11 Sept** brand list and the
-**14 Sept** model layer, before the column existed.
+Hover gives the sentence:
 
-**The Model tab's ladder counts NULL as a list block, and is RIGHT to** — the
-model could not block anything before it shipped, so by construction those were
-list blocks. But that is an *inference about when a row was written*, and a
-per-row label is precisely where this repo refuses to present an inference as a
-record. The same rule as `first_ticked_at`: *"an inferred timestamp in an
-observational column is read as a measurement by the next person."*
+- **Brand list** — *"This domain is on our list of national real-estate and
+  insurance brands, so it was turned away without anything needing to read the
+  site."*
+- **AI check** — *"The AI check read this company website and classified it as
+  real estate or insurance. The Model tab shows the exact quote it relied on."*
 
-So the chip says **`unrecorded`**, and its tooltip explains why the ladder is
-still correct to count it with the list. The two surfaces do not contradict each
-other; one states the record, the other states a sound inference, and each says
-which it is.
+11 + 5 = 16, which is exactly what the Model tab's ladder says. Nothing to
+reconcile between the two tabs.
+
+## A correction to the first cut of this PR
+
+The first version shipped the stored values almost raw — `list` / `model` /
+`unrecorded` — and invented a **third** state. Both were wrong for a screen SDRs
+read, and Darshil called it: *"what is null here — don't get you."*
+
+`unrecorded` was the worse half. Eight leads blocked between the 11 Sept brand
+list and the 14 Sept model layer have no source stored, because the column did
+not exist yet. I treated an empty column as *"we don't know"* — but the model
+could not block anything before it shipped, so those **are** brand-list blocks
+and the dates prove it. Showing a third state made a reader stop and decode
+something for no gain, and made the Blocked tab disagree with the ladder.
+
+The rule I reached for — *don't present an inference as a record* — is about
+values you never observed, like a backfilled timestamp. It does not apply to a
+fact the system's own history makes certain. Applying it here cost clarity and
+bought nothing.
+
+**No backfill either way.** The column stays null on those eight rows because
+that is what was recorded; the *display* says what we know. The provenance
+footnote survives on hover for anyone auditing, without making the chip itself
+something to work out.
 
 ## What changed
 
@@ -69,7 +95,7 @@ tables, and that column means nothing on All Leads, which keeps it in the toolti
 
 ## Verified
 
-**Bar green, run bare:** 12 suites, **3482 assertions** (+13).
+**Bar green, run bare:** 12 suites, **3487 assertions** (+18).
 
 **The query was EXECUTED, not read** — run against production read-only; it
 returns `non_icp_source` in the result set.
@@ -78,7 +104,7 @@ returns `non_icp_source` in the result set.
 stored sources:
 
 ```
-painted chip counts: { list: 3, model: 5, unrecorded: 8 }
+painted chip counts: { "Brand list": 11, "AI check": 5 }
 ```
 
 Every row painted exactly what the database stores. All Leads painted no chip and
@@ -95,8 +121,13 @@ from an `allstate.com` list match.
 | # | Mutation | Result |
 |---|---|---|
 | 1 | The column is no longer selected (the original gap) | CAUGHT |
-| 2 | An unrecorded source claims to be the list | CAUGHT |
-| 3 | The visible chip is dropped from the Blocked tab | CAUGHT |
+| 2 | A third label creeps back in | CAUGHT |
+| 3 | The raw stored slug leaks to the screen | CAUGHT |
+| 4 | The visible chip is dropped from the Blocked tab | CAUGHT |
+
+Tests pin that **exactly two labels are reachable** across every input including
+unknown future values, and that no stored slug (`llm`, `domain_list`) can reach
+the screen.
 
 ---
 
@@ -110,13 +141,10 @@ from an `allstate.com` list match.
 
 ## Not done
 
-- **No backfill of the 8 nulls.** They are genuinely unrecorded, and writing
-  `domain_list` into them now would be inventing provenance — the thing the chip
-  exists to avoid. They are correctly inferable from their dates and the tooltip
-  says so.
-- The Model tab ladder still labels those 8 as "Blocked — brand list" with no
-  caveat on that panel. Defensible, and I left it alone rather than widening
-  scope; if you want the ladder to carry the same nuance, say so.
+- **No backfill of the 8 nulls.** The column stays null because that is what was
+  recorded; only the display asserts what the dates make certain.
+- The Model tab's ladder is untouched — it already read 11 / 5, and the Blocked
+  tab now agrees with it rather than needing reconciliation.
 
 ## Deploy
 
