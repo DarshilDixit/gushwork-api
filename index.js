@@ -1178,6 +1178,50 @@ setMetaOutcomeReporter((outcome) => {
    so failures interleaved with successes still alert through the trickle path.
    Lowering the streak can only ever reduce noise, never hide a real outage. */
 
+/* ── WHAT A SALESFORCE WRITE FAILURE ACTUALLY MEANS ──────────────────
+   SIX call sites raise this -- three "Lead not created" and three "Booking
+   not recorded" -- and every one of them hardcoded the same two impact
+   sentences. On 16 Sept 2026 both fired for the same person in the same
+   second and contradicted each other: the critical said "This lead is NOT in
+   Salesforce. Add it manually", the warning said "The lead exists in
+   Salesforce but the booking is missing". Both cannot be true, and the first
+   one was the dangerous half.
+
+   mdorf@performancemediastrategies.com converted to a Contact, Account and
+   Opportunity on 29 June and booked again on 16 Sept. They are in Salesforce
+   as a CUSTOMER. Adding them by hand creates a duplicate against a live
+   Account, which is worse than doing nothing at all.
+
+   ONE function rather than six edits, for the reason this repo keeps
+   relearning: a guard added to the obvious site misses its siblings. The
+   nonIcpScheduleSuppressed trio is the same shape. */
+function salesforceFailureAlert(kind, err, ctx) {
+  const converted   = err && err.sfConvertedLead === true;
+  const unavailable = /down for maintenance|SALESFORCE_UNAVAILABLE/i.test(err && err.message || '');
+
+  /* A converted lead is not a missing lead, and an outage is not a lost one
+     either -- both are wrong to page someone about at critical. */
+  const severity = (converted || unavailable) ? 'warning'
+                 : (kind === 'lead' ? 'critical' : 'warning');
+
+  const title = converted   ? 'Already a customer — nothing written'
+              : unavailable ? 'Salesforce unavailable — write skipped'
+              : (kind === 'lead' ? 'Lead not created' : 'Booking not recorded');
+
+  const impact = converted
+    ? 'This person IS in Salesforce, as a converted Contact/Account/Opportunity. Do NOT add them manually — that creates a duplicate against a live account. Log the booking against the existing Contact, and tell whoever owns that account.'
+    : unavailable
+    ? 'Salesforce was down when we tried. Nothing is wrong with this lead — it just was not written. Re-run it once Salesforce is back.'
+    : (kind === 'lead'
+        ? 'This lead is NOT in Salesforce. Add it manually.'
+        : 'The lead exists in Salesforce but the booking is missing.');
+
+  alertOps(severity, 'Salesforce', title, Object.assign({}, ctx, {
+    'Error': err && err.message,
+    'Impact': impact,
+  }));
+}
+
 function recordFailure(source, id, error) {
   try {
     const cfg = FAILURE_MONITORS[source];
@@ -12502,7 +12546,7 @@ app.post('/submit', async (req, res) => {
          Falls back to product where nothing was ticked, so /ai-demo, the
          ad landers and every historical lead send exactly what they send
          today. */
-      pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,product:(product_interest||product),about_business,hear_about_us:hearAboutUsFinal,hear_about_us_raw:hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'form completed', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
+      pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,product:(product_interest||product),about_business,hear_about_us:hearAboutUsFinal,hear_about_us_raw:hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false}).catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); salesforceFailureAlert('lead', err, { 'Email': email, 'Stage': 'form completed' }); });
 
       // Meta CAPI Lead — suppressed when the website check failed (temporary
       // non-blocking mode still lets the lead through, but keeps the Lead
@@ -12731,7 +12775,7 @@ app.post('/booking-confirmed', async (req, res) => {
     if (email) {
       findSFLeadByEmail(email).then(leadId => {
         if (leadId) return updateSFLead(leadId, { booking_uid__c: booking_uid, booking_start_time__c: start_time || '', booking_event_type__c: event_type || '', completed__c: true });
-      }).catch(err => { console.warn('[/booking-confirmed] SF update failed (non-blocking):', err.message); alertOps('warning', 'Salesforce', 'Booking not recorded', { 'Session': session_id, 'Error': err.message, 'Impact': 'The lead exists in Salesforce but the booking is missing.' }); });
+      }).catch(err => { console.warn('[/booking-confirmed] SF update failed (non-blocking):', err.message); salesforceFailureAlert('booking', err, { 'Session': session_id }); });
       pool.query(SCHEDULE_LEAD_SQL, [session_id]).then(r => {
         const fullLead = r.rows[0] || {};
         /* Meta suppression, event 3 of 3 (Schedule). Guarded EXPLICITLY rather
@@ -12813,7 +12857,7 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
         syncBookingToAWS(lead.session_id, bookingUid, startTime, endTime, eventType);
         findSFLeadByEmail(email).then(leadId => {
           if (leadId) return updateSFLead(leadId, { booking_uid__c: bookingUid, booking_start_time__c: startTime || '', booking_event_type__c: eventType || '', completed__c: true });
-        }).catch(err => { console.warn('[/cal-webhook] SF update failed (non-blocking):', err.message); alertOps('warning', 'Salesforce', 'Booking not recorded', { 'Email': email, 'Error': err.message, 'Impact': 'The lead exists in Salesforce but the booking is missing.' }); });
+        }).catch(err => { console.warn('[/cal-webhook] SF update failed (non-blocking):', err.message); salesforceFailureAlert('booking', err, { 'Email': email }); });
         pool.query(SCHEDULE_LEAD_SQL, [lead.session_id]).then(r => {
           const fullLead = r.rows[0] || {};
           /* Meta suppression, event 3 of 3 (Schedule). Guarded EXPLICITLY rather
@@ -12900,7 +12944,7 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
 
     slackSubmit({ first_name:slackFirstName, last_name:slackLastName, email, company:slackCompany, sell_to:'B2B', phone:attendee.phone||'', enriched_title:enrichData.enriched_title, enriched_company_size:enrichData.enriched_company_size, enriched_industry:enrichData.enriched_industry, enriched_linkedin:enrichData.enriched_linkedin, enriched_city:enrichData.enriched_city, enriched_state:enrichData.enriched_state, enriched_country:enrichData.enriched_country, enriched_seniority:enrichData.enriched_seniority, enriched_departments:enrichData.enriched_departments, enriched_email_status:enrichData.enriched_email_status, enriched_founded_year:enrichData.enriched_founded_year, enriched_annual_revenue:enrichData.enriched_annual_revenue, enriched_funding_events:enrichData.enriched_funding_events, enriched_alexa_ranking:enrichData.enriched_alexa_ranking, enriched_keywords:enrichData.enriched_keywords, enriched_org_hq:enrichData.enriched_org_hq, enriched_total_funding:enrichData.enriched_total_funding, enriched_funding_stage:enrichData.enriched_funding_stage, prefill_source:'cal_webhook' });
 
-    pushToSalesforce({ first_name:slackFirstName, last_name:slackLastName, email, phone:attendee.phone||'', company:slackCompany, sell_to:'B2B', booking_uid:bookingUid, start_time:startTime, event_type:eventType, enriched_title:enrichData.enriched_title, enriched_company_size:enrichData.enriched_company_size, enriched_industry:enrichData.enriched_industry, enriched_linkedin:enrichData.enriched_linkedin, enriched_seniority:enrichData.enriched_seniority, enriched_departments:enrichData.enriched_departments, enriched_city:enrichData.enriched_city, enriched_state:enrichData.enriched_state, enriched_country:enrichData.enriched_country, enriched_annual_revenue:enrichData.enriched_annual_revenue, enriched_total_funding:enrichData.enriched_total_funding, enriched_funding_stage:enrichData.enriched_funding_stage, enriched_founded_year:enrichData.enriched_founded_year, step_reached:2, booked:true }).catch(err => { console.warn('[/cal-webhook] SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'booking webhook', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
+    pushToSalesforce({ first_name:slackFirstName, last_name:slackLastName, email, phone:attendee.phone||'', company:slackCompany, sell_to:'B2B', booking_uid:bookingUid, start_time:startTime, event_type:eventType, enriched_title:enrichData.enriched_title, enriched_company_size:enrichData.enriched_company_size, enriched_industry:enrichData.enriched_industry, enriched_linkedin:enrichData.enriched_linkedin, enriched_seniority:enrichData.enriched_seniority, enriched_departments:enrichData.enriched_departments, enriched_city:enrichData.enriched_city, enriched_state:enrichData.enriched_state, enriched_country:enrichData.enriched_country, enriched_annual_revenue:enrichData.enriched_annual_revenue, enriched_total_funding:enrichData.enriched_total_funding, enriched_funding_stage:enrichData.enriched_funding_stage, enriched_founded_year:enrichData.enriched_founded_year, step_reached:2, booked:true }).catch(err => { console.warn('[/cal-webhook] SF push failed (non-blocking):', err.message); salesforceFailureAlert('lead', err, { 'Email': email, 'Stage': 'booking webhook' }); });
 
     console.log(`[/cal-webhook] ✅ Created new lead: ${email} | session: ${webhookSessionId}`);
     res.json({ ok: true, action: 'created_new', session_id: webhookSessionId });
@@ -13175,7 +13219,7 @@ if (rhRouter && !RH_ALLOWED_ROUTERS.some((r) => r.toLowerCase() === rhRouter)) {
         findSFLeadByEmail(email).then(leadId => {
           console.log(`[/rh-webhook] 🔗 SF lookup for ${email}: ${leadId ? 'Found ' + leadId : 'Not found'}`);
           if (leadId) return updateSFLead(leadId, { booking_uid__c: bookingUid, booking_start_time__c: startTime || '', booking_event_type__c: eventType || '', completed__c: true });
-        }).catch(err => { console.warn('[/rh-webhook] ⚠ SF update failed (non-blocking):', err.message); alertOps('warning', 'Salesforce', 'Booking not recorded', { 'Email': email, 'Error': err.message, 'Impact': 'The lead exists in Salesforce but the booking is missing.' }); });
+        }).catch(err => { console.warn('[/rh-webhook] ⚠ SF update failed (non-blocking):', err.message); salesforceFailureAlert('booking', err, { 'Email': email }); });
 
         pool.query(SCHEDULE_LEAD_SQL, [lead.session_id]).then(r => {
           const fullLead = r.rows[0] || {};
@@ -13243,7 +13287,7 @@ if (rhRouter && !RH_ALLOWED_ROUTERS.some((r) => r.toLowerCase() === rhRouter)) {
 
     syncToAWS({ session_id:webhookSessionId, email, first_name:firstName, last_name:lastName, company, sell_to:'B2B', completed:true, step_reached:2, prefill_source:'rh_webhook' });
     slackSubmit({ first_name:firstName, last_name:lastName, email, company, sell_to:'B2B', prefill_source:'rh_webhook' });
-    pushToSalesforce({ first_name:firstName, last_name:lastName, email, company, sell_to:'B2B', booking_uid:bookingUid, start_time:startTime, event_type:eventType, step_reached:2, booked:true }).catch(err => { console.warn('[/rh-webhook] ⚠ SF push failed (non-blocking):', err.message); alertOps('critical', 'Salesforce', 'Lead not created', { 'Email': email, 'Stage': 'booking webhook', 'Error': err.message, 'Impact': 'This lead is NOT in Salesforce. Add it manually.' }); });
+    pushToSalesforce({ first_name:firstName, last_name:lastName, email, company, sell_to:'B2B', booking_uid:bookingUid, start_time:startTime, event_type:eventType, step_reached:2, booked:true }).catch(err => { console.warn('[/rh-webhook] ⚠ SF push failed (non-blocking):', err.message); salesforceFailureAlert('lead', err, { 'Email': email, 'Stage': 'booking webhook' }); });
 
     console.log(`[/rh-webhook] ✅ Created new lead (fallback): ${email} | session: ${webhookSessionId}`);
     res.json({ ok: true, action: 'created_new', session_id: webhookSessionId });

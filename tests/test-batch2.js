@@ -1892,7 +1892,20 @@ function finish() {
       body.__method = opts.method;
       posts.push(body);
       posts.__headers = opts.headers;
-      return behaviour(body, posts.length);
+      /* A REAL fetch Response carries BOTH .json() and .text(), and a body
+         can only be consumed once. salesforce.js reads .text() and parses it
+         itself, so that an HTML maintenance page produces a named outage
+         instead of "Unexpected token <". These fixtures only ever defined
+         .json(), so they stopped modelling a Response the moment that
+         changed -- and a stub that is not a Response tests nothing.
+         Derived rather than written out at each fixture, so a new one cannot
+         forget it. */
+      const r = behaviour(body, posts.length);
+      if (r && typeof r.json === 'function' && typeof r.text !== 'function') {
+        r.text = async () => JSON.stringify(await r.json());
+      }
+      if (r && r.status === undefined) r.status = r.ok ? 200 : 400;
+      return r;
     };
     return posts;
   };
@@ -3235,6 +3248,120 @@ section12()
   .then((rows) => { for (const [n, c, x] of rows) ok(n, c, x); return results20().catch((e) => [['backfill: section 20 ran to completion', false, e && e.message]]); })
   .then((rows) => { for (const [n, c, x] of rows) ok(n, c, x); })
   .catch((err) => { ok('capi: section 12 completed', false, err && err.message); })
+  /* ══ SALESFORCE: AN OUTAGE IS NOT A LOST LEAD, AND A CONVERTED LEAD
+        IS NOT A MISSING ONE ══════════════════════════════════════════
+     16 Sept 2026: four alerts, two causes, and both messages were wrong.
+     Salesforce served an HTML maintenance page with a 503 and every write
+     path called res.json() on it, so the critical alert read "Unexpected
+     token < in JSON at position 0" -- which reads as a bug in this repo
+     rather than a third party being down, and named a lead that really was
+     missing. Separately, a returning customer whose Lead had been converted
+     produced "This lead is NOT in Salesforce. Add it manually", which is
+     false and creates a duplicate against a live Account if anyone does it. */
+  .then(async () => {
+    const sfSrc = fs.readFileSync(path.join(__dirname, '..', 'salesforce.js'), 'utf8');
+
+    /* getSalesforceToken always checked res.ok and read .text(). The WRITE
+       paths never did, so one path reported the outage in plain words and
+       the others reported a parse error for the same minute of it. */
+    ok('sfbody: one shared reader handles Salesforce response bodies',
+       /async function readSfBody\(res\)/.test(sfSrc));
+    ok('sfbody: it reads text FIRST, then parses — a body can only be read once',
+       /const text = await res\.text\(\)[\s\S]{0,140}JSON\.parse\(text\)/.test(sfSrc));
+    {
+      const create = sfSrc.slice(sfSrc.indexOf('async function pushToSalesforce'),
+                                 sfSrc.indexOf('async function findSFLeadByEmail'));
+      const update = sfSrc.slice(sfSrc.indexOf('async function updateSFLead'),
+                                 sfSrc.indexOf('const SF_MAX_PAGES'));
+      ok('sfbody: the CREATE path no longer parses an unchecked body',
+         /readSfBody\(r\)/.test(create) && !/result: await r\.json\(\)/.test(create));
+      ok('sfbody: the UPDATE path no longer parses an unchecked body',
+         /readSfBody\(r\)/.test(update) && !/result: await r\.json\(\)/.test(update));
+    }
+
+    /* EXECUTED. The whole point is the sentence a human reads at 3am. */
+    const readSfBody = eval('(' + sfSrc.slice(
+      sfSrc.indexOf('async function readSfBody(res)'),
+      sfSrc.indexOf('async function pushToSalesforce')).trim().replace(/\s*$/, '') + ')');
+    const res = (status, body) => ({ status, text: async () => body });
+
+    const maint = await readSfBody(res(503,
+      '<html><body>We are down for maintenance. Sorry for the inconvenience.</body></html>'));
+    ok('sfbody: a maintenance page is named as an OUTAGE, not a parse error',
+       maint[0].errorCode === 'SALESFORCE_UNAVAILABLE' && !/Unexpected token/.test(maint[0].message),
+       JSON.stringify(maint).slice(0, 150));
+    ok('sfbody: and it says the lead itself is fine',
+       /Nothing is wrong with this lead/.test(maint[0].message));
+    const gw = await readSfBody(res(502, '<html>bad gateway</html>'));
+    ok('sfbody: a non-JSON body that is not maintenance still reports its status',
+       gw[0].errorCode === 'NON_JSON_RESPONSE' && /502/.test(gw[0].message), gw[0].message);
+    const real = await readSfBody(res(400, '[{"errorCode":"X","message":"y"}]'));
+    ok('sfbody: a genuine Salesforce error array passes through unchanged',
+       Array.isArray(real) && real[0].errorCode === 'X');
+
+    /* ── A CONVERTED LEAD IS A CUSTOMER, NOT A MISSING LEAD ────────── */
+    const { sfConvertedLeadError } = require('../salesforce.js');
+    ok('sfconv: the converted-lead error is recognised',
+       sfConvertedLeadError([{ errorCode: 'CANNOT_UPDATE_CONVERTED_LEAD' }]) === true);
+    ok('sfconv: and an unrelated Salesforce error is not mistaken for it',
+       sfConvertedLeadError([{ errorCode: 'REQUIRED_FIELD_MISSING' }]) === false);
+    ok('sfconv: a null or empty result does not throw',
+       sfConvertedLeadError(null) === false && sfConvertedLeadError([]) === false);
+    ok('sfconv: updateSFLead throws a FLAGGED error for it',
+       /err\.sfConvertedLead = true/.test(sfSrc));
+    /* The thrown message carries the warning too, so it is right even at a
+       call site that only logs err.message and never reads the flag. */
+    ok('sfconv: and the thrown message itself warns against adding a duplicate',
+       /do NOT add them manually/i.test(sfSrc));
+
+    /* ── ONE ALERT BUILDER, SIX CALL SITES ─────────────────────────── */
+    const idx = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+    ok('sfalert: one function builds the Salesforce failure alert',
+       /function salesforceFailureAlert\(kind, err, ctx\)/.test(idx));
+    {
+      const calls = (idx.match(/salesforceFailureAlert\(/g) || []).length;
+      /* Six call sites plus the declaration. A guard added to the obvious
+         site misses its siblings -- this repo's oldest lesson, and the
+         reason these six are one function rather than six edits. */
+      ok('sfalert: all SIX call sites go through it', calls === 7, String(calls));
+      ok('sfalert: no call site still hardcodes the dangerous advice',
+         (idx.match(/This lead is NOT in Salesforce\. Add it manually\./g) || []).length === 1);
+      ok('sfalert: and the surviving copy is the fallback INSIDE the builder',
+         idx.indexOf('This lead is NOT in Salesforce') > idx.indexOf('function salesforceFailureAlert')
+         && idx.indexOf('This lead is NOT in Salesforce') < idx.indexOf('function recordFailure'));
+    }
+    /* EXECUTED: the message a converted lead produces, and its severity. */
+    {
+      const sent = [];
+      const build = new Function('alertOps',
+        idx.slice(idx.indexOf('function salesforceFailureAlert(kind, err, ctx)'),
+                  idx.indexOf('function recordFailure(source, id, error)'))
+        + '; return salesforceFailureAlert;')((sev, src, title, f) => sent.push({ sev, title, f }));
+
+      const conv = Object.assign(new Error('already converted'), { sfConvertedLead: true });
+      build('lead', conv, { Email: 'a@b.com' });
+      ok('sfalert/converted: it is NOT called a missing lead',
+         !/not created/i.test(sent[0].title), sent[0].title);
+      ok('sfalert/converted: the impact says they ARE in Salesforce',
+         /IS in Salesforce/.test(sent[0].f.Impact));
+      ok('sfalert/converted: and explicitly says do NOT add them manually',
+         /do NOT add them manually/i.test(sent[0].f.Impact));
+      ok('sfalert/converted: downgraded from critical — nothing is lost',
+         sent[0].sev === 'warning', sent[0].sev);
+
+      build('lead', new Error('Salesforce is down for maintenance (HTTP 503).'), { Email: 'c@d.com' });
+      ok('sfalert/outage: an outage is not a lost lead either',
+         sent[1].sev === 'warning' && /Re-run it once Salesforce is back/.test(sent[1].f.Impact));
+
+      build('lead', new Error('REQUIRED_FIELD_MISSING'), { Email: 'e@f.com' });
+      ok('sfalert/real: a genuine failure is STILL critical and still says add it manually',
+         sent[2].sev === 'critical' && /Add it manually/.test(sent[2].f.Impact));
+      build('booking', new Error('REQUIRED_FIELD_MISSING'), { Session: 's' });
+      ok('sfalert/real: and a booking failure stays a warning with its own impact',
+         sent[3].sev === 'warning' && /booking is missing/.test(sent[3].f.Impact));
+    }
+  })
+  .catch((err) => { ok('sf: the Salesforce outage section completed', false, err && err.message); })
   .then(() => {
     console.log('');
     console.log(`  passed: ${pass}`);
