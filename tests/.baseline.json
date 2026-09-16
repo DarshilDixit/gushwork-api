@@ -1,6 +1,6 @@
 {
-  "savedAt": "2026-09-16T11:33:41.553Z",
-  "grandTotal": 3455,
+  "savedAt": "2026-09-16T12:52:37.016Z",
+  "grandTotal": 3469,
   "suites": {
     "test-batch1.js": 109,
     "test-batch2.js": 746,
@@ -9,7 +9,7 @@
     "test-partnerstack.js": 1030,
     "test-sf-readers.js": 70,
     "test-submit-gate.js": 14,
-    "test-session-payload.js": 71,
+    "test-session-payload.js": 85,
     "test-session-page-views.js": 23,
     "test-lead-field-changes.js": 118,
     "test-non-icp.js": 493,

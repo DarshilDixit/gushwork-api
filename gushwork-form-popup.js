@@ -1,7 +1,7 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.13.0-ads  (ADS PAGE VERSION)
+  GUSHWORK — MULTI-STEP FORM  v5.14.0-ads  (ADS PAGE VERSION)
 
-  Tracks /demo v5.13.0. Full feature parity with /demo, EXCEPT the
+  Tracks /demo v5.14.0. Full feature parity with /demo, EXCEPT the
   booking step, which keeps the Ads page's fullscreen modal
   presentation — opened after step 2 — instead of /demo's inline
   column render, AND the close affordances that modal needs (v5.7.2).
@@ -9,6 +9,11 @@
   port of gushwork-form.js and should be kept in step with it. A
   modal needs a way out and an inline column does not, so this
   section has no /demo counterpart to track.
+
+  v5.14.0-ads — the phone flag follows the visitor's IP, and asks in time.
+    Ported from /demo v5.14.0, identical. This fork DOES serve the phone
+    field, so unlike most recent ports this one is live here rather than
+    carried for parity: every Google Ads lander gets the same fix.
 
   v5.13.0-ads — "What do you need?" ported from /demo v5.13.0,
     identical. No page this fork serves carries the markup, so every
@@ -541,21 +546,6 @@
     link.href = 'https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/css/intlTelInput.min.css';
     document.head.appendChild(link);
 
-    function loadScript(src, onload) {
-      const s = document.createElement('script');
-      s.src = src;
-      s.onload = onload;
-      document.head.appendChild(s);
-    }
-
-    loadScript('https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js', function () {
-      loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/intlTelInput.min.js', function () {
-        loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/utils.js', function () {
-          initPhoneInputs();
-        });
-      });
-    });
-
     /* ── COUNTRY FROM THE VISITOR'S IP ────────────────────────────────
        country.is is the right API and it is working: free, CORS-friendly
        (it sends access-control-allow-origin: *), and it answered an Indian
@@ -587,23 +577,35 @@
     var GEO_CACHE_KEY  = 'gw_phone_country';
     var GEO_TIMEOUT_MS = 2500;
     var GEO_FALLBACK   = 'us';
+    /* Memoised for the page, so several phone inputs share ONE lookup and a
+       late caller never re-fetches. Named GEO_* like the constants above
+       because that is the prefix the test harness lifts. */
+    var GEO_VALUE      = null;
+    var GEO_WAITING    = null;
+
+    /* First answer wins, and is broadcast to everyone already waiting. */
+    function geoSettle(cc) {
+      if (GEO_VALUE) return;
+      GEO_VALUE = cc || GEO_FALLBACK;
+      var waiting = GEO_WAITING || [];
+      GEO_WAITING = [];
+      for (var i = 0; i < waiting.length; i++) waiting[i](GEO_VALUE);
+    }
 
     function lookupCountry(callback) {
+      if (GEO_VALUE) { callback(GEO_VALUE); return; }
+      if (GEO_WAITING) { GEO_WAITING.push(callback); return; }
+      GEO_WAITING = [callback];
+
       var cached = null;
       /* sessionStorage throws outright in some privacy modes, so every read
          and write here is guarded and an unavailable store just means the
          lookup runs again. */
       try { cached = sessionStorage.getItem(GEO_CACHE_KEY); } catch (e) {}
-      if (cached) { callback(cached); return; }
+      if (cached) { geoSettle(cached); return; }
 
-      var settled = false;
-      function settle(cc) {
-        if (settled) return;
-        settled = true;
-        callback(cc || GEO_FALLBACK);
-      }
       /* A hung lookup must never leave the input without a country. */
-      setTimeout(function () { settle(GEO_FALLBACK); }, GEO_TIMEOUT_MS);
+      setTimeout(function () { geoSettle(GEO_FALLBACK); }, GEO_TIMEOUT_MS);
 
       fetch('https://api.country.is')
         .then(function (r) {
@@ -615,10 +617,50 @@
           /* Cached only on a REAL answer. Caching the fallback would pin the
              rest of the session to the US after one blip. */
           if (cc) { try { sessionStorage.setItem(GEO_CACHE_KEY, cc); } catch (e) {} }
-          settle(cc);
+          geoSettle(cc);
         })
-        .catch(function () { settle(GEO_FALLBACK); });
+        .catch(function () { geoSettle(GEO_FALLBACK); });
     }
+
+    /* ── START IT NOW, NOT AFTER THE SCRIPTS ──────────────────────────
+       THIS LINE IS THE FIX, and without it the flag stays wrong for as long
+       as the CDN takes. initPhoneInputs runs at the END of three SERIAL
+       script loads -- jQuery, then intlTelInput, then utils.js, each waiting
+       on the previous onload -- and only then did anything ask where the
+       visitor is. Measured on a fast connection on 16 Sept 2026: 0.30s of
+       serial script loading before a 0.22s lookup could even start, and that
+       is the good case. On mobile it is seconds.
+
+       intl-tel-input does self-heal when the answer finally lands -- its
+       handleAutoCountry re-sets the flag on every instance -- but ONLY while
+       the input is still empty. Somebody who reaches step 2 and starts typing
+       an Indian number under a US flag KEEPS the US flag, and the number is
+       stored as +1. That is the window this closes.
+
+       Firing here moves the lookup into the same instant the stylesheet and
+       the first script tag are injected, so it resolves in parallel with the
+       downloads instead of after them. By the time initPhoneInputs runs,
+       GEO_VALUE is normally already set and lookupCountry answers instantly.
+
+       The empty callback is deliberate: this call exists for its side effect
+       of populating GEO_VALUE. */
+    lookupCountry(function () {});
+
+    function loadScript(src, onload) {
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = onload;
+      document.head.appendChild(s);
+    }
+
+    loadScript('https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js', function () {
+      loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/intlTelInput.min.js', function () {
+        loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/utils.js', function () {
+          initPhoneInputs();
+        });
+      });
+    });
+
 
     function initPhoneInputs() {
       if (typeof $ === 'undefined' || typeof window.intlTelInput === 'undefined') return;
@@ -3370,7 +3412,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.13.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.14.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

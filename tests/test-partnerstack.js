@@ -3905,12 +3905,20 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
     /* Pinned to the CURRENT version on purpose: this is what catches a form
        file shipped without its version bumped, which is how the Webflow re-pin
        silently ships half a fix. Bump both when you bump the files. */
-    /* v5.13.0 since 15 Sept, when the CRM product stopped disqualifying
-       B2C. Was v5.11.0, and before that sat on v5.10.0 while both form
-       files had moved on -- failing on main for days as a red bar nobody
-       read rather than as a caught bug. Bump it in the same commit that
-       bumps the files. */
-    ok(`form(${name}): version banner says v5.13.0`, /Form initialised v5\.13\.0/.test(f));
+    /* v5.14.0 since 16 Sept, when the phone flag started following the
+       visitor's IP. Was v5.13.0 (CRM product stopped disqualifying B2C),
+       v5.11.0 before that, and it once sat on v5.10.0 while both form files
+       had moved on -- failing on main for days as a red bar nobody read
+       rather than as a caught bug. Bump it in the same commit that bumps
+       the files.
+
+       THIS ASSERTION IS WHY THE VERSION GETS BUMPED AT ALL. The console
+       banner is the documented way to confirm a Webflow pin swap actually
+       took, and on 16 Sept the phone fix first shipped WITHOUT a bump -- so
+       the banner read v5.13.0 on the old pin and the new one alike and
+       could not tell you anything. A deploy check that returns the same
+       answer either way is not a check. See the Webflow step in CLAUDE.md. */
+    ok(`form(${name}): version banner says v5.14.0`, /Form initialised v5\.14\.0/.test(f));
   }
 
   console.log('');

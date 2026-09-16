@@ -164,15 +164,19 @@ function driveLookup(file, opts) {
   /* The three constants come from the file too, so the test uses the real
      cache key and the real timeout rather than numbers of its own. */
   const consts = src.split('\n').filter((l) => /^\s*var GEO_[A-Z_]+\s*=/.test(l)).join('\n');
-  ok(`${file}: the geo constants were found to lift`, consts.split('\n').length === 3, consts);
+  /* Five now: the three settings plus GEO_VALUE / GEO_WAITING, which memoise
+     the answer for the page so the prewarm below can hand it to the real
+     caller instantly. They are named GEO_* precisely so this lift keeps
+     finding them. */
+  ok(`${file}: the geo state and constants were found to lift`, consts.split('\n').length === 5, consts);
 
   const fn = new Function('fetch', 'sessionStorage', 'setTimeout', 'String',
-    consts + '\n' + lift(src, 'lookupCountry')
+    consts + '\n' + lift(src, 'geoSettle') + '\n' + lift(src, 'lookupCountry')
     + '\n return lookupCountry;')(fetch_, sessionStorage, setTimeout_, String);
 
   const got = [];
   fn((cc) => got.push(cc));
-  return { got, store, timers, flushTimers: () => timers.forEach((t) => t.fn()) };
+  return { got, store, timers, fn, flushTimers: () => timers.forEach((t) => t.fn()) };
 }
 
 /* Async because the lookup resolves on a microtask. This is a CommonJS
@@ -247,6 +251,39 @@ for (const file of ['gushwork-form.js', 'gushwork-form-popup.js']) {
     const r = driveLookup(file, { storageThrows: true, fetch: () => Promise.resolve({ ok: true, json: async () => ({ country: 'FR' }) }) });
     await new Promise((res) => setImmediate(res));
     eq(`${tag}/geo: an unusable sessionStorage does not break the lookup`, r.got[0], 'fr');
+  }
+
+  /* MEMOISED FOR THE PAGE. Two callers must share one lookup: the prewarm
+     fires at page parse and the real caller arrives later, after three serial
+     script loads. If the second caller re-fetched, the prewarm would buy
+     nothing. */
+  {
+    let calls = 0;
+    const r = driveLookup(file, { fetch: () => { calls++; return Promise.resolve({ ok: true, json: async () => ({ country: 'IN' }) }); } });
+    const second = [];
+    r.fn(function (cc) { second.push(cc); });        // arrives while in flight
+    await new Promise((res) => setImmediate(res));
+    eq(`${tag}/geo: a second caller shares the in-flight lookup, no second fetch`, calls, 1);
+    eq(`${tag}/geo: and both callers get the same answer`, r.got[0] + ',' + second[0], 'in,in');
+    /* A caller arriving AFTER it resolved gets the memoised value with no
+       fetch at all -- this is the path the real phone input takes once the
+       prewarm has landed. */
+    const third = [];
+    r.fn(function (cc) { third.push(cc); });
+    eq(`${tag}/geo: a later caller is answered from memory, synchronously`, third[0], 'in');
+    eq(`${tag}/geo: and still no extra fetch`, calls, 1);
+  }
+
+  /* THE PREWARM ITSELF. Without this call the lookup does not begin until
+     three serial script loads have finished, which is the whole bug. It is a
+     bare statement at module level, so only source can pin it. */
+  {
+    const src2 = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    ok(`${tag}/geo: the lookup is PREWARMED at parse time, not left to init`,
+       /\n\s*lookupCountry\(function \(\) \{\}\);/.test(src2));
+    /* It must fire BEFORE the script chain, or it is not a prewarm. */
+    ok(`${tag}/geo: and the prewarm runs before the jQuery load starts`,
+       src2.indexOf('lookupCountry(function () {});') < src2.indexOf("loadScript('https://cdnjs.cloudflare.com/ajax/libs/jquery"));
   }
 
   /* The options the library is actually given. Behaviour above proves the
