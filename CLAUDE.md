@@ -193,11 +193,18 @@ repo grows, and a collision resolves to the wrong file rather than erroring.
 **The `curl` sweep below has a blind spot the API closes.** Its page list is
 maintained by hand, so it cannot find a page carrying a pin that nobody
 remembered to add to it. Reading every page's footer block found exactly that:
-**`/start-old` is pinned to `d493e92e`, a 26 June commit** — v4.4-era, months
+**`/start-old` was pinned to `d493e92e`, a 26 June commit** — v4.4-era, months
 behind. It is a 404 today and therefore harmless, which is also why no sweep
-would ever have caught it. Publish that page and it serves June's form to real
-visitors. Prefer the API sweep; see the section at the end of
+would ever have caught it. Publish that page and it would have served June's
+form to real visitors. Prefer the API sweep; see the section at the end of
 `docs/tickets/non-icp-v1-block.md`.
+
+**`/start-old` was re-pinned with everything else on 16 Sept 2026** and is no
+longer stale — but it is still a draft, so it is still invisible to the `curl`
+sweep, and it will go stale again at the next form deploy unless the API sweep
+is the one you run. **The authoritative set is 13 pages: the 12 published ones
+below plus the `start-old` draft.** Read every page's footer through the API;
+do not trust the hand-written list.
 
 **AND SWEEP EVERY PAGE, not just the two you changed.** The pin lives in a
 `<script src>`, and Webflow lets a *page* carry its own script tag that a
@@ -227,6 +234,50 @@ them together is the only thing that records that the pair was *tested* together
 `/demo` logs `Form initialised v…`, the Ads page logs `… (Google Ads)`. If the
 version there is not the one you just merged, Webflow is still serving the old
 pin — the deploy is not done, however green this repo looks.
+
+**THE BANNER IS ONLY A CHECK IF YOU BUMPED THE VERSION, and on 16 Sept 2026 it
+was not.** The phone-country fix shipped without touching the version string, so
+both files read `v5.13.0` before AND after — the banner was identical on the old
+pin and the new one. Anyone following the paragraph above would have read
+v5.13.0, concluded nothing had changed, and been wrong in whichever direction
+they guessed. A confirmation step that returns the same answer either way is not
+a confirmation step.
+
+**So bump the version on EVERY form change**, even a one-line one. It costs
+nothing and it is the only thing that makes the banner mean something. The
+version lives in the `Form initialised v…` string in both files and must move in
+both, like everything else in the fork.
+
+**A TEST PINS THAT STRING, so the bump is three edits, not two.**
+`tests/test-partnerstack.js` asserts the banner reads the current version in
+both files. Bump the files without bumping the assertion and the bar goes red
+on `main` — which has happened here before, and sat there for days as a red bar
+nobody read rather than as a caught bug. Do all three in one commit.
+
+**And when the version did not move, these two are what actually discriminate:**
+
+1. **The SHA in the page HTML** — `curl` the page and read `gushwork-api@<sha>`.
+   Exact, and it is the thing you just changed.
+2. **A distinctive string in the file that SHA serves** — fetch the jsDelivr URL
+   and grep for something only the new code has. For the phone fix that was
+   `initialCountry: 'auto'` against the old `initialCountry: 'us'`.
+
+Check 2 matters on its own: check 1 only proves the page asks for the right
+bytes, not that jsDelivr can serve them. Fetch the new SHA BEFORE editing any
+page — a pin to a SHA jsDelivr 404s takes the form off every page at once.
+
+**`publish_site` IS ASYNCHRONOUS, and the first sweep after it will lie.**
+Webflow returns success immediately and then compiles; on 16 Sept the live pages
+still served the old HTML for about two minutes after the call returned. Poll the
+page until the SHA flips rather than reading one red sweep as a failed publish
+and starting to undo things.
+
+**Publishing ships the WHOLE SITE, not just your pages.** Single-page publishing
+needs Enterprise, which this site is not on — the same entitlement that blocks
+branching. So a republish also releases anything anyone else has staged in the
+Designer since the last publish. Check `lastUpdated` against `lastPublished` on
+the site record first, and if they differ, ask whose work is in there before
+publishing.
 
 **`backfill-sf.js` is a kept tool, not dead code.** It re-syncs leads to Salesforce
 after a broken connection or outage. Its `/admin/backfill-sf` route is deliberately
