@@ -1203,6 +1203,38 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        count. */
     ok('ladderA: no-customer-key leads are counted separately, as leads',
        /ps_xid IS NOT NULL AND ps_customer_key IS NULL/.test(fn) && /noCustomerKeyLeads/.test(fn));
+    /* ── THE BLEND, PINNED AT THE QUERY ───────────────────────────────
+       The executed assertions further down drive a fixture, so they cannot
+       see the SQL: reverting this to MAX(ps_partner_key) survived the
+       mutation run because the fake pool returns the same rows either way.
+       These read the query, which is the only thing that can catch it.
+
+       THE BUG: partner identity was MAX(ps_partner_key), MAX(ps_partner_name)
+       and MAX(ps_partner_email), three aggregates resolved independently over
+       a group keyed by DOMAIN. A domain can carry leads from two partners --
+       allstate.com did on 16 Sept 2026 -- and the three then return fields
+       belonging to two different people: the name said Test Account, the key
+       and the email said Reviews Guide. */
+    /* codeOnly on every one of the three. The comment directly above this
+       query in index.js NAMES the construct it exists to prevent, so a raw
+       match fails against correct code -- the house's own recurring trap. */
+    ok('ladderA/identity: partner identity is NOT three independent MAX() calls',
+       !/MAX\(ps_partner_key\)/.test(codeOnly(fn))
+       && !/MAX\(ps_partner_name\)/.test(codeOnly(fn))
+       && !/MAX\(ps_partner_email\)/.test(codeOnly(fn)));
+    ok('ladderA/identity: one authoritative key is picked per domain',
+       /ARRAY_AGG\(ps_partner_key ORDER BY/.test(fn));
+    /* THE ORDER IS THE MONEY ORDER. PartnerStack credits the partner on the
+       session that claimed the conversion, so ps_signup_sent_at outranks
+       recency; the earliest claim is the tie-break for a domain that has not
+       converted yet. Ordering by created_at alone would name the wrong
+       partner for any domain whose first lead was not the one that converted. */
+    ok('ladderA/identity: and the pick prefers whoever actually holds the conversion',
+       /ORDER BY \(ps_signup_sent_at IS NOT NULL\) DESC, created_at ASC/.test(fn));
+    ok('ladderA/identity: every partner on the domain is carried so contention can be shown',
+       /ARRAY_AGG\(DISTINCT ps_partner_key\)/.test(fn)
+       && /COUNT\(DISTINCT ps_partner_key\)/.test(fn));
+
     /* EXECUTED. Asserting the field name exists passes even when the value is
        hardcoded to 0 — a mutation survived on exactly that, which would hide
        the unit seam rather than surface it. */
