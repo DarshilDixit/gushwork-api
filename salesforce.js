@@ -193,6 +193,71 @@ function sfUnknownFields(result) {
   return [...named];
 }
 
+/* ── READ A SALESFORCE RESPONSE BODY WITHOUT ASSUMING IT IS JSON ──────
+   Salesforce answers an outage with an HTML maintenance page, not JSON. On
+   16 Sept 2026 it served "We are down for maintenance" with a 503 and every
+   write path here called res.json() on it, so JSON.parse choked on the "<"
+   and the critical Slack alert read:
+
+       Error: Unexpected token < in JSON at position 0
+
+   which tells whoever is on call nothing at all. It looks like a bug in this
+   repo rather than a third party being down, and the lead it names is really
+   missing -- gregory.ingalls@gmail.com had booked a demo and never reached
+   Salesforce.
+
+   getSalesforceToken already got this right: it checks res.ok and reads
+   .text(). The write paths simply never did, so one path reported the outage
+   in plain words and the others reported a parse error for the same minute of
+   the same outage.
+
+   Returns the parsed JSON when the body IS json, and otherwise a synthetic
+   error shaped like Salesforce's own error array, so sfUnknownFields and the
+   callers keep working unchanged. */
+/* ── A CONVERTED LEAD IS NOT A FAILED WRITE ──────────────────────────
+   findSFLeadByEmail takes the NEWEST Lead for an address with no
+   IsConverted filter, so a returning visitor whose Lead was converted to a
+   Contact/Account/Opportunity lands on a record Salesforce refuses to
+   update: CANNOT_UPDATE_CONVERTED_LEAD.
+
+   On 16 Sept 2026 mdorf@performancemediastrategies.com did exactly that --
+   converted 29 June, booked a second demo on 16 Sept -- and the alert said
+   "This lead is NOT in Salesforce. Add it manually." That is false and acting
+   on it is harmful: they ARE in Salesforce, as a customer, and adding a Lead
+   by hand creates a duplicate against a live Account.
+
+   Measured: 403 of 807 people who submitted in the last 30 days have a
+   converted newest Lead, but the write only fails when they submit AFTER the
+   conversion date -- 3 submits and 1 booking in 30 days. Rare, recurring, and
+   growing as more Leads convert.
+
+   This does not change what we write. It changes what we SAY, which is the
+   part that was wrong. */
+function sfConvertedLeadError(result) {
+  const arr = Array.isArray(result) ? result : (result ? [result] : []);
+  return arr.some((e) => e && e.errorCode === 'CANNOT_UPDATE_CONVERTED_LEAD');
+}
+
+async function readSfBody(res) {
+  const text = await res.text().catch(() => '');
+  try {
+    return JSON.parse(text);
+  } catch {
+    /* Not JSON. Say what actually happened: the status, and enough of the
+       body to recognise a maintenance page, without pasting a whole HTML
+       document into a Slack alert. */
+    const looksLikeMaintenance = /down for maintenance/i.test(text);
+    const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 120);
+    return [{
+      errorCode: looksLikeMaintenance ? 'SALESFORCE_UNAVAILABLE' : 'NON_JSON_RESPONSE',
+      message: looksLikeMaintenance
+        ? `Salesforce is down for maintenance (HTTP ${res.status}). Nothing is wrong with this lead -- retry once Salesforce is back.`
+        : `Salesforce returned HTTP ${res.status} with a non-JSON body: ${snippet}`,
+      fields: [],
+    }];
+  }
+}
+
 async function pushToSalesforce(payload) {
   try {
     const lead = buildLeadFields(payload);
@@ -229,7 +294,7 @@ async function pushToSalesforce(payload) {
           body: JSON.stringify(body),
         }
       );
-      return { ok: r.ok, result: await r.json() };
+      return { ok: r.ok, result: await readSfBody(r) };
     };
 
     let { ok: postOk, result } = await post(lead);
@@ -340,7 +405,7 @@ async function updateSFLead(leadId, fields) {
       }
     );
     if (r.status === 204) return { ok: true, result: null };
-    return { ok: false, result: await r.json() };
+    return { ok: false, result: await readSfBody(r) };
   };
 
   let { ok, result } = await patch(safeFields);
@@ -372,6 +437,19 @@ async function updateSFLead(leadId, fields) {
 
        All five call sites tolerate a rejection — four chain a .catch that
        alerts, one awaits inside a try/catch. Checked before this changed. */
+    /* The converted case gets its own message, because the generic one sends
+       the reader to do the one thing they must not do. */
+    if (sfConvertedLeadError(result)) {
+      console.warn(`[SF] Lead ${leadId} is CONVERTED — it is a customer, not a missing lead. Nothing written.`);
+      const err = new Error(
+        `[SF] Lead ${leadId} was already converted to a Contact/Account/Opportunity, so Salesforce will not accept updates to it. ` +
+        `This person IS in Salesforce — do NOT add them manually, that creates a duplicate against a live Account. ` +
+        `The booking was not recorded anywhere; log it against the existing Contact instead.`
+      );
+      err.sfConvertedLead = true;
+      err.sfLeadId = leadId;
+      throw err;
+    }
     console.error('[SF] Lead update failed:', JSON.stringify(result));
     throw new Error(`[SF] Lead update failed for ${leadId}: ${JSON.stringify(result).slice(0, 300)}`);
   }
@@ -730,4 +808,4 @@ async function findEnrichmentByEmails(emails) {
   }
 }
 
-module.exports = { pushToSalesforce, findSFLeadByEmail, updateSFLead, updateOpportunityFields, getSalesforceToken, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails, SF_EMAIL_BATCH };
+module.exports = { pushToSalesforce, findSFLeadByEmail, updateSFLead, updateOpportunityFields, getSalesforceToken, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails, SF_EMAIL_BATCH, sfConvertedLeadError };
