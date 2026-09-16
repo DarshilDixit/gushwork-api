@@ -211,6 +211,19 @@ for (const file of ['gushwork-form.js', 'gushwork-form-popup.js']) {
     eq(`${tag}/geo: a failure is NOT cached`, r.store.gw_phone_country, undefined);
   }
 
+  /* A 200 THAT CARRIES NO COUNTRY. This is the only path that reaches the
+     cache write with an empty value, so it is the only thing that can catch
+     a cache guard that has been loosened -- caching the fallback here would
+     pin the whole session to the US after one malformed response. The
+     rejected-fetch case below never reaches that line at all, which is why
+     it survived the mutation run on its own. */
+  {
+    const r = driveLookup(file, { fetch: () => Promise.resolve({ ok: true, json: async () => ({ ip: '1.2.3.4' }) }) });
+    await new Promise((res) => setImmediate(res));
+    eq(`${tag}/geo: a 200 with no country still falls back to 'us'`, r.got[0], 'us');
+    eq(`${tag}/geo: and that fallback is NOT written to the cache`, r.store.gw_phone_country, undefined);
+  }
+
   /* An HTTP error is a failure, not a country. */
   {
     const r = driveLookup(file, { fetch: () => Promise.resolve({ ok: false, status: 503, json: async () => ({}) }) });
