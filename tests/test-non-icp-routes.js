@@ -814,51 +814,59 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
        Asserting the OUTPUT, not that the function exists: "it is defined" is
        one level short of the thing that actually matters, which is the whole
        lesson of the Model tab's confident zero. */
-    /* ── WHICH MECHANISM BLOCKED THIS LEAD ────────────────────────────
-       non_icp_reason holds a DOMAIN for both mechanisms, so a blocked row
-       reading kw.com looked identical whether a string comparison or a model
-       produced it. Three real states exist in production -- domain_list, llm,
-       and NULL for the eight leads blocked between the 11 Sept brand list and
-       the 14 Sept model layer.
+    /* ── WHY WAS THIS LEAD TURNED AWAY ───────────────────────────────
+       Two checks can block, and non_icp_reason holds a DOMAIN for both, so
+       the row could not say which. Plain words, because SDRs read this tab.
 
-       Asserting the OUTPUT of the labels, and that the ROW actually paints
-       them, because "the helper is defined" is one level short of the thing
-       that matters -- the lesson of the Model tab's confident zero. */
+       TWO answers, never three. Eight leads blocked between the 11 Sept brand
+       list and the 14 Sept model layer have no source stored, because the
+       column did not exist yet -- but the model could not block anything
+       before it shipped, so those ARE brand-list blocks. An earlier draft
+       showed them as "unrecorded", which made a reader stop and decode a
+       third state for no gain. */
     if (scope && scope.nonIcpSourceShort && scope.nonIcpSourceWhy && scope.leadRowsHtml) {
-      eq2('blocked/source: the model reads as "model"', scope.nonIcpSourceShort('llm'), 'model');
-      eq2('blocked/source: the brand list reads as "list"', scope.nonIcpSourceShort('domain_list'), 'list');
-      /* NULL MUST NOT CLAIM TO BE THE LIST. The ladder counts it there and is
-         right to, but that is an inference about when the row was written;
-         the row itself never recorded it. */
-      eq2('blocked/source: an unrecorded source says so rather than claiming the list',
-          scope.nonIcpSourceShort(null), 'unrecorded');
-      ok('blocked/source: and the explanation says why it is still a list block',
-         /only thing that could block/.test(scope.nonIcpSourceWhy(null)));
-      ok('blocked/source: the model explanation points at the evidence quote',
-         /evidence quote/.test(scope.nonIcpSourceWhy('llm')));
-      ok('blocked/source: the list explanation says it is re-derivable',
-         /re-derive/.test(scope.nonIcpSourceWhy('domain_list')));
+      eq2('blocked/why: the model reads as "AI check"', scope.nonIcpSourceShort('llm'), 'AI check');
+      eq2('blocked/why: the list reads as "Brand list"', scope.nonIcpSourceShort('domain_list'), 'Brand list');
+      eq2('blocked/why: a pre-column block also reads as "Brand list", not a third state',
+          scope.nonIcpSourceShort(null), 'Brand list');
+      /* EXACTLY TWO labels can ever appear in that column. A third would make
+         the column stop scanning, which is the whole point of the change. */
+      const labels = new Set(['llm', 'domain_list', null, undefined, '', 'something_new']
+        .map((v) => scope.nonIcpSourceShort(v)));
+      eq2('blocked/why: only two distinct labels are reachable', labels.size, 2);
 
-      /* PAINTED, not just computed. The visible chip is Blocked-tab only (ns
-         "b"); All Leads keeps the marker in the tooltip so the shared renderer
-         does not clutter a table where the column means nothing. */
-      const rowsB = scope.leadRowsHtml([{ session_id: 's1', email: 'a@kw.com',
-        non_icp_blocked: true, non_icp_reason: 'kw.com', non_icp_source: 'llm' }], 'b');
-      ok('blocked/source: the Blocked row paints a visible chip naming the model',
-         />model</.test(rowsB), rowsB.slice(0, 400));
-      const rowsL = scope.leadRowsHtml([{ session_id: 's1', email: 'a@kw.com',
-        non_icp_blocked: true, non_icp_reason: 'kw.com', non_icp_source: 'llm' }], 'l');
-      ok('blocked/source: All Leads does NOT paint the chip, only the tooltip',
-         !/>model</.test(rowsL) && /Blocked by: model/.test(rowsL));
-      const rowsN = scope.leadRowsHtml([{ session_id: 's2', email: 'b@x.com',
-        non_icp_blocked: true, non_icp_reason: 'x.com', non_icp_source: null }], 'b');
-      ok('blocked/source: an unrecorded source paints as unrecorded, not as list',
-         />unrecorded</.test(rowsN) && !/>list</.test(rowsN));
-      /* A lead that is NOT blocked must gain nothing at all. */
-      const rowsClean = scope.leadRowsHtml([{ session_id: 's3', email: 'c@y.com',
-        non_icp_blocked: false, non_icp_source: null }], 'b');
-      ok('blocked/source: an unblocked lead gets no chip and no blocked tooltip',
-         !/unrecorded|Blocked by:/.test(rowsClean));
+      /* NO SLUGS ON SCREEN. The stored values must not leak to a reader. */
+      for (const v of ['llm', 'domain_list', null]) {
+        const lab = scope.nonIcpSourceShort(v);
+        ok(`blocked/why: "${lab}" is plain words, not a stored slug`,
+           !/_/.test(lab) && lab !== 'llm' && lab !== 'domain_list');
+      }
+
+      /* The footnote still exists for anyone auditing a pre-column row, even
+         though the chip reads the same as a real list block. */
+      ok('blocked/why: a pre-column block still explains its provenance on hover',
+         /before we started recording which check fired/.test(scope.nonIcpSourceWhy(null)));
+      ok('blocked/why: a real list block carries no such footnote',
+         !/before we started recording/.test(scope.nonIcpSourceWhy('domain_list')));
+      ok('blocked/why: the AI explanation points at the quote on the Model tab',
+         /quote/.test(scope.nonIcpSourceWhy('llm')));
+
+      /* PAINTED, not just computed. Blocked-tab only; All Leads keeps it in
+         the tooltip so the shared renderer does not clutter a table where the
+         column means nothing. */
+      const row = (src, ns) => scope.leadRowsHtml([{ session_id: 's1', email: 'a@kw.com',
+        non_icp_blocked: true, non_icp_reason: 'kw.com', non_icp_source: src }], ns);
+      ok('blocked/why: the Blocked row paints a visible "AI check" chip',
+         />AI check</.test(row('llm', 'b')));
+      ok('blocked/why: and "Brand list" for a list block',
+         />Brand list</.test(row('domain_list', 'b')));
+      ok('blocked/why: a pre-column block paints "Brand list" too',
+         />Brand list</.test(row(null, 'b')));
+      ok('blocked/why: All Leads paints no chip but keeps the reason on hover',
+         !/class="pschip"/.test(row('llm', 'l')) && /Blocked by: AI check/.test(row('llm', 'l')));
+      ok('blocked/why: an unblocked lead gets nothing at all',
+         !/Blocked by:|pschip/.test(scope.leadRowsHtml(
+           [{ session_id: 's3', email: 'c@y.com', non_icp_blocked: false }], 'b')));
     }
 
     if (scope && scope.escq) {

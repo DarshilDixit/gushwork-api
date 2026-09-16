@@ -4882,22 +4882,30 @@ app.get('/monitor', (req, res) => {
      the two tabs again and the symptom is a click that does nothing,
      which is invisible to any check that only asks whether the row
      rendered. */
-  /* WHICH MECHANISM BLOCKED THIS LEAD. Three real states in production, not
-     two: domain_list, llm, and NULL for the eight leads blocked between the
-     11 Sept brand list and the 14 Sept model layer, before the column
-     existed.
+  /* WHY WAS THIS LEAD TURNED AWAY. Two checks can block, and until now the
+     row could not say which: non_icp_reason holds a DOMAIN for both, so
+     kw.com looked identical whether a list comparison or the model produced
+     it.
 
-     The Model tab's ladder counts NULL as a list block, which is correct by
-     construction -- the model could not block anything before it shipped --
-     but that is an INFERENCE, and a per-row label is exactly where this repo
-     refuses to present an inference as a record. So the row says what was
-     actually stored, and the tooltip explains why the ladder is still right
-     to count it with the list. */
-  'function nonIcpSourceShort(src){return src==="llm"?"model":(src==="domain_list"?"list":"unrecorded");}' +
+     PLAIN WORDS, because SDRs read this tab, not engineers -- the same rule
+     as "Domain registered but no website on it" rather than parked_confirmed.
+     The stored values are domain_list and llm; nobody reading a dashboard
+     should have to know that.
+
+     AND THERE ARE ONLY TWO ANSWERS, not three. Eight leads blocked between
+     the 11 Sept brand list and the 14 Sept model layer have no source stored,
+     because the column did not exist yet. That is not an unknown: the model
+     could not block anything before it shipped, so those were brand-list
+     blocks and the chip says so. An earlier draft of this invented a third
+     "unrecorded" state, which made a reader stop and work out what it meant
+     for no gain -- the dashboard's job is to be read, not decoded. The
+     tooltip carries the provenance footnote for anyone auditing; the chip
+     stays one of two words so the column scans. */
+  'function nonIcpSourceShort(src){return src==="llm"?"AI check":"Brand list";}' +
   'function nonIcpSourceWhy(src){'
-  + 'if(src==="llm")return "Decided by the model reading the company website. Re-check it against the evidence quote on the Model tab.";'
-  + 'if(src==="domain_list")return "Matched the brand-domain list (NON_ICP_DOMAINS) -- a plain string comparison you can re-derive by reading the list.";'
-  + 'return "Not recorded. This lead was blocked before non_icp_source existed, when the brand list was the only thing that could block -- so it was a list block, but the row does not say so itself.";}' +
+  + 'if(src==="llm")return "The AI check read this company website and classified it as real estate or insurance. The Model tab shows the exact quote it relied on.";'
+  + 'if(src==="domain_list")return "This domain is on our list of national real-estate and insurance brands, so it was turned away without anything needing to read the site.";'
+  + 'return "This domain is on our list of national real-estate and insurance brands. (Blocked before we started recording which check fired -- the brand list was the only one that existed then.)";}' +
   /* TOP LEVEL, like every other shared helper. leadRowsHtml renders both All
      Leads and Blocked, so anything it calls has to be visible to both -- the
      scope bug that made Blocked rows silently unexpandable. */
