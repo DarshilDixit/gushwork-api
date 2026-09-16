@@ -277,8 +277,9 @@ function sfIsRetryable(err) {
    On 16 Sept 2026 mdorf@performancemediastrategies.com did exactly that --
    converted 29 June, booked a second demo on 16 Sept -- and the alert said
    "This lead is NOT in Salesforce. Add it manually." That is false and acting
-   on it is harmful: they ARE in Salesforce, as a customer, and adding a Lead
-   by hand creates a duplicate against a live Account.
+   on it is harmful: they ARE in Salesforce as a converted Contact and Account
+   -- qualified, not necessarily bought -- and adding a Lead by hand creates a
+   duplicate against a live Account.
 
    Measured: 403 of 807 people who submitted in the last 30 days have a
    converted newest Lead, but the write only fails when they submit AFTER the
