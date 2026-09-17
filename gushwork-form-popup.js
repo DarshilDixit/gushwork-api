@@ -1090,8 +1090,15 @@
     ======================================================= */
 
     function getCookie(name) {
-      var match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
-      return match ? decodeURIComponent(match[2]) : '';
+      /* WRAPPED SINCE 17 SEPT 2026. document.cookie throws outright in a
+         few privacy configurations, and captureUTMs now reads a cookie --
+         so an unwrapped throw here would take out initialisation before
+         the form exists rather than costing one optional value. Same
+         defence rememberCampaign and the sessionStorage reads carry. */
+      try {
+        var match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+        return match ? decodeURIComponent(match[2]) : '';
+      } catch (e) { return ''; }
     }
 
     /* Thirty days, per the request. Written ONLY when the URL carried a
