@@ -12189,7 +12189,7 @@ app.post('/partial', async (req, res) => {
      the Meta content_ids, given the SAME two inputs, so the stored slug
      and the event cannot disagree. Selection outranks the page; CRM wins
      a both-ticked selection because this is the single routing slug. */
-  const product = resolveProduct({ page_url, product_interest });
+  const product = resolveProduct({ page_url, product_interest, utm_campaign, utm_medium });
 
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
@@ -12230,7 +12230,7 @@ app.post('/partial', async (req, res) => {
     const _ltvFree = email ? freeEmailMatch(email.split('@')[1] || '') : null;
     const metaWillFire = !nonIcp.suppress_meta && !disqualified && !!email && !_ltvFree;
     const meta_predicted_ltv = metaWillFire
-      ? predictedLtvFor(resolveEventProduct({ page_url, product_interest }))
+      ? predictedLtvFor(resolveEventProduct({ page_url, product_interest, utm_campaign, utm_medium }))
       : null;
 
     const upsert = await pool.query(`
@@ -12392,7 +12392,7 @@ app.post('/partial', async (req, res) => {
     if (nonIcp.suppress_meta) {
       console.log(`[/partial] ⏭ StartTrial suppressed — non-ICP/${nonIcp.source} (${nonIcp.reason}): ${email}`);
     } else if (!disqualified && isBusinessEmail) {
-      pushStartTrialToMeta({session_id,email,sell_to,page_url,fbc,fbp,landing_page,product_interest}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => { console.warn('[/partial] Meta CAPI StartTrial failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (StartTrial)', err.message); });
+      pushStartTrialToMeta({session_id,email,sell_to,page_url,fbc,fbp,landing_page,product_interest,utm_campaign,utm_medium}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => { console.warn('[/partial] Meta CAPI StartTrial failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (StartTrial)', err.message); });
     } else if (!disqualified) {
       console.log(`[/partial] ⏭ StartTrial skipped — ${freeMatch && !freeMatch.exact ? `likely typo of free provider ${freeMatch.domain}` : 'free email domain'}: ${email}`);
     }
@@ -12466,7 +12466,7 @@ app.post('/submit', async (req, res) => {
   const hearAboutUsFinal = psHear || hear_about_us;
   // Same resolver and the same two inputs the Meta payload uses — see /partial.
   const product_interest = canonicalProductInterest(req.body.product_interest);
-  const product = resolveProduct({ page_url, product_interest });
+  const product = resolveProduct({ page_url, product_interest, utm_campaign, utm_medium });
 
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
@@ -12530,7 +12530,7 @@ app.post('/submit', async (req, res) => {
        by a later call. */
     const meta_predicted_ltv = (!nonIcp.suppress_meta
         && isWebsiteVerified({ website_check_failed, website_check_reason }))
-      ? predictedLtvFor(resolveEventProduct({ page_url, product_interest }))
+      ? predictedLtvFor(resolveEventProduct({ page_url, product_interest, utm_campaign, utm_medium }))
       : null;
 
     const upsert = await pool.query(`
@@ -12745,7 +12745,7 @@ app.post('/submit', async (req, res) => {
       if (nonIcpSuppressMeta) {
         console.log(`[/submit] ⏭ Meta CAPI Lead suppressed — non-ICP/model flagged (${nonIcpReason}): ${email}`);
       } else if (isWebsiteVerified({ website_check_failed, website_check_reason })) {
-        pushFormEventsToMeta({session_id,email,phone,first_name,last_name,company,website,sell_to,page_url,fbc,fbp,landing_page,product_interest,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_seniority:enrich.enriched_seniority,enriched_funding_stage:enrich.enriched_funding_stage}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => { console.warn('[/submit] Meta CAPI failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (Lead)', err.message); });
+        pushFormEventsToMeta({session_id,email,phone,first_name,last_name,company,website,sell_to,page_url,fbc,fbp,landing_page,product_interest,utm_campaign,utm_medium,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_seniority:enrich.enriched_seniority,enriched_funding_stage:enrich.enriched_funding_stage}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => { console.warn('[/submit] Meta CAPI failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (Lead)', err.message); });
       } else {
         console.log(`[/submit] ⏭ Meta CAPI Lead skipped — website not verified (${website_check_reason || 'failed'}): ${email}`);
       }
@@ -12916,6 +12916,17 @@ const SCHEDULE_LEAD_SQL = `
   SELECT l.session_id, l.email, l.phone, l.first_name, l.last_name,
          l.company, l.sell_to, l.page_url, l.landing_page, l.fbc, l.fbp,
          l.website_check_failed, l.website_check_reason,
+         /* THE SCHEDULE EVENT RESOLVED ITS PRODUCT OFF THE PAGE ALONE
+            UNTIL 17 SEPT 2026, because product_interest was never
+            selected here. A /demo lead who ticked AI-CRM was therefore
+            stored under one product, reported to Meta on Lead under
+            that same product, and then reported on Schedule under the
+            page default instead -- one person counted twice over, under
+            two different products, with no error anywhere. Pre-existing;
+            found while adding the two utm columns beside it, which the
+            campaign rule needs for the same reason. All three booking
+            routes read this one statement. */
+         l.product_interest, l.utm_campaign, l.utm_medium,
          /* Read so all THREE booking routes can suppress Schedule. Selected
             here rather than re-queried per route because this statement is
             the only thing the three share -- CLAUDE.md's "a fix on one is a

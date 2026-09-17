@@ -70,7 +70,18 @@ function drive(file) {
     getItem: (k) => (k in store ? store[k] : null),
     setItem: (k, v) => { store[k] = String(v); },
   };
-  const documentFake = { referrer: THIS_HIT_REF, getElementById: () => null, cookie: '' };
+  /* document.cookie ACCUMULATES, it does not overwrite. A plain string
+     property makes the second of two writes erase the first, so a file
+     correctly setting both campaign and medium reads back as having set
+     only the medium -- a harness artefact that looks exactly like a
+     bug in the code under test. */
+  const cookieJar = [];
+  const documentFake = {
+    referrer: THIS_HIT_REF,
+    getElementById: () => null,
+    get cookie() { return cookieJar.join('; '); },
+    set cookie(v) { cookieJar.push(String(v)); },
+  };
   const windowFake   = { location: { href: PAGE, search: PAGE.slice(PAGE.indexOf('?')) } };
 
   let posted = null;
@@ -84,7 +95,12 @@ function drive(file) {
     'formState', 'sessionStorage', 'document', 'window', 'crypto',
     'fetchWithTimeout', 'isRailwayReady', 'RAILWAY_API_URL', 'NET_TIMEOUT_MS',
     'setHidden', 'URLSearchParams',
+    /* captureUTMs writes and reads the 30-day campaign cookie since 17
+       Sept 2026, so its two helpers have to come across or this factory
+       throws and the suite reports a crash rather than a payload. */
     [lift(src, 'initSession'), lift(src, 'captureUTMs'), lift(src, 'saveSession'),
+     lift(src, 'rememberCampaign'), lift(src, 'getCookie'),
+     (/const OFFER_COOKIE_DAYS = \d+;/.exec(src) || [''])[0],
      'return { initSession, captureUTMs, saveSession };'].join('\n')
   );
   const fns = factory(
@@ -96,13 +112,15 @@ function drive(file) {
   fns.initSession();
   fns.captureUTMs();
   fns.saveSession();
-  return posted;
+  return { posted, cookie: documentFake.cookie };
 }
 
 for (const file of ['gushwork-form.js', 'gushwork-form-popup.js']) {
   const tag = file.replace('gushwork-form', 'form').replace('.js', '');
   let p;
-  try { p = drive(file); } catch (err) { ok(`${tag}: drives without throwing`, false, err.message); continue; }
+  let driven;
+  try { driven = drive(file); } catch (err) { ok(`${tag}: drives without throwing`, false, err.message); continue; }
+  p = driven.posted;
 
   ok(`${tag}: posted to /session`, !!p && /\/session$/.test(p.url), p && p.url);
   if (!p) continue;
@@ -123,14 +141,26 @@ for (const file of ['gushwork-form.js', 'gushwork-form-popup.js']) {
   eq(`${tag}: page_url is this page load`, p.body.page_url, PAGE);
   eq(`${tag}: utm_source still sent`, p.body.utm_source, 'facebook');
   eq(`${tag}: utm_campaign still sent`, p.body.utm_campaign, 'CAMP');
+
+  /* THE 30-DAY MEMORY, EXECUTED rather than read. The offer is decided
+     from this pair, so a cookie that is never written means a return
+     visit is asked again which product they came for. Asserted on what
+     document.cookie actually received, because a rememberCampaign that
+     silently threw would leave every source assertion above intact. */
+  ok(`${tag}: the campaign was written to a cookie`,
+     /gw_utm_campaign=CAMP/.test(driven.cookie), driven.cookie);
+  ok(`${tag}: the medium was written beside it`,
+     /gw_utm_medium=paid/.test(driven.cookie), driven.cookie);
+  ok(`${tag}: the cookie lasts 30 days`,
+     /max-age=2592000/.test(driven.cookie), driven.cookie);
 }
 
 /* Both files must send the SAME key set -- the fork has silently drifted
    before, and a payload that differs between them splits the data by
    which page the visitor happened to land on. */
 try {
-  const a = Object.keys(drive('gushwork-form.js').body).sort();
-  const b = Object.keys(drive('gushwork-form-popup.js').body).sort();
+  const a = Object.keys(drive('gushwork-form.js').posted.body).sort();
+  const b = Object.keys(drive('gushwork-form-popup.js').posted.body).sort();
   eq('both files send an identical key set', a.join(','), b.join(','));
 } catch (err) {
   ok('both files send an identical key set', false, err.message);

@@ -455,10 +455,21 @@ const P = build(popup);
   const runRouter = (src, attrValue, opts = {}) => {
     const ticked = opts.ticked || [];
     const crmAttr = opts.crmAttr;
+    /* wantsCrm() reads the campaign as well as the checkboxes since 17
+       Sept 2026, so the offer helpers have to come across with it --
+       otherwise this lift throws ReferenceError and the suite reports
+       UNMEASURED rather than a result. */
     const fnSrc = liftFn(src, 'rhRouterId') + '\n'
       + liftFn(src, 'selectedNeeds') + '\n'
       + liftFn(src, 'wantsCrm') + '\n'
-      + (/const NEEDS_SLUGS = \[[^\]]*\];/.exec(src) || [''])[0];
+      + liftFn(src, 'campaignOffer') + '\n'
+      + liftFn(src, 'currentOffer') + '\n'
+      + (/const NEEDS_SLUGS = \[[^\]]*\];/.exec(src) || [''])[0] + '\n'
+      + (/const OFFER_CRM\s+= '[^']*';/.exec(src) || [''])[0] + '\n'
+      + (/const OFFER_AEO\s+= '[^']*';/.exec(src) || [''])[0] + '\n'
+      + (/const OFFER_SELECTOR\s+= '[^']*';/.exec(src) || [''])[0] + '\n'
+      + (/const OFFER_AD_MEDIUMS = \[[^\]]*\];/.exec(src) || [''])[0];
+    const formState = { utm_campaign: opts.campaign || '', utm_medium: opts.medium || '' };
     const def = /const RH_ROUTER_ID_DEFAULT = '(\d+)';/.exec(src);
     const box = (v) => ({ checked: true, value: v });
     const document = {
@@ -476,8 +487,8 @@ const P = build(popup);
         return { getAttribute: (a) => (a === 'data-rh-router' ? attrValue : null) };
       },
     };
-    return new Function('document', 'RH_ROUTER_ID_DEFAULT',
-      fnSrc + '\nreturn rhRouterId();')(document, def && def[1]);
+    return new Function('document', 'RH_ROUTER_ID_DEFAULT', 'formState',
+      fnSrc + '\nreturn rhRouterId();')(document, def && def[1], formState);
   };
 
   for (const [label, src] of [['demo', demo], ['ads', popup]]) {
@@ -496,6 +507,24 @@ const P = build(popup);
        runRouter(src, undefined, { ticked: ['aeo', 'crm'], crmAttr: '6804' }), '6804');
     eq(`router: ${label} keeps the default on a Lead-Gen-only tick`,
        runRouter(src, undefined, { ticked: ['aeo'], crmAttr: '6804' }), '6138');
+    /* ── THE CAMPAIGN PATH, 17 Sept 2026 ─────────────────────────
+       THIS IS THE ASSERTION THAT MAKES THE CRM BRANCH REACHABLE rather
+       than merely present. With the selector hidden nothing is ticked,
+       so wantsCrm() has only the campaign to go on -- and if it did not
+       read it, a CRM-ad lead would book with the AEO team while every
+       source assertion about the rule still passed. Driven, not read. */
+    eq(`router: ${label} routes a CRM campaign with NO tick to the CRM router`,
+       runRouter(src, undefined, { crmAttr: '6804', campaign: 'FLI__Prospecting__CRM-Offer__CBO', medium: 'paid' }), '6804');
+    eq(`router: ${label} keeps the default on an AEO campaign`,
+       runRouter(src, undefined, { crmAttr: '6804', campaign: 'FLI__Prospecting__TOF__CBO', medium: 'paid' }), '6138');
+    /* NOT AN AD. The same string arriving on a LinkedIn post or the
+       lead-estimator drip decides nothing -- 29 leads over 90 days. */
+    eq(`router: ${label} ignores a CRM-shaped campaign that is not an ad`,
+       runRouter(src, undefined, { crmAttr: '6804', campaign: 'crm-newsletter', medium: 'social' }), '6138');
+    /* A BARE CAMPAIGN ID IS NOT AN AEO CAMPAIGN, and it is not a CRM one
+       either -- it decides nothing and the selector does the asking. */
+    eq(`router: ${label} keeps the default on an unreadable campaign`,
+       runRouter(src, undefined, { crmAttr: '6804', campaign: '120241181781830373', medium: 'paid' }), '6138');
     /* FAILS SAFE. A CRM tick on a page that forgot the attribute gets
        the page default, which is today's behaviour -- never a wrong
        team, and never undefined. */

@@ -201,6 +201,63 @@ function canonicalProductInterest(raw) {
   return uniq.length ? uniq.join(',') : null;
 }
 
+/* ── WHICH OFFER THE VISITOR IS SHOWN ────────────────────────────────
+   Until 17 Sept 2026 the offer was a pure function of the pathname, so
+   somebody who clicked a CRM ad and arrived anywhere except /ai-demo was
+   sold AEO, and there was nothing in the URL to say otherwise. Swapnil
+   asked for the campaign to decide instead.
+
+   THE MEDIUM GATE IS NOT DECORATION. "Any other campaign means AEO"
+   sounds exhaustive and is not: utm_campaign is also carried by traffic
+   that never saw an ad -- LinkedIn social posts (gushwork, nb), the
+   lead-estimator drip (email/drip), email-signature links
+   (ai-agents-cta), backlinks from other people's sites
+   (footer-backlink, whose utm_source is the referring domain) and a
+   Trustpilot profile click. Measured over 90 days that is 29 leads who
+   declared no product intent at all and would have lost the question.
+   Only paid/cpc gets an offer decided for it.
+
+   AN UNREADABLE CAMPAIGN IS NOT AN AEO CAMPAIGN. 17 leads arrive with a
+   bare Meta campaign ID (120241181781830373) and 6 with an unrendered
+   {{campaign.name}} macro. Reading "no crm in this string" off a number
+   and forcing AEO would silently hide the CRM offer from people who
+   clicked a CRM ad. Same rule the website checkers follow: "we could not
+   tell" is its own answer, and here it means ask.
+
+   BRAND SEARCH IS NOT A PRODUCT SIGNAL. Somebody googling our name has
+   told us they want us, not which thing they want.
+
+   MATCHED ON "brand", NEVER ON "br". Every campaign we have that
+   contains br already contains brand, so the short token earns nothing
+   today -- and it is the trap that just bit Source_Bucket__c in
+   Salesforce, where CONTAINS(..,"li") routed "client", "link" and the
+   name "Jolian" to LinkedIn. The first campaign named
+   Prospecting__Broad__CBO would silently have become a selector
+   campaign with nothing anywhere to say so.
+
+   ORDER IS crm BEFORE brand, matching the table in the request: a
+   CRM-offer campaign running on brand search is a CRM campaign.
+
+   THIS IS A THIRD COPY OF A RULE THAT MUST STAY IN SYNC with
+   gushwork-form.js and gushwork-form-popup.js, the same shape as
+   B2C_ALLOWED_PATHS. tests/test-batch2.js lifts all three and asserts
+   they agree, because a list this shape has drifted three times here. */
+const OFFER_CRM      = 'crm';
+const OFFER_AEO      = 'aeo';
+const OFFER_SELECTOR = 'selector';
+const OFFER_AD_MEDIUMS = ['paid', 'cpc'];
+
+function campaignOffer(utm_campaign, utm_medium) {
+  const m = String(utm_medium == null ? '' : utm_medium).trim().toLowerCase();
+  if (!OFFER_AD_MEDIUMS.includes(m)) return OFFER_SELECTOR;
+  const c = String(utm_campaign == null ? '' : utm_campaign).trim().toLowerCase();
+  /* Empty, a bare id, or a template macro the ad platform never filled in. */
+  if (!c || /^[0-9]+$/.test(c) || c.includes('{{') || c.includes('}}')) return OFFER_SELECTOR;
+  if (c.includes('crm'))   return OFFER_CRM;
+  if (c.includes('brand')) return OFFER_SELECTOR;
+  return OFFER_AEO;
+}
+
 /* EXACT pathname match, never a prefix or substring test — '/ai-demo'
    contains 'demo', and a looser match would put CRM leads on the AEO
    product or the other way round.
@@ -217,9 +274,25 @@ function canonicalProductInterest(raw) {
 
    Selection is ignored where it is absent, so /ai-demo, the ad landers
    and every historical lead resolve exactly as they did before. */
-function resolveProduct({ page_url, product_interest } = {}) {
+function resolveProduct({ page_url, product_interest, utm_campaign, utm_medium } = {}) {
   const ticked = canonicalProductInterest(product_interest);
   if (ticked) return ticked.includes('crm') ? 'crm' : 'aeo';
+  /* THE CAMPAIGN RANKS BELOW THE PAGE'S OWN MAPPING AND ABOVE THE
+     DEFAULT, and that middle position is the whole design.
+
+     Above the default: a CRM ad that lands anywhere but /ai-demo is why
+     this exists at all, and the default would call that lead aeo.
+
+     Below an explicit mapping: /ai-demo SELLS the CRM product. A visitor
+     who arrives there on an AEO prospecting campaign is on the CRM page,
+     and letting the campaign win would demote a real /ai-demo lead to
+     aeo -- routing them to the wrong calendar, on the one page in the
+     catalogue that has never been ambiguous.
+
+     Only the crm answer is consulted. The aeo answer IS the default, so
+     reading it here would change nothing and would quietly move the
+     unreadable-page case (null) onto a product. */
+  if (campaignCrmApplies(page_url, utm_campaign, utm_medium)) return 'crm';
   return resolveProductFromPage({ page_url });
 }
 
@@ -234,11 +307,60 @@ function resolveProduct({ page_url, product_interest } = {}) {
    product_interest, never leads.product, and a test pins that -- it is
    the invariant that would otherwise drift silently, because the two
    agree on every lead except the both-ticked one. */
-function resolveEventProduct({ page_url, product_interest } = {}) {
-  return canonicalProductInterest(product_interest) || resolveProductFromPage({ page_url });
+function resolveEventProduct({ page_url, product_interest, utm_campaign, utm_medium } = {}) {
+  const ticked = canonicalProductInterest(product_interest);
+  if (ticked) return ticked;
+  /* Same precedence as resolveProduct, for the same reasons -- the two
+     must not disagree about a lead nobody ticked anything for. */
+  if (campaignCrmApplies(page_url, utm_campaign, utm_medium)) return 'crm';
+  return resolveProductFromPage({ page_url });
+}
+
+/* Does the campaign get to decide this lead? THREE conditions, kept in
+   one place because resolveProduct and resolveEventProduct both ask and
+   a copy of this test would be a copy that drifts.
+
+   1. THE PAGE MUST BE READABLE. An unreadable page_url returns null from
+      resolveProductFromPage on purpose -- "we could not tell which page
+      this was" is not "this was the default page" -- and letting a
+      campaign rescue it would quietly convert that honest null into a
+      product. The campaign tells us what they clicked, not where they
+      landed, and the untagged event is the correct report for a lead we
+      cannot place.
+   2. THE PAGE MUST NOT SELL A NAMED PRODUCT. /ai-demo is the CRM page;
+      an AEO campaign arriving there is on the CRM page.
+   3. Only crm. The aeo answer is already the default. */
+function campaignCrmApplies(page_url, utm_campaign, utm_medium) {
+  const normalised = normalisePagePath(page_url);
+  if (!normalised) return false;
+  if (PRODUCT_PATHS[normalised]) return false;
+  return campaignOffer(utm_campaign, utm_medium) === OFFER_CRM;
+}
+
+/* The page's OWN entry, with no default and no logging: "does this
+   pathname sell a named product", as opposed to "what should we tag
+   this event". Split out so the campaign can be ranked between the two
+   without resolveProductFromPage's default swallowing the question. */
+function explicitProductForPage(page_url) {
+  const normalised = normalisePagePath(page_url);
+  return normalised ? (PRODUCT_PATHS[normalised] || null) : null;
 }
 
 function resolveProductFromPage({ page_url } = {}) {
+  const normalised = normalisePagePath(page_url);
+  if (!normalised) return null;
+  const mapped = PRODUCT_PATHS[normalised];
+  if (mapped) return mapped;
+  noteDefaultedPath(normalised);
+  return DEFAULT_PRODUCT;
+}
+
+/* The pathname, lowercased and stripped of a trailing slash, or null
+   when the value is not a page at all. Lifted out of
+   resolveProductFromPage unchanged so explicitProductForPage cannot
+   normalise a second way -- one normaliser, the same rule CLAUDE.md
+   applies to partnerStackCustomerKey. */
+function normalisePagePath(page_url) {
   if (!page_url || typeof page_url !== 'string') return null;
   let pathname;
   try {
@@ -260,11 +382,7 @@ function resolveProductFromPage({ page_url } = {}) {
     }
   }
   // Trailing slash is the same page: /ai-demo and /ai-demo/ must not disagree.
-  const normalised = pathname.toLowerCase().replace(/\/+$/, '') || '/';
-  const mapped = PRODUCT_PATHS[normalised];
-  if (mapped) return mapped;
-  noteDefaultedPath(normalised);
-  return DEFAULT_PRODUCT;
+  return pathname.toLowerCase().replace(/\/+$/, '') || '/';
 }
 
 /* Reports each event's outcome to whoever wired one up — index.js uses it to
@@ -368,7 +486,18 @@ function buildEventData(eventName, payload, options = {}) {
        product was a pure function of the page; a /demo lead ticking
        AI-CRM would have stored 'crm' and fired 'aeo' with nothing
        anywhere to reconcile them. */
-    : resolveEventProduct({ page_url: payload.page_url, product_interest: payload.product_interest });
+    : resolveEventProduct({
+        page_url:         payload.page_url,
+        product_interest: payload.product_interest,
+        /* THE CAMPAIGN HAS TO REACH HERE OR THE EVENT DISAGREES WITH THE
+           COLUMN. index.js resolves leads.product with these two; if the
+           event did not get them, a CRM-campaign lead on /demo would be
+           stored crm and reported to Meta as aeo, with nothing anywhere
+           to reconcile the two. Same failure the ticked-selection fix
+           closed on 15 Sept, one input later. */
+        utm_campaign:     payload.utm_campaign,
+        utm_medium:       payload.utm_medium,
+      });
   if (slug) {
     eventData.custom_data.content_ids   = [...PRODUCTS[slug].content_ids];
     eventData.custom_data.content_type  = 'product';
@@ -563,6 +692,11 @@ module.exports = {
   PRODUCT_INTEREST_SLUGS,
   canonicalProductInterest,
   resolveEventProduct,
+  campaignOffer,
+  OFFER_CRM,
+  OFFER_AEO,
+  OFFER_SELECTOR,
+  OFFER_AD_MEDIUMS,
   predictedLtvFor,
   PREDICTED_LTV,
   DEFAULT_PRODUCT,

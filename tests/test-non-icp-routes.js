@@ -1608,6 +1608,106 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
   }
 
   /* ========================================================
+     THE CAMPAIGN DECIDES THE OFFER — SAME INVARIANT, NEW INPUT
+     (17 Sept 2026)
+
+     The selector is hidden for paid traffic now, so a CRM-ad lead
+     reaches /submit with NO product_interest at all and the only thing
+     saying "crm" is utm_campaign. That is exactly the shape the 15 Sept
+     divergence bug had: one input decides the column, a different one
+     decides the event, and they agree on every lead except the ones
+     that matter.
+
+     DRIVEN END TO END for the same reason as the loop above. The unit
+     tests in test-batch2 section 27 prove campaignOffer answers
+     correctly; they cannot prove /submit passes it to both resolvers,
+     and a route that forgot one would store crm and report aeo with
+     nothing anywhere to reconcile them.
+
+     product_interest MUST STAY NULL throughout: the ad is a guess about
+     this person, not an answer they gave, and NULL there means "we never
+     asked". Writing it would report an inference as a stated preference
+     into Salesforce's restricted picklist.
+     ======================================================== */
+  for (const [label, campaign, medium, wantProduct, wantIds, wantLtv] of [
+    ['CRM ad on /demo',        'FLI__Prospecting__CRM-Offer__CBO__StartTrial', 'paid', 'crm', ['crm'], 5000],
+    ['AEO ad on /demo',        'FLI__Prospecting__TOF__CBO__StartTrial',       'paid', 'aeo', ['aeo'], 12000],
+    /* Brand search decides nothing, so the page default still applies
+       and the visitor is the one who answers -- via the selector. */
+    ['brand search on /demo',  'UR_G_S_US_BR_Brand-tIS',                      'cpc',  'aeo', ['aeo'], 12000],
+    /* A bare campaign id is not an AEO campaign. It must not be read as
+       "no crm in this string, therefore aeo". */
+    ['bare campaign id',       '120241181781830373',                          'paid', 'aeo', ['aeo'], 12000],
+    /* NOT AN AD. The same CRM-shaped string on a newsletter decides
+       nothing -- 29 leads over 90 days arrive on channels like this. */
+    ['crm-shaped newsletter',  'crm-roundup',                                 'drip', 'aeo', ['aeo'], 12000],
+  ]) {
+    reset();
+    const sid = '00000000-0000-4000-8000-0000000000d' + (campaign.length % 9);
+    await realFetch(BASE + '/submit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sid, email: 'x@cleanbiz.test', website: 'https://cleanbiz.test',
+        company: 'Clean', first_name: 'A', last_name: 'B', sell_to: 'B2B',
+        page_url: 'https://www.gushwork.ai/demo',
+        utm_campaign: campaign, utm_medium: medium,
+        /* nothing ticked -- the selector was hidden for the paid rows */
+      }),
+    });
+    await sleep(600);
+
+    const ins = S.writes.find((w) => /INSERT INTO leads \(/.test(w.flat));
+    const cols = ins ? boundCols(ins) : {};
+    ok(`campaign[${label}]: stored product is ${wantProduct}`,
+       cols.product === wantProduct, String(cols.product));
+    ok(`campaign[${label}]: product_interest stays null -- we never asked`,
+       cols.product_interest === null || cols.product_interest === undefined,
+       JSON.stringify(cols.product_interest));
+
+    const lead = S.metaPayloads.find((p) => (p.data || []).some((e) => e.event_name === 'Lead'));
+    const ev = lead && lead.data.find((e) => e.event_name === 'Lead');
+    const ids = ev && ev.custom_data && ev.custom_data.content_ids;
+    ok(`campaign[${label}]: Meta fired a Lead event`, !!ev);
+    ok(`campaign[${label}]: Meta content_ids are ${JSON.stringify(wantIds)}`,
+       !!ids && JSON.stringify(ids) === JSON.stringify(wantIds), JSON.stringify(ids));
+    /* THE INVARIANT. The column and the event are resolved by two
+       different functions from the same inputs; this is the only place
+       a route that forgot to pass one of them shows up. */
+    ok(`campaign[${label}]: the column and the event agree`,
+       !!ids && ids.join(',') === cols.product,
+       'column=' + cols.product + ' meta=' + JSON.stringify(ids));
+    ok(`campaign[${label}]: predicted_ltv is ${wantLtv}`,
+       ev && ev.custom_data && ev.custom_data.predicted_ltv === wantLtv,
+       String(ev && ev.custom_data && ev.custom_data.predicted_ltv));
+  }
+
+  /* A TICK STILL OUTRANKS THE AD. Somebody on a CRM campaign who does
+     see the selector -- they arrived before the cookie, or the markup
+     is there anyway -- and ticks Lead Gen is a Lead Gen lead. The ad is
+     a guess about them; the checkbox is them. */
+  {
+    reset();
+    await realFetch(BASE + '/submit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: '00000000-0000-4000-8000-0000000000e1', email: 'x@cleanbiz.test',
+        website: 'https://cleanbiz.test', company: 'Clean', first_name: 'A', last_name: 'B',
+        sell_to: 'B2B', page_url: 'https://www.gushwork.ai/demo',
+        product_interest: 'aeo', utm_campaign: 'CRM-Offer', utm_medium: 'paid',
+      }),
+    });
+    await sleep(600);
+    const ins = S.writes.find((w) => /INSERT INTO leads \(/.test(w.flat));
+    const cols = ins ? boundCols(ins) : {};
+    ok('campaign[tick beats ad]: stored product is aeo', cols.product === 'aeo', String(cols.product));
+    const lead = S.metaPayloads.find((p) => (p.data || []).some((e) => e.event_name === 'Lead'));
+    const ev = lead && lead.data.find((e) => e.event_name === 'Lead');
+    ok('campaign[tick beats ad]: Meta content_ids are ["aeo"]',
+       !!ev && JSON.stringify(ev.custom_data.content_ids) === JSON.stringify(['aeo']),
+       JSON.stringify(ev && ev.custom_data && ev.custom_data.content_ids));
+  }
+
+  /* ========================================================
      PAGES WITHOUT THE QUESTION MUST BE UNCHANGED, AND NOTHING
      MAY FIRE TWICE.
 
