@@ -202,9 +202,30 @@ form to real visitors. Prefer the API sweep; see the section at the end of
 **`/start-old` was re-pinned with everything else on 16 Sept 2026** and is no
 longer stale — but it is still a draft, so it is still invisible to the `curl`
 sweep, and it will go stale again at the next form deploy unless the API sweep
-is the one you run. **The authoritative set is 13 pages: the 12 published ones
-below plus the `start-old` draft.** Read every page's footer through the API;
-do not trust the hand-written list.
+is the one you run.
+
+**THE AUTHORITATIVE SET IS 15 PAGES, NOT 13 — CORRECTED 17 SEPT 2026.** This
+said 13 and it was wrong by two: `/aeo` and `/ai-crm` both carry
+`gushwork-form-popup.js` and neither was in the list or in the `curl` sweep
+below. They were found only by reading all 83 pages' footers through the API,
+which is the sweep this section already told you to prefer and which nobody had
+actually run. A count written down here is a claim with a shelf life; the API
+scan is the measurement. **Run the scan, do not trust this number either.**
+
+**THE API DOES THE WHOLE JOB, and that is worth knowing before you start.** The
+MCP tool only accepts footer content inline, so a repin through it means
+re-typing each page's entire custom-code block — 13k to 26k characters — to
+change 40. With a site API token (Site settings → Apps & integrations → API
+access; scopes: Custom Code, Pages, Sites, all read+write) it is a scripted
+read-replace-write over exact bytes:
+
+    GET /v2/pages/{page_id}/custom_code/freeform          -> [{location, content}, ...]
+    PUT /v2/pages/{page_id}/custom_code/freeform/{footer} -> {location, content}
+
+The PUT is location-scoped: writing the footer leaves the head block untouched,
+verified. There is no PUT on the collection path, only on `/{location}` — the
+collection path answers 404 for every write method, which reads as "no access"
+and is not.
 
 **AND SWEEP EVERY PAGE, not just the two you changed.** The pin lives in a
 `<script src>`, and Webflow lets a *page* carry its own script tag that a
@@ -212,10 +233,10 @@ Project-Settings republish never touches. Two were found stale on 10 Sept, both
 invisible from inside this repo:
 
 ```bash
-for p in /demo /start /start-now /ai-demo /meeting-booked /careers \
-         /consulting-lead-generation /manufacturing-lead-generation \
-         /financial-services-lead-generation /lead-gen /seo-leads \
-         /financial-services-seo /manufacturing-seo-services /consulting-seo-services; do
+for p in /demo /ai-demo /aeo /ai-crm /start /start-now /lead-gen /seo-leads \
+         /consulting-lead-generation /consulting-seo-services \
+         /financial-services-lead-generation /financial-services-seo \
+         /manufacturing-lead-generation /manufacturing-seo-services; do
   echo "$p -> $(curl -s "https://www.gushwork.ai$p" | grep -oE 'gushwork-api@[0-9a-f]{7,40}' | sort -u | tr '\n' ' ')"
 done
 ```
