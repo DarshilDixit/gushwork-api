@@ -1548,11 +1548,33 @@ function finish() {
      a pure function of the page and this read `{ page_url }`; the moment a
      checkbox can decide it, a route that forgot the selection would store
      one slug and fire another with nothing anywhere to reconcile them. */
-  ok('product: both routes resolve from page_url AND the selection',
-     (src.match(/resolveProduct\(\{ page_url, product_interest \}\)/g) || []).length === 2);
+  ok('product: both routes resolve from page_url, the selection AND the campaign',
+     (src.match(/resolveProduct\(\{ page_url, product_interest, utm_campaign: offer_campaign, utm_medium: offer_medium \|\| utm_medium \}\)/g) || []).length === 2);
+  /* THE OFFER'S CAMPAIGN IS NOT THE ATTRIBUTION CAMPAIGN, and both
+     routes must read the offer one. Folding the 30-day cookie into
+     utm_campaign would re-attribute real leads from organic to paid and
+     leave them carrying a paid campaign beside an empty utm_source,
+     which is the field Source_Bucket__c actually reads. */
+  ok('product: offer_campaign falls back to this visit, never the other way round',
+     /const offer_campaign\s+= \(req\.body\.offer_campaign\s+\|\| utm_campaign \|\| ''\)/.test(src));
+  ok('product: utm_campaign itself is never read from the offer field',
+     !/const utm_campaign[^;]*offer_campaign/.test(src));
   ok('product: the selection reaches Meta, so the event cannot diverge',
      /pushStartTrialToMeta\(\{[^}]*product_interest/.test(src)
      && /pushFormEventsToMeta\(\{[^}]*product_interest/.test(src));
+  /* THE CAMPAIGN HAS TO REACH META FOR THE SAME REASON THE SELECTION DID.
+     A CRM-campaign lead on /demo is stored crm by resolveProduct above; an
+     event payload without the campaign resolves the same lead to aeo from
+     the page and reports a different product than the column holds. */
+  ok('product: the campaign reaches Meta on both form paths',
+     /pushStartTrialToMeta\(\{[^}]*utm_campaign:offer_campaign/.test(src)
+     && /pushFormEventsToMeta\(\{[^}]*utm_campaign:offer_campaign/.test(src));
+  /* AND ON THE THREE BOOKING ROUTES, which share one statement. Schedule
+     resolved its product from the page alone until 17 Sept 2026 because
+     product_interest was never selected here -- so a lead who ticked
+     AI-CRM fired Lead as crm and Schedule as aeo. */
+  ok('product: the Schedule statement selects the selection and the campaign',
+     /l\.product_interest, l\.utm_campaign, l\.utm_medium/.test(src));
   /* THE COLUMN HOLDS A SLUG THIS CODE RESOLVED, never a string a page
      sent. product is never read from the body at all -- a hidden field
      would otherwise let any page write anything into it.
@@ -3234,6 +3256,235 @@ async function section12() {
     const clean = mk(['field-wrapper', 'is-hidden']);
     setWrapHidden(clean, false);
     eq('26: no inline display is introduced on a clean reveal', clean.style.display, '');
+  }
+}
+
+/* ============================================================
+   27. THE CAMPAIGN DECIDES THE OFFER — THIRD COPY, AND EXECUTED
+
+   Until 17 Sept 2026 the pathname decided which offer a visitor saw, so
+   a CRM ad landing anywhere but /ai-demo sold AEO. The campaign decides
+   now, and the rule therefore exists in THREE places:
+
+     meta-capi.js            campaignOffer   the server's resolveProduct
+     gushwork-form.js        campaignOffer   what /demo shows
+     gushwork-form-popup.js  campaignOffer   the ad landers
+
+   Same shape as B2C_ALLOWED_PATHS in section 21 and for the same
+   reason: three copies of one rule, no shared module, and a drift means
+   the offer on screen disagrees with the product we store and report.
+
+   EXECUTED, NOT READ. A source assertion cannot tell a reachable branch
+   from an `if (false)`, which is the lesson this repo has now learned
+   three times, so each copy is lifted and CALLED against the same
+   table. The fixtures are real campaigns out of leads.utm_campaign,
+   with their real utm_medium.
+   ============================================================ */
+{
+  const META  = require('../meta-capi');
+  /* Brace-matched rather than regexed to a closing line: these sit at
+     four-space indent inside the form files' IIFE, and a lazy match
+     would stop at the first nested closing brace. */
+  const liftFunction = (fsrc, name) => {
+    const m = new RegExp('\\n    (?:async )?function ' + name + '\\s*\\(').exec(fsrc);
+    if (!m) throw new Error('function not found: ' + name);
+    let d = 0;
+    for (let j = fsrc.indexOf('{', m.index); j < fsrc.length; j++) {
+      if (fsrc[j] === '{') d++;
+      else if (fsrc[j] === '}') { d--; if (!d) return fsrc.slice(m.index, j + 1); }
+    }
+    throw new Error('unbalanced braces in: ' + name);
+  };
+  const demo  = fs.readFileSync(path.join(__dirname, '..', 'gushwork-form.js'), 'utf8');
+  const popup = fs.readFileSync(path.join(__dirname, '..', 'gushwork-form-popup.js'), 'utf8');
+
+  const liftOffer = (src, tag) => {
+    /* Each PIECE must be present. Checked before joining, because the
+       lifted function legitimately contains blank lines and testing the
+       joined text for them would fail on correct input. A missing piece
+       would otherwise surface as a confusing ReferenceError from inside
+       new Function rather than as a named assertion. */
+    const parts = [
+      (/const OFFER_CRM\s+= '[^']*';/.exec(src) || [''])[0],
+      (/const OFFER_AEO\s+= '[^']*';/.exec(src) || [''])[0],
+      (/const OFFER_SELECTOR\s+= '[^']*';/.exec(src) || [''])[0],
+      (/const OFFER_AD_MEDIUMS = \[[^\]]*\];/.exec(src) || [''])[0],
+      liftFunction(src, 'campaignOffer'),
+    ];
+    ok(`27: ${tag} carries the whole rule`, parts.every((x) => x && x.length > 0),
+       parts.map((x, i) => (x ? '' : 'piece ' + i + ' missing')).filter(Boolean).join(', '));
+    return new Function(parts.concat('return campaignOffer;').join('\n'))();
+  };
+
+  const impls = [
+    ['meta-capi', (c, m) => META.campaignOffer(c, m)],
+    ['form',      liftOffer(demo,  'form')],
+    ['form-popup',liftOffer(popup, 'form-popup')],
+  ];
+
+  /* Every row is a campaign that has actually arrived, with the medium
+     it actually arrived on, and the answer it must get. */
+  const CASES = [
+    ['FLI__Prospecting__AudienceTesting__CBO__StartTrial', 'paid',  'aeo',      'the biggest Meta campaign, 1282 leads'],
+    ['FLI__Prospecting__CRM-Offer__CBO__StartTrial',       'paid',  'crm',      'the one CRM campaign, 39 leads'],
+    ['UR_G_S_US_BR_Brand-tIS',                             'cpc',   'selector', 'Google brand, and BR is UPPERCASE in the real value'],
+    ['Search_US_Brand_tImp-Share',                         'cpc',   'selector', 'the other brand campaign'],
+    ['UR_G_PMAX_US_NB_Prospecting',                        'cpc',   'aeo',      'Google non-brand'],
+    ['120241181781830373',                                 'paid',  'selector', 'a bare Meta campaign ID, 17 leads'],
+    ['{{campaign.name}}',                                  'paid',  'selector', 'an unrendered macro, 6 leads'],
+    ['gushwork',                                           'social','selector', 'a LinkedIn post, not an ad'],
+    ['lead_estimator',                                     'drip',  'selector', 'our own drip email'],
+    ['ai-agents-cta',                                      'email', 'selector', 'an email-signature link'],
+    ['footer-backlink',                                    'referral','selector','a backlink from another site'],
+    ['',                                                   '',      'selector', 'direct or organic'],
+    [null,                                                 null,    'selector', 'nothing captured at all'],
+    /* THE TRAP. "br" as a substring would make this a selector campaign
+       and nobody would ever see why -- the identical bug that routed
+       "client", "link" and the name "Jolian" to LinkedIn through
+       Source_Bucket__c. Broad targeting is standard Meta naming. */
+    ['FLI__Prospecting__Broad__CBO',                       'paid',  'aeo',      'Broad must NOT read as brand'],
+    /* CRM outranks brand, matching the order in the request. */
+    ['UR_G_S_US_BR_Brand-CRM-Offer',                       'cpc',   'crm',      'crm is tested before brand'],
+  ];
+
+  for (const [name, fn] of impls)
+    for (const [campaign, medium, want, why] of CASES)
+      eq(`27: ${name}: ${JSON.stringify(campaign)} @ ${JSON.stringify(medium)} -> ${want}  (${why})`,
+         fn(campaign, medium), want);
+
+  /* THE THREE MUST AGREE ON EVERY ROW, which is the point of the
+     section. Asserted separately so a drift reads as a drift rather
+     than as three unrelated failures. */
+  for (const [campaign, medium] of CASES) {
+    const answers = impls.map(([, fn]) => fn(campaign, medium));
+    ok(`27: all three copies agree on ${JSON.stringify(campaign)}`,
+       answers.every((a) => a === answers[0]), answers.join(' / '));
+  }
+
+  /* ── THE SERVER'S PRECEDENCE ───────────────────────────────────
+     campaignOffer only answers "what were they sold". resolveProduct
+     has to rank it, and the ranking is the part that can quietly go
+     wrong in both directions. */
+  eq('27: a CRM campaign on /demo stores crm',
+     META.resolveProduct({ page_url: 'https://www.gushwork.ai/demo', utm_campaign: 'CRM-Offer', utm_medium: 'paid' }), 'crm');
+  /* THE PAGE THAT SELLS CRM OUTRANKS AN AEO CAMPAIGN. Letting the
+     campaign win here would demote a real /ai-demo lead to aeo and book
+     them with the wrong team, on the one page that was never ambiguous. */
+  eq('27: an AEO campaign on /ai-demo still stores crm',
+     META.resolveProduct({ page_url: 'https://www.gushwork.ai/ai-demo', utm_campaign: 'TOF', utm_medium: 'paid' }), 'crm');
+  /* THE PAGE-WINS GUARD IS INVISIBLE ON TODAY'S CATALOGUE, and that is
+     precisely why it needs this test. PRODUCT_PATHS has exactly one
+     entry, /ai-demo -> crm, and the only campaign answer that can
+     override anything is also crm -- so the two agree and removing the
+     guard changes no result. Measured: mutating it away survived the
+     entire bar.
+
+     It stops being invisible the moment a second product page exists,
+     and at that point a CRM campaign would silently re-tag every
+     visitor to that page. So the catalogue is given a temporary second
+     entry here and taken away again. */
+  {
+    const PP = META.PRODUCT_PATHS;
+    const had = Object.prototype.hasOwnProperty.call(PP, '/seo-only-demo');
+    PP['/seo-only-demo'] = 'aeo';
+    try {
+      eq('27: a page that names its product beats a CRM campaign',
+         META.resolveProduct({ page_url: '/seo-only-demo', utm_campaign: 'CRM-Offer', utm_medium: 'paid' }), 'aeo');
+      eq('27: and the event slug agrees with it',
+         META.resolveEventProduct({ page_url: '/seo-only-demo', utm_campaign: 'CRM-Offer', utm_medium: 'paid' }), 'aeo');
+      /* The campaign still decides on a page with no entry, so this is
+         not just "the campaign never wins". */
+      eq('27: the campaign still decides on an unmapped page',
+         META.resolveProduct({ page_url: '/some-lander', utm_campaign: 'CRM-Offer', utm_medium: 'paid' }), 'crm');
+    } finally {
+      if (!had) delete PP['/seo-only-demo'];
+    }
+  }
+
+  /* WHAT THEY TICKED STILL OUTRANKS THE AD. The ad is a guess about
+     them; the checkbox is them. */
+  eq('27: an AEO tick beats a CRM campaign',
+     META.resolveProduct({ page_url: '/demo', product_interest: 'aeo', utm_campaign: 'CRM-Offer', utm_medium: 'paid' }), 'aeo');
+  /* AN UNREADABLE PAGE IS STILL UNTAGGED. "We could not tell which page
+     this was" must not be rescued into a product by the campaign -- the
+     null is the honest report and a test already pins it for the
+     no-campaign case. */
+  eq('27: an unreadable page stays null even with a CRM campaign',
+     META.resolveProduct({ page_url: 'not a url', utm_campaign: 'CRM-Offer', utm_medium: 'paid' }), null);
+  /* AND THE EVENT SLUG MOVES WITH IT. The column and the Meta event
+     disagreeing is the failure the ticked-selection fix closed on 15
+     Sept; the campaign is the same hazard one input later. */
+  eq('27: the event slug follows the campaign too',
+     META.resolveEventProduct({ page_url: '/demo', utm_campaign: 'CRM-Offer', utm_medium: 'paid' }), 'crm');
+  eq('27: the event slug still honours a both-ticked selection',
+     META.resolveEventProduct({ page_url: '/demo', product_interest: 'aeo,crm', utm_campaign: 'CRM-Offer', utm_medium: 'paid' }), 'aeo,crm');
+
+  /* ── THE SELECTOR ACTUALLY HIDES ───────────────────────────────
+     syncNeedsVisibility is where the decision lands. Driven, because an
+     ordering or presence assertion here would survive the condition
+     being dropped entirely. */
+  for (const [tag, src] of [['form', demo], ['form-popup', popup]]) {
+    const mk = () => {
+      const cls = new Set(['field-wrapper', 'is-collapsible', 'is-hidden']);
+      return { classList: { toggle: (c, on) => (on ? cls.add(c) : cls.delete(c)), contains: (c) => cls.has(c) },
+               style: {}, has: (c) => cls.has(c) };
+    };
+    const run = (campaign, medium) => {
+      const wrap = mk();
+      const body = [
+        (/const HIDDEN_CLASS = '[^']*';/.exec(src) || [''])[0],
+        (/const OFFER_CRM\s+= '[^']*';/.exec(src) || [''])[0],
+        (/const OFFER_AEO\s+= '[^']*';/.exec(src) || [''])[0],
+        (/const OFFER_SELECTOR\s+= '[^']*';/.exec(src) || [''])[0],
+        (/const OFFER_AD_MEDIUMS = \[[^\]]*\];/.exec(src) || [''])[0],
+        liftFunction(src, 'campaignOffer'),
+        liftFunction(src, 'currentOffer'),
+        liftFunction(src, 'offerIsSelector'),
+        liftFunction(src, 'setWrapHidden'),
+        liftFunction(src, 'syncNeedsVisibility'),
+        'syncNeedsVisibility(); return wrap;',
+      ].join('\n');
+      return new Function('document', 'formState', 'sellToChecked', 'hideError', 'getComputedStyle', 'wrap', body)(
+        { getElementById: (id) => (id === 'needs-wrap' ? wrap : null) },
+        /* offer_*, not utm_* -- the offer reads what we REMEMBER them
+           coming for, which is a different column to what this visit is
+           attributed to. A stub using utm_* here would pass while the
+           real page showed the wrong offer. */
+        { offer_campaign: campaign, offer_medium: medium },
+        () => ({ id: 'sell-b2b' }), () => {}, undefined, wrap);
+    };
+    ok(`27: ${tag} SHOWS the selector for direct traffic`,   !run('', '').has('is-hidden'));
+    ok(`27: ${tag} SHOWS the selector for a brand campaign`, !run('UR_G_S_US_BR_Brand-tIS', 'cpc').has('is-hidden'));
+    ok(`27: ${tag} SHOWS the selector for a LinkedIn post`,  !run('gushwork', 'social').has('is-hidden'));
+    ok(`27: ${tag} SHOWS the selector for a bare campaign id`, !run('120241181781830373', 'paid').has('is-hidden'));
+    ok(`27: ${tag} HIDES the selector for an AEO ad`,         run('FLI__Prospecting__TOF__CBO', 'paid').has('is-hidden'));
+    ok(`27: ${tag} HIDES the selector for a CRM ad`,          run('FLI__Prospecting__CRM-Offer__CBO', 'paid').has('is-hidden'));
+  }
+
+  /* ── B2C IS ALLOWED WHEREVER CRM IS SOLD ───────────────────────
+     A CRM-campaign lead on /demo is being sold the CRM product, so the
+     B2C dead end removed for /ai-demo on 15 Sept must not come back for
+     them. The const is untouched, so section 21 still holds. */
+  for (const [tag, src] of [['form', demo], ['form-popup', popup]]) {
+    const run = (path, campaign, medium) => {
+      const body = [
+        (/const B2C_ALLOWED_PATHS = \[[^\]]*\];/.exec(src) || [''])[0],
+        (/const OFFER_CRM\s+= '[^']*';/.exec(src) || [''])[0],
+        (/const OFFER_AEO\s+= '[^']*';/.exec(src) || [''])[0],
+        (/const OFFER_SELECTOR\s+= '[^']*';/.exec(src) || [''])[0],
+        (/const OFFER_AD_MEDIUMS = \[[^\]]*\];/.exec(src) || [''])[0],
+        liftFunction(src, 'campaignOffer'),
+        liftFunction(src, 'currentOffer'),
+        liftFunction(src, 'b2cAllowedHere'),
+        'return b2cAllowedHere();',
+      ].join('\n');
+      return new Function('window', 'formState', body)(
+        { location: { pathname: path } }, { offer_campaign: campaign, offer_medium: medium });
+    };
+    ok(`27: ${tag} still allows B2C on /ai-demo`,           run('/ai-demo', '', '') === true);
+    ok(`27: ${tag} still refuses B2C on /demo by default`,  run('/demo', '', '') === false);
+    ok(`27: ${tag} allows B2C for a CRM campaign on /demo`, run('/demo', 'CRM-Offer', 'paid') === true);
+    ok(`27: ${tag} still refuses B2C for an AEO campaign`,  run('/demo', 'TOF', 'paid') === false);
   }
 }
 

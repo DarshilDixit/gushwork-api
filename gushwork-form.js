@@ -1,6 +1,10 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.14.0  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.15.0  (/demo PAGE VERSION - thru github/jsdlivr)
 
+  v5.15.0 — the ad campaign decides which offer we show, not the pathname.
+    utm_campaign + utm_medium pick CRM, AEO or the selector; every
+    uncertain case asks. Remembered for 30 days so a return visit still
+    knows which ad brought them.
   v5.14.0 — the phone flag follows the visitor's IP, and asks in time.
     initialCountry was hardcoded 'us' and corrected afterwards by
     setCountry, so the field asserted a country nobody had checked and
@@ -584,7 +588,12 @@
     function syncNeedsVisibility() {
       var wrap = document.getElementById('needs-wrap');
       if (!wrap) return;
-      var chosen = !!sellToChecked();
+      /* TWO CONDITIONS NOW: they have answered sell-to, AND the campaign
+         did not already tell us which product they came for. The
+         mandatory-answer guard in handleStep1Next reads needsVisible(),
+         so hiding it here also stops the form demanding an answer to a
+         question nobody can see -- no second change needed there. */
+      var chosen = !!sellToChecked() && offerIsSelector();
       setWrapHidden(wrap, !chosen);
       /* A stale error under a hidden question reads as an error about
          the thing above it. */
@@ -594,10 +603,86 @@
     function needsAsked() {
       return !!document.querySelector('input[name="needs"], #need-aeo, #need-crm');
     }
-    function wantsCrm() { return selectedNeeds().indexOf('crm') !== -1; }
+    /* A TICK OR A CRM CAMPAIGN. Everything downstream of this reads the
+       checkboxes -- the RevenueHero router, the about-business textarea --
+       and with the selector hidden nothing is ticked, so a CRM-campaign
+       lead would have booked with the AEO team and never been asked about
+       their business. product_interest is deliberately NOT written from
+       here: it stays whatever they actually ticked, which for a hidden
+       selector is nothing at all, because NULL there means "we never
+       asked" and an ad's guess is not an answer they gave. */
+    function wantsCrm() {
+      return currentOffer() === OFFER_CRM || selectedNeeds().indexOf('crm') !== -1;
+    }
+
+    /* ── WHICH OFFER THIS VISITOR SEES ──────────────────────────
+       Until 17 Sept 2026 the pathname decided, so a CRM ad that landed
+       anywhere but /ai-demo sold AEO and nothing in the URL said
+       otherwise. Requested by Swapnil on 17 Sept: the campaign decides.
+
+       WHY THIS IS THE FIX AND NOT JUST A ROUTING TIDY-UP. Measured over
+       the two days after the question shipped, 18 of 44 people ticked
+       BOTH boxes -- and both-ticked routes the booking to the CRM team.
+       None of those 18 came from a CRM ad; 8 came from AEO ads; 12
+       booked. Asking a question somebody has already answered by which
+       ad they clicked is what produced those, because a second checkbox
+       costs nothing to tick.
+
+       SELECTOR IS THE FALLBACK IN EVERY UNCERTAIN CASE, never AEO. A
+       campaign we cannot read, a channel that is not an ad, no campaign
+       at all -- all of them mean "we were not told", and the honest
+       response to that is to ask. Forcing AEO on an unreadable campaign
+       would hide the CRM offer from people who clicked a CRM ad, which
+       is the exact failure this change exists to remove, re-created one
+       layer down.
+
+       THE RULE LIVES IN THREE FILES: here, gushwork-form-popup.js, and
+       campaignOffer() in meta-capi.js, which is what the server resolves
+       leads.product with. A test lifts all three and asserts they agree
+       -- the same guard B2C_ALLOWED_PATHS carries, for the same reason.
+       Keep them byte-identical. */
+    const OFFER_CRM        = 'crm';
+    const OFFER_AEO        = 'aeo';
+    const OFFER_SELECTOR   = 'selector';
+    const OFFER_AD_MEDIUMS = ['paid', 'cpc'];
+
+    function campaignOffer(utm_campaign, utm_medium) {
+      var m = String(utm_medium == null ? '' : utm_medium).trim().toLowerCase();
+      if (OFFER_AD_MEDIUMS.indexOf(m) === -1) return OFFER_SELECTOR;
+      var c = String(utm_campaign == null ? '' : utm_campaign).trim().toLowerCase();
+      /* Empty, a bare id, or a macro the ad platform never filled in.
+         Measured over 90 days: 17 leads arrive as 120241181781830373 and
+         6 as {{campaign.name}}. */
+      if (!c || /^[0-9]+$/.test(c) || c.indexOf('{{') !== -1 || c.indexOf('}}') !== -1) return OFFER_SELECTOR;
+      if (c.indexOf('crm') !== -1) return OFFER_CRM;
+      /* "brand", never "br". Every campaign we have containing br already
+         contains brand, so the short token earns nothing -- and it is the
+         trap that just bit Source_Bucket__c in Salesforce, where a
+         two-letter CONTAINS routed "client", "link" and the name "Jolian"
+         to LinkedIn. Prospecting__Broad__CBO would have become a selector
+         campaign silently. */
+      if (c.indexOf('brand') !== -1) return OFFER_SELECTOR;
+      return OFFER_AEO;
+    }
+
+    /* Reads offer_campaign / offer_medium -- URL, then this visit, then
+       the 30-day cookie. Deliberately NOT utm_campaign, which is this
+       visit only and must stay that way for attribution. */
+    function currentOffer() {
+      return campaignOffer(formState.offer_campaign, formState.offer_medium);
+    }
+    function offerIsSelector() { return currentOffer() === OFFER_SELECTOR; }
+
     function b2cAllowedHere() {
+      /* THE CAMPAIGN OPENS THIS GATE TOO. B2C_ALLOWED_PATHS is about
+         which product is being sold, and a CRM-campaign lead on /demo is
+         being sold the CRM product just as surely as an /ai-demo
+         visitor. Leaving it path-only would dead-end them on the
+         disqualified step -- the exact thing removed for /ai-demo on 15
+         Sept, re-created for a lead who arrived a different way. The
+         const itself is unchanged, so the four-copies test still holds. */
       var p = (window.location.pathname || '').toLowerCase().replace(/\/+$/, '') || '/';
-      return B2C_ALLOWED_PATHS.indexOf(p) !== -1;
+      return B2C_ALLOWED_PATHS.indexOf(p) !== -1 || currentOffer() === OFFER_CRM;
     }
 
     const formState = {
@@ -616,6 +701,8 @@
       utm_source: '',
       utm_medium: '',
       utm_campaign: '',
+      offer_campaign: '',
+      offer_medium: '',
       utm_content: '',
       utm_term: '',
       referrer: '',
@@ -645,8 +732,38 @@
     ======================================================= */
 
     function getCookie(name) {
-      var match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
-      return match ? decodeURIComponent(match[2]) : '';
+      /* WRAPPED SINCE 17 SEPT 2026. document.cookie throws outright in a
+         few privacy configurations, and captureUTMs now reads a cookie --
+         so an unwrapped throw here would take out initialisation before
+         the form exists rather than costing one optional value. Same
+         defence rememberCampaign and the sessionStorage reads carry. */
+      try {
+        var match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+        return match ? decodeURIComponent(match[2]) : '';
+      } catch (e) { return ''; }
+    }
+
+    /* Thirty days, per the request. Written ONLY when the URL carried a
+       campaign, so a later organic visit cannot refresh a stale one into
+       another month of life.
+
+       The pair is written together and read together: an offer decided
+       from this visit's medium and the last visit's campaign would be a
+       blend of two arrivals rather than either one.
+
+       Host-scoped unless we are actually on gushwork.ai, where it is set
+       on the parent domain so an ad landing on the apex and a form on www
+       are one visitor. Wrapped, because cookies throw outright in some
+       privacy modes and a lost cookie must never cost the lead. */
+    const OFFER_COOKIE_DAYS = 30;
+    function rememberCampaign(campaign, medium) {
+      try {
+        var host = (window.location.hostname || '');
+        var dom  = /(^|\.)gushwork\.ai$/.test(host) ? ';domain=.gushwork.ai' : '';
+        var attrs = ';max-age=' + (OFFER_COOKIE_DAYS * 86400) + ';path=/' + dom + ';SameSite=Lax';
+        document.cookie = 'gw_utm_campaign=' + encodeURIComponent(campaign) + attrs;
+        document.cookie = 'gw_utm_medium='   + encodeURIComponent(medium || '') + attrs;
+      } catch (e) { /* no cookie, no offer memory -- the selector still shows */ }
     }
 
     function initSession() {
@@ -668,9 +785,56 @@
 
     function captureUTMs() {
       const p = new URLSearchParams(window.location.search);
+      /* THE CAMPAIGN NOW SURVIVES THE TAB CLOSING, because the offer is
+         decided from it. sessionStorage already carried it perfectly
+         WITHIN a visit -- measured over 90 days, of 1,715 leads whose
+         landing URL carried utm_campaign and who then submitted on /demo,
+         zero lost it, including everyone who came via the homepage -- so
+         the cookie is not for the cross-page case. It is for the return
+         visit: 42 people in 180 days first arrived on a paid ad and came
+         back later with no campaign in the URL, on average 13.5 days
+         later, 40 of them inside 30 days. Without it they are asked again
+         which product they want, having already told us by clicking.
+
+         WRITTEN HERE, READ INTO offer_* BELOW, AND DELIBERATELY NOT
+         INTO utm_*. The first draft of this folded the cookie into the
+         attribution chain; see the block below for the 40 leads that
+         would have silently changed channel.
+
+         A CAMPAIGN IN THE URL ALWAYS WINS AND REWRITES THE COOKIE, so
+         somebody returning from a different ad gets the new offer --
+         and a visit carrying no campaign never re-stamps it, so one ad
+         click cannot renew itself indefinitely. */
+      var urlCampaign = p.get('utm_campaign') || '';
+      var urlMedium   = p.get('utm_medium')   || '';
+      if (urlCampaign) rememberCampaign(urlCampaign, urlMedium);
+
       formState.utm_source = p.get('utm_source') || sessionStorage.getItem('gw_utm_source') || '';
-      formState.utm_medium = p.get('utm_medium') || sessionStorage.getItem('gw_utm_medium') || '';
-      formState.utm_campaign = p.get('utm_campaign') || sessionStorage.getItem('gw_utm_campaign') || '';
+      formState.utm_medium = urlMedium   || sessionStorage.getItem('gw_utm_medium')   || '';
+      formState.utm_campaign = urlCampaign || sessionStorage.getItem('gw_utm_campaign') || '';
+
+      /* ── THE OFFER'S CAMPAIGN IS A DIFFERENT QUESTION TO ATTRIBUTION,
+         AND MERGING THEM CORRUPTED THE COLUMN. Caught before shipping.
+
+         leads.utm_campaign answers "which campaign brought this visit".
+         Reading the 30-day cookie into it would have changed that to
+         "within 30 days" -- silently re-attributing 40 real leads from
+         organic to paid, with no error and nothing on any dashboard
+         saying the meaning had moved. Worse, only campaign and medium
+         had a cookie, so those leads would have carried a paid campaign
+         beside an EMPTY utm_source, and Source_Bucket__c reads
+         utm_source -- Salesforce and this column would have disagreed
+         about the same lead.
+
+         So they are two fields. utm_* stays this visit, exactly as it
+         always has. offer_* is what we remember them coming for, and
+         nothing but the product resolver reads it. Sent to the server
+         because resolveProduct has to reach the same answer the page
+         showed -- and it is no new trust, the utm_ fields beside it are
+         equally client-supplied. NOT sent to /session: form_sessions is
+         an attribution table. */
+      formState.offer_campaign = formState.utm_campaign || getCookie('gw_utm_campaign') || '';
+      formState.offer_medium   = formState.utm_medium   || getCookie('gw_utm_medium')   || '';
       formState.utm_content = p.get('utm_content') || sessionStorage.getItem('gw_utm_content') || '';
       formState.utm_term = p.get('utm_term') || sessionStorage.getItem('gw_utm_term') || '';
       formState.referrer = sessionStorage.getItem('gw_referrer') || 'direct';
@@ -3004,7 +3168,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.14.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.15.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
