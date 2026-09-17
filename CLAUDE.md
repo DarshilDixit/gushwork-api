@@ -227,6 +227,38 @@ verified. There is no PUT on the collection path, only on `/{location}` — the
 collection path answers 404 for every write method, which reads as "no access"
 and is not.
 
+**EDITING PAGE ELEMENTS HEADLESSLY: WHAT WORKS AND WHAT DOES NOT.** Learned
+on 18 Sept 2026 adding the about-business textarea to `/ai-crm`. The MCP
+Designer tools can create the element and most of its properties, but two
+form-field properties are Designer-only and will silently stay at Webflow's
+defaults:
+
+| Property | Headless? |
+|---|---|
+| element + position + classes (`data_element_builder`) | yes |
+| DOM id (`set_settings` key `domId`) | yes |
+| custom attributes, incl. **`maxlength`** (`set_attributes`) | yes — overrides Webflow's own, no duplicate |
+| field **Name** (`set_settings` key `name`) | **stores but never renders** |
+| **Placeholder** | **not settable at all** — *"not applicable to this element"* |
+
+**The `name` one is the trap: the write succeeds, `get_settings` reads the
+new value straight back, and the published HTML keeps `name="field"`.**
+Verified across two republishes and five minutes of polling, so it is not a
+compile race. Stored is not rendered. Do not trust a read-back here.
+
+**Placeholder is the one that matters**, because the form script turns it
+into the visible floating label — a field created headlessly shows
+**"Example Text"** to real visitors until somebody opens the Designer. Set
+it there, or do not create form fields headlessly at all.
+
+**AND THE TEXTAREA NEEDS PAGE-LEVEL CSS THAT DOES NOT COME WITH IT.** The
+float-label wrapper centres its label vertically, which is right for a
+one-line input and wrong for a tall textarea — the label floats in the
+middle of the box. `/ai-demo` has four rules in its **head** custom code
+pinning it to the top and fixing the padding; they must be ported to any
+page that gains the field. `/ai-crm` went live without them and looked
+broken.
+
 **AND SWEEP EVERY PAGE, not just the two you changed.** The pin lives in a
 `<script src>`, and Webflow lets a *page* carry its own script tag that a
 Project-Settings republish never touches. Two were found stale on 10 Sept, both
@@ -911,6 +943,32 @@ The on-screen heading is **"What are you looking for?"**, changed in Webflow
 on 16 Sept. Nothing in the code reads it — it is recorded here only so this
 file and the page agree.
 
+**THE TWO ROUTER ATTRIBUTES ARE NOT INTERCHANGEABLE, and picking the wrong
+one sends a page's traffic to the wrong team.** `rhRouterId()` reads
+`data-rh-router-crm` ONLY when `wantsCrm()` is true, then falls through to
+`data-rh-router`, then to 6138.
+
+| Attribute | Applies | Use it on |
+|---|---|---|
+| `data-rh-router` | always | a page that sells ONE product |
+| `data-rh-router-crm` | only when this visitor is a CRM lead | a page where the visitor decides |
+
+So `/demo` carries `data-rh-router-crm="6804"` and no `data-rh-router` —
+conditional, because the visitor decides there. `/ai-demo` and `/ai-crm`
+carry `data-rh-router="6804"` — unconditional, because the page decides.
+
+**A CRM PAGE MUST NOT USE THE `-crm` ONE.** `wantsCrm()` is true only when
+the visitor ticked AI-CRM or arrived on a CRM campaign, and a CRM page has
+neither the checkboxes nor, for most of its traffic, a campaign — so
+direct, organic and brand visitors would fall straight past it to the AEO
+team. That is what `/ai-crm` did until 18 Sept, when it had no attribute
+at all. The plain attribute asserts a fact about the page; the `-crm` one
+depends on detecting something about the person.
+
+The attribute lives on the form wrapper, so it travels with the content
+when `/ai-crm` is duplicated into `/ai-demo` — and both already hold the
+same value, so that swap is a no-op for routing.
+
 **HIDDEN BY A CLASS, NOT `display:none`, AND THAT IS LOAD-BEARING.** Both
 wrappers carry `field-wrapper is-collapsible is-hidden`. Webflow cannot store
 an inline style, so `style.display = ''` could never reveal anything — that
@@ -966,6 +1024,26 @@ That makes **FOUR copies of the CRM path set**: `PRODUCT_PATHS` in
 agree. Add a product page to the catalogue without adding it to the forms
 and the visitor is disqualified on a page the server has already decided
 is CRM — nothing else in the repo would say so.
+
+**AND THE REVERSE HAPPENED ON 18 SEPT 2026: a page live in Webflow and in
+NEITHER list.** `/ai-crm` shipped carrying `data-rh-router="6804"`, so its
+bookings reached the CRM team, while being absent from `PRODUCT_PATHS` and
+from both `B2C_ALLOWED_PATHS`. Every lead from it was stored and reported
+as `aeo` — wrong Salesforce picklist, wrong Meta event, 12000 of predicted
+value instead of 5000 — and a B2C answer dead-ended the prospect. The
+booking went to the right team and the record said the wrong thing.
+
+**IT HALF-WORKED, WHICH IS WHY IT SURVIVED.** A visitor arriving on a CRM
+campaign got through the gate by the OTHER door — `currentOffer() === crm`
+— so the page looked correct to anyone who tested it from an ad, and
+failed for direct, organic, brand and AEO-ad traffic, which is most of it.
+Found by a human answering B2C on the live page. Section 21 could not
+catch it: that test asserts the three lists AGREE, and they agreed
+perfectly about a page none of them had heard of.
+
+**So the check when a new product page appears is "is it in the
+catalogue", not "do the lists agree".** A page can be live, correctly
+routed and entirely absent from this repo.
 
 **Two `sell_to ILIKE 'B2B%'` predicates exist and they MOVE TOGETHER** —
 `/monitor/sdr` and the `noBooking` card in `/monitor/metrics` that counts
@@ -1033,7 +1111,15 @@ it was written, not by anyone opening the tab.
 `PRODUCTS`, `PRODUCT_PATHS`, `DEFAULT_PRODUCT` and `resolveProduct` live in
 `meta-capi.js` and are imported by `index.js` — one catalogue, so the
 stored column and the Meta event cannot disagree. Today `PRODUCT_PATHS` is
-`{'/ai-demo': 'crm'}`; everything else is `aeo`.
+`{'/ai-demo': 'crm', '/ai-crm': 'crm'}`; everything else is `aeo`.
+
+**`/ai-crm` is the rebuilt CRM page and will eventually replace
+`/ai-demo`'s content wholesale.** Both are mapped, both resolve `crm`, and
+the swap therefore changes nothing here. It is also the FIRST entry that
+makes the page-beats-campaign rule observable: until there were two, the
+only mapping and the only overriding campaign answer were both `crm`, so
+the guard could be deleted without any test noticing. Measured — the
+mutation survived a full bar.
 
 This is the opposite of how the rest of the repo works, deliberately. An
 AEO allowlist rots: the form is live on a dozen pages — `/demo`, `/start`,
@@ -1083,6 +1169,20 @@ when the textarea landed; measured, a worst-case body was already 12,755
 bytes without it. The `slice(0, 1000)` is a backstop for the column and
 matches `maxlength="1000"` on the Webflow textarea, so what the visitor
 sees on screen is what the column keeps.
+
+**THAT LAST SENTENCE WAS AN INTENTION, NOT A MEASUREMENT, UNTIL 18 SEPT
+2026.** All three pages carrying the field — `/demo`, `/ai-demo` and
+`/ai-crm` — rendered `maxlength="5000"`, Webflow's default, while the
+server cut at 1000. Anyone writing a long answer would have lost the tail
+silently: no warning, no error, and nothing in the row to show it had been
+cut. Never actually bit — the longest answer ever recorded is 262
+characters and no row sits at exactly 1000 — so this was a trap rather
+than a loss. All three are now genuinely 1000.
+
+**THE FIELD IS ON THREE PAGES, and the third is easy to miss.** `/demo`
+has it behind the AI-CRM tick inside `#about-business-wrap`; `/ai-demo`
+and `/ai-crm` have it permanently visible with no wrapper. A change to
+"the about-business textarea" is three edits.
 
 **A Meta CAPI failure only reaches `recordFailure` because the push
 functions THROW.** They end in `Promise.allSettled`, which never rejects,
