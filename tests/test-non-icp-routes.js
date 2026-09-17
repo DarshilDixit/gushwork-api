@@ -1681,6 +1681,39 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
        String(ev && ev.custom_data && ev.custom_data.predicted_ltv));
   }
 
+  /* ── /partial CARRIES THE CAMPAIGN TOO ────────────────────────
+     MEASURED GAP, not a hypothetical: dropping the campaign from
+     /partial's resolveProduct call SURVIVED the whole bar, because
+     every case above drives /submit. /partial writes leads.product on
+     its own insert and fires StartTrial with its own content_ids, so a
+     route that forgot the campaign would store aeo for a CRM-ad lead
+     for the entire time they are filling the form in -- and report that
+     to Meta -- with /submit quietly correcting the column later and the
+     StartTrial conversion already counted against the wrong product. */
+  for (const [label, campaign, medium, wantProduct, wantIds] of [
+    ['CRM ad', 'FLI__Prospecting__CRM-Offer__CBO__StartTrial', 'paid', 'crm', ['crm']],
+    ['AEO ad', 'FLI__Prospecting__TOF__CBO__StartTrial',       'paid', 'aeo', ['aeo']],
+    ['brand',  'UR_G_S_US_BR_Brand-tIS',                       'cpc',  'aeo', ['aeo']],
+  ]) {
+    reset();
+    await post('/partial', {
+      session_id: '00000000-0000-4000-8000-0000000000f' + (campaign.length % 9),
+      email: 'buyer@cleanbiz.test', sell_to: 'B2B', step_reached: 1,
+      page_url: 'https://www.gushwork.ai/demo',
+      utm_campaign: campaign, utm_medium: medium,
+    });
+    await sleep(600);
+    const ins = S.writes.find((w) => /INSERT INTO leads \(/.test(w.flat));
+    const cols = ins ? boundCols(ins) : {};
+    ok(`partial-campaign[${label}]: stored product is ${wantProduct}`,
+       cols.product === wantProduct, String(cols.product));
+    const st = S.metaPayloads.find((x) => (x.data || []).some((e) => e.event_name === 'StartTrial'));
+    const ev = st && st.data.find((e) => e.event_name === 'StartTrial');
+    ok(`partial-campaign[${label}]: StartTrial content_ids are ${JSON.stringify(wantIds)}`,
+       !!ev && JSON.stringify(ev.custom_data.content_ids) === JSON.stringify(wantIds),
+       JSON.stringify(ev && ev.custom_data && ev.custom_data.content_ids));
+  }
+
   /* A TICK STILL OUTRANKS THE AD. Somebody on a CRM campaign who does
      see the selector -- they arrived before the cookie, or the markup
      is there anyway -- and ticks Lead Gen is a Lead Gen lead. The ad is

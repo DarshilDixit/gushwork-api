@@ -3363,6 +3363,35 @@ async function section12() {
      them with the wrong team, on the one page that was never ambiguous. */
   eq('27: an AEO campaign on /ai-demo still stores crm',
      META.resolveProduct({ page_url: 'https://www.gushwork.ai/ai-demo', utm_campaign: 'TOF', utm_medium: 'paid' }), 'crm');
+  /* THE PAGE-WINS GUARD IS INVISIBLE ON TODAY'S CATALOGUE, and that is
+     precisely why it needs this test. PRODUCT_PATHS has exactly one
+     entry, /ai-demo -> crm, and the only campaign answer that can
+     override anything is also crm -- so the two agree and removing the
+     guard changes no result. Measured: mutating it away survived the
+     entire bar.
+
+     It stops being invisible the moment a second product page exists,
+     and at that point a CRM campaign would silently re-tag every
+     visitor to that page. So the catalogue is given a temporary second
+     entry here and taken away again. */
+  {
+    const PP = META.PRODUCT_PATHS;
+    const had = Object.prototype.hasOwnProperty.call(PP, '/seo-only-demo');
+    PP['/seo-only-demo'] = 'aeo';
+    try {
+      eq('27: a page that names its product beats a CRM campaign',
+         META.resolveProduct({ page_url: '/seo-only-demo', utm_campaign: 'CRM-Offer', utm_medium: 'paid' }), 'aeo');
+      eq('27: and the event slug agrees with it',
+         META.resolveEventProduct({ page_url: '/seo-only-demo', utm_campaign: 'CRM-Offer', utm_medium: 'paid' }), 'aeo');
+      /* The campaign still decides on a page with no entry, so this is
+         not just "the campaign never wins". */
+      eq('27: the campaign still decides on an unmapped page',
+         META.resolveProduct({ page_url: '/some-lander', utm_campaign: 'CRM-Offer', utm_medium: 'paid' }), 'crm');
+    } finally {
+      if (!had) delete PP['/seo-only-demo'];
+    }
+  }
+
   /* WHAT THEY TICKED STILL OUTRANKS THE AD. The ad is a guess about
      them; the checkbox is them. */
   eq('27: an AEO tick beats a CRM campaign',
