@@ -1,7 +1,7 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.15.0-ads  (ADS PAGE VERSION)
+  GUSHWORK — MULTI-STEP FORM  v5.15.1-ads  (ADS PAGE VERSION)
 
-  Tracks /demo v5.15.0. Full feature parity with /demo, EXCEPT the
+  Tracks /demo v5.15.1. Full feature parity with /demo, EXCEPT the
   booking step, which keeps the Ads page's fullscreen modal
   presentation — opened after step 2 — instead of /demo's inline
   column render, AND the close affordances that modal needs (v5.7.2).
@@ -10,6 +10,7 @@
   modal needs a way out and an inline column does not, so this
   section has no /demo counterpart to track.
 
+  v5.15.1-ads — /ai-crm joins B2C_ALLOWED_PATHS, matching /demo.
   v5.15.0-ads — the ad campaign decides which offer we show, not the
     pathname. Ported from /demo v5.15.0, identical. The ad landers carry
     no selector markup, so hiding it is a no-op here -- the rule is
@@ -3577,7 +3578,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.15.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.15.1-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

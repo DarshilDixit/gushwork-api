@@ -1,6 +1,8 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.15.0  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.15.1  (/demo PAGE VERSION - thru github/jsdlivr)
 
+  v5.15.1 — /ai-crm joins B2C_ALLOWED_PATHS. The page was live and
+    selling the CRM product while a B2C answer dead-ended the prospect.
   v5.15.0 — the ad campaign decides which offer we show, not the pathname.
     utm_campaign + utm_medium pick CRM, AEO or the selector; every
     uncertain case asks. Remembered for 30 days so a return visit still
@@ -3168,7 +3170,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.15.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.15.1 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
