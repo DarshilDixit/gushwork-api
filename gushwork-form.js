@@ -665,11 +665,11 @@
       return OFFER_AEO;
     }
 
-    /* Read from formState, which captureUTMs() fills before anything
-       below is wired -- URL, then sessionStorage, then the 30-day
-       cookie. */
+    /* Reads offer_campaign / offer_medium -- URL, then this visit, then
+       the 30-day cookie. Deliberately NOT utm_campaign, which is this
+       visit only and must stay that way for attribution. */
     function currentOffer() {
-      return campaignOffer(formState.utm_campaign, formState.utm_medium);
+      return campaignOffer(formState.offer_campaign, formState.offer_medium);
     }
     function offerIsSelector() { return currentOffer() === OFFER_SELECTOR; }
 
@@ -701,6 +701,8 @@
       utm_source: '',
       utm_medium: '',
       utm_campaign: '',
+      offer_campaign: '',
+      offer_medium: '',
       utm_content: '',
       utm_term: '',
       referrer: '',
@@ -800,8 +802,31 @@
       if (urlCampaign) rememberCampaign(urlCampaign, urlMedium);
 
       formState.utm_source = p.get('utm_source') || sessionStorage.getItem('gw_utm_source') || '';
-      formState.utm_medium = urlMedium   || sessionStorage.getItem('gw_utm_medium')   || getCookie('gw_utm_medium')   || '';
-      formState.utm_campaign = urlCampaign || sessionStorage.getItem('gw_utm_campaign') || getCookie('gw_utm_campaign') || '';
+      formState.utm_medium = urlMedium   || sessionStorage.getItem('gw_utm_medium')   || '';
+      formState.utm_campaign = urlCampaign || sessionStorage.getItem('gw_utm_campaign') || '';
+
+      /* ── THE OFFER'S CAMPAIGN IS A DIFFERENT QUESTION TO ATTRIBUTION,
+         AND MERGING THEM CORRUPTED THE COLUMN. Caught before shipping.
+
+         leads.utm_campaign answers "which campaign brought this visit".
+         Reading the 30-day cookie into it would have changed that to
+         "within 30 days" -- silently re-attributing 40 real leads from
+         organic to paid, with no error and nothing on any dashboard
+         saying the meaning had moved. Worse, only campaign and medium
+         had a cookie, so those leads would have carried a paid campaign
+         beside an EMPTY utm_source, and Source_Bucket__c reads
+         utm_source -- Salesforce and this column would have disagreed
+         about the same lead.
+
+         So they are two fields. utm_* stays this visit, exactly as it
+         always has. offer_* is what we remember them coming for, and
+         nothing but the product resolver reads it. Sent to the server
+         because resolveProduct has to reach the same answer the page
+         showed -- and it is no new trust, the utm_ fields beside it are
+         equally client-supplied. NOT sent to /session: form_sessions is
+         an attribution table. */
+      formState.offer_campaign = formState.utm_campaign || getCookie('gw_utm_campaign') || '';
+      formState.offer_medium   = formState.utm_medium   || getCookie('gw_utm_medium')   || '';
       formState.utm_content = p.get('utm_content') || sessionStorage.getItem('gw_utm_content') || '';
       formState.utm_term = p.get('utm_term') || sessionStorage.getItem('gw_utm_term') || '';
       formState.referrer = sessionStorage.getItem('gw_referrer') || 'direct';

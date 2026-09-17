@@ -1714,6 +1714,45 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
        JSON.stringify(ev && ev.custom_data && ev.custom_data.content_ids));
   }
 
+  /* ── THE RETURN VISIT: REMEMBERED OFFER, NO ATTRIBUTION ───────
+     The shape that only exists because of the 30-day cookie, and the
+     one that nearly corrupted leads.utm_campaign. Somebody clicked a
+     CRM ad three weeks ago and comes back today with a clean URL: they
+     must see and get the CRM offer, and this visit must still be
+     recorded as having NO campaign, because it had none.
+
+     Merging the two would have re-attributed 40 real leads from organic
+     to paid, and left them carrying a paid campaign beside an empty
+     utm_source -- the field Source_Bucket__c actually reads, so
+     Salesforce and this column would have disagreed about one lead. */
+  {
+    reset();
+    await realFetch(BASE + '/submit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: '00000000-0000-4000-8000-0000000000e2', email: 'x@cleanbiz.test',
+        website: 'https://cleanbiz.test', company: 'Clean', first_name: 'A', last_name: 'B',
+        sell_to: 'B2B', page_url: 'https://www.gushwork.ai/demo',
+        offer_campaign: 'FLI__Prospecting__CRM-Offer__CBO__StartTrial', offer_medium: 'paid',
+        /* no utm_* at all -- this visit came in clean */
+      }),
+    });
+    await sleep(600);
+    const ins = S.writes.find((w) => /INSERT INTO leads \(/.test(w.flat));
+    const cols = ins ? boundCols(ins) : {};
+    ok('return-visit: the remembered CRM ad still decides the product',
+       cols.product === 'crm', String(cols.product));
+    ok('return-visit: THIS visit is still attributed to no campaign',
+       !cols.utm_campaign, JSON.stringify(cols.utm_campaign));
+    ok('return-visit: and to no medium',
+       !cols.utm_medium, JSON.stringify(cols.utm_medium));
+    const lead = S.metaPayloads.find((x) => (x.data || []).some((e) => e.event_name === 'Lead'));
+    const ev = lead && lead.data.find((e) => e.event_name === 'Lead');
+    ok('return-visit: Meta hears crm, matching the column',
+       !!ev && JSON.stringify(ev.custom_data.content_ids) === JSON.stringify(['crm']),
+       JSON.stringify(ev && ev.custom_data && ev.custom_data.content_ids));
+  }
+
   /* A TICK STILL OUTRANKS THE AD. Somebody on a CRM campaign who does
      see the selector -- they arrived before the cookie, or the markup
      is there anyway -- and ticks Lead Gen is a Lead Gen lead. The ad is

@@ -112,7 +112,7 @@ function drive(file) {
   fns.initSession();
   fns.captureUTMs();
   fns.saveSession();
-  return { posted, cookie: documentFake.cookie };
+  return { posted, cookie: documentFake.cookie, state: formState };
 }
 
 for (const file of ['gushwork-form.js', 'gushwork-form-popup.js']) {
@@ -153,6 +153,19 @@ for (const file of ['gushwork-form.js', 'gushwork-form-popup.js']) {
      /gw_utm_medium=paid/.test(driven.cookie), driven.cookie);
   ok(`${tag}: the cookie lasts 30 days`,
      /max-age=2592000/.test(driven.cookie), driven.cookie);
+
+  /* ATTRIBUTION MUST NOT MOVE. The offer remembers; utm_campaign does
+     not. Folding the cookie into the attribution column would have
+     silently re-attributed 40 real leads from organic to paid, and left
+     them carrying a paid campaign beside an EMPTY utm_source -- which is
+     the field Source_Bucket__c reads, so Salesforce and this column
+     would have disagreed about the same lead. Caught before shipping;
+     pinned here so it cannot come back. */
+  eq(`${tag}: offer_campaign is sent`, driven.state.offer_campaign, 'CAMP');
+  eq(`${tag}: offer_medium is sent`,   driven.state.offer_medium,   'paid');
+  ok(`${tag}: /session is NOT given the offer fields`,
+     !('offer_campaign' in p.body) && !('offer_medium' in p.body),
+     Object.keys(p.body).join(','));
 }
 
 /* Both files must send the SAME key set -- the fork has silently drifted

@@ -469,7 +469,7 @@ const P = build(popup);
       + (/const OFFER_AEO\s+= '[^']*';/.exec(src) || [''])[0] + '\n'
       + (/const OFFER_SELECTOR\s+= '[^']*';/.exec(src) || [''])[0] + '\n'
       + (/const OFFER_AD_MEDIUMS = \[[^\]]*\];/.exec(src) || [''])[0];
-    const formState = { utm_campaign: opts.campaign || '', utm_medium: opts.medium || '' };
+    const formState = { offer_campaign: opts.campaign || '', offer_medium: opts.medium || '' };
     const def = /const RH_ROUTER_ID_DEFAULT = '(\d+)';/.exec(src);
     const box = (v) => ({ checked: true, value: v });
     const document = {

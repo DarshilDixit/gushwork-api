@@ -1549,7 +1549,16 @@ function finish() {
      checkbox can decide it, a route that forgot the selection would store
      one slug and fire another with nothing anywhere to reconcile them. */
   ok('product: both routes resolve from page_url, the selection AND the campaign',
-     (src.match(/resolveProduct\(\{ page_url, product_interest, utm_campaign, utm_medium \}\)/g) || []).length === 2);
+     (src.match(/resolveProduct\(\{ page_url, product_interest, utm_campaign: offer_campaign, utm_medium: offer_medium \|\| utm_medium \}\)/g) || []).length === 2);
+  /* THE OFFER'S CAMPAIGN IS NOT THE ATTRIBUTION CAMPAIGN, and both
+     routes must read the offer one. Folding the 30-day cookie into
+     utm_campaign would re-attribute real leads from organic to paid and
+     leave them carrying a paid campaign beside an empty utm_source,
+     which is the field Source_Bucket__c actually reads. */
+  ok('product: offer_campaign falls back to this visit, never the other way round',
+     /const offer_campaign\s+= \(req\.body\.offer_campaign\s+\|\| utm_campaign \|\| ''\)/.test(src));
+  ok('product: utm_campaign itself is never read from the offer field',
+     !/const utm_campaign[^;]*offer_campaign/.test(src));
   ok('product: the selection reaches Meta, so the event cannot diverge',
      /pushStartTrialToMeta\(\{[^}]*product_interest/.test(src)
      && /pushFormEventsToMeta\(\{[^}]*product_interest/.test(src));
@@ -1558,8 +1567,8 @@ function finish() {
      event payload without the campaign resolves the same lead to aeo from
      the page and reports a different product than the column holds. */
   ok('product: the campaign reaches Meta on both form paths',
-     /pushStartTrialToMeta\(\{[^}]*utm_campaign,utm_medium/.test(src)
-     && /pushFormEventsToMeta\(\{[^}]*utm_campaign,utm_medium/.test(src));
+     /pushStartTrialToMeta\(\{[^}]*utm_campaign:offer_campaign/.test(src)
+     && /pushFormEventsToMeta\(\{[^}]*utm_campaign:offer_campaign/.test(src));
   /* AND ON THE THREE BOOKING ROUTES, which share one statement. Schedule
      resolved its product from the page alone until 17 Sept 2026 because
      product_interest was never selected here -- so a lead who ticked
@@ -3437,7 +3446,11 @@ async function section12() {
       ].join('\n');
       return new Function('document', 'formState', 'sellToChecked', 'hideError', 'getComputedStyle', 'wrap', body)(
         { getElementById: (id) => (id === 'needs-wrap' ? wrap : null) },
-        { utm_campaign: campaign, utm_medium: medium },
+        /* offer_*, not utm_* -- the offer reads what we REMEMBER them
+           coming for, which is a different column to what this visit is
+           attributed to. A stub using utm_* here would pass while the
+           real page showed the wrong offer. */
+        { offer_campaign: campaign, offer_medium: medium },
         () => ({ id: 'sell-b2b' }), () => {}, undefined, wrap);
     };
     ok(`27: ${tag} SHOWS the selector for direct traffic`,   !run('', '').has('is-hidden'));
@@ -3466,7 +3479,7 @@ async function section12() {
         'return b2cAllowedHere();',
       ].join('\n');
       return new Function('window', 'formState', body)(
-        { location: { pathname: path } }, { utm_campaign: campaign, utm_medium: medium });
+        { location: { pathname: path } }, { offer_campaign: campaign, offer_medium: medium });
     };
     ok(`27: ${tag} still allows B2C on /ai-demo`,           run('/ai-demo', '', '') === true);
     ok(`27: ${tag} still refuses B2C on /demo by default`,  run('/demo', '', '') === false);
