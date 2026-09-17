@@ -1753,6 +1753,58 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
        JSON.stringify(ev && ev.custom_data && ev.custom_data.content_ids));
   }
 
+  /* ── /ai-crm END TO END, ADDED 18 SEPT 2026 ───────────────────
+     The page was live and routed to the CRM team by its Webflow
+     attribute while being absent from PRODUCT_PATHS, so every lead from
+     it was stored and reported as aeo: wrong Salesforce picklist, wrong
+     Meta event, 12000 of predicted value instead of 5000. The booking
+     went to the right team and the record said the wrong thing, which is
+     the shape of bug this suite exists for.
+
+     DRIVEN ACROSS JOURNEYS because the failure was journey-dependent --
+     the page half-worked from a CRM ad and failed everywhere else. */
+  for (const [label, campaign, medium] of [
+    ['direct',        '',                                 ''],
+    ['CRM ad',        'FLI__Prospecting__CRM-Offer__CBO',  'paid'],
+    ['AEO ad',        'FLI__Prospecting__TOF__CBO',        'paid'],
+    ['brand search',  'UR_G_S_US_BR_Brand-tIS',            'cpc'],
+    ['LinkedIn post', 'gushwork',                          'social'],
+  ]) {
+    reset();
+    await realFetch(BASE + '/submit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: '00000000-0000-4000-8000-0000000000f' + ((campaign.length % 8) + 1),
+        email: 'x@cleanbiz.test', website: 'https://cleanbiz.test', company: 'Clean',
+        first_name: 'A', last_name: 'B', sell_to: 'B2C',
+        page_url: 'https://www.gushwork.ai/ai-crm',
+        utm_campaign: campaign, utm_medium: medium,
+      }),
+    });
+    await sleep(600);
+    const ins = S.writes.find((w) => /INSERT INTO leads \(/.test(w.flat));
+    const cols = ins ? boundCols(ins) : {};
+    ok(`ai-crm[${label}]: stored product is crm`, cols.product === 'crm', String(cols.product));
+    /* The page never asks the question, so this stays "we never asked". */
+    ok(`ai-crm[${label}]: product_interest stays null`,
+       cols.product_interest === null || cols.product_interest === undefined,
+       JSON.stringify(cols.product_interest));
+    const lead = S.metaPayloads.find((x) => (x.data || []).some((e) => e.event_name === 'Lead'));
+    const ev = lead && lead.data.find((e) => e.event_name === 'Lead');
+    ok(`ai-crm[${label}]: Meta content_ids are ["crm"]`,
+       !!ev && JSON.stringify(ev.custom_data.content_ids) === JSON.stringify(['crm']),
+       JSON.stringify(ev && ev.custom_data && ev.custom_data.content_ids));
+    ok(`ai-crm[${label}]: predicted_ltv is the CRM number, 5000`,
+       ev && ev.custom_data && ev.custom_data.predicted_ltv === 5000,
+       String(ev && ev.custom_data && ev.custom_data.predicted_ltv));
+    /* THE SERVER BELIEVES THE BOOLEAN IT IS HANDED. The gate is
+       client-side, so this asserts the server does not invent a
+       disqualification of its own for a B2C answer on a CRM page. */
+    ok(`ai-crm[${label}]: a B2C answer is not disqualified server-side`,
+       cols.disqualified === false || cols.disqualified === 'false',
+       String(cols.disqualified));
+  }
+
   /* A TICK STILL OUTRANKS THE AD. Somebody on a CRM campaign who does
      see the selector -- they arrived before the cookie, or the markup
      is there anyway -- and ticks Lead Gen is a Lead Gen lead. The ad is
