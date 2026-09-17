@@ -145,6 +145,13 @@ const PRODUCTS = {
 /* The exceptions. Everything not listed here is DEFAULT_PRODUCT. */
 const PRODUCT_PATHS = {
   '/ai-demo': 'crm',
+  /* /ai-crm is the rebuilt CRM page and will eventually replace /ai-demo's
+     content wholesale. Both sell the same product, so both are mapped and
+     the swap changes nothing here. Added 18 Sept 2026 after a B2C answer on
+     /ai-crm dead-ended a prospect: the page was live, routed to the CRM team
+     by its Webflow attribute, and still missing from this catalogue -- so
+     every lead from it was being stored as aeo. */
+  '/ai-crm': 'crm',
 };
 const DEFAULT_PRODUCT = 'aeo';
 

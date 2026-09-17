@@ -1140,8 +1140,13 @@ function finish() {
      on 90 days of real leads, a /demo-only list left 631 leads (18%, 408
      completed) sending unlabelled events. A default only fails when a new
      product launches, which is rare and deliberate — and logged. */
-  eq('product: /ai-demo is the only mapped exception',
-     META.PRODUCT_PATHS, { '/ai-demo': 'crm' });
+  /* THE EXCEPTIONS ARE PINNED BY VALUE, not merely counted, so adding a
+     page here is a decision somebody made rather than a diff nobody
+     read. Both entries are the CRM product: /ai-crm is the rebuilt page
+     that will replace /ai-demo's content, and until that swap happens
+     both are live and both must resolve the same way. */
+  eq('product: the mapped exceptions are exactly the two CRM pages',
+     META.PRODUCT_PATHS, { '/ai-demo': 'crm', '/ai-crm': 'crm' });
   ok('product: the default is aeo', META.DEFAULT_PRODUCT === 'aeo');
   ok('product: every mapped path names a real product',
      Object.values(META.PRODUCT_PATHS).every((s) => s in META.PRODUCTS));
@@ -3485,7 +3490,63 @@ async function section12() {
     ok(`27: ${tag} still refuses B2C on /demo by default`,  run('/demo', '', '') === false);
     ok(`27: ${tag} allows B2C for a CRM campaign on /demo`, run('/demo', 'CRM-Offer', 'paid') === true);
     ok(`27: ${tag} still refuses B2C for an AEO campaign`,  run('/demo', 'TOF', 'paid') === false);
+
+    /* ── /ai-crm, ADDED 18 SEPT 2026 ──────────────────────────
+       The page shipped live, routed to the CRM team by its Webflow
+       attribute, and was missing from this list -- so a B2C answer
+       dead-ended a CRM prospect on a page that sells to B2C happily.
+       It half-worked, which is why it survived: a visitor arriving on a
+       CRM campaign got through the OTHER door, currentOffer() === crm,
+       so the page looked fine to anyone who tested it from an ad.
+
+       EVERY JOURNEY, deliberately. The page sells one product whoever
+       shows up, and most of its traffic will carry no campaign at all --
+       which is exactly the case the campaign clause cannot rescue.
+       Measured on /ai-demo, the page /ai-crm replaces: 9 of 40 leads
+       answered B2C or Mixed. */
+    ok(`27: ${tag} allows B2C on /ai-crm direct`,            run('/ai-crm', '', '') === true);
+    ok(`27: ${tag} allows B2C on /ai-crm from a CRM ad`,     run('/ai-crm', 'CRM-Offer', 'paid') === true);
+    ok(`27: ${tag} allows B2C on /ai-crm from an AEO ad`,    run('/ai-crm', 'TOF', 'paid') === true);
+    ok(`27: ${tag} allows B2C on /ai-crm from brand search`, run('/ai-crm', 'UR_G_S_US_BR_Brand-tIS', 'cpc') === true);
+    /* Normalised the same way resolveProduct normalises, so a trailing
+       slash or a capitalised path cannot disagree with the server about
+       what page this is. */
+    ok(`27: ${tag} allows B2C on /ai-crm/ with a trailing slash`, run('/ai-crm/', '', '') === true);
+    ok(`27: ${tag} allows B2C on /AI-CRM uppercased`,             run('/AI-CRM', '', '') === true);
+    /* And nothing near it opened by accident. */
+    ok(`27: ${tag} still refuses B2C on /ai-crm-pricing`,    run('/ai-crm-pricing', '', '') === false);
+    ok(`27: ${tag} still refuses B2C on /aeo`,               run('/aeo', '', '') === false);
   }
+
+  /* ── /ai-crm IS A CRM PAGE TO THE SERVER TOO ──────────────────
+     The Webflow attribute routes the booking; this is what decides the
+     stored product, the Salesforce picklist and the Meta event. Before
+     this entry existed the page fell through to the aeo default, so a
+     CRM lead was reported as an AEO lead at 12000 instead of 5000 with
+     nothing anywhere saying so. */
+  for (const [label, url] of [
+    ['plain',            'https://www.gushwork.ai/ai-crm'],
+    ['trailing slash',   'https://www.gushwork.ai/ai-crm/'],
+    ['uppercased',       'https://www.gushwork.ai/AI-CRM'],
+    ['with a query',     'https://www.gushwork.ai/ai-crm?utm_campaign=x'],
+    ['bare path',        '/ai-crm'],
+  ]) {
+    eq(`27: /ai-crm resolves crm (${label})`, META.resolveProduct({ page_url: url }), 'crm');
+    eq(`27: /ai-crm event slug is crm (${label})`, META.resolveEventProduct({ page_url: url }), 'crm');
+  }
+  /* THE PAGE OUTRANKS THE CAMPAIGN, and /ai-crm is the first entry that
+     makes that guard matter in production: an AEO prospecting campaign
+     pointed at the CRM page must not demote the lead. */
+  eq('27: an AEO campaign on /ai-crm still resolves crm',
+     META.resolveProduct({ page_url: '/ai-crm', utm_campaign: 'FLI__Prospecting__TOF__CBO', utm_medium: 'paid' }), 'crm');
+  eq('27: brand search on /ai-crm still resolves crm',
+     META.resolveProduct({ page_url: '/ai-crm', utm_campaign: 'UR_G_S_US_BR_Brand-tIS', utm_medium: 'cpc' }), 'crm');
+  /* Nothing adjacent moved. */
+  eq('27: /ai-demo is untouched',   META.resolveProduct({ page_url: '/ai-demo' }), 'crm');
+  eq('27: /demo is untouched',      META.resolveProduct({ page_url: '/demo' }), 'aeo');
+  eq('27: /aeo is untouched',       META.resolveProduct({ page_url: '/aeo' }), 'aeo');
+  eq('27: /ai-crm-pricing does NOT match by prefix',
+     META.resolveProduct({ page_url: '/ai-crm-pricing' }), 'aeo');
 }
 
 /* ============================================================ */

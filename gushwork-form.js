@@ -434,7 +434,7 @@
        Matched against the PATHNAME, lowercased, trailing slash stripped --
        the same normalisation resolveProduct does, so /ai-demo/ and
        /AI-Demo cannot disagree with the server about what they are. */
-    const B2C_ALLOWED_PATHS = ['/ai-demo'];
+    const B2C_ALLOWED_PATHS = ['/ai-demo', '/ai-crm'];
 
     /* ── WHAT DO YOU NEED? ────────────────────────────────────────
        /demo ONLY. The page is a bad proxy for intent: somebody who saw
