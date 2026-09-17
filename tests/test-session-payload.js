@@ -58,14 +58,14 @@ const PAGE  = 'https://www.gushwork.ai/start?utm_source=facebook&utm_medium=paid
 const FIRST_TOUCH_REF = 'https://l.facebook.com/';   // gw_referrer, written once by the site-wide script
 const THIS_HIT_REF    = 'https://www.gushwork.ai/pricing'; // document.referrer for THIS load
 
-function drive(file) {
+function drive(file, opts = {}) {
   const src = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
 
-  const store = {
+  const store = Object.assign({
     gw_referrer: FIRST_TOUCH_REF,
     gw_landing_page: 'https://www.gushwork.ai/start',
     gw_session_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
-  };
+  }, opts.session || {});
   const sessionStorage = {
     getItem: (k) => (k in store ? store[k] : null),
     setItem: (k, v) => { store[k] = String(v); },
@@ -75,14 +75,19 @@ function drive(file) {
      correctly setting both campaign and medium reads back as having set
      only the medium -- a harness artefact that looks exactly like a
      bug in the code under test. */
-  const cookieJar = [];
+  const cookieJar = (opts.cookies || []).slice();
   const documentFake = {
     referrer: THIS_HIT_REF,
     getElementById: () => null,
     get cookie() { return cookieJar.join('; '); },
     set cookie(v) { cookieJar.push(String(v)); },
   };
-  const windowFake   = { location: { href: PAGE, search: PAGE.slice(PAGE.indexOf('?')) } };
+  const page = opts.page || PAGE;
+  const windowFake = { location: {
+    href: page,
+    search: page.indexOf('?') === -1 ? '' : page.slice(page.indexOf('?')),
+    hostname: 'www.gushwork.ai',
+  } };
 
   let posted = null;
   const fetchWithTimeout = (url, opts) => {
@@ -166,6 +171,43 @@ for (const file of ['gushwork-form.js', 'gushwork-form-popup.js']) {
   ok(`${tag}: /session is NOT given the offer fields`,
      !('offer_campaign' in p.body) && !('offer_medium' in p.body),
      Object.keys(p.body).join(','));
+}
+
+/* ── THE RETURN VISIT, DRIVEN ─────────────────────────────────────
+   A clean URL, no campaign in this session, and a 30-day cookie left by
+   an ad click three weeks ago. THIS is the only shape where the two
+   fields differ, so it is the only shape that can catch the cookie
+   leaking back into the attribution column -- and every case above
+   carries a campaign in the URL, which is why putting it back survived
+   a full mutation run.
+
+   What must be true: the offer still remembers, and THIS visit is still
+   recorded as having arrived with nothing. Folding them together would
+   re-attribute 40 real leads from organic to paid, and pair a paid
+   campaign with an empty utm_source, which is the field
+   Source_Bucket__c reads. */
+for (const file of ['gushwork-form.js', 'gushwork-form-popup.js']) {
+  const tag = file.replace('gushwork-form', 'form').replace('.js', '');
+  let d;
+  try {
+    d = drive(file, {
+      page: 'https://www.gushwork.ai/demo',
+      cookies: ['gw_utm_campaign=FLI__Prospecting__CRM-Offer__CBO__StartTrial',
+                'gw_utm_medium=paid'],
+    });
+  } catch (err) { ok(`${tag}: return visit drives without throwing`, false, err.message); continue; }
+
+  eq(`${tag}: return visit attributes THIS visit to no campaign`, d.state.utm_campaign, '');
+  eq(`${tag}: return visit attributes THIS visit to no medium`,   d.state.utm_medium,   '');
+  eq(`${tag}: but the offer still remembers the campaign`,
+     d.state.offer_campaign, 'FLI__Prospecting__CRM-Offer__CBO__StartTrial');
+  eq(`${tag}: and the medium beside it`, d.state.offer_medium, 'paid');
+  eq(`${tag}: /session is still told there was no campaign`,
+     d.posted.body.utm_campaign, '');
+  /* And nothing re-stamps the cookie on a visit that carried no
+     campaign -- otherwise one ad click renews itself forever. */
+  ok(`${tag}: a clean visit does not refresh the cookie`,
+     !/max-age/.test(d.cookie), d.cookie);
 }
 
 /* Both files must send the SAME key set -- the fork has silently drifted
