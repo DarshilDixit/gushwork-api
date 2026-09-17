@@ -796,14 +796,15 @@
          later, 40 of them inside 30 days. Without it they are asked again
          which product they want, having already told us by clicking.
 
-         ADDED TO THE EXISTING CHAIN RATHER THAN READ SEPARATELY. A
-         dedicated offer cookie would give the page two notions of "the
-         campaign" -- the one deciding what they see and the one stored on
-         the lead -- which is how those two start disagreeing. One value,
-         read URL first, then this visit, then the last ad they clicked.
+         WRITTEN HERE, READ INTO offer_* BELOW, AND DELIBERATELY NOT
+         INTO utm_*. The first draft of this folded the cookie into the
+         attribution chain; see the block below for the 40 leads that
+         would have silently changed channel.
 
          A CAMPAIGN IN THE URL ALWAYS WINS AND REWRITES THE COOKIE, so
-         somebody returning from a different ad gets the new offer. */
+         somebody returning from a different ad gets the new offer --
+         and a visit carrying no campaign never re-stamps it, so one ad
+         click cannot renew itself indefinitely. */
       var urlCampaign = p.get('utm_campaign') || '';
       var urlMedium   = p.get('utm_medium')   || '';
       if (urlCampaign) rememberCampaign(urlCampaign, urlMedium);
