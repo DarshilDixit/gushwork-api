@@ -86,16 +86,36 @@ reported to Meta as two different products, with no error anywhere. The three
 columns are now selected there. **This changes the Schedule event for existing
 both-ticked leads**, from `['aeo']` to `['aeo','crm']`.
 
-## The 30-day cookie
+## The 30-day cookie, and the bug it nearly caused
 
-Built, as a **third fallback in the existing chain** (`URL → sessionStorage →
-cookie`) rather than a separate offer cookie — so the offer on screen and
-`leads.utm_campaign` cannot become two different notions of "the campaign".
-A campaign in the URL always wins and rewrites it.
-
-It is not for the cross-page case, which already worked. It is for the return
+Built. Not for the cross-page case, which already worked — for the return
 visit: 42 people in 180 days first arrived on a paid ad and came back later
 with no campaign, on average 13.5 days later, 40 of them inside 30 days.
+
+**The first version of this wired the cookie into the `captureUTMs` chain,
+which would have silently changed what `leads.utm_campaign` means** — from
+"the campaign that brought this visit" to "…or any visit in the last 30 days".
+Measured against history: **40 leads currently recorded with no campaign would
+have been re-attributed to a paid ad**, with nothing anywhere saying the
+definition had moved.
+
+Worse, only campaign and medium had a cookie, so those 40 would have carried a
+paid `utm_campaign` beside an **empty `utm_source`** — and `Source_Bucket__c`
+is a formula on `utm_source`, so Salesforce would have bucketed them one way
+while this column said another, about the same lead. Exactly the silent
+re-bucketing CLAUDE.md warns about for `hear_about_us`.
+
+So they are two questions and two fields:
+
+| Field | Means | Reads |
+|---|---|---|
+| `utm_campaign` / `utm_medium` | what brought **this visit** | URL → sessionStorage (**unchanged**) |
+| `offer_campaign` / `offer_medium` | what we **remember** them coming for | URL → sessionStorage → cookie |
+
+Only the product resolver reads `offer_*`. It is sent on `/partial` and
+`/submit` so the server reaches the answer the page showed, and **not** to
+`/session`, which is an attribution table. No new trust — the `utm_` fields
+beside it are equally client-supplied.
 
 ## Three copies
 
@@ -107,14 +127,26 @@ and **executes** them against real campaign values from `leads.utm_campaign`.
 
 Full bar green, **3,706 assertions across 12 suites**, run bare.
 
-**Ten mutations, all caught.** Two survived on the first pass and were real
-test gaps, now closed and re-verified:
+**Twelve mutations, all caught.** Three survived on the first pass and were
+real test gaps, now closed and re-verified:
 - the `/ai-demo`-beats-campaign guard is invisible on today's catalogue (one
   entry, `/ai-demo → crm`, which agrees with the only overriding answer), so
   the test now adds a temporary second entry;
 - dropping the campaign from **`/partial`**'s resolver survived, because every
   case drove `/submit`. `/partial` writes `leads.product` and fires StartTrial
-  with its own `content_ids`.
+  with its own `content_ids`;
+- putting the cookie **back** into `formState.utm_campaign` survived, because
+  every existing drive carries a campaign in the URL and the URL wins — so the
+  cookie never mattered. Both form files are now driven with a clean `/demo`
+  URL and a three-week-old ad cookie.
+
+**Checked against history, not reasoned about:** every `utm_medium` ever seen
+(`paid`/`cpc` are the only ad ones; `paid-social` exists on 3 leads but carries
+no campaign, so it falls to the selector — the safe direction); zero leads have
+a paid medium with no campaign; no CRM-shaped campaign has ever reached a page
+other than `/ai-demo`; and the ad landers carry **no** `data-rh-router`
+attribute at all, so a CRM campaign there cannot route to the wrong team — it
+degrades to 6138 exactly as today.
 
 `SCHEDULE_LEAD_SQL` was **executed** against the real schema via `EXPLAIN`,
 not just read.
@@ -133,36 +165,63 @@ Until then every real lead runs v5.14.0.
 Check `lastUpdated` vs `lastPublished` before republishing: publishing ships
 the whole site, including anyone else's staged Designer work.
 
-## Still open with Swapnil
+## Told to Swapnil, not asked
 
-1. `brand` only instead of `br` — amended here, needs his OK.
-2. Reading `utm_medium` — a second parameter, he asked for one.
-3. Single-choice selector, for the remaining 10 both-tickers.
-4. Ad ops: some ad sets send a campaign **id** or an unrendered
-   `{{campaign.name}}`. A CRM ad doing that would silently show the selector.
+`brand` instead of `br`, the `utm_medium` gate, and unreadable-campaign →
+selector are all decided here. His instruction was to read only
+`utm_campaign` and not `utm_content` **because ad names contain CRM** —
+`utm_medium` is a channel, not an ad name, and without the gate his own rule
+misfires on 29 non-ad leads.
+
+**One genuine question for him:** make the selector a single choice
+(AEO / AI-CRM / not sure) to fix the remaining 10 both-tickers? Follow-up, not
+a blocker.
+
+**For ad ops, not a question:** some ad sets send a campaign **id** or an
+unrendered `{{campaign.name}}`. A CRM ad doing that would show the selector
+rather than the CRM offer.
 
 ## What was verified, and what was not
 
 Stated plainly, because a card is trusted rather than checked.
 
-**Executed:** the full bar bare (3,706 assertions, 12 suites); ten mutations
-with `measure.js --mutation`; `campaignOffer` called directly in all three
+**Executed:** the full bar bare (3,730 assertions, 12 suites); twelve mutations
+via `measure.js --mutation`; `campaignOffer` called directly in all three
 copies against real campaign values; `syncNeedsVisibility`, `wantsCrm`,
-`b2cAllowedHere` and `rememberCampaign` driven in a stubbed DOM; `/partial`
-and `/submit` driven over real HTTP with the bound columns and the
-`content_ids` that reached `graph.facebook.com` read back;
-`SCHEDULE_LEAD_SQL` EXPLAINed against the live schema.
+`b2cAllowedHere`, `getCookie` and `rememberCampaign` driven in a stubbed DOM,
+including a clean URL with a three-week-old cookie; `/partial` and `/submit`
+driven over real HTTP with the bound columns and the `content_ids` that reached
+`graph.facebook.com` read back; `SCHEDULE_LEAD_SQL` EXPLAINed against the live
+schema.
 
-**Measured against production data:** every number quoted above comes from a
-query run in this session against the Railway database — the campaign
-distribution, the 29 non-ad leads, the 23 unreadable campaigns, the 1,715
-leads that lost nothing in transit, the 18-of-44 both-tick rate, and the 42
-returning ad visitors.
+**Measured against production data:** every number here comes from a query run
+in this session against Railway — the campaign distribution, every `utm_medium`
+ever seen, the 29 non-ad leads, the 23 unreadable campaigns, the 1,715 leads
+that lost nothing in transit, the 18-of-44 both-tick rate, the 42 returning ad
+visitors, and the 40 leads the attribution bug would have re-channelled.
 
-**Asserted only structurally:** nothing new. The three-copy sync is executed,
-not read.
+**Checked live:** all 12 published pages pinned to `b60b594`; `/meeting-booked`
+and `/careers` now carry no tag; ad landers carry no `data-rh-router`.
+
+**Asserted only structurally:** nothing new.
 
 **Never executed:** the CRM branch against real traffic — no lead has ever
 taken it. Confirmable by hand after deploy with a query-string URL.
 
 **Not done:** the Webflow half. 13 page pins, unchanged.
+
+## A correction to this card's first version
+
+The first version listed `brand`-vs-`br` and the `utm_medium` gate as needing
+Swapnil's sign-off. They do not. His instruction was to read only
+`utm_campaign` and not `utm_content`, *because ad names contain CRM* —
+`utm_medium` is a channel, not an ad name, and without it his own rule
+misfires on 29 non-ad leads. Both are decided here and told to him. The only
+open question is the single-choice selector.
+
+## Publishing is blocked on someone else's work
+
+At the time of writing the Webflow site record reads `lastUpdated`
+2026-09-17T16:50:20Z against `lastPublished` 16:49:43Z, and `www.gushwork.ai`
+last published at 15:26:16Z. There are unpublished Designer changes staged, and
+publishing ships the whole site. Ask whose they are before republishing.
