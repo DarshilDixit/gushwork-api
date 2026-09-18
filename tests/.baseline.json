@@ -1,9 +1,9 @@
 {
-  "savedAt": "2026-09-18T19:01:30.883Z",
-  "grandTotal": 3847,
+  "savedAt": "2026-09-18T19:49:24.149Z",
+  "grandTotal": 3884,
   "suites": {
     "test-batch1.js": 109,
-    "test-batch2.js": 952,
+    "test-batch2.js": 989,
     "test-batch-a.js": 316,
     "test-ads-parity.js": 228,
     "test-partnerstack.js": 1030,

@@ -2967,9 +2967,21 @@ async function section12() {
   /* NOT inferred from the name. "Darshil Test" is a tempting signal and
      a wrong one: a real prospect may be called Darshil, and the block
      list already contains allstate.com because it is a real brokerage. */
+  /* SCOPED TO THE FUNCTION BODY, NOT A BYTE WINDOW FROM THE IDENTIFIER.
+     The window version read "isInternalLead followed within 400 chars by
+     first_name" and broke on 19 Sept 2026 the moment a CALLER was added
+     whose next statement was pushToSalesforce({first_name,...}). Nothing
+     had started inferring anything; the assertion was measuring distance
+     in the file. Same failure mode as the ordering assertions documented
+     in CLAUDE.md -- a byte window is not a scope. */
+  const internalFnBody = (() => {
+    const i = src.indexOf('function isInternalLead(email) {');
+    return i === -1 ? '' : src.slice(i, src.indexOf('\n}', i) + 2);
+  })();
+  ok('23: isInternalLead is liftable for the name check', internalFnBody.length > 0);
   ok('23: test-ness is never inferred from a person name',
      !/first_name[^\n]{0,80}[Tt]est['"]/.test(src)
-     && !/isInternalLead[\s\S]{0,400}first_name/.test(src));
+     && !/first_name|last_name/.test(internalFnBody));
 
   const fn = between('function isInternalLead(email)', 'function internalLeadSqlClause');
   ok('23: it matches on the whole address, lowercased', /trim\(\)\.toLowerCase\(\)/.test(fn));
@@ -3575,6 +3587,109 @@ async function section12() {
   eq('27: /aeo is untouched',       META.resolveProduct({ page_url: '/aeo' }), 'aeo');
   eq('27: /ai-crm-pricing does NOT match by prefix',
      META.resolveProduct({ page_url: '/ai-crm-pricing' }), 'aeo');
+}
+
+/* ============================================================
+   28. OUR OWN TEST SUBMISSIONS DO NOT FEED META OR SALESFORCE
+
+   Measured 19 Sept 2026: 21 internal addresses had produced 81 lead
+   rows since March and, since Meta CAPI went live on 8 April, had
+   fired 61 StartTrial, 31 Lead and 14 Schedule events -- 1.14%, 0.81%
+   and 0.41% of each -- plus 41 Salesforce Lead records. Nobody chose
+   that. An ad audience optimised partly toward our own staff is noise
+   we were paying to inject.
+
+   b@g.ai WAS THE LEAST PROTECTED ADDRESS, NOT THE MOST. It is
+   special-cased in four hardcoded lists -- both form files,
+   PS_TEST_EMAILS and the two booking webhooks -- and was in none of
+   the one that matters, so isInternalLead('b@g.ai') answered FALSE and
+   it was not even marked on the dashboard as ours.
+
+   EXECUTED, NOT READ, and BOTH HALVES ARE NEEDED. Driving the function
+   proves it decides correctly; it says nothing about whether the five
+   Meta call sites reach it, and an ordering assertion cannot see an
+   `if (false)`. So the wiring is asserted per call site by name.
+   ============================================================ */
+{
+  /* Top-level in index.js, so zero indent -- the section 27 lifter
+     looks for four spaces and would not find these. */
+  const liftTop = (name) => {
+    const m = new RegExp('\\nfunction ' + name + '\\s*\\(').exec(src);
+    if (!m) throw new Error('function not found: ' + name);
+    let d = 0;
+    for (let j = src.indexOf('{', m.index); j < src.length; j++) {
+      if (src[j] === '{') d++;
+      else if (src[j] === '}') { d--; if (!d) return src.slice(m.index, j + 1); }
+    }
+    throw new Error('unbalanced braces in: ' + name);
+  };
+
+  const parts = [
+    (/const ELV_EXCLUDED_DOMAINS = \[[^\]]*\];/.exec(src) || [''])[0],
+    (/const INTERNAL_TEST_EMAILS = \[[\s\S]*?\n\];/.exec(src) || [''])[0],
+    liftTop('isInternalLead'),
+    liftTop('internalLeadSuppressesMeta'),
+  ];
+  ok('28: every piece of the internal-lead rule is liftable',
+     parts.every((x) => x && x.length > 0),
+     parts.map((x, i) => (x ? '' : 'piece ' + i + ' missing')).filter(Boolean).join(', '));
+
+  /* console is stubbed so the suite stays readable; the calls still
+     happen, which is what reachability means here. */
+  const suppresses = new Function('console', 'process',
+    parts.concat('return internalLeadSuppressesMeta;').join('\n')
+  )({ log() {} }, { env: {} });
+  const internal = new Function('process',
+    parts.concat('return isInternalLead;').join('\n')
+  )({ env: {} });
+
+  /* ---- it decides correctly ---- */
+  [
+    ['b@g.ai',                    true,  'the form test address -- THE regression this closes'],
+    ['B@G.AI',                    true,  'case folded'],
+    ['  b@g.ai  ',                true,  'trimmed'],
+    ['darshil.dixit@gushwork.ai', true,  'staff address'],
+    ['test@test.com',             true,  'test domain'],
+    ['x@example.com',             true,  'example domain'],
+    ['agent@allstate.com',        true,  'the non-ICP walkthrough address'],
+    ['john@acme.com',             false, 'a real prospect'],
+    ['',                          false, 'empty'],
+    [null,                        false, 'null'],
+    ['someone@notgushwork.ai',    false, 'MUST NOT substring-match gushwork.ai'],
+    ['a@gushwork.ai.evil.com',    false, 'MUST NOT match a lookalike domain'],
+  ].forEach(([email, want, why]) => {
+    eq(`28: isInternalLead(${JSON.stringify(email)}) -- ${why}`, internal(email), want);
+    eq(`28: suppresses Meta for ${JSON.stringify(email)}`, suppresses(email, '/t'), want);
+  });
+
+  /* ---- and the five Meta call sites actually reach it ---- */
+  const CALLS = [
+    ["internalLeadSuppressesMeta(email, '/partial')",              'StartTrial'],
+    ["internalLeadSuppressesMeta(email, '/submit')",               'Lead'],
+    ["internalLeadSuppressesMeta(fullLead.email, '/booking-confirmed')", 'Schedule 1 of 3'],
+    ["internalLeadSuppressesMeta(fullLead.email, '/cal-webhook')",       'Schedule 2 of 3'],
+    ["internalLeadSuppressesMeta(fullLead.email, '/rh-webhook')",        'Schedule 3 of 3'],
+  ];
+  CALLS.forEach(([call, what]) => {
+    eq(`28: ${what} is guarded -- ${call}`, src.split(call).length - 1, 1);
+  });
+  eq('28: exactly five call sites, so a sixth Meta event cannot be added unnoticed',
+     (src.match(/internalLeadSuppressesMeta\(/g) || []).length, 1 + CALLS.length);
+
+  /* Ordering: ours is decided BEFORE the non-ICP question at all three
+     Schedule sites. Our own address is ours whatever the model thinks
+     of its domain, and the logged reason should say so. */
+  ['/booking-confirmed', '/cal-webhook', '/rh-webhook'].forEach((tag) => {
+    ok(`28: ${tag} checks internal before non-ICP`,
+       src.indexOf(`internalLeadSuppressesMeta(fullLead.email, '${tag}')`) <
+       src.indexOf(`nonIcpScheduleSuppressed(fullLead, '${tag}')`));
+  });
+
+  /* ---- Salesforce ---- */
+  ok('28: the /submit Salesforce push is inside an isInternalLead guard',
+     /if \(isInternalLead\(email\)\) \{[\s\S]{0,200}?Salesforce push skipped[\s\S]{0,200}?\} else \{\s*\n\s*pushToSalesforce\(/.test(src));
+  ok('28: nothing is stamped when the push is skipped, so the retry sweep ignores it',
+     !/Salesforce push skipped[\s\S]{0,300}?markSalesforceSynced/.test(src));
 }
 
 /* ============================================================ */
