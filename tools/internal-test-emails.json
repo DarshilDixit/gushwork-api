@@ -1,0 +1,116 @@
+{
+ "_what": "Addresses our OWN form actually submitted that isInternalLead recognises. Provenance, not a rule.",
+ "_why": "141 Salesforce Leads match isInternalLead and ~100 are NOT ours -- @example.com placeholders carrying outbound LeadSource codes (E004P, C240A, C100PA) that never appear in our leads table. Internal-email is a safe test for suppressing an outbound event and an unsafe test for destroying a record.",
+ "_generated": "2026-09-19, point-in-time. Regenerate before re-running.",
+ "_query": "SELECT DISTINCT lower(email) FROM leads WHERE submitted_at IS NOT NULL AND (lower(split_part(email,'@',2)) IN ('gushwork.ai','test.com','example.com','example.org','g.ai') OR lower(email)='agent@allstate.com')",
+ "emails": [
+  {
+   "email": "agent@allstate.com",
+   "first_seen": "2026-09-11",
+   "last_seen": "2026-09-15",
+   "form_rows": 5
+  },
+  {
+   "email": "av@gushwork.ai",
+   "first_seen": "2026-06-11",
+   "last_seen": "2026-06-11",
+   "form_rows": 1
+  },
+  {
+   "email": "b@g.ai",
+   "first_seen": "2026-07-01",
+   "last_seen": "2026-07-01",
+   "form_rows": 1
+  },
+  {
+   "email": "bigrah.prasad@gushwork.ai",
+   "first_seen": "2026-05-26",
+   "last_seen": "2026-06-26",
+   "form_rows": 2
+  },
+  {
+   "email": "darshil.dixit@gushwork.ai",
+   "first_seen": "2026-03-20",
+   "last_seen": "2026-09-11",
+   "form_rows": 16
+  },
+  {
+   "email": "dheeraj.soni@gushwork.ai",
+   "first_seen": "2026-07-08",
+   "last_seen": "2026-07-08",
+   "form_rows": 1
+  },
+  {
+   "email": "growth@gushwork.ai",
+   "first_seen": "2026-07-01",
+   "last_seen": "2026-07-01",
+   "form_rows": 1
+  },
+  {
+   "email": "manideep.reddy@gushwork.ai",
+   "first_seen": "2026-07-02",
+   "last_seen": "2026-07-02",
+   "form_rows": 1
+  },
+  {
+   "email": "rayan.sadiq@gushwork.ai",
+   "first_seen": "2026-08-06",
+   "last_seen": "2026-08-06",
+   "form_rows": 1
+  },
+  {
+   "email": "shikhar.verma@gushwork.ai",
+   "first_seen": "2026-05-26",
+   "last_seen": "2026-07-08",
+   "form_rows": 3
+  },
+  {
+   "email": "shubham.kumar@gushwork.ai",
+   "first_seen": "2026-08-05",
+   "last_seen": "2026-08-05",
+   "form_rows": 1
+  },
+  {
+   "email": "sriram.iyer@gushwork.ai",
+   "first_seen": "2026-04-17",
+   "last_seen": "2026-07-30",
+   "form_rows": 2
+  },
+  {
+   "email": "sukriti.shukla@gushwork.ai",
+   "first_seen": "2026-06-30",
+   "last_seen": "2026-06-30",
+   "form_rows": 1
+  },
+  {
+   "email": "swapnil@gushwork.ai",
+   "first_seen": "2026-03-23",
+   "last_seen": "2026-03-23",
+   "form_rows": 1
+  },
+  {
+   "email": "swapnil.sinha@gushwork.ai",
+   "first_seen": "2026-04-09",
+   "last_seen": "2026-09-16",
+   "form_rows": 3
+  },
+  {
+   "email": "test@test.com",
+   "first_seen": "2026-07-20",
+   "last_seen": "2026-07-20",
+   "form_rows": 1
+  },
+  {
+   "email": "tushar.kumar@gushwork.ai",
+   "first_seen": "2026-07-30",
+   "last_seen": "2026-07-30",
+   "form_rows": 1
+  },
+  {
+   "email": "utsav.singh@gushwork.ai",
+   "first_seen": "2026-03-24",
+   "last_seen": "2026-06-18",
+   "form_rows": 4
+  }
+ ]
+}
