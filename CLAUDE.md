@@ -1348,6 +1348,53 @@ count, and the filter is opt-in. **Never inferred from a person's name**: a
 real prospect may be called Darshil, and `allstate.com` is a real brokerage
 domain that is on the block list for that reason.
 
+**"MARKED, NEVER EXCLUDED" IS ABOUT OUR OWN NUMBERS, AND AS OF 19 SEPT
+2026 IT STOPS AT OUR OWN NUMBERS.** Internal submissions are still
+counted in every `leads` figure, still on the dashboard, still booking —
+that rule is unchanged and is about reconciling a number against the
+database. But they no longer leave the building. Three outbound systems
+now refuse them:
+
+| System | Guard | Why |
+|---|---|---|
+| Meta CAPI (5 call sites) | `internalLeadSuppressesMeta` | a conversion tells Facebook to find more people like us |
+| Salesforce (`/submit`) | `isInternalLead` | `Source_Bucket__c` recomputes on read, so each junk Lead is reported as real inbound |
+| AWS mirror (`syncToAWS`) | inside the function | `gw_form_leads` is the DIALER FEED — a row is a person somebody may ring |
+
+**The three harms are different and only the first is about signal.**
+Measured before the fix: 21 addresses, 81 rows since March, 61
+StartTrial / 31 Lead / 14 Schedule (1.14% / 0.81% / 0.41%), 41
+Salesforce Leads. Under 1% dilutes rather than misdirects; the
+Salesforce records and the dialer rows cost people's time instead.
+
+**`b@g.ai` WAS THE LEAST PROTECTED ADDRESS, NOT THE MOST.** It is
+special-cased in **four** hardcoded lists — both form files,
+`PS_TEST_EMAILS`, and the two booking webhooks — and was in none of
+`INTERNAL_TEST_EMAILS`, so `isInternalLead('b@g.ai')` answered **false**
+and it was not even marked. Now listed. Four special cases and no
+membership of the one list that decides anything is the shape to look
+for elsewhere.
+
+**And it was the website gate that let them through, not a missing
+one.** `isWebsiteVerified` returns **true** for a null reason
+("pre-feature rows") and `test_email_skipped` is itself on
+`WEBSITE_VERIFIED_REASONS` — so skipping email verification for a test
+address is *precisely* what marks it verified. The gate was working; it
+was answering a different question to the one everyone assumed.
+
+**The AWS guard is INSIDE `syncToAWS`, not at its four call sites**,
+because two of those are the Cal and RevenueHero **safety nets** — the
+pair most likely to be missed by someone guarding the two obvious
+routes. The three targeted writes (`syncBookingToAWS`,
+`syncPartnerIdentityToAWS`, `syncHearAboutUsToAWS`) need no guard: each
+is a plain `UPDATE ... WHERE session_id`, so with no mirror row they
+match nothing and no-op. `syncBookingToAWS` now **reads `rowCount`** and
+says which happened — it used to log a tick unconditionally, so an
+update that matched nothing read as success.
+
+`tests/test-batch2.js` §28 and §29 execute all of this rather than
+reading it, and all five mutations are caught.
+
 **Two copies of the label map.** `WEBSITE_REASON_LABELS` is a normal JS object.
 The monitor dashboard has a second copy (`var WLBL=`) inside a JS string that gets
 sent to the browser. Both need updating, and the string one uses `\u2014` for em
