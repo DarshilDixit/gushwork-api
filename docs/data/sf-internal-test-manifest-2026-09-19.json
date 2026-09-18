@@ -1,0 +1,85 @@
+{
+  "written_at": "2026-09-18T21:09:12.389Z",
+  "marker": "Internal test submission",
+  "changed": [
+    {
+      "id": "00QOX00000mHbHG2A0",
+      "email": "av@gushwork.ai",
+      "old_how_did_you_hear": "google",
+      "old_source_bucket": "Google"
+    },
+    {
+      "id": "00QOX00000jGvqZ2AS",
+      "email": "b@g.ai",
+      "old_how_did_you_hear": "s",
+      "old_source_bucket": "Others"
+    },
+    {
+      "id": "00QOX00000lRmWv2AK",
+      "email": "bigrah.prasad@gushwork.ai",
+      "old_how_did_you_hear": "Referral - pillarsfincrimeadvisory@gmail.com",
+      "old_source_bucket": "Referral"
+    },
+    {
+      "id": "00QOX00000lRnxd2AC",
+      "email": "darshil.dixit@gushwork.ai",
+      "old_how_did_you_hear": "Google",
+      "old_source_bucket": "Google"
+    },
+    {
+      "id": "00QOX00000nkS1t2AE",
+      "email": "dheeraj.soni@gushwork.ai",
+      "old_how_did_you_hear": "Linkedin",
+      "old_source_bucket": "LinkedIn"
+    },
+    {
+      "id": "00QOX00000kqaMm2AI",
+      "email": "growth@gushwork.ai",
+      "old_how_did_you_hear": null,
+      "old_source_bucket": "Others"
+    },
+    {
+      "id": "00QOX00000kKilg2AC",
+      "email": "manideep.reddy@gushwork.ai",
+      "old_how_did_you_hear": "Facebook",
+      "old_source_bucket": "Meta"
+    },
+    {
+      "id": "00QOX00000pJFal2AG",
+      "email": "shubham.kumar@gushwork.ai",
+      "old_how_did_you_hear": "Instagram (Paid)",
+      "old_source_bucket": "Meta"
+    },
+    {
+      "id": "00QOX00000nMOp52AG",
+      "email": "sukriti.shukla@gushwork.ai",
+      "old_how_did_you_hear": null,
+      "old_source_bucket": "Others"
+    },
+    {
+      "id": "00QOX00000jIIML2A4",
+      "email": "swapnil.sinha@gushwork.ai",
+      "old_how_did_you_hear": "abc",
+      "old_source_bucket": "Others"
+    },
+    {
+      "id": "00QOX00000lYloP2AS",
+      "email": "test@test.com",
+      "old_how_did_you_hear": "Chatgpt",
+      "old_source_bucket": "AI / LLM"
+    },
+    {
+      "id": "00QOX00000oxGol2AE",
+      "email": "tushar.kumar@gushwork.ai",
+      "old_how_did_you_hear": "Internet",
+      "old_source_bucket": "Others"
+    },
+    {
+      "id": "00QOX00000meofC2AQ",
+      "email": "utsav.singh@gushwork.ai",
+      "old_how_did_you_hear": "fb",
+      "old_source_bucket": "Meta"
+    }
+  ],
+  "failed": []
+}
