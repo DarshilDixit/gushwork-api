@@ -51,7 +51,11 @@ const liftSrc = [
 
 const M = (new Function(liftSrc + `
   return { NON_ICP_DOMAINS, NON_ICP_PREFIXES, hostMatchesDomain, nonIcpMatchHost,
-           partnerStackCustomerKey, registrableDomain, nonIcpHostForms };
+           partnerStackCustomerKey, registrableDomain, nonIcpHostForms,
+           /* nonIcpSpeculativeDomain needs the real one -- a stub would let
+              the speculative-domain rules drift from the free-mail list
+              they key off. */
+           freeEmailMatch };
 `))();
 
 const hit = (x) => { const r = M.nonIcpMatchHost(x); return r ? r.domain : null; };
@@ -966,7 +970,10 @@ const results10d = (async () => {
 {
   for (const [name, s] of [['/demo', formSrc], ['ads', popupSrc]]) {
     ok(`${name}: has the non-ICP check`,        s.includes('function checkNonIcp('));
-    ok(`${name}: fails open on a non-200`,      s.includes("return { blocked: false, status: 'backend_error' };"));
+    /* pending:false rides along on every fail-open path since 18 Sept
+       2026 -- a backend that cannot answer must never make the calendar
+       wait for it. */
+    ok(`${name}: fails open on a non-200`,      s.includes("return { blocked: false, status: 'backend_error', pending: false };"));
     ok(`${name}: redirects to /thank-you`,      s.includes("const NON_ICP_REDIRECT = '/thank-you';"));
     /* /thank-you greets the visitor from attendeeName. Without it a blocked
        lead reads "Thank you, !". */
@@ -997,7 +1004,14 @@ const results10d = (async () => {
     ok(`${name}: prewarms on email blur`,       s.includes("checkNonIcp(val, '').catch(() => {});"));
     ok(`${name}: prewarms on website blur`,     s.includes("checkNonIcp(getField('email'), val).catch(() => {});"));
     ok(`${name}: honours the server backstop`,  s.includes('submitRes.non_icp_blocked === true'));
-    ok(`${name}: only caches a real answer`,    s.includes("if (v.status === 'ok') _nonIcpVerdicts.set(key, v);"));
+    /* AND NEVER CACHES A POLLED ONE. The calendar hold re-asks with
+       fresh:true while a warm is in flight; memoising that answer would
+       hand the next poll the very not-blocked result it is trying to
+       supersede, and the hold would spin to its cap reading its own
+       stale reply. */
+    ok(`${name}: only caches a real answer`,    s.includes("if (v.status === 'ok' && !fresh) _nonIcpVerdicts.set(key, v);"));
+    ok(`${name}: a fresh poll bypasses the memo`,
+       /if \(!fresh && _nonIcpVerdicts\.has\(key\)\) return/.test(s));
 
     /* THE ORDERING THAT MATTERS. hero.submit() is what produces the booking
        widget, so the check has to sit above it or a blocked lead gets a
@@ -1454,6 +1468,11 @@ results13 = (async () => {
         'nonIcpWriteVerdictRow', 'nonIcpClassifyDomain', 'recordFailure', 'recordSuccess',
         'nonIcpCandidateDomains', 'isPartnerStackTestEmail', 'NON_ICP_LLM_ENABLED', 'console',
         'NON_ICP_BLOCK_ENABLED', 'nonIcpMatchHost',
+        /* nonIcpSpeculativeDomain lives in this block and needs both of
+           these. Real implementations, not stubs: a stub would let the
+           speculative-domain rules drift from the free-mail list they
+           are supposed to key off. */
+        'freeEmailMatch', 'partnerStackCustomerKey',
         'const _nonIcpLlmInFlight = new Map();\n' + warmLift +
         '\nreturn { warmNonIcpLlm, _nonIcpLlmInFlight };'))(
         { env: {} }, stats,
@@ -1463,10 +1482,79 @@ results13 = (async () => {
         (src2, id, err) => calls.failures.push({ src: src2, id, err }),
         (src2) => calls.successes.push(src2),
         () => ['x.test'], () => false, true, { log() {}, warn() {} },
-        opts.v1Hit === true, () => (opts.v1Hit ? { domain: 'kw.com' } : null));
+        opts.v1Hit === true, () => (opts.v1Hit ? { domain: 'kw.com' } : null),
+        M.freeEmailMatch, M.partnerStackCustomerKey);
       return { scope, calls, stats };
     };
     const wait = () => new Promise((r) => setTimeout(r, 30));
+
+    /* ── THE SPECULATIVE DOMAIN (18 Sept 2026) ─────────────────────
+       steenhoekinsurance@outlook.com booked an insurance demo because
+       her verdict landed 2.6 s after she submitted -- the step-1 email
+       blur had only outlook.com to warm. Her local part IS her domain.
+
+       THE SAFETY RULE IS THE POINT: it may warm, it may never decide.
+       The guess is wrong for 93% of free-mail leads, so a guessed domain
+       reaching nonIcpVerdict could block a lead on somebody else's
+       website. Asserted directly below. */
+    {
+      const spec = mkW({ source: 'llm' }).scope;
+      const f = (e) => {
+        const sc = (new Function('freeEmailMatch', 'partnerStackCustomerKey',
+          between('function nonIcpSpeculativeDomain(email)', '\n/* ── IS AN ANSWER ACTUALLY COMING?') +
+          '\nreturn nonIcpSpeculativeDomain;'))(M.freeEmailMatch, M.partnerStackCustomerKey);
+        return sc(e);
+      };
+      eq('spec: the lead that caused this — free mail, company in the local part',
+         f('steenhoekinsurance@outlook.com'), 'steenhoekinsurance.com');
+      eq('spec: digits mean a person, not a brand (the OTHER missed lead)',
+         f('dla1972@me.com'), null);
+      eq('spec: a business email is ignored — its domain is already warmed at step 1',
+         f('pamela@steenhoekinsurance.com'), null);
+      eq('spec: dotted personal addressing is not a company name',
+         f('john.smith@gmail.com'), null);
+      eq('spec: short local parts are not worth a fetch', f('bob@gmail.com'), null);
+      eq('spec: plus addressing is not a company name', f('a+tag@gmail.com'), null);
+      eq('spec: junk in, null out', f(''), null);
+      eq('spec: junk in, null out (no @)', f('notanemail'), null);
+
+      /* THE ONE THAT MATTERS. nonIcpVerdict reads
+         nonIcpCandidateDomains; if the guess ever appeared there, a lead
+         could be blocked on a domain they never gave us. */
+      const cands = (new Function('partnerStackCustomerKey',
+        between('function nonIcpCandidateDomains({ email, website } = {})', '\n/* ── The warm path') +
+        '\nreturn nonIcpCandidateDomains;'))(M.partnerStackCustomerKey);
+      const got = cands({ email: 'steenhoekinsurance@outlook.com', website: '' });
+      ok('spec: the GUESS NEVER reaches the decision path',
+         !got.includes('steenhoekinsurance.com'), JSON.stringify(got));
+    }
+
+    /* ── nonIcpWarmPending: the calendar holds on this and nothing else ── */
+    {
+      const w = mkW({ source: 'llm' });
+      const pend = (new Function('_nonIcpLlmInFlight', 'nonIcpCandidateDomains',
+        'nonIcpSpeculativeDomain',
+        between('function nonIcpWarmPending({ email, website } = {})', '\nfunction warmNonIcpLlm') +
+        '\nreturn nonIcpWarmPending;'));
+      const map = new Map();
+      const fn = pend(map, () => ['acme.test'], () => null);
+      ok('pending: false when nothing is in flight — a wait would be pure delay',
+         fn({ email: 'a@acme.test' }) === false);
+      map.set('acme.test', Promise.resolve());
+      ok('pending: true while a warm is running for this lead — the ONLY hold case',
+         fn({ email: 'a@acme.test' }) === true);
+      map.clear();
+      map.set('someone-elses.test', Promise.resolve());
+      ok('pending: another lead\'s warm does not hold this calendar',
+         fn({ email: 'a@acme.test' }) === false);
+      /* The speculative domain counts too -- it is the one being warmed
+         for exactly the lead this feature exists for. */
+      const fn2 = pend(map, () => ['outlook.com'], () => 'steenhoekinsurance.com');
+      map.clear(); map.set('steenhoekinsurance.com', Promise.resolve());
+      ok('pending: a speculative warm holds the calendar as well',
+         fn2({ email: 'steenhoekinsurance@outlook.com' }) === true);
+    }
+
 
     /* A landed verdict. */
     let w = mkW({ source: 'llm', business_type: 'insurance', blocking: true, confidence: 0.9, model_id: 'm' });

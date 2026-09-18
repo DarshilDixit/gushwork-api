@@ -1,7 +1,7 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.15.1-ads  (ADS PAGE VERSION)
+  GUSHWORK — MULTI-STEP FORM  v5.16.0-ads  (ADS PAGE VERSION)
 
-  Tracks /demo v5.15.1. Full feature parity with /demo, EXCEPT the
+  Tracks /demo v5.16.0. Full feature parity with /demo, EXCEPT the
   booking step, which keeps the Ads page's fullscreen modal
   presentation — opened after step 2 — instead of /demo's inline
   column render, AND the close affordances that modal needs (v5.7.2).
@@ -10,6 +10,8 @@
   modal needs a way out and an inline column does not, so this
   section has no /demo counterpart to track.
 
+  v5.16.0-ads — the calendar waits when an answer is seconds away.
+    Ported from /demo v5.16.0, identical.
   v5.15.1-ads — /ai-crm joins B2C_ALLOWED_PATHS, matching /demo.
   v5.15.0-ads — the ad campaign decides which offer we show, not the
     pathname. Ported from /demo v5.15.0, identical. The ad landers carry
@@ -161,6 +163,70 @@
   }
   #form-wrap-view {
   transition: max-width 0.5s ease, padding 0.5s ease;
+  }
+
+  /* CALENDAR SKELETON. Shaped like RevenueHero's two panes -- month grid
+     on the left, time slots on the right -- so the wait reads as "your
+     calendar is loading", which is what is actually happening. A spinner
+     would read as "something is stuck".
+
+     Greys and radius match .input-field on purpose: it should look like
+     part of this form, not a third-party loader dropped into it. */
+  #gw-cal-skeleton {
+  display: none;
+  padding: 4px 0 8px;
+  }
+  .gw-cal-skel-head {
+  font-size: 14px;
+  color: #6b7280;
+  margin-bottom: 14px;
+  }
+  .gw-cal-skel-panes {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+  }
+  .gw-cal-skel-grid {
+  flex: 1 1 0%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 7px;
+  }
+  .gw-cal-skel-slots {
+  flex: 0 0 34%;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  }
+  .gw-cal-skel-grid span {
+  height: 26px;
+  border-radius: 6px;
+  }
+  .gw-cal-skel-slots span {
+  height: 38px;
+  border-radius: 8px;
+  }
+  .gw-cal-skel-grid span,
+  .gw-cal-skel-slots span {
+  display: block;
+  background: linear-gradient(90deg, #f1f2f3 25%, #e6e8ea 37%, #f1f2f3 63%);
+  background-size: 400% 100%;
+  animation: gwCalShimmer 1.3s ease-in-out infinite;
+  }
+  @keyframes gwCalShimmer {
+  0%   { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+  }
+  /* A visitor who asked for less motion gets the same grey blocks,
+     holding still. */
+  @media (prefers-reduced-motion: reduce) {
+  .gw-cal-skel-grid span,
+  .gw-cal-skel-slots span { animation: none; background: #eceef0; }
+  }
+  @media screen and (max-width: 767px) {
+  .gw-cal-skel-panes { flex-direction: column; }
+  .gw-cal-skel-slots { flex: 1 1 auto; width: 100%; }
   }
   `;
     const style = document.createElement('style');
@@ -2379,10 +2445,36 @@
       const el = document.getElementById('website');
       if (!el) return;
 
-      // Editing the field clears a stale verdict error immediately
+      /* WARM ON WHICHEVER COMES FIRST, TYPING-STOPPED OR LEAVING.
+         Blur alone loses the case that produced the 18 Sept miss: the
+         lead typed a half domain, tabbed away, came back, corrected it,
+         and clicked Next -- so the warm for the real domain began
+         fractions of a second before the submit and landed 2.6 seconds
+         after it.
+
+         Neither trigger dominates. Somebody who types and tabs straight
+         on blurs in ~0.2s, faster than this 800ms; somebody who pauses
+         to re-read blurs seconds later, slower. Running both and letting
+         the server dedup per domain is strictly better than choosing.
+
+         COSTS ALMOST NOTHING WHEN IT FIRES ON A HALF-TYPED VALUE. A
+         domain that does not resolve fails at the fetch and never
+         reaches the model -- measured, the steenhoekins.com row from
+         that lead's own mistyping has no business_type at all. */
+      const WEBSITE_WARM_DEBOUNCE_MS = 800;
+      let _websiteWarmTimer = null;
       el.addEventListener('input', () => {
         hideError('website-error');
         updateWebsiteMismatchTip();
+        clearTimeout(_websiteWarmTimer);
+        _websiteWarmTimer = setTimeout(() => {
+          const val = el.value.trim();
+          /* Only once it looks like a whole domain. Warming every pause
+             mid-word would be fetches for strings nobody typed. */
+          if (!val || !/\.[a-z]{2,}$/i.test(val)) return;
+          if (isTestEmail(getField('email'))) return;
+          checkNonIcp(getField('email'), val).catch(() => {});
+        }, WEBSITE_WARM_DEBOUNCE_MS);
       });
 
       // Blur — prewarm the cache and surface the error early so the
@@ -2749,13 +2841,20 @@
       return (email || '').trim().toLowerCase() + '|' + (website || '').trim().toLowerCase();
     }
 
-    function checkNonIcp(email, website) {
-      if (!email && !website) return Promise.resolve({ blocked: false, status: 'empty' });
-      if (isTestEmail(email)) return Promise.resolve({ blocked: false, status: 'test_email' });
-      if (!isRailwayReady()) return Promise.resolve({ blocked: false, status: 'no_backend' });
+    /* fresh:true SKIPS THE MEMO, and the calendar hold depends on it.
+       _nonIcpVerdicts remembers the first server answer for the session,
+       which is right for the blur warms -- but a poll asking "has the
+       verdict landed yet" would otherwise be handed back the very
+       not-blocked answer it is trying to supersede, and would loop until
+       the cap reading its own stale result. */
+    function checkNonIcp(email, website, opts) {
+      const fresh = !!(opts && opts.fresh);
+      if (!email && !website) return Promise.resolve({ blocked: false, status: 'empty', pending: false });
+      if (isTestEmail(email)) return Promise.resolve({ blocked: false, status: 'test_email', pending: false });
+      if (!isRailwayReady()) return Promise.resolve({ blocked: false, status: 'no_backend', pending: false });
       const key = nonIcpKey(email, website);
-      if (_nonIcpVerdicts.has(key)) return Promise.resolve(_nonIcpVerdicts.get(key));
-      if (_nonIcpInFlight.has(key)) return _nonIcpInFlight.get(key);
+      if (!fresh && _nonIcpVerdicts.has(key)) return Promise.resolve(_nonIcpVerdicts.get(key));
+      if (!fresh && _nonIcpInFlight.has(key)) return _nonIcpInFlight.get(key);
 
       const p = (async () => {
         try {
@@ -2764,26 +2863,30 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email: email || '', website: website || '' }),
           }, NET_TIMEOUT_MS.nonIcp);
-          if (!res.ok) return { blocked: false, status: 'backend_error' };
+          if (!res.ok) return { blocked: false, status: 'backend_error', pending: false };
           const data = await res.json();
           return {
             blocked:        data.blocked === true,
             matched_domain: data.matched_domain || null,
             status:         'ok',
+            /* "a scrape and a model call are running for this lead right
+               now". Absent on an older backend, which reads as false and
+               simply means the calendar never waits. */
+            pending:        data.pending === true,
           };
         } catch (err) {
           const timedOut = err && err.name === 'AbortError';
           console.warn('[GW] Non-ICP check ' + (timedOut ? 'timed out' : 'failed') + ' — allowing through:', err && err.message);
-          return { blocked: false, status: timedOut ? 'timeout' : 'fetch_error' };
+          return { blocked: false, status: timedOut ? 'timeout' : 'fetch_error', pending: false };
         }
       })()
         /* Only a real server answer is cached. A fail-open verdict must never
            be remembered as a pass for the rest of the session -- the same rule
            EMAIL_UNCACHEABLE encodes for ELV. */
-        .then((v) => { if (v.status === 'ok') _nonIcpVerdicts.set(key, v); return v; })
-        .finally(() => { _nonIcpInFlight.delete(key); });
+        .then((v) => { if (v.status === 'ok' && !fresh) _nonIcpVerdicts.set(key, v); return v; })
+        .finally(() => { if (!fresh) _nonIcpInFlight.delete(key); });
 
-      _nonIcpInFlight.set(key, p);
+      if (!fresh) _nonIcpInFlight.set(key, p);
       return p;
     }
 
@@ -3361,22 +3464,144 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
 
         // Transition to step-3 (300ms animation)
         showStep('step-3');
+        showCalSkeleton();
 
-        // Await RH — likely already resolved due to parallel execution
-        const rhData = await rhPromise;
+        /* Both waits run together, so the hold spends time the visitor
+           was already giving to RevenueHero rather than adding to it. */
+        const [rhData, verdict] = await Promise.all([
+          rhPromise,
+          awaitNonIcpVerdict(formState.email, formState.website),
+        ]);
+
+        /* THE SLOT IS NEVER TAKEN. The redirect happens before the
+           calendar is ever rendered, which is the whole reason the gate
+           sits here instead of in the booking routes. */
+        if (verdict === 'blocked') {
+          /* KNOWN AND DELIBERATE GAP: the lead row still says NOT blocked.
+             /submit ran before this verdict existed, so it stamped
+             non_icp_blocked=false, fired Meta Lead and pushed Salesforce
+             for somebody we are now turning away.
+
+             Left alone on purpose rather than patched from here. Without
+             this hold that same lead is recorded identically AND takes an
+             AE's slot, so this is strictly better, not a regression --
+             and re-stamping would mean a write from the client into the
+             money path, unsupervised, to correct roughly two leads a
+             week. The right fix is server-side and is its own decision;
+             see docs/tickets/non-icp-verdict-arrives-after-submit.md. */
+          hideCalSkeleton();
+          redirectNonIcp({ matched_domain: null });
+          return;
+        }
 
         // Wait for step animation to complete, then render inline
         setTimeout(() => {
+          hideCalSkeleton();
           hero.dialog.setEmbedTarget('#rh-embed');
           hero.dialog.open(rhData);
           console.log('[GW] ✅ RH inline embed opened');
         }, 350);
       } catch (error) {
         console.error('[GW] RH error:', error);
+        /* A SHIMMER THAT NEVER RESOLVES IS WORSE THAN AN EMPTY BOX.
+           Before the skeleton existed this path left #rh-embed blank;
+           without this line it would leave a placeholder animating
+           forever, telling the visitor something is still coming when
+           nothing is. Only the catch -- the success path removes it
+           inside the 350ms step-animation timeout, and removing it in
+           `finally` would blank the panel early. */
+        hideCalSkeleton();
       } finally {
         _submitting = false;
         setLoading('step-2-next', false);
       }
+    }
+
+
+    /* =======================================================
+    THE CALENDAR HOLD
+    =======================================================
+    WHY THIS EXISTS. On 18 Sept 2026 two insurance leads booked demos
+    with both non-ICP blocks switched on and the model having classified
+    both domains correctly at 0.97 and 0.98. Nothing misfired: /submit is
+    a cache read and nothing else, a miss fails open, and both verdicts
+    were written 2.6 and 11.7 seconds AFTER the submit.
+
+    WHY THE GATE IS HERE AND NOT LATER. RevenueHero commits the slot
+    before it tells us -- initRHBookingListener fires on MEETING_BOOKED,
+    past tense -- so the ten to forty seconds a visitor spends choosing a
+    time cannot be used. The last moment we control is between /submit
+    returning and the calendar rendering. Holding here means the slot is
+    never taken; every later option means cancelling on somebody who has
+    already booked.
+
+    IT HOLDS FOR EXACTLY ONE STATE. pending:true from /non-icp-check --
+    a scrape and a model call running right now for one of this lead's
+    domains.
+
+      verdict already cached -> decided at /submit, no hold (61% of real
+                               traffic, measured from the live cache-hit
+                               rate)
+      nothing in flight      -> nothing is coming, so a wait is pure
+                               delay with no possible payoff
+
+    That second rule is the one a careless version gets wrong by waiting
+    "just in case" and taxing every lead for a decision nobody is
+    computing.
+
+    FAILS OPEN ON EVERYTHING. Cap reached, backend down, route thrown,
+    request timed out -- all of them show the calendar. The cap is
+    deliberately short: at a 3.3s average warm it catches the common case
+    and gives up on the 19.6s tail rather than making a real prospect
+    wait for it. */
+    const CAL_HOLD_MAX_MS  = 4000;
+    const CAL_HOLD_POLL_MS = 400;
+
+    /* The skeleton is INJECTED, not Webflow markup, so it ships and
+       versions with this file and cannot drift from the code that shows
+       it. It also fills a gap that is blank today: #rh-embed sits empty
+       while RevenueHero loads, so most of what this draws is an
+       improvement for the leads who are never held at all. */
+    function calSkeletonEl() {
+      let el = document.getElementById('gw-cal-skeleton');
+      if (el) return el;
+      const host = document.getElementById('rh-embed');
+      if (!host) return null;
+      el = document.createElement('div');
+      el.id = 'gw-cal-skeleton';
+      el.innerHTML =
+        '<div class="gw-cal-skel-head">Finding times that work\u2026</div>' +
+        '<div class="gw-cal-skel-panes">' +
+          '<div class="gw-cal-skel-grid">' +
+            Array.from({ length: 28 }).map(function () { return '<span></span>'; }).join('') +
+          '</div>' +
+          '<div class="gw-cal-skel-slots">' +
+            Array.from({ length: 5 }).map(function () { return '<span></span>'; }).join('') +
+          '</div>' +
+        '</div>';
+      host.appendChild(el);
+      return el;
+    }
+    function showCalSkeleton() { const el = calSkeletonEl(); if (el) el.style.display = 'block'; }
+    function hideCalSkeleton() { const el = document.getElementById('gw-cal-skeleton'); if (el) el.remove(); }
+
+    /* Resolves 'blocked' | 'clear'. Never rejects: every failure path
+       answers 'clear', because a lead must never lose a calendar to our
+       own plumbing. */
+    async function awaitNonIcpVerdict(email, website) {
+      const started = Date.now();
+      try {
+        while (Date.now() - started < CAL_HOLD_MAX_MS) {
+          /* fresh:true -- the memo already holds the not-blocked answer
+             from /submit, and re-reading it would loop to the cap. */
+          const v = await checkNonIcp(email, website, { fresh: true });
+          if (v && v.blocked) return 'blocked';
+          if (!v || v.pending !== true) return 'clear';   // nothing coming
+          await new Promise(function (r) { setTimeout(r, CAL_HOLD_POLL_MS); });
+        }
+      } catch (e) { /* fall through to clear */ }
+      console.log('[GW] calendar hold: no verdict within ' + CAL_HOLD_MAX_MS + 'ms \u2014 showing calendar');
+      return 'clear';
     }
 
     /* =======================================================
@@ -3578,7 +3803,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.15.1-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.16.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

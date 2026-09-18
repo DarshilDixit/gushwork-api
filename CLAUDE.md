@@ -204,6 +204,27 @@ longer stale — but it is still a draft, so it is still invisible to the `curl`
 sweep, and it will go stale again at the next form deploy unless the API sweep
 is the one you run.
 
+**AND A PIN CAN LIVE IN THE HEAD, NOT ONLY THE FOOTER — 18 SEPT 2026.**
+Everything below says "footer", and a repin script written to that
+assumption silently reported "no pin found" for `/ai-demo` while the live
+page was plainly loading a form script. The page had been reworked and
+its tag now sits in the **head** block.
+
+A read that finds nothing is not proof of nothing. **Scan both blocks on
+every page**, and treat "no pin" on a page you know serves the form as a
+bug in the scan rather than a fact about the page.
+
+**The set is 17 pinned BLOCKS across 85 pages as of 18 Sept**, up from 15
+across 83 two days earlier — `/aeo-new` and `/ai-demo-old` appeared, and
+`/ai-demo` moved head-ward. Counting pages is the wrong unit; count
+blocks.
+
+**AND RETRY THE READS.** A dry run over 85 pages hit `429 Too Many
+Requests` on four of them and skipped them with a printed warning. On a
+dry run that is noise; on an apply run it is a stale pin nobody will ever
+notice. Back off and retry, sleep between pages, and make a read failure
+fatal rather than a line of output.
+
 **THE AUTHORITATIVE SET IS 15 PAGES, NOT 13 — CORRECTED 17 SEPT 2026.** This
 said 13 and it was wrong by two: `/aeo` and `/ai-crm` both carry
 `gushwork-form-popup.js` and neither was in the list or in the `curl` sweep

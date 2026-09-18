@@ -49,6 +49,16 @@ function eq(name, actual, expected) {
 
 /* Lift a top-level function by brace-matching forward from its signature,
    so the body is taken whole however long it is. */
+/* The slice of a file between two literals — used to assert on one
+   region rather than letting a match anywhere in 3,000 lines count. */
+function between(src, a, b) {
+  const i = src.indexOf(a);
+  if (i === -1) throw new Error('start marker not found: ' + a);
+  const j = src.indexOf(b, i);
+  if (j === -1) throw new Error('end marker not found: ' + b);
+  return src.slice(i, j + b.length);
+}
+
 function liftFn(src, name) {
   const re = new RegExp('\\n    (?:async )?function ' + name + '\\s*\\(');
   const m = re.exec(src);
@@ -546,6 +556,161 @@ const P = build(popup);
      liftFn(demo, 'rhRouterId'), liftFn(popup, 'rhRouterId'));
 }
 
+/* The hold test AWAITS -- it drives real timers to prove the cap is
+   honoured -- so the summary prints from its continuation. The catch is
+   not optional: without it a throw escapes as an unhandledRejection and
+   the suite prints no totals at all, which reads as UNMEASURED rather
+   than as a failure. */
+(async () => {
+/* ============================================================
+   THE CALENDAR HOLD, DRIVEN — both files
+
+   Two insurance leads booked demos on 18 Sept 2026 because their
+   verdicts were written 2.6 s and 11.7 s AFTER /submit read the cache.
+   RevenueHero commits the slot before it tells us, so the last moment
+   anything can prevent the booking is between /submit returning and the
+   calendar rendering. This is that gate.
+
+   EXECUTED, NOT READ. An ordering or presence assertion here would
+   survive the await being dropped, the cap being removed, or the poll
+   reading its own memo forever — which is exactly how this feature
+   would fail silently and let a lead book anyway.
+   ============================================================ */
+{
+  const mkHold = (src, label) => {
+    const body = [
+      (/const CAL_HOLD_MAX_MS\s*=\s*\d+;/.exec(src) || [''])[0],
+      (/const CAL_HOLD_POLL_MS\s*=\s*\d+;/.exec(src) || [''])[0],
+      liftFn(src, 'awaitNonIcpVerdict'),
+      'return { awaitNonIcpVerdict, CAL_HOLD_MAX_MS, CAL_HOLD_POLL_MS };',
+    ].join('\n');
+    ok(`hold(${label}): the cap and poll interval are declared`,
+       /CAL_HOLD_MAX_MS/.test(body) && /CAL_HOLD_POLL_MS/.test(body));
+    return (checkNonIcp) => new Function('checkNonIcp', 'console', body)(
+      checkNonIcp, { log() {}, warn() {} });
+  };
+
+  /* ── IS IT ACTUALLY WIRED IN? ─────────────────────────────────
+     MEASURED GAP: replacing the awaitNonIcpVerdict call in the submit
+     flow with Promise.resolve('clear') -- the function present, correct
+     and never consulted -- SURVIVED the entire bar. Every test below
+     drives the function in isolation, and none of them could see that
+     nothing calls it.
+
+     This is the repo's oldest lesson: a behaviour test proves the unit
+     works, not that the product uses it. These are source assertions and
+     that is their known ceiling, but they are what closes the hole
+     between "the hold is correct" and "the hold runs". */
+  for (const [label, src] of [['demo', demo], ['ads', popup]]) {
+    /* COMMENTS STRIPPED FIRST. These assertions match structure across a
+       span, and a paragraph of explanation inserted between two
+       statements would otherwise push them out of any byte window and
+       fail on a correct file -- which it did, immediately, the first time
+       a comment was added between the branch and its redirect. */
+    const flow = between(src, 'showStep(\'step-3\');', 'hero.dialog.open(rhData);')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    ok(`wiring(${label}): the submit flow awaits the hold`,
+       /awaitNonIcpVerdict\(\s*formState\.email\s*,\s*formState\.website\s*\)/.test(flow), flow.slice(0, 160));
+    ok(`wiring(${label}): it runs alongside RevenueHero, not after it`,
+       /Promise\.all\(\[[\s\S]*rhPromise[\s\S]*awaitNonIcpVerdict/.test(flow));
+    ok(`wiring(${label}): a blocked verdict redirects`,
+       /verdict === 'blocked'[\s\S]{0,200}redirectNonIcp\(/.test(flow));
+    ok(`wiring(${label}): and RETURNS, so the calendar never opens`,
+       /verdict === 'blocked'[\s\S]{0,260}\breturn;/.test(flow));
+    ok(`wiring(${label}): the redirect happens BEFORE the calendar is opened`,
+       flow.indexOf('redirectNonIcp(') < flow.indexOf('hero.dialog.setEmbedTarget'));
+    ok(`wiring(${label}): the skeleton is shown when step 3 appears`,
+       /showStep\('step-3'\);[\s\S]{0,80}showCalSkeleton\(\)/.test(flow));
+    /* A RevenueHero failure lands in the outer catch. Without this the
+       skeleton animates forever, which is worse than the blank box this
+       path showed before it existed. */
+    const whole = src.replace(/\/\*[\s\S]*?\*\//g, '');
+    ok(`wiring(${label}): a RevenueHero failure clears the skeleton`,
+       /RH error:[\s\S]{0,200}hideCalSkeleton\(\)/.test(whole));
+  }
+
+  for (const [label, src] of [['demo', demo], ['ads', popup]]) {
+    const make = mkHold(src, label);
+
+    /* 1. Already blocked in the cache — decided without any wait. */
+    {
+      let calls = 0;
+      const s = make(async () => { calls++; return { blocked: true, pending: false }; });
+      const t0 = Date.now();
+      const r = await s.awaitNonIcpVerdict('a@b.test', 'b.test');
+      eq(`hold(${label}): a cached block is returned`, r, 'blocked');
+      ok(`hold(${label}): and without polling — one call`, calls === 1, String(calls));
+      ok(`hold(${label}): and without waiting`, Date.now() - t0 < 200);
+    }
+
+    /* 2. NOTHING IN FLIGHT MUST NOT HOLD. The rule a careless version
+       gets wrong by waiting "just in case" and taxing every lead for a
+       decision nobody is computing. */
+    {
+      let calls = 0;
+      const s = make(async () => { calls++; return { blocked: false, pending: false }; });
+      const t0 = Date.now();
+      const r = await s.awaitNonIcpVerdict('a@b.test', 'b.test');
+      eq(`hold(${label}): not pending resolves clear`, r, 'clear');
+      ok(`hold(${label}): and does NOT wait when no answer is coming`,
+         Date.now() - t0 < 200 && calls === 1, `${Date.now() - t0}ms, ${calls} calls`);
+    }
+
+    /* 3. THE LEAD THAT CAUSED THIS. A warm is in flight; the verdict
+       lands mid-hold; the calendar is never shown. */
+    {
+      let calls = 0;
+      const s = make(async () => {
+        calls++;
+        return calls < 3 ? { blocked: false, pending: true } : { blocked: true, pending: false };
+      });
+      const r = await s.awaitNonIcpVerdict('steenhoekinsurance@outlook.com', 'steenhoekinsurance.com');
+      eq(`hold(${label}): a verdict arriving mid-hold blocks the calendar`, r, 'blocked');
+      ok(`hold(${label}): it polled rather than answering from the first read`, calls >= 3, String(calls));
+    }
+
+    /* 4. FAILS OPEN AT THE CAP. A warm slower than the cap — the 19.6 s
+       scrape tail — must release the calendar, not strand a real
+       prospect on a skeleton. */
+    {
+      const s = make(async () => ({ blocked: false, pending: true }));
+      const t0 = Date.now();
+      const r = await s.awaitNonIcpVerdict('a@b.test', 'b.test');
+      const took = Date.now() - t0;
+      eq(`hold(${label}): a warm slower than the cap fails OPEN`, r, 'clear');
+      ok(`hold(${label}): and gives up at the cap, not later`,
+         took >= s.CAL_HOLD_MAX_MS - 200 && took < s.CAL_HOLD_MAX_MS + 1500, `${took}ms`);
+    }
+
+    /* 5. A THROWN CHECK NEVER COSTS A LEAD. */
+    {
+      const s = make(async () => { throw new Error('backend down'); });
+      eq(`hold(${label}): a thrown check resolves clear`,
+         await s.awaitNonIcpVerdict('a@b.test', 'b.test'), 'clear');
+    }
+
+    /* 6. THE POLL MUST ASK FRESH. checkNonIcp memoises the first server
+       answer per email|website; without fresh:true the poll would be
+       handed back the not-blocked verdict it is trying to supersede and
+       would spin to the cap reading its own reply — the feature would
+       look wired up and catch nothing. */
+    {
+      const seen = [];
+      const s = make(async (e, w, opts) => {
+        seen.push(opts && opts.fresh === true);
+        return { blocked: false, pending: false };
+      });
+      await s.awaitNonIcpVerdict('a@b.test', 'b.test');
+      ok(`hold(${label}): every poll bypasses the memo with fresh:true`,
+         seen.length > 0 && seen.every(Boolean), JSON.stringify(seen));
+    }
+  }
+}
+})()
+  .catch((err) => { ok('parity: the calendar-hold section completed', false, err && err.message); })
+  .then(() => {
+
 /* ============================================================ */
 console.log('');
 if (failures.length) {
@@ -557,3 +722,5 @@ console.log(`  passed: ${pass}`);
 console.log(`  failed: ${fail}`);
 console.log('');
 process.exit(fail ? 1 : 0);
+
+  });
