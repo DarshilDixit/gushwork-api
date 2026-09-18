@@ -602,7 +602,14 @@ const P = build(popup);
      that is their known ceiling, but they are what closes the hole
      between "the hold is correct" and "the hold runs". */
   for (const [label, src] of [['demo', demo], ['ads', popup]]) {
-    const flow = between(src, 'showStep(\'step-3\');', 'hero.dialog.open(rhData);');
+    /* COMMENTS STRIPPED FIRST. These assertions match structure across a
+       span, and a paragraph of explanation inserted between two
+       statements would otherwise push them out of any byte window and
+       fail on a correct file -- which it did, immediately, the first time
+       a comment was added between the branch and its redirect. */
+    const flow = between(src, 'showStep(\'step-3\');', 'hero.dialog.open(rhData);')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
     ok(`wiring(${label}): the submit flow awaits the hold`,
        /awaitNonIcpVerdict\(\s*formState\.email\s*,\s*formState\.website\s*\)/.test(flow), flow.slice(0, 160));
     ok(`wiring(${label}): it runs alongside RevenueHero, not after it`,

@@ -3094,6 +3094,18 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
            calendar is ever rendered, which is the whole reason the gate
            sits here instead of in the booking routes. */
         if (verdict === 'blocked') {
+          /* KNOWN AND DELIBERATE GAP: the lead row still says NOT blocked.
+             /submit ran before this verdict existed, so it stamped
+             non_icp_blocked=false, fired Meta Lead and pushed Salesforce
+             for somebody we are now turning away.
+
+             Left alone on purpose rather than patched from here. Without
+             this hold that same lead is recorded identically AND takes an
+             AE's slot, so this is strictly better, not a regression --
+             and re-stamping would mean a write from the client into the
+             money path, unsupervised, to correct roughly two leads a
+             week. The right fix is server-side and is its own decision;
+             see docs/tickets/non-icp-verdict-arrives-after-submit.md. */
           hideCalSkeleton();
           redirectNonIcp({ matched_domain: null });
           return;
