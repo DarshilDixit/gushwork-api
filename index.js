@@ -6076,12 +6076,20 @@ app.post('/non-icp-check', async (req, res) => {
       blocked:        v.blocked === true,
       matched_domain: v.blocked ? v.reason : null,
       label:          v.blocked ? v.label  : null,
+      /* THE ONLY NEW FIELD, and the form holds the calendar on it. True
+         means a scrape and a model call are running for one of this
+         lead's domains right now, so an answer is seconds away and worth
+         waiting for. Read AFTER the verdict above: a cached verdict
+         answers the question outright and nothing should wait for a warm
+         that has already finished. */
+      pending:        v.blocked === true ? false : nonIcpWarmPending({ email, website }),
     });
   } catch (err) {
     /* Belt and braces -- nonIcpVerdict already swallows everything. If this
        line is ever reached the lead still goes through. */
     console.warn('[non-ICP] /non-icp-check errored — answering "not blocked":', err.message);
-    return res.json({ blocked: false, matched_domain: null, label: null });
+    /* pending:false so a thrown route never makes the calendar wait. */
+    return res.json({ blocked: false, matched_domain: null, label: null, pending: false });
   }
 });
 
@@ -8182,6 +8190,72 @@ const _nonIcpLlmStats = { ok: 0, errored: 0, unreachable: 0, writeFailed: 0,
 
 function nonIcpLlmHealthSnapshot() { return { ..._nonIcpLlmStats }; }
 
+/* ── THE SPECULATIVE DOMAIN, AND WHY IT IS WARM-ONLY ─────────────────
+   A free-mail lead hides their company until the website field is typed
+   at step 2, which is why both misses on 18 Sept were @outlook.com and
+   @me.com -- the step-1 email blur had nothing to warm.
+
+   But the local part often IS the company: steenhoekinsurance@outlook.com
+   is steenhoekinsurance.com, and that lead booked an insurance demo
+   because her verdict landed 2.6 seconds after she submitted. Measured
+   over 90 days, the local part matches the eventual website domain for
+   37 of 535 free-mail leads -- 6.9%, about one a week.
+
+   NEVER A DECISION INPUT, and this is the whole safety of it. The guess
+   is wrong 93% of the time: dla1972@me.com would produce dla1972.com,
+   which may be somebody else's business entirely. Blocking on that would
+   be the worst bug this system could have. It is returned by a SEPARATE
+   function from nonIcpCandidateDomains so it can only ever reach the
+   warm, never nonIcpVerdict -- a guessed domain fills the cache and, if
+   the guess was wrong, is simply never read for that lead.
+
+   CHEAP WHEN WRONG. A domain that does not resolve fails at the fetch
+   and never reaches the model: the steenhoekins.com row from her own
+   mistyping has scrape_status=unreachable and no business_type at all.
+   Measured cost of being wrong is one failed HTTP request. */
+function nonIcpSpeculativeDomain(email) {
+  const raw = String(email || '').trim().toLowerCase();
+  const at = raw.indexOf('@');
+  if (at <= 0) return null;
+  const local  = raw.slice(0, at);
+  const domain = raw.slice(at + 1);
+  /* Only for free mail. A business email already gives us a real domain
+     and nonIcpCandidateDomains has been warming it since step 1. */
+  if (!freeEmailMatch(domain)) return null;
+  /* A local part that is plainly not a company name. Dots and plus
+     addressing are ordinary in personal mail; digits usually mean
+     dla1972 rather than a brand. Short strings are not worth a fetch. */
+  if (local.length < 8) return null;
+  if (!/^[a-z][a-z-]*[a-z]$/.test(local)) return null;
+  const key = partnerStackCustomerKey(local + '.com');
+  return key || null;
+}
+
+/* ── IS AN ANSWER ACTUALLY COMING? ───────────────────────────────────
+   The calendar hold exists for exactly one state: a warm running right
+   now for a domain belonging to this lead. Everything else must NOT
+   hold --
+
+     verdict already cached  -> decide immediately (61% of real traffic)
+     nothing in flight       -> nothing is coming, so waiting is pure
+                                delay with no possible payoff
+
+   That middle rule is the one a careless version gets wrong by holding
+   "just in case" and taxing every lead for a decision nobody is
+   computing.
+
+   PER PROCESS, and that is a real limit rather than a detail: the map
+   lives in this dyno. Railway runs a single replica today (no scaling
+   variables set), so the warm and the read share a process. Scale to two
+   and this quietly starts answering false -- which fails OPEN, the safe
+   direction, but it stops catching anything. */
+function nonIcpWarmPending({ email, website } = {}) {
+  const spec = nonIcpSpeculativeDomain(email);
+  const domains = nonIcpCandidateDomains({ email, website });
+  if (spec && !domains.includes(spec)) domains.push(spec);
+  return domains.some((d) => _nonIcpLlmInFlight.has(d));
+}
+
 function warmNonIcpLlm({ email, website } = {}) {
   if (!NON_ICP_LLM_ENABLED) return;
   if (isPartnerStackTestEmail(email)) return;
@@ -8199,7 +8273,13 @@ function warmNonIcpLlm({ email, website } = {}) {
      nonIcpVerdict at all three call sites, so it never saw the V1 hit. It
      matched here instead, against the same function the verdict uses. */
   if (NON_ICP_BLOCK_ENABLED && (nonIcpMatchHost(email) || nonIcpMatchHost(website))) return;
-  for (const domain of nonIcpCandidateDomains({ email, website })) {
+  /* The speculative domain is appended, never substituted, and only
+     reaches this loop -- nonIcpVerdict still reads nonIcpCandidateDomains
+     alone, so a guess can warm the cache but can never decide a lead. */
+  const spec = nonIcpSpeculativeDomain(email);
+  const warmDomains = nonIcpCandidateDomains({ email, website });
+  if (spec && !warmDomains.includes(spec)) warmDomains.push(spec);
+  for (const domain of warmDomains) {
     if (_nonIcpLlmInFlight.has(domain)) continue;
     const p = (async () => {
       const cached = await nonIcpReadVerdictRow(domain);
