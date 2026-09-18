@@ -1394,6 +1394,42 @@ match nothing and no-op. `syncBookingToAWS` now **reads `rowCount`** and
 says which happened — it used to log a tick unconditionally, so an
 update that matched nothing read as success.
 
+**AND THE PAGE IS A SIGNAL, NOT ONLY THE ADDRESS — 19 SEPT 2026.**
+`isInternalSubmission(email, page_url)` is what every outbound guard now
+asks; `isInternalLead(email)` is only half of it. **40 lead rows were
+submitted from `gushwork.webflow.io`**, the Webflow staging host, and
+**19 carried addresses no list could ever catch** — the team's personal
+Gmails (`swapnilsinha07@`, `utsavsingh5600@`, `darshildixit21@`), plus
+`honey@apple.com`, `ywhs@gggg.com` and `johnlennon@abc.com` whose website
+was `heheheh.com`. 15 were submitted, so each fired Meta, created a
+Salesforce Lead and reached the dialer.
+
+**Nobody FINDS the staging site**, so everyone on it was handed the URL.
+That makes the page a stronger signal than the address, and it is the
+signal a list of addresses can never become.
+
+**Exact HOST match, never a substring.** `INTERNAL_STAGING_HOSTS` is
+compared against `new URL(page_url).hostname`, so
+`gushwork.webflow.io.evil.com` and `evil.com/?x=gushwork.webflow.io` do
+not match. A bare path resolves to no host and is therefore **not**
+evidence of staging — same rule as `resolveProduct`: what we cannot read
+is not a default.
+
+**Nothing is lost when it fires.** The lead is still written to `leads`
+and still appears on the dashboard; it is only not propagated outward. So
+a real person who is sent a staging link is visible to us, just not
+auto-pushed. The one row that looked like a real company was checked
+rather than waved through — `hari@productledsales.io` landed directly on
+`/demo-testing-rh` with referrer "direct" on 18 June, the same day two
+staff were testing that exact page.
+
+**The dashboard marker and the guards ask the SAME question**, and that
+is the fix for how this stayed hidden: Meta was suppressed by address and
+the dashboard agreed with it, so nobody could see that **neither had ever
+consulted the page**. `internalLeadSqlClause(emailCol, pageCol, params)`
+carries the third arm too, as an exact `SPLIT_PART` host match rather
+than a `LIKE`.
+
 `tests/test-batch2.js` §28 and §29 execute all of this rather than
 reading it, and all five mutations are caught.
 
