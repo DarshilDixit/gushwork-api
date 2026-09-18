@@ -1562,6 +1562,34 @@ function finish() {
      which is the field Source_Bucket__c actually reads. */
   ok('product: offer_campaign falls back to this visit, never the other way round',
      /const offer_campaign\s+= \(req\.body\.offer_campaign\s+\|\| utm_campaign \|\| ''\)/.test(src));
+
+  /* ── THE COLUMNS, ADDED 19 SEPT 2026 ──────────────────────────────
+     offer_campaign was read, used to resolve the product and tag Meta,
+     and then thrown away -- so "did the 30-day cookie rescue this lead"
+     was arguable but not queryable. It matters because the population it
+     serves is not small: 424 leads in 90 days arrived with the campaign
+     plainly visible in previous_page and nothing in utm_campaign, and
+     the loss is 31.2% inside Facebook and Instagram in-app browsers
+     against 0% on desktop.
+
+     BOTH FORM UPSERTS, and COALESCEd like every other attribution
+     column -- /partial fires repeatedly through step 1 and must never
+     blank what an earlier call captured. */
+  ok('offer: both form upserts store the columns',
+     (src.match(/ps_partner_name,ps_partner_email,offer_campaign,offer_medium\)/g) || []).length === 2);
+  ok('offer: both bind the values',
+     (src.match(/psIdentity\?\.name\|\|null,psIdentity\?\.email\|\|null,offer_campaign\|\|null,offer_medium\|\|null\]/g) || []).length === 2);
+  ok('offer: both COALESCE on conflict, so a later /partial cannot blank them',
+     (src.match(/offer_campaign\s+= COALESCE\(EXCLUDED\.offer_campaign/g) || []).length === 2
+     && (src.match(/offer_medium\s+= COALESCE\(EXCLUDED\.offer_medium/g) || []).length === 2);
+  ok('offer: the schema declares both columns',
+     /ADD COLUMN IF NOT EXISTS offer_campaign TEXT/.test(dbsrc)
+     && /ADD COLUMN IF NOT EXISTS offer_medium\s+TEXT/.test(dbsrc));
+  /* NEVER BACKFILLED. A null here means "this lead predates the column",
+     and inferring one would put a measurement where an absence belongs --
+     the same rule non_icp_checked_at follows. */
+  ok('offer: neither column is backfilled or defaulted',
+     !/ADD COLUMN IF NOT EXISTS offer_(campaign|medium)[^,;`]*DEFAULT/.test(dbsrc));
   ok('product: utm_campaign itself is never read from the offer field',
      !/const utm_campaign[^;]*offer_campaign/.test(src));
   ok('product: the selection reaches Meta, so the event cannot diverge',

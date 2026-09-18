@@ -725,6 +725,31 @@ async function initDB() {
          V1 incident, arriving one column earlier. */
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS non_icp_llm_flagged BOOLEAN DEFAULT FALSE`,
 
+      /* ── WHAT WE REMEMBERED THEM COMING FOR ───────────────────────────
+         NOT a second copy of utm_campaign, and the difference is the whole
+         reason both exist.
+
+         utm_campaign is what THIS page load was attributed to: URL, then
+         this visit's sessionStorage. offer_campaign adds the 30-day
+         cookie, and is the only thing the product resolver reads.
+
+         They differ for one population and it is not small. Measured over
+         90 days, 424 leads arrived with the campaign plainly visible in
+         previous_page and nothing in utm_campaign -- and the split by
+         browsing context says why: 31.2% loss inside the Facebook and
+         Instagram in-app browsers against 1.6% on a normal mobile browser
+         and 0% on desktop. Those webviews do not carry sessionStorage
+         across a navigation; they do carry cookies, which is why _fbc
+         survives the same journey that loses the UTMs.
+
+         WITHOUT THESE COLUMNS THE COOKIE'S EFFECT IS UNOBSERVABLE. It was
+         read in /partial and /submit, used to resolve the product and tag
+         Meta, and then discarded -- so "did the cookie rescue this lead"
+         could be argued but not queried. Storing it makes the 424 a number
+         somebody can watch instead of a claim. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS offer_campaign TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS offer_medium   TEXT`,
+
       /* ── SALESFORCE SYNC STATE ────────────────────────────────────────
          Until 16 Sept 2026 nothing recorded whether a Salesforce write had
          landed. A maintenance window that afternoon dropped
