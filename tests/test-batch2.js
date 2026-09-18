@@ -3692,6 +3692,104 @@ async function section12() {
      !/Salesforce push skipped[\s\S]{0,300}?markSalesforceSynced/.test(src));
 }
 
+/* ============================================================
+   29. OUR OWN TEST SUBMISSIONS DO NOT REACH THE DIALER
+
+   gw_form_leads is not a reporting surface -- it is the feed the
+   dialer reads, so a row there is a person somebody may ring. That is
+   a DIFFERENT harm to the Meta and Salesforce ones section 28 closes:
+   those were about signal, this one wastes an SDR's time.
+
+   The guard sits INSIDE syncToAWS rather than at its four call sites,
+   because two of those are the Cal and RevenueHero safety nets -- the
+   pair most likely to be missed by someone guarding the two obvious
+   routes.
+
+   EXECUTED. The function is lifted and CALLED against a stub pool, so
+   what is asserted is whether a query was issued, not whether a line
+   of source exists.
+   ============================================================ */
+{
+  const liftTop = (name) => {
+    const m = new RegExp('\\nfunction ' + name + '\\s*\\(').exec(src);
+    if (!m) throw new Error('function not found: ' + name);
+    let d = 0;
+    for (let j = src.indexOf('{', m.index); j < src.length; j++) {
+      if (src[j] === '{') d++;
+      else if (src[j] === '}') { d--; if (!d) return src.slice(m.index, j + 1); }
+    }
+    throw new Error('unbalanced braces in: ' + name);
+  };
+  const base = [
+    (/const ELV_EXCLUDED_DOMAINS = \[[^\]]*\];/.exec(src) || [''])[0],
+    (/const INTERNAL_TEST_EMAILS = \[[\s\S]*?\n\];/.exec(src) || [''])[0],
+    liftTop('isInternalLead'),
+  ];
+
+  /* A synchronous thenable, so the .then() logging runs before the
+     assertion rather than after the suite has printed its totals. */
+  const thenable = (rowCount) => ({
+    then(f) { f({ rowCount }); return { catch() {} }; },
+    catch() { return this; },
+  });
+
+  const makeSync = (pool, logs) => new Function(
+    'awsPool', 'console', 'recordFailure', 'process',
+    base.concat(liftTop('syncToAWS'), 'return syncToAWS;').join('\n')
+  )(pool, { log: (m) => logs.push(m), warn: (m) => logs.push(m) }, () => {}, { env: {} });
+
+  /* ---- the mirror itself ---- */
+  [
+    ['b@g.ai',                    false, 'the form test address'],
+    ['darshil.dixit@gushwork.ai', false, 'staff address'],
+    ['x@test.com',                false, 'test domain'],
+    ['agent@allstate.com',        false, 'the non-ICP walkthrough address'],
+    ['buyer@acme.com',            true,  'a REAL lead still mirrors -- the dialer must keep working'],
+    [undefined,                   true,  'a webhook row with no email still mirrors'],
+  ].forEach(([email, shouldWrite, why]) => {
+    const seen = [], logs = [];
+    const sync = makeSync({ query: (sql, params) => { seen.push(sql); return thenable(1); } }, logs);
+    sync({ session_id: 's1', email });
+    eq(`29: mirror write for ${JSON.stringify(email)} -- ${why}`, seen.length, shouldWrite ? 1 : 0);
+    if (!shouldWrite) {
+      ok(`29: and it says why it skipped ${JSON.stringify(email)}`,
+         logs.some((l) => /Mirror skipped/.test(l)), logs.join(' | '));
+    }
+  });
+
+  /* A missing awsPool must still short-circuit first -- the guard must
+     not have moved above it and started touching a null pool. */
+  {
+    const logs = [];
+    const sync = new Function('awsPool', 'console', 'recordFailure', 'process',
+      base.concat(liftTop('syncToAWS'), 'return syncToAWS;').join('\n')
+    )(null, { log: (m) => logs.push(m), warn: (m) => logs.push(m) }, () => {}, { env: {} });
+    let threw = false;
+    try { sync({ session_id: 's1', email: 'buyer@acme.com' }); } catch (e) { threw = true; }
+    ok('29: no awsPool is still a clean no-op', !threw);
+  }
+
+  /* ---- the three targeted writes no-op rather than erroring ---- */
+  ['syncBookingToAWS', 'syncPartnerIdentityToAWS', 'syncHearAboutUsToAWS'].forEach((name) => {
+    const fsrc = liftTop(name);
+    ok(`29: ${name} is a targeted UPDATE keyed on session_id, so a missing mirror row matches nothing`,
+       /UPDATE gw_form_leads/.test(fsrc) && /WHERE\s+session_id\s*=\s*\$1/.test(fsrc));
+    ok(`29: ${name} is NOT an upsert, so it cannot resurrect a skipped row`,
+       !/INSERT INTO/.test(fsrc));
+  });
+
+  /* ---- and the booking log reports what it actually did ---- */
+  [[0, /not mirrored/, 'no row'], [1, /Booking synced/, 'a row']].forEach(([rowCount, want, what]) => {
+    const logs = [];
+    const fn = new Function('awsPool', 'console', 'recordFailure',
+      liftTop('syncBookingToAWS') + '; return syncBookingToAWS;'
+    )({ query: () => thenable(rowCount) }, { log: (m) => logs.push(m), warn: (m) => logs.push(m) }, () => {});
+    fn('s1', 'uid', null, null, null);
+    ok(`29: booking sync against ${what} logs the truth`,
+       logs.some((l) => want.test(l)), logs.join(' | '));
+  });
+}
+
 /* ============================================================ */
 /* Section 12 is async, so the totals are printed from its continuation.
    The catch is not optional: without it a throw in there escapes as an

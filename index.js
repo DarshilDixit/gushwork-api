@@ -326,6 +326,35 @@ async function initAWSTable() {
 
 function syncToAWS(data) {
   if (!awsPool) return;
+  /* OUR OWN TEST SUBMISSIONS DO NOT REACH THE DIALER.
+
+     gw_form_leads is not a reporting surface -- it is the feed the dialer
+     reads, so a row here is a person somebody may ring. An SDR calling
+     darshil.dixit@gushwork.ai is the harm, and it is a different harm to
+     the Meta and Salesforce ones closed on 19 Sept 2026: those were about
+     signal, this one wastes a human being's time.
+
+     GUARDED HERE RATHER THAN AT THE FOUR CALL SITES, deliberately. Two of
+     them are the Cal and RevenueHero SAFETY NETS, which insert a lead that
+     has no form row at all -- exactly the pair most likely to be forgotten
+     by someone adding the guard to the two obvious routes. One function,
+     every caller, the same discipline as internalLeadSuppressesMeta.
+
+     The three targeted writes -- syncBookingToAWS, syncPartnerIdentityToAWS
+     and syncHearAboutUsToAWS -- need no guard of their own. Each is a plain
+     UPDATE ... WHERE session_id, so with no mirror row they match nothing
+     and no-op. Verified, not assumed: see tests/test-batch2.js section 29.
+
+     isInternalLead is declared ~5,000 lines below this. That is safe only
+     because syncToAWS is never called during module evaluation -- every
+     caller is inside a route handler. A const read above its declaration is
+     a TDZ error at RUNTIME that node --check cannot see, which is one of the
+     three breaks CLAUDE.md records from 11-12 Sept 2026. Do not call this
+     from top-level code. */
+  if (isInternalLead(data && data.email)) {
+    console.log(`[AWS] ⏭ Mirror skipped — internal test submission: ${data && data.email}`);
+    return;
+  }
   awsPool.query(`
     INSERT INTO gw_form_leads
       (session_id, page_url,
@@ -506,7 +535,13 @@ function syncBookingToAWS(session_id, booking_uid, start_time, end_time, event_t
     UPDATE gw_form_leads SET booking_uid=$2, start_time=$3, end_time=$4, event_type=$5, booked_at=NOW(), completed=true, updated_at=NOW()
     WHERE session_id = $1
   `, [session_id, booking_uid, start_time || null, end_time || null, event_type || null])
-  .then(() => console.log(`[AWS] ✅ Booking synced for session ${session_id}`))
+  /* REPORTS WHAT IT ACTUALLY DID. This logged a tick unconditionally, so a
+     booking that matched NO mirror row -- now the normal case for our own
+     test submissions, and a real bug for anyone else -- read as success.
+     An UPDATE that matched nothing is not a sync. */
+  .then((r) => console.log(r.rowCount
+    ? `[AWS] ✅ Booking synced for session ${session_id}`
+    : `[AWS] ⏭ Booking not mirrored — no gw_form_leads row for session ${session_id}`))
   .catch(err => { console.warn(`[AWS] ⚠ Booking sync failed:`, err.message); recordFailure('AWS sync', 'booking sync', err.message); });
 }
 
