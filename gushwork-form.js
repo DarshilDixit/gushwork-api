@@ -3120,6 +3120,14 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
         }, 350);
       } catch (error) {
         console.error('[GW] RH error:', error);
+        /* A SHIMMER THAT NEVER RESOLVES IS WORSE THAN AN EMPTY BOX.
+           Before the skeleton existed this path left #rh-embed blank;
+           without this line it would leave a placeholder animating
+           forever, telling the visitor something is still coming when
+           nothing is. Only the catch -- the success path removes it
+           inside the 350ms step-animation timeout, and removing it in
+           `finally` would blank the panel early. */
+        hideCalSkeleton();
       } finally {
         _submitting = false;
         setLoading('step-2-next', false);
