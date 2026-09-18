@@ -5409,6 +5409,12 @@ const ELV_EXCLUDED_DOMAINS = ['gushwork.ai', 'test.com', 'example.com', 'example
    domains. */
 const INTERNAL_TEST_EMAILS = [
   'agent@allstate.com',    // the non-ICP block walkthrough, 11 and 15 Sept 2026
+  /* THE FORM'S OWN TEST ADDRESS, and it was the ONE address this list did
+     not know about. It is special-cased in four hardcoded lists -- both
+     form files, PS_TEST_EMAILS, and the two booking webhooks -- none of
+     which is this one, so isInternalLead('b@g.ai') answered FALSE and it
+     was not even MARKED on the dashboard as ours. */
+  'b@g.ai',
   ...String(process.env.INTERNAL_TEST_EMAILS || '')
     .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
 ];
@@ -5418,6 +5424,37 @@ function isInternalLead(email) {
   if (!e) return false;
   if (INTERNAL_TEST_EMAILS.includes(e)) return true;
   return ELV_EXCLUDED_DOMAINS.includes(e.slice(e.lastIndexOf('@') + 1));
+}
+
+/* OUR OWN TEST SUBMISSIONS MUST NOT FEED THE AD ALGORITHM.
+
+   Measured 19 Sept 2026, and the number is small rather than alarming --
+   which is why it had never been noticed. 21 internal addresses had
+   produced 81 lead rows since 20 March; since Meta CAPI went live on
+   8 April they had fired 61 StartTrial, 31 Lead and 14 Schedule events,
+   being 1.14%, 0.81% and 0.41% of each. Nobody chose that, and every one
+   of those conversions told Facebook to go and find more people like us.
+
+   IT WAS THE WEBSITE GATE THAT LET THEM THROUGH, not an absent one.
+   isWebsiteVerified returns TRUE for a null reason (pre-feature rows) and
+   test_email_skipped is itself on WEBSITE_VERIFIED_REASONS -- so skipping
+   email verification for a test address is precisely what marks it
+   verified. The gate was working; it was answering a different question
+   to the one anybody assumed.
+
+   ONE FUNCTION, FIVE CALL SITES, for the same reason
+   nonIcpScheduleSuppressed is one function called three times: a
+   condition copied five times stays in step by luck, and the copy that
+   drifts is the one nobody re-reads. tests/test-batch2.js section 28
+   asserts all five sites call it AND executes it.
+
+   This does NOT touch the lead itself. It still books, still reaches the
+   dashboard, still counts in every headline number -- the rule that our
+   own submissions are marked rather than hidden is unchanged. */
+function internalLeadSuppressesMeta(email, where) {
+  if (!isInternalLead(email)) return false;
+  console.log(`[${where}] ⏭ Meta CAPI suppressed — internal test submission: ${email}`);
+  return true;
 }
 
 /* The same test, as SQL, for queries that page in the database and so
@@ -12483,7 +12520,10 @@ app.post('/partial', async (req, res) => {
        exactly as today -- but it stops feeding the ad algorithm the moment
        NON_ICP_LLM_META is on. Those are two switches because they are two
        costs, and reading `blocked` here would silently tie them together. */
-    if (nonIcp.suppress_meta) {
+    if (internalLeadSuppressesMeta(email, '/partial')) {
+      /* Checked FIRST so the logged reason is the real one -- our own
+         address is ours whatever the model thinks of its domain. */
+    } else if (nonIcp.suppress_meta) {
       console.log(`[/partial] ⏭ StartTrial suppressed — non-ICP/${nonIcp.source} (${nonIcp.reason}): ${email}`);
     } else if (!disqualified && isBusinessEmail) {
       pushStartTrialToMeta({session_id,email,sell_to,page_url,fbc,fbp,landing_page,product_interest,utm_campaign:offer_campaign,utm_medium:offer_medium||utm_medium}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => { console.warn('[/partial] Meta CAPI StartTrial failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (StartTrial)', err.message); });
@@ -12836,12 +12876,26 @@ app.post('/submit', async (req, res) => {
          Falls back to product where nothing was ticked, so /ai-demo, the
          ad landers and every historical lead send exactly what they send
          today. */
-      pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,product:(product_interest||product),about_business,hear_about_us:hearAboutUsFinal,hear_about_us_raw:hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false})
-        /* BOTH OUTCOMES ARE RECORDED, not just the failure. A success stamp is
-           what lets anyone ask which leads are missing from Salesforce, and it
-           is what clears a lead out of the retry sweep once it lands. */
-        .then(() => markSalesforceSynced(session_id))
-        .catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); markSalesforceFailed(session_id, err); salesforceFailureAlert('lead', err, { 'Email': email, 'Stage': 'form completed' }); });
+      /* SALESFORCE DOES NOT NEED OUR OWN TEST SUBMISSIONS EITHER. 41 junk
+         Lead records had accumulated by 19 Sept 2026, and they are not
+         inert: Source_Bucket__c is a formula that recomputes on read, so
+         every one of them is being bucketed and reported as real inbound.
+
+         Nothing is stamped when we skip. The retry sweep keys on
+         sf_sync_failed_at IS NOT NULL -- a write we WATCHED fail -- so a
+         push never attempted is invisible to it rather than queued
+         forever. Deliberate: stamping sf_synced_at would be recording
+         that Salesforce has a lead it does not have. */
+      if (isInternalLead(email)) {
+        console.log(`[/submit] ⏭ Salesforce push skipped — internal test submission: ${email}`);
+      } else {
+        pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,product:(product_interest||product),about_business,hear_about_us:hearAboutUsFinal,hear_about_us_raw:hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false})
+          /* BOTH OUTCOMES ARE RECORDED, not just the failure. A success stamp is
+             what lets anyone ask which leads are missing from Salesforce, and it
+             is what clears a lead out of the retry sweep once it lands. */
+          .then(() => markSalesforceSynced(session_id))
+          .catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); markSalesforceFailed(session_id, err); salesforceFailureAlert('lead', err, { 'Email': email, 'Stage': 'form completed' }); });
+      }
 
       // Meta CAPI Lead — suppressed when the website check failed (temporary
       // non-blocking mode still lets the lead through, but keeps the Lead
@@ -12850,7 +12904,9 @@ app.post('/submit', async (req, res) => {
          website-verified branch so the logged reason is the real one, the
          same ordering /partial uses for StartTrial. A blocked lead never
          reaches this branch at all -- it took the branch above. */
-      if (nonIcpSuppressMeta) {
+      if (internalLeadSuppressesMeta(email, '/submit')) {
+        /* First, same ordering as /partial. */
+      } else if (nonIcpSuppressMeta) {
         console.log(`[/submit] ⏭ Meta CAPI Lead suppressed — non-ICP/model flagged (${nonIcpReason}): ${email}`);
       } else if (isWebsiteVerified({ website_check_failed, website_check_reason })) {
         pushFormEventsToMeta({session_id,email,phone,first_name,last_name,company,website,sell_to,page_url,fbc,fbp,landing_page,product_interest,utm_campaign:offer_campaign,utm_medium:offer_medium||utm_medium,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_seniority:enrich.enriched_seniority,enriched_funding_stage:enrich.enriched_funding_stage}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => { console.warn('[/submit] Meta CAPI failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (Lead)', err.message); });
@@ -13088,6 +13144,7 @@ app.post('/booking-confirmed', async (req, res) => {
            than trusting that a blocked lead never reaches a calendar: a lead
            blocked at /submit may already have had RevenueHero fired alongside
            it, and this webhook does not care what the browser did. */
+        if (internalLeadSuppressesMeta(fullLead.email, '/booking-confirmed')) return;
         if (nonIcpScheduleSuppressed(fullLead, '/booking-confirmed')) return;
         if (!isWebsiteVerified(fullLead)) { console.log(`[/booking-confirmed] ⏭ Meta CAPI Schedule skipped — website not verified: session ${session_id}`); return; }
         return pushFormEventsToMeta({...fullLead, booking_uid}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''});
@@ -13170,7 +13227,8 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
              than trusting that a blocked lead never reaches a calendar: a lead
              blocked at /submit may already have had RevenueHero fired alongside
              it, and this webhook does not care what the browser did. */
-          if (nonIcpScheduleSuppressed(fullLead, '/cal-webhook')) return;
+          if (internalLeadSuppressesMeta(fullLead.email, '/cal-webhook')) return;
+        if (nonIcpScheduleSuppressed(fullLead, '/cal-webhook')) return;
           if (!isWebsiteVerified(fullLead)) { console.log(`[/cal-webhook] ⏭ Meta CAPI Schedule skipped — website not verified: session ${lead.session_id}`); return; }
           return pushFormEventsToMeta({...fullLead, booking_uid: bookingUid}, {clientIpAddress:'',clientUserAgent:''});
         }).catch(err => { console.warn('[/cal-webhook] Meta CAPI failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (Schedule)', err.message); });
@@ -13533,7 +13591,8 @@ if (rhRouter && !RH_ALLOWED_ROUTERS.some((r) => r.toLowerCase() === rhRouter)) {
              than trusting that a blocked lead never reaches a calendar: a lead
              blocked at /submit may already have had RevenueHero fired alongside
              it, and this webhook does not care what the browser did. */
-          if (nonIcpScheduleSuppressed(fullLead, '/rh-webhook')) return;
+          if (internalLeadSuppressesMeta(fullLead.email, '/rh-webhook')) return;
+        if (nonIcpScheduleSuppressed(fullLead, '/rh-webhook')) return;
           if (!isWebsiteVerified(fullLead)) { console.log(`[/rh-webhook] ⏭ Meta CAPI Schedule skipped — website not verified: session ${lead.session_id}`); return; }
           return pushFormEventsToMeta({...fullLead, booking_uid: bookingUid}, {clientIpAddress:'',clientUserAgent:''});
         }).catch(err => { console.warn('[/rh-webhook] ⚠ Meta CAPI failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (Schedule)', err.message); });
