@@ -546,6 +546,121 @@ const P = build(popup);
      liftFn(demo, 'rhRouterId'), liftFn(popup, 'rhRouterId'));
 }
 
+/* The hold test AWAITS -- it drives real timers to prove the cap is
+   honoured -- so the summary prints from its continuation. The catch is
+   not optional: without it a throw escapes as an unhandledRejection and
+   the suite prints no totals at all, which reads as UNMEASURED rather
+   than as a failure. */
+(async () => {
+/* ============================================================
+   THE CALENDAR HOLD, DRIVEN — both files
+
+   Two insurance leads booked demos on 18 Sept 2026 because their
+   verdicts were written 2.6 s and 11.7 s AFTER /submit read the cache.
+   RevenueHero commits the slot before it tells us, so the last moment
+   anything can prevent the booking is between /submit returning and the
+   calendar rendering. This is that gate.
+
+   EXECUTED, NOT READ. An ordering or presence assertion here would
+   survive the await being dropped, the cap being removed, or the poll
+   reading its own memo forever — which is exactly how this feature
+   would fail silently and let a lead book anyway.
+   ============================================================ */
+{
+  const mkHold = (src, label) => {
+    const body = [
+      (/const CAL_HOLD_MAX_MS\s*=\s*\d+;/.exec(src) || [''])[0],
+      (/const CAL_HOLD_POLL_MS\s*=\s*\d+;/.exec(src) || [''])[0],
+      liftFn(src, 'awaitNonIcpVerdict'),
+      'return { awaitNonIcpVerdict, CAL_HOLD_MAX_MS, CAL_HOLD_POLL_MS };',
+    ].join('\n');
+    ok(`hold(${label}): the cap and poll interval are declared`,
+       /CAL_HOLD_MAX_MS/.test(body) && /CAL_HOLD_POLL_MS/.test(body));
+    return (checkNonIcp) => new Function('checkNonIcp', 'console', body)(
+      checkNonIcp, { log() {}, warn() {} });
+  };
+
+  for (const [label, src] of [['demo', demo], ['ads', popup]]) {
+    const make = mkHold(src, label);
+
+    /* 1. Already blocked in the cache — decided without any wait. */
+    {
+      let calls = 0;
+      const s = make(async () => { calls++; return { blocked: true, pending: false }; });
+      const t0 = Date.now();
+      const r = await s.awaitNonIcpVerdict('a@b.test', 'b.test');
+      eq(`hold(${label}): a cached block is returned`, r, 'blocked');
+      ok(`hold(${label}): and without polling — one call`, calls === 1, String(calls));
+      ok(`hold(${label}): and without waiting`, Date.now() - t0 < 200);
+    }
+
+    /* 2. NOTHING IN FLIGHT MUST NOT HOLD. The rule a careless version
+       gets wrong by waiting "just in case" and taxing every lead for a
+       decision nobody is computing. */
+    {
+      let calls = 0;
+      const s = make(async () => { calls++; return { blocked: false, pending: false }; });
+      const t0 = Date.now();
+      const r = await s.awaitNonIcpVerdict('a@b.test', 'b.test');
+      eq(`hold(${label}): not pending resolves clear`, r, 'clear');
+      ok(`hold(${label}): and does NOT wait when no answer is coming`,
+         Date.now() - t0 < 200 && calls === 1, `${Date.now() - t0}ms, ${calls} calls`);
+    }
+
+    /* 3. THE LEAD THAT CAUSED THIS. A warm is in flight; the verdict
+       lands mid-hold; the calendar is never shown. */
+    {
+      let calls = 0;
+      const s = make(async () => {
+        calls++;
+        return calls < 3 ? { blocked: false, pending: true } : { blocked: true, pending: false };
+      });
+      const r = await s.awaitNonIcpVerdict('steenhoekinsurance@outlook.com', 'steenhoekinsurance.com');
+      eq(`hold(${label}): a verdict arriving mid-hold blocks the calendar`, r, 'blocked');
+      ok(`hold(${label}): it polled rather than answering from the first read`, calls >= 3, String(calls));
+    }
+
+    /* 4. FAILS OPEN AT THE CAP. A warm slower than the cap — the 19.6 s
+       scrape tail — must release the calendar, not strand a real
+       prospect on a skeleton. */
+    {
+      const s = make(async () => ({ blocked: false, pending: true }));
+      const t0 = Date.now();
+      const r = await s.awaitNonIcpVerdict('a@b.test', 'b.test');
+      const took = Date.now() - t0;
+      eq(`hold(${label}): a warm slower than the cap fails OPEN`, r, 'clear');
+      ok(`hold(${label}): and gives up at the cap, not later`,
+         took >= s.CAL_HOLD_MAX_MS - 200 && took < s.CAL_HOLD_MAX_MS + 1500, `${took}ms`);
+    }
+
+    /* 5. A THROWN CHECK NEVER COSTS A LEAD. */
+    {
+      const s = make(async () => { throw new Error('backend down'); });
+      eq(`hold(${label}): a thrown check resolves clear`,
+         await s.awaitNonIcpVerdict('a@b.test', 'b.test'), 'clear');
+    }
+
+    /* 6. THE POLL MUST ASK FRESH. checkNonIcp memoises the first server
+       answer per email|website; without fresh:true the poll would be
+       handed back the not-blocked verdict it is trying to supersede and
+       would spin to the cap reading its own reply — the feature would
+       look wired up and catch nothing. */
+    {
+      const seen = [];
+      const s = make(async (e, w, opts) => {
+        seen.push(opts && opts.fresh === true);
+        return { blocked: false, pending: false };
+      });
+      await s.awaitNonIcpVerdict('a@b.test', 'b.test');
+      ok(`hold(${label}): every poll bypasses the memo with fresh:true`,
+         seen.length > 0 && seen.every(Boolean), JSON.stringify(seen));
+    }
+  }
+}
+})()
+  .catch((err) => { ok('parity: the calendar-hold section completed', false, err && err.message); })
+  .then(() => {
+
 /* ============================================================ */
 console.log('');
 if (failures.length) {
@@ -557,3 +672,5 @@ console.log(`  passed: ${pass}`);
 console.log(`  failed: ${fail}`);
 console.log('');
 process.exit(fail ? 1 : 0);
+
+  });
