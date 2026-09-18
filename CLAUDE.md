@@ -1080,6 +1080,45 @@ being disqualified, and all three were authorised explicitly on 15 Sept
 2026 — the non-ICP reasoning is about AEO and does not transfer to CRM.
 Measured exposure is about two leads a day.
 
+**THE COOKIE NAMESPACE IS SHARED BETWEEN THIS REPO AND WEBFLOW, AND
+`gw_utm_campaign` IS ALREADY TAKEN.** Two scripts write cookies on
+`.gushwork.ai` and they live in different places, so neither one's file
+shows you the other:
+
+| Cookie | Written by | Lifetime | Job |
+|---|---|---|---|
+| `gw_utm_campaign` / `gw_utm_medium` | `gushwork-form.js` `rememberCampaign()` | **30 days** | which offer to show a returning visitor |
+| `gwa_*` (seven) | Webflow **site-wide footer** | **session** | carry attribution across an in-app-browser webview |
+| `gw_ps_*` | Webflow site-wide footer | 90 days | PartnerStack |
+| `_fbc` | `gushwork-form.js` | 90 days | Meta click id |
+
+The attribution mirror was written on the `gw_` names first and it broke
+both directions at once, caught by executing it rather than reading it:
+re-writing `gw_utm_campaign` with no `max-age` **downgrades the 30-day
+offer memory to a single session**, and reading that still-live 30-day
+cookie back into `sessionStorage` puts a **paid campaign into
+`utm_campaign` on an organic return visit, beside an empty
+`utm_source`** — which `Source_Bucket__c` reads. That is exactly the
+corruption the `offer_*` split exists to prevent, arriving from a
+different file. Hence `gwa_`.
+
+**The site-wide attribution script is in Webflow global site settings
+(footer), NOT in this repo and NOT in `gushwork-embeds`.** It is the
+thing that writes `gw_referrer`, `gw_landing_page` and `gw_utm_*` into
+`sessionStorage`, which is where `gushwork-form.js` reads them from. So a
+change to how attribution is captured is a **Webflow** change with no
+diff anywhere in git — and, unlike a form pin, it needs no re-pin,
+because rehydrating into `sessionStorage` leaves every reader untouched.
+
+**Why a cookie at all: sessionStorage does not survive the Facebook and
+Instagram in-app browsers.** Each navigation can open a fresh webview,
+which keeps cookies and drops `sessionStorage` — which is why `_fbc`
+lives through the same journey that loses the UTMs. Measured over 90
+days: **31.2% UTM loss in-app, 1.6% on a normal mobile browser, 0% on
+desktop, 424 leads.** Those leads still show the campaign in
+`previous_page`, which is how the loss was found at all.
+
+
 **`gushwork-form-popup.js` is a FORK of `gushwork-form.js`, not a sibling.**
 The Ads file exists only to present the booking step as a fullscreen modal
 opened after step 2. Every other line is meant to be the same code, and there is
