@@ -12327,8 +12327,8 @@ app.post('/partial', async (req, res) => {
         SELECT email, company, website, phone, first_name, last_name, sell_to, booking_uid, step_reached
           FROM leads WHERE session_id = $1
       )
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business,non_icp_blocked,non_icp_reason,non_icp_source,non_icp_checked_at,non_icp_llm_flagged,product_interest,meta_predicted_ltv,ps_partner_name,ps_partner_email)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW(),$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49)
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business,non_icp_blocked,non_icp_reason,non_icp_source,non_icp_checked_at,non_icp_llm_flagged,product_interest,meta_predicted_ltv,ps_partner_name,ps_partner_email,offer_campaign,offer_medium)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,false,NOW(),$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51)
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -12342,6 +12342,11 @@ app.post('/partial', async (req, res) => {
         utm_source            = COALESCE(EXCLUDED.utm_source,            leads.utm_source),
         utm_medium            = COALESCE(EXCLUDED.utm_medium,            leads.utm_medium),
         utm_campaign          = COALESCE(EXCLUDED.utm_campaign,          leads.utm_campaign),
+        /* COALESCEd like every other attribution column: /partial fires
+           repeatedly through step 1 and must never blank what an earlier
+           call captured. */
+        offer_campaign        = COALESCE(EXCLUDED.offer_campaign,        leads.offer_campaign),
+        offer_medium          = COALESCE(EXCLUDED.offer_medium,          leads.offer_medium),
         utm_content           = COALESCE(EXCLUDED.utm_content,           leads.utm_content),
         utm_term              = COALESCE(EXCLUDED.utm_term,              leads.utm_term),
         referrer              = COALESCE(EXCLUDED.referrer,              leads.referrer),
@@ -12447,7 +12452,7 @@ app.post('/partial', async (req, res) => {
         (SELECT p.step_reached FROM prev p) AS prev_step_reached,
         leads.email, leads.company, leads.website, leads.phone,
         leads.first_name, leads.last_name, leads.sell_to, leads.step_reached
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business,nonIcp.blocked===true,(nonIcp.blocked||nonIcp.llm_flagged)?nonIcp.reason:null,nonIcpStamp(nonIcp).source,nonIcpStamp(nonIcp).checked_at,nonIcp.llm_flagged===true,product_interest,meta_predicted_ltv,psIdentity?.name||null,psIdentity?.email||null]);
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,step_reached,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business,nonIcp.blocked===true,(nonIcp.blocked||nonIcp.llm_flagged)?nonIcp.reason:null,nonIcpStamp(nonIcp).source,nonIcpStamp(nonIcp).checked_at,nonIcp.llm_flagged===true,product_interest,meta_predicted_ltv,psIdentity?.name||null,psIdentity?.email||null,offer_campaign||null,offer_medium||null]);
 
     /* After the write, off the response path. Never awaited. */
     recordLeadFieldChanges(session_id, upsert.rows[0], '/partial', { arrived_step: step_reached });
@@ -12636,8 +12641,8 @@ app.post('/submit', async (req, res) => {
         SELECT email, company, website, phone, first_name, last_name, sell_to, booking_uid, step_reached
           FROM leads WHERE session_id = $1
       )
-      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business,non_icp_blocked,non_icp_reason,non_icp_source,non_icp_checked_at,non_icp_llm_flagged,product_interest,meta_predicted_ltv,ps_partner_name,ps_partner_email)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW(),$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48)
+      INSERT INTO leads (session_id,page_url,email,website,sell_to,first_name,last_name,phone,company,hear_about_us,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,prefill_source,fbc,fbp,landing_page,previous_page,enriched_title,enriched_company_size,enriched_industry,enriched_linkedin,disqualified,disqualified_reason,step_reached,completed,submitted_at,updated_at,website_check_failed,website_check_reason,elv_status,elv_checked_at,hear_about_us_raw,ps_xid,ps_partner_key,ps_customer_key,ps_click_at,ps_click_history,product,about_business,non_icp_blocked,non_icp_reason,non_icp_source,non_icp_checked_at,non_icp_llm_flagged,product_interest,meta_predicted_ltv,ps_partner_name,ps_partner_email,offer_campaign,offer_medium)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,true,NOW(),NOW(),$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50)
       ON CONFLICT (session_id) DO UPDATE SET
         page_url              = COALESCE(EXCLUDED.page_url,              leads.page_url),
         email                 = COALESCE(EXCLUDED.email,                 leads.email),
@@ -12651,6 +12656,11 @@ app.post('/submit', async (req, res) => {
         utm_source            = COALESCE(EXCLUDED.utm_source,            leads.utm_source),
         utm_medium            = COALESCE(EXCLUDED.utm_medium,            leads.utm_medium),
         utm_campaign          = COALESCE(EXCLUDED.utm_campaign,          leads.utm_campaign),
+        /* COALESCEd like every other attribution column: /partial fires
+           repeatedly through step 1 and must never blank what an earlier
+           call captured. */
+        offer_campaign        = COALESCE(EXCLUDED.offer_campaign,        leads.offer_campaign),
+        offer_medium          = COALESCE(EXCLUDED.offer_medium,          leads.offer_medium),
         utm_content           = COALESCE(EXCLUDED.utm_content,           leads.utm_content),
         utm_term              = COALESCE(EXCLUDED.utm_term,              leads.utm_term),
         referrer              = COALESCE(EXCLUDED.referrer,              leads.referrer),
@@ -12745,7 +12755,7 @@ app.post('/submit', async (req, res) => {
            (Meta, Slack, the response) must read the row rather than the
            in-memory verdict or the block silently lifts itself. */
         leads.non_icp_blocked, leads.non_icp_reason, leads.non_icp_llm_flagged, leads.non_icp_source
-    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business,nonIcp.blocked===true,(nonIcp.blocked||nonIcp.llm_flagged)?nonIcp.reason:null,nonIcpStamp(nonIcp).source,nonIcpStamp(nonIcp).checked_at,nonIcp.llm_flagged===true,product_interest,meta_predicted_ltv,psIdentity?.name||null,psIdentity?.email||null]);
+    `, [session_id,page_url||null,email||null,website||null,sell_to||null,first_name||null,last_name||null,phone||null,company||null,hearAboutUsFinal||null,utm_source||null,utm_medium||null,utm_campaign||null,utm_content||null,utm_term||null,referrer||null,prefill_source||null,fbc||null,fbp||null,landing_page||null,previous_page||null,enriched_title||null,enriched_company_size||null,enriched_industry||null,enriched_linkedin||null,disqualified,disqualified_reason||null,website_check_failed,website_check_reason||null,elv?.status||null,elv?.checked_at||null,hear_about_us||null,ps.ps_xid,ps.ps_partner_key,ps.ps_customer_key,ps.ps_click_at,ps.ps_click_history?JSON.stringify(ps.ps_click_history):null,product,about_business,nonIcp.blocked===true,(nonIcp.blocked||nonIcp.llm_flagged)?nonIcp.reason:null,nonIcpStamp(nonIcp).source,nonIcpStamp(nonIcp).checked_at,nonIcp.llm_flagged===true,product_interest,meta_predicted_ltv,psIdentity?.name||null,psIdentity?.email||null,offer_campaign||null,offer_medium||null]);
 
     /* After the write, off the response path. Never awaited. */
     const identityDiff = diffLeadIdentityFields(upsert.rows[0], { arrived_step: 2 });

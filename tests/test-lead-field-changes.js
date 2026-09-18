@@ -512,11 +512,39 @@ const NO_CHANGE  = Object.assign({}, CHANGED, { prev_email: CHANGED.email, prev_
     ok('partial/identity: the resolved EMAIL is bound as a parameter',
        !!up && (up.params || []).includes('a@alpha.test'));
     /* Appended at the END of the column list precisely so no existing
-       placeholder renumbered. If someone reorders them, this says so. */
-    eq('partial/identity: name is the second-to-last bound parameter',
-       (up.params || [])[(up.params || []).length - 2], 'Alpha Partners');
-    eq('partial/identity: email is the last bound parameter',
-       (up.params || [])[(up.params || []).length - 1], 'a@alpha.test');
+       placeholder renumbered. If someone reorders them, this says so.
+
+       DERIVED FROM THE COLUMN LIST RATHER THAN HARDCODED AS "the last
+       two". It was the latter until 19 Sept 2026, when offer_campaign
+       and offer_medium were appended after these -- preserving the
+       no-renumber property this assertion exists to protect, and failing
+       it anyway. A test that breaks when the rule it guards is FOLLOWED
+       is testing the wrong thing. */
+    {
+      /* MAPPED THROUGH THE PLACEHOLDER, not the column index. Two
+         columns in this statement are literals -- completed is `false`
+         and updated_at is NOW() -- so the Nth column is NOT the Nth
+         bound parameter, and a naive index silently reads the wrong
+         slot. */
+      const flat = (up && up.flat) || '';
+      const colList = flat.match(/INSERT INTO leads \(([^)]*)\)/);
+      const cols = colList ? colList[1].split(',').map((c) => c.trim()) : [];
+      const valList = flat.match(/VALUES \(([\s\S]*?)\)\s*ON CONFLICT/);
+      const vals = valList ? valList[1].split(',').map((v) => v.trim()) : [];
+      const at = (name) => {
+        const i = cols.indexOf(name);
+        const ph = i >= 0 && vals[i] ? (vals[i].match(/^\$(\d+)$/) || [])[1] : null;
+        return ph ? (up.params || [])[Number(ph) - 1] : undefined;
+      };
+      ok('partial/identity: the column and value lists were parsed',
+         cols.length > 0 && vals.length === cols.length, `${cols.length} cols, ${vals.length} vals`);
+      eq('partial/identity: NAME is bound at its own column position',  at('ps_partner_name'),  'Alpha Partners');
+      eq('partial/identity: EMAIL is bound at its own column position', at('ps_partner_email'), 'a@alpha.test');
+      /* The property the original assertion was really protecting: these
+         two sit at the tail, so nothing before them renumbered. */
+      ok('partial/identity: they remain at the tail of the column list',
+         cols.indexOf('ps_partner_name') >= cols.length - 4, cols.slice(-4).join(','));
+    }
     /* EXISTING-first COALESCE: /partial fires repeatedly through step 1 and a
        later tick whose peek misses must not blank a name an earlier one
        resolved. */
