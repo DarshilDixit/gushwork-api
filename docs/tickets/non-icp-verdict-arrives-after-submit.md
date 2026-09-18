@@ -100,36 +100,92 @@ So "the booking route will catch it" is false today in both senses.
 
 ---
 
-## Options, with what each is actually worth
+## CORRECTION, 18 Sept 2026 — two of the four options below were wrong
 
-Not recommending one. Each has a real cost and the choice is a business call.
+Written into the first version of this ticket and checked afterwards. Both
+claims were wrong, and the corrections change what is worth building.
 
-**A. Re-read the verdict at booking.**
-Both misses would have been caught: the verdict existed 14.0 s and 28.9 s
-before the respective bookings. But it is only a *wider* race, not a closed
-one — measured over 30 days, median booking is 19.9 s after submit and
-**237 of 778 booked within 15 seconds**. It also raises the question option A
-cannot answer on its own: what do you *do* with a lead who has already taken a
-slot?
+**Option B does not work, and the "~100 seconds earlier" claim was false.**
+`steenhoekins.com` is a syntactically valid domain with a real TLD. A "does
+this look like a domain" guard passes it; only DNS rejects it, and by then the
+fetch is already paid for. It would not have caught this lead. It is also worth
+very little on its own: **39 of 3,127** warms in 30 days ended `unreachable`,
+`thin` or `blocked_by_site` — 1.2%.
 
-**B. Do not warm on a partial domain.**
-Requiring a resolvable host before spending a warm cycle would have started
-Steenhoek's real check roughly 100 seconds earlier — comfortably before the
-submit. Cheap, narrow, and it fixes the cause rather than the symptom. Does
-nothing for a visitor who types the domain correctly and submits fast.
+**Option C already exists.** `nonIcpCandidateDomains` already returns the email
+domain alongside the website domain, and the warm already fires on the step-1
+email blur — the code comment states the intent outright: *"The step-1 email
+blur buys roughly the thirty to sixty seconds a visitor spends on step 2."* It
+did nothing for these two leads because both used free mail (`@outlook.com`,
+`@me.com`). Free-mail domains are also already filtered: only 3 of 3,127
+verdict rows are providers.
 
-**C. Warm earlier than the website field.**
-The email domain is known at step 1, ~3.5 minutes before submit here. For
-`steenhoekinsurance@outlook.com` that is a free-mail domain and worthless — but
-for the many leads whose email domain *is* their company domain it would warm
-minutes ahead.
-
-**D. Leave `/submit` alone.**
-Stated explicitly so it is a decision rather than an omission. Making the
-route wait on a scrape or a model call is the one thing this design refuses,
-and nothing here is an argument for changing that.
+So neither is worth building, and the ticket should not have proposed them.
 
 ---
+
+## THE RACE IS THE WRONG FRAME
+
+The first version treated this as a timing problem to be won — get the verdict
+into the cache before the click. Measured, that framing is wrong.
+
+**The cost this feature exists to avoid is an AE spending an hour with a
+non-ICP prospect. That cost is incurred at the MEETING, not at the booking.**
+And the meeting is not imminent:
+
+| Booking to demo | |
+|---|---|
+| Median | **35 hours** |
+| 10th percentile | **3.3 hours** |
+| Demos within 1 hour of booking | 60 of 1,543 (3.9%) |
+| Demos more than 24 hours out | 920 of 1,543 (60%) |
+
+There is no 2.6-second race to win. There is a **3.3-hour window at the tenth
+percentile** in which to reach the same conclusion, by which time the cache is
+warm — both of these verdicts existed within 12 seconds of the submit.
+
+Every option that touches the lead path is trying to win a race the business
+does not need won.
+
+---
+
+## Options, re-framed
+
+**A. A sweep over recently booked leads. (Recommended shape.)**
+Re-read `non_icp_domain_verdicts` for leads booked in the last N minutes, and
+act on any that now resolve blocking. Touches nothing on the lead path: no
+redirect, no wait, no form change, no re-pin. A sweep on a 5-minute cadence
+would have caught both of these with hours to spare. Converts a 2.6-second
+race into a multi-hour one.
+
+**B. Re-check when the calendar step loads.**
+Would have to fire within ~2.6 s of the submit to catch Steenhoek, which is
+roughly when step 3 renders — so it is still a race, just a slightly longer
+one. And the action is bad: pulling a visitor off a calendar they are already
+looking at, or worse, after they have chosen a slot.
+
+**C. Re-check inside the three booking routes.**
+Cheaper than a sweep and catches both (their verdicts predate the bookings by
+14.0 s and 28.9 s). But it fires exactly once, at the only moment the verdict
+might still be missing — a lead whose warm is slower than their booking is
+missed permanently, with no second look.
+
+**D. Make `/submit` wait.**
+Stated only to rule it out. This is the one thing the design refuses, and
+nothing here argues for changing it.
+
+**The open question is not which mechanism — it is what ACTION is appropriate
+once a booked lead is found to be non-ICP.** That is a business decision, not
+a code one, and it is the thing this ticket actually needs answered:
+
+1. Stamp `non_icp_blocked` only — the lead drops out of Salesforce pushes and
+   the SDR list, the demo still happens.
+2. Stamp it and alert a human to cancel or reassign.
+3. Cancel the booking automatically.
+
+Option 1 is nearly free and does not remove the AE's hour. Option 3 removes it
+but is the most aggressive action in the codebase and would be taken on a
+model verdict without a human in the loop.
 
 ## What is NOT wrong, and should not be "fixed"
 
