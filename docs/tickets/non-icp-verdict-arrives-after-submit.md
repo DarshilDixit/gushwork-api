@@ -208,3 +208,45 @@ model verdict without a human in the loop.
    internal alert, or something the AE sees before the call?
 3. Do the two already-booked demos on 21 and 22 Sept need a human decision
    before they happen?
+
+
+---
+
+## WHAT WAS ACTUALLY BUILT, 18 Sept 2026 — PR 94 and 95
+
+Not option A. The sweep above was framed around a booking that has
+already happened, and the objection to it was the right one: an AE's slot
+is the cost, and cancelling on somebody who has already chosen a time is
+a bad answer even when the classification is correct.
+
+So the gate moved earlier instead, to the last moment anything can
+prevent the booking at all.
+
+**RevenueHero commits the slot before it tells us.**
+`initRHBookingListener` fires on `MEETING_BOOKED`, past tense, so the ten
+to forty seconds a visitor spends choosing a time cannot be used. The
+only remaining window is between `/submit` returning and the calendar
+rendering — which is where the hold now sits, behind a calendar skeleton,
+so the slot is never taken and nobody loses a calendar they were already
+looking at.
+
+**It holds for exactly one state**: a warm in flight for one of this
+lead's domains. A cached verdict decides with no hold (61% of traffic);
+nothing in flight shows the calendar immediately, because waiting for a
+decision nobody is computing is pure delay. Capped at 4s, failing open on
+every path.
+
+Two supporting changes, neither of which prevents anything on its own:
+a speculative warm from a free-mail local part (warm-only, never a
+decision input) and warming on debounced website input as well as blur.
+
+**The residual is unchanged and still needs an answer.** A 19.6-second
+scrape still beats the cap, and the question this ticket raised — what
+action is appropriate when a booked lead turns out to be non-ICP — was
+not answered by building the hold. It was avoided for the common case.
+
+**And the hold leaves a gap of its own**: a lead blocked there still has
+`non_icp_blocked=false`, a fired Meta `Lead` and a Salesforce push,
+because `/submit` ran before the verdict existed. Strictly better than
+the same lead also taking a slot, but not clean. The fix is server-side
+and is still open.
