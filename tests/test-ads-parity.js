@@ -49,6 +49,16 @@ function eq(name, actual, expected) {
 
 /* Lift a top-level function by brace-matching forward from its signature,
    so the body is taken whole however long it is. */
+/* The slice of a file between two literals — used to assert on one
+   region rather than letting a match anywhere in 3,000 lines count. */
+function between(src, a, b) {
+  const i = src.indexOf(a);
+  if (i === -1) throw new Error('start marker not found: ' + a);
+  const j = src.indexOf(b, i);
+  if (j === -1) throw new Error('end marker not found: ' + b);
+  return src.slice(i, j + b.length);
+}
+
 function liftFn(src, name) {
   const re = new RegExp('\\n    (?:async )?function ' + name + '\\s*\\(');
   const m = re.exec(src);
@@ -579,6 +589,33 @@ const P = build(popup);
     return (checkNonIcp) => new Function('checkNonIcp', 'console', body)(
       checkNonIcp, { log() {}, warn() {} });
   };
+
+  /* ── IS IT ACTUALLY WIRED IN? ─────────────────────────────────
+     MEASURED GAP: replacing the awaitNonIcpVerdict call in the submit
+     flow with Promise.resolve('clear') -- the function present, correct
+     and never consulted -- SURVIVED the entire bar. Every test below
+     drives the function in isolation, and none of them could see that
+     nothing calls it.
+
+     This is the repo's oldest lesson: a behaviour test proves the unit
+     works, not that the product uses it. These are source assertions and
+     that is their known ceiling, but they are what closes the hole
+     between "the hold is correct" and "the hold runs". */
+  for (const [label, src] of [['demo', demo], ['ads', popup]]) {
+    const flow = between(src, 'showStep(\'step-3\');', 'hero.dialog.open(rhData);');
+    ok(`wiring(${label}): the submit flow awaits the hold`,
+       /awaitNonIcpVerdict\(\s*formState\.email\s*,\s*formState\.website\s*\)/.test(flow), flow.slice(0, 160));
+    ok(`wiring(${label}): it runs alongside RevenueHero, not after it`,
+       /Promise\.all\(\[[\s\S]*rhPromise[\s\S]*awaitNonIcpVerdict/.test(flow));
+    ok(`wiring(${label}): a blocked verdict redirects`,
+       /verdict === 'blocked'[\s\S]{0,200}redirectNonIcp\(/.test(flow));
+    ok(`wiring(${label}): and RETURNS, so the calendar never opens`,
+       /verdict === 'blocked'[\s\S]{0,260}\breturn;/.test(flow));
+    ok(`wiring(${label}): the redirect happens BEFORE the calendar is opened`,
+       flow.indexOf('redirectNonIcp(') < flow.indexOf('hero.dialog.setEmbedTarget'));
+    ok(`wiring(${label}): the skeleton is shown when step 3 appears`,
+       /showStep\('step-3'\);[\s\S]{0,80}showCalSkeleton\(\)/.test(flow));
+  }
 
   for (const [label, src] of [['demo', demo], ['ads', popup]]) {
     const make = mkHold(src, label);
