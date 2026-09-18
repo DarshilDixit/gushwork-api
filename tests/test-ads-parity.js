@@ -622,6 +622,12 @@ const P = build(popup);
        flow.indexOf('redirectNonIcp(') < flow.indexOf('hero.dialog.setEmbedTarget'));
     ok(`wiring(${label}): the skeleton is shown when step 3 appears`,
        /showStep\('step-3'\);[\s\S]{0,80}showCalSkeleton\(\)/.test(flow));
+    /* A RevenueHero failure lands in the outer catch. Without this the
+       skeleton animates forever, which is worse than the blank box this
+       path showed before it existed. */
+    const whole = src.replace(/\/\*[\s\S]*?\*\//g, '');
+    ok(`wiring(${label}): a RevenueHero failure clears the skeleton`,
+       /RH error:[\s\S]{0,200}hideCalSkeleton\(\)/.test(whole));
   }
 
   for (const [label, src] of [['demo', demo], ['ads', popup]]) {
