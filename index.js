@@ -351,8 +351,8 @@ function syncToAWS(data) {
      a TDZ error at RUNTIME that node --check cannot see, which is one of the
      three breaks CLAUDE.md records from 11-12 Sept 2026. Do not call this
      from top-level code. */
-  if (isInternalLead(data && data.email)) {
-    console.log(`[AWS] ⏭ Mirror skipped — internal test submission: ${data && data.email}`);
+  if (isInternalSubmission(data && data.email, data && data.page_url)) {
+    console.log(`[AWS] ⏭ Mirror skipped — internal test submission: ${data && data.email} (${(data && data.page_url) || 'no page'})`);
     return;
   }
   awsPool.query(`
@@ -3448,8 +3448,8 @@ app.get('/monitor/leads', async (req, res) => {
      after the query would drop rows out of a page and make the count
      disagree with the table. The per-row FLAG is computed in JS below,
      from the same function, so there is still one definition. */
-  if (internal === 'exclude') conditions.push('NOT ' + internalLeadSqlClause('l.email', params));
-  if (internal === 'only')    conditions.push(internalLeadSqlClause('l.email', params));
+  if (internal === 'exclude') conditions.push('NOT ' + internalLeadSqlClause('l.email', 'l.page_url', params));
+  if (internal === 'only')    conditions.push(internalLeadSqlClause('l.email', 'l.page_url', params));
 
   if (sellTo === '__clarified') {
     // any lead that flipped B2C/Mixed -> B2B at the disqualified step
@@ -3585,7 +3585,7 @@ app.get('/monitor/leads', async (req, res) => {
         // Same derived flag as the JSON path, from the same function.
         ...allRows.rows.map(r => cols.map(c => escape(
           c === 'unverifiable_pair' ? isUnverifiablePair(r)
-          : c === 'is_internal'     ? isInternalLead(r.email)
+          : c === 'is_internal'     ? isInternalSubmission(r.email, r.page_url)
           : r[c])).join(','))
       ].join('\n');
       res.setHeader('Content-Type', 'text/csv');
@@ -3618,7 +3618,7 @@ app.get('/monitor/leads', async (req, res) => {
          parameters from inside it would leave the count query bound to
          two parameters it never references -- which Postgres rejects
          outright. Same reason unverifiable_pair is computed here. */
-      is_internal: isInternalLead(r.email),
+      is_internal: isInternalSubmission(r.email, r.page_url),
     }));
 
     res.json({ total, page, pages: Math.ceil(total / limit), leads: leadRows });
@@ -5461,6 +5461,50 @@ function isInternalLead(email) {
   return ELV_EXCLUDED_DOMAINS.includes(e.slice(e.lastIndexOf('@') + 1));
 }
 
+/* THE STAGING SITE IS NOT A MARKETING SURFACE, SO NOTHING FROM IT IS A
+   REAL LEAD. Found 19 Sept 2026 while checking a referral: 40 lead rows
+   were submitted from gushwork.webflow.io, and 19 of them carried
+   addresses isInternalLead could never recognise -- the team's PERSONAL
+   Gmails (swapnilsinha07@, utsavsingh5600@, darshildixit21@), plus
+   honey@apple.com, ywhs@gggg.com and johnlennon@abc.com whose website
+   was heheheh.com. 15 were submitted, so each fired Meta, pushed a
+   Salesforce Lead and reached the dialer.
+
+   THE PAGE IS A BETTER SIGNAL THAN THE ADDRESS HERE. A list of addresses
+   can only ever catch the addresses somebody remembered to add; nobody
+   FINDS gushwork.webflow.io, so everyone on it was handed the URL.
+
+   The one row that looked like a real company was checked rather than
+   assumed -- hari@productledsales.io, landing directly on
+   /demo-testing-rh with referrer "direct", on 18 June, the same day two
+   staff were testing that exact page. Same session.
+
+   NOTHING IS LOST WHEN THIS FIRES. The lead is still written to our own
+   leads table and still appears on the dashboard -- it simply is not
+   propagated outward. So a real person who is somehow sent a staging
+   link is visible to us, just not auto-pushed to Salesforce, Meta or the
+   dialer. Exact host match, never a substring: gushwork.webflow.io.evil.com
+   is not our staging site. */
+const INTERNAL_STAGING_HOSTS = ['gushwork.webflow.io'];
+
+function isStagingSubmission(page_url) {
+  const raw = String(page_url == null ? '' : page_url).trim();
+  if (!raw) return false;
+  let host;
+  /* new URL throws on a bare path, which is the honest answer here: a
+     page_url we cannot resolve to a host is not evidence of staging. */
+  try { host = new URL(raw).hostname.toLowerCase(); } catch (e) { return false; }
+  return INTERNAL_STAGING_HOSTS.includes(host);
+}
+
+/* The question every outbound guard actually asks: is this OURS? Two
+   independent signals, either one sufficient. isInternalLead stays
+   email-only because it is also the dashboard's marker and the SQL
+   clause's shape. */
+function isInternalSubmission(email, page_url) {
+  return isInternalLead(email) || isStagingSubmission(page_url);
+}
+
 /* OUR OWN TEST SUBMISSIONS MUST NOT FEED THE AD ALGORITHM.
 
    Measured 19 Sept 2026, and the number is small rather than alarming --
@@ -5486,9 +5530,10 @@ function isInternalLead(email) {
    This does NOT touch the lead itself. It still books, still reaches the
    dashboard, still counts in every headline number -- the rule that our
    own submissions are marked rather than hidden is unchanged. */
-function internalLeadSuppressesMeta(email, where) {
-  if (!isInternalLead(email)) return false;
-  console.log(`[${where}] ⏭ Meta CAPI suppressed — internal test submission: ${email}`);
+function internalLeadSuppressesMeta(email, page_url, where) {
+  if (!isInternalSubmission(email, page_url)) return false;
+  const why = isInternalLead(email) ? 'internal address' : 'staging site';
+  console.log(`[${where}] ⏭ Meta CAPI suppressed — ${why}: ${email} (${page_url || 'no page'})`);
   return true;
 }
 
@@ -5502,13 +5547,20 @@ function internalLeadSuppressesMeta(email, where) {
    /monitor/leads already builds its WHERE. Interpolating the list into
    the SQL text instead would put an env-var value inside a query
    string, which is the one thing worth never doing here. */
-function internalLeadSqlClause(emailCol, params) {
+function internalLeadSqlClause(emailCol, pageCol, params) {
   params.push(INTERNAL_TEST_EMAILS);
   const a = params.length;
   params.push(ELV_EXCLUDED_DOMAINS);
   const b = params.length;
+  params.push(INTERNAL_STAGING_HOSTS);
+  const c = params.length;
+  /* The third arm mirrors isStagingSubmission. SPLIT_PART twice is the
+     host, so it is an EXACT match and not a LIKE -- a substring test here
+     would make gushwork.webflow.io.evil.com read as our staging site.
+     Kept in step with the JS by a test that drives both. */
   return `(LOWER(${emailCol}) = ANY($${a}::text[])
-           OR SPLIT_PART(LOWER(${emailCol}), '@', 2) = ANY($${b}::text[]))`;
+           OR SPLIT_PART(LOWER(${emailCol}), '@', 2) = ANY($${b}::text[])
+           OR LOWER(SPLIT_PART(SPLIT_PART(${pageCol}, '//', 2), '/', 1)) = ANY($${c}::text[]))`;
 }
 
 const _elvWindow    = [];   // [{ t: ms, bad: bool }]
@@ -12555,7 +12607,7 @@ app.post('/partial', async (req, res) => {
        exactly as today -- but it stops feeding the ad algorithm the moment
        NON_ICP_LLM_META is on. Those are two switches because they are two
        costs, and reading `blocked` here would silently tie them together. */
-    if (internalLeadSuppressesMeta(email, '/partial')) {
+    if (internalLeadSuppressesMeta(email, page_url, '/partial')) {
       /* Checked FIRST so the logged reason is the real one -- our own
          address is ours whatever the model thinks of its domain. */
     } else if (nonIcp.suppress_meta) {
@@ -12921,7 +12973,7 @@ app.post('/submit', async (req, res) => {
          push never attempted is invisible to it rather than queued
          forever. Deliberate: stamping sf_synced_at would be recording
          that Salesforce has a lead it does not have. */
-      if (isInternalLead(email)) {
+      if (isInternalSubmission(email, page_url)) {
         console.log(`[/submit] ⏭ Salesforce push skipped — internal test submission: ${email}`);
       } else {
         pushToSalesforce({first_name,last_name,email,phone,company,website,sell_to,product:(product_interest||product),about_business,hear_about_us:hearAboutUsFinal,hear_about_us_raw:hear_about_us,page_url,fbc,fbp,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer,landing_page,enriched_title:enrich.enriched_title,enriched_company_size:enrich.enriched_company_size,enriched_industry:enrich.enriched_industry,enriched_linkedin:enrich.enriched_linkedin,enriched_seniority:enrich.enriched_seniority,enriched_departments:enrich.enriched_departments,enriched_city:enrich.enriched_city,enriched_state:enrich.enriched_state,enriched_country:enrich.enriched_country,enriched_annual_revenue:enrich.enriched_annual_revenue,enriched_total_funding:enrich.enriched_total_funding,enriched_funding_stage:enrich.enriched_funding_stage,enriched_founded_year:enrich.enriched_founded_year,step_reached:2,booked:false})
@@ -12939,7 +12991,7 @@ app.post('/submit', async (req, res) => {
          website-verified branch so the logged reason is the real one, the
          same ordering /partial uses for StartTrial. A blocked lead never
          reaches this branch at all -- it took the branch above. */
-      if (internalLeadSuppressesMeta(email, '/submit')) {
+      if (internalLeadSuppressesMeta(email, page_url, '/submit')) {
         /* First, same ordering as /partial. */
       } else if (nonIcpSuppressMeta) {
         console.log(`[/submit] ⏭ Meta CAPI Lead suppressed — non-ICP/model flagged (${nonIcpReason}): ${email}`);
@@ -13179,7 +13231,7 @@ app.post('/booking-confirmed', async (req, res) => {
            than trusting that a blocked lead never reaches a calendar: a lead
            blocked at /submit may already have had RevenueHero fired alongside
            it, and this webhook does not care what the browser did. */
-        if (internalLeadSuppressesMeta(fullLead.email, '/booking-confirmed')) return;
+        if (internalLeadSuppressesMeta(fullLead.email, fullLead.page_url, '/booking-confirmed')) return;
         if (nonIcpScheduleSuppressed(fullLead, '/booking-confirmed')) return;
         if (!isWebsiteVerified(fullLead)) { console.log(`[/booking-confirmed] ⏭ Meta CAPI Schedule skipped — website not verified: session ${session_id}`); return; }
         return pushFormEventsToMeta({...fullLead, booking_uid}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''});
@@ -13262,7 +13314,7 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
              than trusting that a blocked lead never reaches a calendar: a lead
              blocked at /submit may already have had RevenueHero fired alongside
              it, and this webhook does not care what the browser did. */
-          if (internalLeadSuppressesMeta(fullLead.email, '/cal-webhook')) return;
+          if (internalLeadSuppressesMeta(fullLead.email, fullLead.page_url, '/cal-webhook')) return;
         if (nonIcpScheduleSuppressed(fullLead, '/cal-webhook')) return;
           if (!isWebsiteVerified(fullLead)) { console.log(`[/cal-webhook] ⏭ Meta CAPI Schedule skipped — website not verified: session ${lead.session_id}`); return; }
           return pushFormEventsToMeta({...fullLead, booking_uid: bookingUid}, {clientIpAddress:'',clientUserAgent:''});
@@ -13626,7 +13678,7 @@ if (rhRouter && !RH_ALLOWED_ROUTERS.some((r) => r.toLowerCase() === rhRouter)) {
              than trusting that a blocked lead never reaches a calendar: a lead
              blocked at /submit may already have had RevenueHero fired alongside
              it, and this webhook does not care what the browser did. */
-          if (internalLeadSuppressesMeta(fullLead.email, '/rh-webhook')) return;
+          if (internalLeadSuppressesMeta(fullLead.email, fullLead.page_url, '/rh-webhook')) return;
         if (nonIcpScheduleSuppressed(fullLead, '/rh-webhook')) return;
           if (!isWebsiteVerified(fullLead)) { console.log(`[/rh-webhook] ⏭ Meta CAPI Schedule skipped — website not verified: session ${lead.session_id}`); return; }
           return pushFormEventsToMeta({...fullLead, booking_uid: bookingUid}, {clientIpAddress:'',clientUserAgent:''});

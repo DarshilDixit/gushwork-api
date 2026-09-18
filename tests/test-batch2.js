@@ -2991,12 +2991,19 @@ async function section12() {
   /* ONE DEFINITION, TWO CONSUMERS. The SQL clause exists because paging
      happens in the database; it must be built from the same constants,
      not a retyped list. */
-  const sql = between('function internalLeadSqlClause(emailCol, params)', '\n/* ── Rule (a)');
+  const sql = between('function internalLeadSqlClause(emailCol, pageCol, params)', '\n/* ── Rule (a)');
   ok('23: the SQL clause is built from the same two constants',
      /params\.push\(INTERNAL_TEST_EMAILS\)/.test(sql) && /params\.push\(ELV_EXCLUDED_DOMAINS\)/.test(sql));
   /* An env var must never be interpolated into query text. */
   ok('23: the values go through bound parameters, never string interpolation',
      /ANY\(\$\$\{a\}::text\[\]\)/.test(sql) && !/\$\{INTERNAL_TEST_EMAILS/.test(sql));
+  /* THE STAGING ARM, ADDED 19 SEPT 2026. It must be an EXACT host match:
+     a LIKE '%gushwork.webflow.io%' would make
+     gushwork.webflow.io.evil.com read as our own staging site. */
+  ok('23: the SQL clause carries the staging arm, from the same constant',
+     /params\.push\(INTERNAL_STAGING_HOSTS\)/.test(sql));
+  ok('23: the staging arm matches the HOST exactly, never a substring',
+     /SPLIT_PART\(SPLIT_PART\(\$\{pageCol\}/.test(sql) && !/ILIKE/.test(sql) && !/LIKE '%/.test(sql));
 
   /* THE DEFAULT IS STILL "COUNT EVERYTHING". A default that excluded
      would be the quiet fix CLAUDE.md forbids. */
@@ -3012,10 +3019,18 @@ async function section12() {
      they share a params array, so a clause pushing parameters from the
      SELECT list leaves the count bound to parameters it never uses. */
   ok('23: the row flag is computed in JS, not in the SELECT list',
-     /is_internal: isInternalLead\(r\.email\)/.test(leads)
+     /is_internal: isInternalSubmission\(r\.email, r\.page_url\)/.test(leads)
      && !/AS is_internal/.test(leads));
   ok('23: the CSV carries it from the same function',
-     /'is_internal'/.test(leads) && /c === 'is_internal'\s*\? isInternalLead\(r\.email\)/.test(leads));
+     /'is_internal'/.test(leads) && /c === 'is_internal'\s*\? isInternalSubmission\(r\.email, r\.page_url\)/.test(leads));
+  /* BOTH SURFACES ASK THE SAME QUESTION. The marker and the outbound
+     guards drifting apart would show a lead as ours while still pushing
+     it, or the reverse -- which is how the staging gap stayed invisible:
+     Meta was suppressed by address and the dashboard agreed, so nobody
+     saw that the PAGE was never consulted by either. */
+  ok('23: the dashboard marker uses the same predicate as the outbound guards',
+     /is_internal: isInternalSubmission\(/.test(leads)
+     && /function isInternalSubmission\(email, page_url\)/.test(src));
 
   /* The Model tab counts ours in PARALLEL and never subtracts, so the
      ladder still sums to the lead total. */
@@ -3627,7 +3642,10 @@ async function section12() {
   const parts = [
     (/const ELV_EXCLUDED_DOMAINS = \[[^\]]*\];/.exec(src) || [''])[0],
     (/const INTERNAL_TEST_EMAILS = \[[\s\S]*?\n\];/.exec(src) || [''])[0],
+    (/const INTERNAL_STAGING_HOSTS = \[[^\]]*\];/.exec(src) || [''])[0],
     liftTop('isInternalLead'),
+    liftTop('isStagingSubmission'),
+    liftTop('isInternalSubmission'),
     liftTop('internalLeadSuppressesMeta'),
   ];
   ok('28: every piece of the internal-lead rule is liftable',
@@ -3642,6 +3660,9 @@ async function section12() {
   const internal = new Function('process',
     parts.concat('return isInternalLead;').join('\n')
   )({ env: {} });
+  const staging = new Function('URL', 'process',
+    parts.concat('return isStagingSubmission;').join('\n')
+  )(URL, { env: {} });
 
   /* ---- it decides correctly ---- */
   [
@@ -3659,16 +3680,41 @@ async function section12() {
     ['a@gushwork.ai.evil.com',    false, 'MUST NOT match a lookalike domain'],
   ].forEach(([email, want, why]) => {
     eq(`28: isInternalLead(${JSON.stringify(email)}) -- ${why}`, internal(email), want);
-    eq(`28: suppresses Meta for ${JSON.stringify(email)}`, suppresses(email, '/t'), want);
+    eq(`28: suppresses Meta for ${JSON.stringify(email)}`, suppresses(email, '/demo', '/t'), want);
   });
+
+  /* ---- THE PAGE IS A SIGNAL TOO, added 19 Sept 2026 ----
+     40 rows were submitted from gushwork.webflow.io, 19 of them under
+     addresses no list could catch -- the team's personal Gmails. Nobody
+     FINDS the staging site, so everyone on it was handed the URL. */
+  [
+    ['https://gushwork.webflow.io/demo',              true,  'the staging site'],
+    ['https://gushwork.webflow.io/demo-testing-rh',   true,  'the actual page the 40 rows came from'],
+    ['http://gushwork.webflow.io/x?a=1',              true,  'scheme and query are irrelevant'],
+    ['https://GUSHWORK.WEBFLOW.IO/demo',              true,  'host is case-insensitive'],
+    ['https://www.gushwork.ai/demo',                  false, 'the REAL site must never match'],
+    ['https://gushwork.webflow.io.evil.com/demo',     false, 'MUST NOT substring-match a lookalike host'],
+    ['https://evil.com/?x=gushwork.webflow.io',       false, 'MUST NOT match it inside a query string'],
+    ['/demo',                                         false, 'a bare path resolves to no host, so it is not evidence'],
+    ['not a url',                                     false, 'garbage is not staging'],
+    ['',                                              false, 'empty'],
+    [null,                                            false, 'null'],
+  ].forEach(([page, want, why]) => {
+    eq(`28: isStagingSubmission(${JSON.stringify(page)}) -- ${why}`, staging(page), want);
+    /* A real prospect's address on the staging site is still ours. */
+    eq(`28: suppresses Meta for buyer@acme.com on ${JSON.stringify(page)}`,
+       suppresses('buyer@acme.com', page, '/t'), want);
+  });
+  eq('28: a real lead on a real page is NEVER suppressed',
+     suppresses('buyer@acme.com', 'https://www.gushwork.ai/demo', '/t'), false);
 
   /* ---- and the five Meta call sites actually reach it ---- */
   const CALLS = [
-    ["internalLeadSuppressesMeta(email, '/partial')",              'StartTrial'],
-    ["internalLeadSuppressesMeta(email, '/submit')",               'Lead'],
-    ["internalLeadSuppressesMeta(fullLead.email, '/booking-confirmed')", 'Schedule 1 of 3'],
-    ["internalLeadSuppressesMeta(fullLead.email, '/cal-webhook')",       'Schedule 2 of 3'],
-    ["internalLeadSuppressesMeta(fullLead.email, '/rh-webhook')",        'Schedule 3 of 3'],
+    ["internalLeadSuppressesMeta(email, page_url, '/partial')",              'StartTrial'],
+    ["internalLeadSuppressesMeta(email, page_url, '/submit')",               'Lead'],
+    ["internalLeadSuppressesMeta(fullLead.email, fullLead.page_url, '/booking-confirmed')", 'Schedule 1 of 3'],
+    ["internalLeadSuppressesMeta(fullLead.email, fullLead.page_url, '/cal-webhook')",       'Schedule 2 of 3'],
+    ["internalLeadSuppressesMeta(fullLead.email, fullLead.page_url, '/rh-webhook')",        'Schedule 3 of 3'],
   ];
   CALLS.forEach(([call, what]) => {
     eq(`28: ${what} is guarded -- ${call}`, src.split(call).length - 1, 1);
@@ -3686,8 +3732,10 @@ async function section12() {
   });
 
   /* ---- Salesforce ---- */
-  ok('28: the /submit Salesforce push is inside an isInternalLead guard',
-     /if \(isInternalLead\(email\)\) \{[\s\S]{0,200}?Salesforce push skipped[\s\S]{0,200}?\} else \{\s*\n\s*pushToSalesforce\(/.test(src));
+  ok('28: the /submit Salesforce push is inside an isInternalSubmission guard',
+     /if \(isInternalSubmission\(email, page_url\)\) \{[\s\S]{0,200}?Salesforce push skipped[\s\S]{0,200}?\} else \{\s*\n\s*pushToSalesforce\(/.test(src));
+  ok('28: SCHEDULE_LEAD_SQL selects page_url, or the three booking guards read undefined',
+     /SELECT[\s\S]{0,2000}?l\.page_url/.test(src));
   ok('28: nothing is stamped when the push is skipped, so the retry sweep ignores it',
      !/Salesforce push skipped[\s\S]{0,300}?markSalesforceSynced/.test(src));
 }
@@ -3723,7 +3771,10 @@ async function section12() {
   const base = [
     (/const ELV_EXCLUDED_DOMAINS = \[[^\]]*\];/.exec(src) || [''])[0],
     (/const INTERNAL_TEST_EMAILS = \[[\s\S]*?\n\];/.exec(src) || [''])[0],
+    (/const INTERNAL_STAGING_HOSTS = \[[^\]]*\];/.exec(src) || [''])[0],
     liftTop('isInternalLead'),
+    liftTop('isStagingSubmission'),
+    liftTop('isInternalSubmission'),
   ];
 
   /* A synchronous thenable, so the .then() logging runs before the
