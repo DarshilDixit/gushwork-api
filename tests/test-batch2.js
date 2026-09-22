@@ -3003,7 +3003,26 @@ async function section12() {
   ok('23: the SQL clause carries the staging arm, from the same constant',
      /params\.push\(INTERNAL_STAGING_HOSTS\)/.test(sql));
   ok('23: the staging arm matches the HOST exactly, never a substring',
-     /SPLIT_PART\(SPLIT_PART\(\$\{pageCol\}/.test(sql) && !/ILIKE/.test(sql) && !/LIKE '%/.test(sql));
+     /SPLIT_PART\(SPLIT_PART\(COALESCE\(\$\{pageCol\}/.test(sql) && !/ILIKE/.test(sql) && !/LIKE '%/.test(sql));
+  /* NULL-SAFE, and this is a correctness bug not a tidy-up.
+
+     SPLIT_PART(NULL, ...) is NULL, so on a lead with no page_url the arm
+     was NULL rather than false. Postgres is three-valued: the whole OR
+     then goes NULL, and NOT(NULL) is NULL as well -- so such a row
+     matched neither the clause NOR its negation and fell out of both
+     halves of any filter built on the pair.
+
+     Caught on 22 Sept 2026 by adding up the two halves of the All Leads
+     Meta filter against production: 869 withheld + 4706 sent = 5575
+     against a population of 5582. Ten rows carry a null page_url.
+
+     The JS has always answered false here -- isStagingSubmission coerces
+     null to '' -- so the two renderings of this one rule were
+     disagreeing, which is the exact drift sharing a definition is for. */
+  ok('23: the staging arm reads a NULL page_url as false, not as NULL',
+     /COALESCE\(\$\{pageCol\}, ''\)/.test(sql));
+  /* The JS half of this pair is executed in section 28, where
+     isStagingSubmission is already lifted. */
 
   /* THE DEFAULT IS STILL "COUNT EVERYTHING". A default that excluded
      would be the quiet fix CLAUDE.md forbids. */
@@ -3682,6 +3701,21 @@ async function section12() {
     eq(`28: isInternalLead(${JSON.stringify(email)}) -- ${why}`, internal(email), want);
     eq(`28: suppresses Meta for ${JSON.stringify(email)}`, suppresses(email, '/demo', '/t'), want);
   });
+
+  /* A NULL page_url IS NOT EVIDENCE OF STAGING, and the SQL has to agree.
+
+     The JS has always answered false here. The SQL arm did not: it read
+     SPLIT_PART(NULL, ...), which is NULL, so the whole OR went NULL and
+     NOT(NULL) went NULL with it -- a lead with no page_url matched
+     neither the clause nor its negation. Ten such rows exist and seven
+     of them were falling out of both halves of the All Leads Meta
+     filter, found by adding the halves up against production on
+     22 Sept 2026. Section 23 asserts the COALESCE that fixes it; this
+     is the JS side of the same claim. */
+  [[null, 'null'], [undefined, 'undefined'], ['', 'empty'], ['/demo', 'a bare path']]
+    .forEach(([u, why]) => {
+      eq(`28: isStagingSubmission(${JSON.stringify(u)}) is false -- ${why}`, staging(u), false);
+    });
 
   /* ---- THE PAGE IS A SIGNAL TOO, added 19 Sept 2026 ----
      40 rows were submitted from gushwork.webflow.io, 19 of them under

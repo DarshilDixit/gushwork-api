@@ -2038,6 +2038,21 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     ok('meta filter: sent is the negation of the same union',
        /NOT \(/.test(sent.sql) && /non_icp_llm_flagged IS TRUE/.test(sent.sql), sent.sql.slice(0, 300));
 
+    /* THE TWO HALVES MUST PARTITION THE POPULATION. This is the assertion
+       that would have caught the null-page_url hole: SPLIT_PART(NULL,...)
+       is NULL, so the internal arm was NULL rather than false, the whole
+       OR went NULL, and NOT(NULL) is NULL -- a row with no page_url
+       matched neither half and simply vanished from both. Measured
+       against production on 22 Sept: 869 + 4706 = 5575 against 5582.
+
+       Asserted on the SQL rather than on counts, because these suites run
+       with no database: the page column must be COALESCEd before it is
+       split, in BOTH halves. */
+    for (const [name, q] of [['withheld', un], ['sent', sent]]) {
+      ok(`meta filter: ${name} is null-safe on page_url`,
+         /SPLIT_PART\(COALESCE\(l\.page_url, ''\)/.test(q.sql), q.sql.slice(0, 400));
+    }
+
     /* An unknown value must be inert rather than an error or, worse, a
        filter that silently matches nothing. */
     const junk = await whereFor('&meta=nonsense');
