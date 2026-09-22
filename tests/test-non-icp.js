@@ -2067,6 +2067,19 @@ results13 = (async () => {
       const d = stubDeps({ ...failScrape, apiBody: answer({ business_type: 'insurance', confidence: 0.98, evidence_quote: 'insurance', reason: 'r' }) });
       const M = V2(ENV, d);
       out.push(['V2 name: the fallback is OFF by default', M.NON_ICP_NAME_FALLBACK === false]);
+      /* THE SOURCE, NOT JUST THE BEHAVIOUR. On 23 Sept 2026 this exact line
+         was committed as `!== 'false'` -- a surviving mutation from a
+         background run that got swept up by `git add -A` -- and PUSHED. The
+         assertion above still passed, because the harness passes an env
+         with the flag absent and `!== 'false'` reads the same as
+         `=== 'true'` when the variable is unset. Only setting it to
+         something else tells them apart. A default that silently inverts is
+         the difference between a feature that ships dark and one that ships
+         live, so both the text and the discriminating case are pinned. */
+      out.push(['V2 name: the default is opt-IN in source, not opt-out',
+                /NON_ICP_NAME_FALLBACK === 'true'/.test(src)]);
+      out.push(['V2 name: an unrelated env value does NOT enable it',
+                V2({ ...ENV, NON_ICP_NAME_FALLBACK: 'yes' }, d).NON_ICP_NAME_FALLBACK === false]);
       const v = await M.nonIcpClassifyDomain('westexinsurance.com');
       out.push(['V2 name: OFF means the scrape failure is unchanged', v.source === 'llm_unreachable', v.source]);
       out.push(['V2 name: OFF makes no API call at all', d.calls.fetches.length === 0, String(d.calls.fetches.length)]);
