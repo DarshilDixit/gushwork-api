@@ -24,6 +24,9 @@
    reads, so nobody triages it as a real blocked prospect.
 
    Run:  node tools/fire-non-icp-slack.js blocked
+         node tools/fire-non-icp-slack.js llm-blocked
+         node tools/fire-non-icp-slack.js llm-meta
+         node tools/fire-non-icp-slack.js late-block
          node tools/fire-non-icp-slack.js booking
 
    Needs SLACK_WEBHOOK_URL in the environment; `booking` also needs the
@@ -86,8 +89,9 @@ const lifted = new Function('require', [
   liftDecl('function slackTruncate'),
   liftDecl('function slackNonIcpBlocked'),
   liftDecl('function slackNonIcpLlmFlagged'),
+  liftDecl('function slackNonIcpLateBlock'),
   liftDecl('const NON_ICP_BUSINESS_TYPES'),
-  'return { alertOps, slackNonIcpBlocked, slackNonIcpLlmFlagged };',
+  'return { alertOps, slackNonIcpBlocked, slackNonIcpLlmFlagged, slackNonIcpLateBlock };',
 ].join('\n'))(require);
 
 const TEST_NOTE = 'DELIBERATE TEST fired by hand via tools/fire-non-icp-slack.js — not a real blocked prospect';
@@ -161,6 +165,33 @@ const FIRES = {
     email: 'non-icp-meta-test@deliberate-non-icp-test.invalid',
     company: `TEST — ${TEST_NOTE}`,
     website: 'deliberate-non-icp-test.invalid',
+  }),
+
+  /* ── THE LATE-VERDICT SWEEP's post, added 23 Sept 2026. ───────────
+     The sweep shipped and started running before this path had ever
+     executed, which by this repo's own rule made it an untested alert --
+     and it is the ONLY thing that tells a human a booked lead turned out
+     to be non-ICP, because a stamped lead is not pushed to Salesforce and
+     is not on the SDR list. Fired by hand here rather than waiting to
+     discover a formatting bug on somebody's real meeting.
+
+     Payload shape copied from the runNonIcpBookedRecheck() call site,
+     which spreads the lead row and the verdict row together. A demo time
+     in the future, because the whole point of the message is that there is
+     still a decision to make. */
+  'late-block': () => lifted.slackNonIcpLateBlock({
+    first_name: 'Deliberate',
+    last_name: 'Test',
+    email: 'non-icp-late-test@deliberate-non-icp-test.invalid',
+    company: `TEST — ${TEST_NOTE}`,
+    website: 'https://deliberate-non-icp-test.invalid/',
+    phone: '+15550000000',
+    start_time: new Date(Date.now() + 36 * 3600 * 1000).toISOString(),
+    domain: 'deliberate-non-icp-test.invalid',
+    business_type: 'insurance',
+    business_type_label: 'Insurance',
+    confidence: 0.97,
+    evidence_quote: 'Medicare and Health Insurance for Texans — a deliberate test quote, not a real prospect.',
   }),
 
   /* The critical. Payload shape copied from rejectBookingIfNonIcp(). */
