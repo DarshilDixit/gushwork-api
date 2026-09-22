@@ -1,7 +1,7 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.16.0-ads  (ADS PAGE VERSION)
+  GUSHWORK — MULTI-STEP FORM  v5.17.0-ads  (ADS PAGE VERSION)
 
-  Tracks /demo v5.16.0. Full feature parity with /demo, EXCEPT the
+  Tracks /demo v5.17.0. Full feature parity with /demo, EXCEPT the
   booking step, which keeps the Ads page's fullscreen modal
   presentation — opened after step 2 — instead of /demo's inline
   column render, AND the close affordances that modal needs (v5.7.2).
@@ -10,6 +10,9 @@
   modal needs a way out and an inline column does not, so this
   section has no /demo counterpart to track.
 
+  v5.17.0-ads — the offer survives a lost session: an internal referrer
+    that still carries the campaign now decides it. Ported from /demo
+    v5.17.0, identical.
   v5.16.0-ads — the calendar waits when an answer is seconds away.
     Ported from /demo v5.16.0, identical.
   v5.15.1-ads — /ai-crm joins B2C_ALLOWED_PATHS, matching /demo.
@@ -1180,6 +1183,47 @@
        on the parent domain so an ad landing on the apex and a form on www
        are one visitor. Wrapped, because cookies throw outright in some
        privacy modes and a lost cookie must never cost the lead. */
+    /* THE THIRD RUNG, ADDED 22 SEPT 2026: the internal referrer.
+
+       THE COOKIE ABOVE HAS NEVER ONCE FIRED. Measured over the 207 leads
+       since the campaign rule shipped on 17 Sept: zero carried an offer
+       that came from the cookie rather than the URL -- including all 14
+       whose campaign was demonstrably lost in transit, which is the exact
+       case it was written for. The code is correct and it is live (the
+       served bytes were checked); whatever Meta's in-app browser does to
+       storage between webviews, it takes the cookie with it.
+
+       document.referrer survives that, because the browser supplies it
+       and no storage clearing can touch it. It is why previous_page still
+       shows the campaign on every one of those 14 leads, and it is the
+       only rung left that works when the first two do not.
+
+       INTERNAL REFERRERS ONLY. An outside page whose URL happened to
+       carry utm_campaign would otherwise decide which product we sell
+       someone. Same host test the previous_page capture below uses.
+
+       OFFER ONLY, NEVER utm_campaign. The comment above says why at
+       length: utm_campaign answers "which campaign brought this visit",
+       and feeding a remembered value into it silently re-attributes
+       organic leads to paid and desyncs Source_Bucket__c. This rung ends
+       at offer_*, like the cookie does.
+
+       THE PAIR MOVES TOGETHER -- campaign and medium both come from this
+       one referrer or neither does, so the offer can never be decided
+       from one arrival's medium and another's campaign. */
+    function offerFromReferrer() {
+      try {
+        var ref = document.referrer || '';
+        if (!ref) return null;
+        var u = new URL(ref);
+        var h = (u.hostname || '').toLowerCase();
+        if (!/(^|\.)gushwork\.ai$/.test(h) && h !== 'gushwork.webflow.io') return null;
+        var c = u.searchParams.get('utm_campaign') || '';
+        if (!c) return null;
+        return { campaign: c, medium: u.searchParams.get('utm_medium') || '' };
+      } catch (e) { return null; }
+    }
+
     const OFFER_COOKIE_DAYS = 30;
     function rememberCampaign(campaign, medium) {
       try {
@@ -1258,8 +1302,9 @@
          showed -- and it is no new trust, the utm_ fields beside it are
          equally client-supplied. NOT sent to /session: form_sessions is
          an attribution table. */
-      formState.offer_campaign = formState.utm_campaign || getCookie('gw_utm_campaign') || '';
-      formState.offer_medium   = formState.utm_medium   || getCookie('gw_utm_medium')   || '';
+      var refOffer = offerFromReferrer();
+      formState.offer_campaign = formState.utm_campaign || getCookie('gw_utm_campaign') || (refOffer ? refOffer.campaign : '') || '';
+      formState.offer_medium   = formState.utm_medium   || getCookie('gw_utm_medium')   || (refOffer ? refOffer.medium   : '') || '';
       formState.utm_content = p.get('utm_content') || sessionStorage.getItem('gw_utm_content') || '';
       formState.utm_term = p.get('utm_term') || sessionStorage.getItem('gw_utm_term') || '';
       formState.referrer = sessionStorage.getItem('gw_referrer') || 'direct';
@@ -3803,7 +3848,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.16.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.17.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
