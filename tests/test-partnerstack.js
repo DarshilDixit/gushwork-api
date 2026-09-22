@@ -574,9 +574,39 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
   {
     const fn = src.slice(src.indexOf('function readPartnerStackRequestContext'),
                          src.indexOf('function readPartnerStackPayload'));
-    ok('ctx: takes only the FIRST x-forwarded-for entry',
-       /fwd\.split\(','\)\[0\]/.test(fn));
-    ok('ctx: falls back to req.ip', /\|\| req\.ip \|\| null/.test(fn));
+    /* THE SPLIT MOVED, AND THIS TEST IS WHY THAT WAS SAFE. It lived inside
+       readPartnerStackRequestContext until 23 Sept 2026, when the six Meta
+       call sites turned out to be passing the raw header and the logic was
+       pulled up into clientIpOf so both integrations read one definition.
+       These two assertions failed the moment it moved -- which is the
+       correct outcome for a check pinned to a location, and the reason
+       they are now pinned to BEHAVIOUR instead.
+
+       EXECUTED, not read. A regex over the source could not have told the
+       difference between a working split and a deleted one that still
+       mentions the word. */
+    ok('ctx: the context delegates to the ONE shared extractor',
+       /const ip_address = clientIpOf\(req\);/.test(fn));
+    {
+      const clientIpOf = (new Function(
+        src.slice(src.indexOf('function clientIpOf(req)'),
+                  src.indexOf('function readPartnerStackRequestContext'))
+        + '\nreturn clientIpOf;'))();
+      eq('ctx: takes only the FIRST x-forwarded-for entry',
+         clientIpOf({ headers: { 'x-forwarded-for': '203.0.113.45, 10.0.0.1' }, ip: '10.0.0.1' }),
+         '203.0.113.45');
+      eq('ctx: a three-hop chain still yields the client',
+         clientIpOf({ headers: { 'x-forwarded-for': '203.0.113.45, 10.0.0.1, 172.16.0.9' }, ip: '172.16.0.9' }),
+         '203.0.113.45');
+      eq('ctx: a single entry is unchanged',
+         clientIpOf({ headers: { 'x-forwarded-for': '203.0.113.45' }, ip: '10.0.0.1' }), '203.0.113.45');
+      eq('ctx: falls back to req.ip when the header is absent',
+         clientIpOf({ headers: {}, ip: '198.51.100.7' }), '198.51.100.7');
+      eq('ctx: falls back to req.ip when the header is empty',
+         clientIpOf({ headers: { 'x-forwarded-for': '' }, ip: '198.51.100.7' }), '198.51.100.7');
+      eq('ctx: null when there is nothing at all',
+         clientIpOf({ headers: {}, ip: undefined }), null);
+    }
     ok('ctx: user agent is bounded', /user-agent[\s\S]{0,80}?slice\(0, 500\)/.test(fn));
     /* origin is the FULL page URL, deliberately: a bare scheme+host cannot
        tell /demo from an ads lander, and the Origin header is absent on
