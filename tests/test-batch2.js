@@ -3024,6 +3024,26 @@ async function section12() {
   /* The JS half of this pair is executed in section 28, where
      isStagingSubmission is already lifted. */
 
+  /* EVERY CONSUMER ASKS THE SAME QUESTION.
+
+     isInternalLead reads the ADDRESS only; isInternalSubmission also
+     matches the staging host. Anything deciding "is this one of ours"
+     must use the second, or it silently disagrees with the rest of the
+     repo -- which nonIcpModelReport did until 22 Sept 2026, counting a
+     staging submission under a personal Gmail as an ordinary prospect
+     while Meta, Salesforce, the dialer and the All Leads marker all
+     treated it as ours.
+
+     Anchored on the model report specifically, because that is the one
+     that drifted and the drift was invisible: both spellings compile,
+     both return a boolean, and the weaker one is simply wrong less
+     often. 19 of 5,582 rows separate them. */
+  ok('23: the Model tab report asks the SAME question as every other consumer',
+     /const mine = isInternalSubmission\(lead\.email, lead\.page_url\);/.test(src),
+     'nonIcpModelReport must use isInternalSubmission, not isInternalLead');
+  ok('23: and it selects the column that question needs',
+     /SELECT[\s\S]{0,400}l\.page_url,[\s\S]{0,400}FROM leads l\s+WHERE l\.created_at/.test(src));
+
   /* THE DEFAULT IS STILL "COUNT EVERYTHING". A default that excluded
      would be the quiet fix CLAUDE.md forbids. */
   const leads = between("app.get('/monitor/leads'", "app.get('/monitor/lead-changes'");
