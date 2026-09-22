@@ -285,6 +285,11 @@ const results7 = (async () => {
   return out;
 })();
 
+/* Declared outside the block below so the chain at the end of the file can
+   see it -- same shape as results13. A const inside the block is invisible
+   there, which is how this first failed. */
+let results8;
+
 /* ============================================================
    8. Where the block is EVALUATED — reachability, not just ordering
 
@@ -319,46 +324,97 @@ const results7 = (async () => {
      below immediately. */
   for (const tag of ['/booking-confirmed', '/cal-webhook', '/rh-webhook']) {
     const re = new RegExp(
-      'if \\(nonIcpScheduleSuppressed\\(fullLead, \'' + tag.replace(/\//g, '\\/') + '\'\\)\\) return;');
+      'if \\(await nonIcpScheduleSuppressed\\(fullLead, \'' + tag.replace(/\//g, '\\/') + '\'\\)\\) return;');
     ok(`Schedule guard on ${tag} is live, not just present`, re.test(src));
   }
-  const scheduleGuards = (src.match(/if \(nonIcpScheduleSuppressed\(fullLead, '[^']+'\)\) return;/g) || []).length;
+  const scheduleGuards = (src.match(/if \(await nonIcpScheduleSuppressed\(fullLead, '[^']+'\)\) return;/g) || []).length;
   eq('exactly THREE live Schedule guards', scheduleGuards, 3);
   /* Each call site must sit immediately before the event actually goes, or
      it is guarding nothing. */
   eq('all three Schedule guards precede the Meta push',
-     (src.match(/if \(nonIcpScheduleSuppressed\(fullLead, '[^']+'\)\) return;[\s\S]{0,400}?pushFormEventsToMeta\(/g) || []).length, 3);
+     (src.match(/if \(await nonIcpScheduleSuppressed\(fullLead, '[^']+'\)\) return;[\s\S]{0,400}?pushFormEventsToMeta\(/g) || []).length, 3);
 
-  /* ── The guard, EXECUTED ────────────────────────────────────────── */
-  {
-    const mk = (meta) => (new Function(
-      'NON_ICP_LLM_META',
-      between('function nonIcpScheduleSuppressed(fullLead, routeTag)', 'const SCHEDULE_LEAD_SQL')
-      + '\nreturn nonIcpScheduleSuppressed;'))(meta);
-    const G = mk(false), Gmeta = mk(true);
-    const row = (o) => ({ session_id: 's', non_icp_reason: 'kw.com', ...o });
+  /* ── The guard, EXECUTED ──────────────────────────────────────────
+     ASYNC SINCE 23 SEPT 2026, and the change is the point rather than an
+     inconvenience. The guard now re-reads non_icp_domain_verdicts, so it
+     had to become async -- and this block, which LIFTS AND RUNS the real
+     function, is what noticed. A source-text assertion would have sailed
+     past a signature change that breaks all three call sites.
 
-    ok('guard: a domain-list block suppresses',
-       G(row({ non_icp_blocked: true }), '/t') === true);
-    ok('guard: a clean lead does NOT suppress',
-       G(row({ non_icp_blocked: false, non_icp_llm_flagged: false }), '/t') === false);
+     new Function cannot hold an `await`, so the body is built through the
+     AsyncFunction constructor instead. The results are collected and
+     chained at the end of the file, matching results7 / results10d /
+     results13. */
+  results8 = (async () => {
+    const out = [];
+    const okA = (n, c, x) => out.push([n, c, x]);
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+    /* `verdict` is the stubbed nonIcpLlmCachedVerdict: null means "the
+       cache still has nothing", which is the common case and must stay
+       fail-open. */
+    const mk = (meta, verdict) => (new AsyncFunction(
+      'NON_ICP_LLM_META', 'nonIcpLlmCachedVerdict',
+      between('async function nonIcpScheduleSuppressed(fullLead, routeTag)', 'const SCHEDULE_LEAD_SQL')
+      + '\nreturn nonIcpScheduleSuppressed;'))(meta, verdict || (async () => null));
+    const G     = await mk(false);
+    const Gmeta = await mk(true);
+    const row   = (o) => ({ session_id: 's', non_icp_reason: 'kw.com', ...o });
+
+    okA('guard: a domain-list block suppresses',
+        (await G(row({ non_icp_blocked: true }), '/t')) === true);
+    okA('guard: a clean lead does NOT suppress',
+        (await G(row({ non_icp_blocked: false, non_icp_llm_flagged: false }), '/t')) === false);
     /* THE WHOLE POINT OF THE SPLIT. A model-flagged lead is not blocked --
        it holds a real calendar slot -- and its Meta event is withheld only
        when NON_ICP_LLM_META was switched on as its own decision. If these
        two ever agree, flagging has silently started reshaping the ad
        audience, which CLAUDE.md says must never happen as a side effect. */
-    ok('guard: flagged + META off does NOT suppress',
-       G(row({ non_icp_blocked: false, non_icp_llm_flagged: true }), '/t') === false);
-    ok('guard: flagged + META on DOES suppress',
-       Gmeta(row({ non_icp_blocked: false, non_icp_llm_flagged: true }), '/t') === true);
+    okA('guard: flagged + META off does NOT suppress',
+        (await G(row({ non_icp_blocked: false, non_icp_llm_flagged: true }), '/t')) === false);
+    okA('guard: flagged + META on DOES suppress',
+        (await Gmeta(row({ non_icp_blocked: false, non_icp_llm_flagged: true }), '/t')) === true);
     /* A missing row is not a blocked lead. Same fail-open direction as
        everything else on the lead path. */
-    ok('guard: a missing row does NOT suppress', G(null, '/t') === false);
-    ok('guard: an empty row does NOT suppress', G({}, '/t') === false);
+    okA('guard: a missing row does NOT suppress', (await G(null, '/t')) === false);
+    okA('guard: an empty row does NOT suppress', (await G({}, '/t')) === false);
     /* A blocked lead suppresses whatever META says -- BLOCK implies META. */
-    ok('guard: blocked suppresses even with META off',
-       G(row({ non_icp_blocked: true, non_icp_llm_flagged: false }), '/t') === true);
-  }
+    okA('guard: blocked suppresses even with META off',
+        (await G(row({ non_icp_blocked: true, non_icp_llm_flagged: false }), '/t')) === true);
+
+    /* ── THE LATE VERDICT. The whole reason this became async. ────────
+       steenhoekinsurance.com classified insurance at 0.97 confidence 2.6
+       SECONDS after the lead submitted, so the column said false and the
+       verdict table said block. The first four assertions below are the
+       ones that would have caught that lead. */
+    const blockHit = { action: 'block', row: { domain: 'steenhoekinsurance.com', business_type: 'insurance', confidence: 0.97 } };
+    const metaHit  = { action: 'meta',  row: { domain: 'pfifashions.com', business_type: 'home_services', confidence: 0.91 } };
+    const clean    = row({ non_icp_blocked: false, non_icp_llm_flagged: false });
+
+    const Glate = await mk(false, async () => blockHit);
+    okA('late verdict: a BLOCKING verdict found after submit suppresses, even with META off',
+        (await Glate(clean, '/t')) === true);
+    const GlateMeta = await mk(true, async () => metaHit);
+    okA('late verdict: a META-only verdict suppresses when META is on',
+        (await GlateMeta(clean, '/t')) === true);
+    /* The same separation the stamped columns already keep. A Meta-only
+       industry must not start suppressing just because the read moved. */
+    const GlateMetaOff = await mk(false, async () => metaHit);
+    okA('late verdict: a META-only verdict does NOT suppress when META is off',
+        (await GlateMetaOff(clean, '/t')) === false);
+    okA('late verdict: an empty cache still does NOT suppress',
+        (await (await mk(false, async () => null))(clean, '/t')) === false);
+    /* FAIL OPEN. A database wobble must never withhold a real lead's
+       conversion -- the direction every read in this feature points. */
+    const GThrow = await mk(false, async () => { throw new Error('connection terminated'); });
+    okA('late verdict: a THROWN read fails open and fires Schedule',
+        (await GThrow(clean, '/t')) === false);
+    /* The stamped column still wins first, so a lead blocked at the form
+       is not re-decided by a cache read that might have expired. */
+    const GBoth = await mk(false, async () => { throw new Error('should not be reached'); });
+    okA('late verdict: the stamped column short-circuits before any read',
+        (await GBoth(row({ non_icp_blocked: true }), '/t')) === true);
+    return out;
+  })();
   /* REFUSING THE BOOKING, not merely suppressing the event. A suppressed
      Schedule still leaves a real slot on a real AE's calendar. */
   eq('all three booking routes call the refusal helper',
@@ -1259,7 +1315,10 @@ const V2 = (() => {
              nonIcpClassifyDomain, nonIcpFetchPageText, nonIcpSha256,
              NON_ICP_SYSTEM_PROMPT, NON_ICP_OUTPUT_SCHEMA, NON_ICP_PROMPT_VERSION,
              NON_ICP_LLM_ENABLED, NON_ICP_LLM_BLOCK, NON_ICP_LLM_META, nonIcpTypeSuppressesMeta,
-             NON_ICP_LLM_CONFIDENCE_FLOOR, NON_ICP_PAGE_TEXT_CAP };`
+             NON_ICP_LLM_CONFIDENCE_FLOOR, NON_ICP_PAGE_TEXT_CAP,
+             nonIcpClassifyFromName, NON_ICP_NAME_FALLBACK,
+             NON_ICP_NAME_CONFIDENCE_FLOOR, NON_ICP_NAME_SYSTEM_PROMPT,
+             NON_ICP_NAME_PROMPT_VERSION };`
   ))({ env }, deps.fetch, deps.attemptFetch, deps.analyzeSubstance,
       deps.isPrivateOrLocalHost || (() => false),
       deps.detectCheckWall || (() => null),
@@ -1986,11 +2045,369 @@ results13 = (async () => {
     out.push(['V2: the health row renders in the dashboard', /id="s-nonicpllm"/.test(src)]);
   }
 
+
+  /* ── 13n. THE NAME-ONLY FALLBACK (23 Sept 2026) ──────────────────
+     Runs only when the scrape failed, judges the DOMAIN NAME alone, and
+     is the answer to the three leaked demos a better fetch could never
+     have caught: longandfoster.com answers 403 behind a bot wall,
+     westexinsurance.com does not connect, adrianadearaujorealtor.com
+     renders client-side. All three are plain from the hostname.
+
+     EXECUTED, like everything else in section 13. */
+  {
+    const NAME_ENV = { ...ENV, NON_ICP_NAME_FALLBACK: 'true' };
+    /* A failing scrape. 500 makes nonIcpFetchPageText give up, which is
+       the only door the fallback sits behind. */
+    const failScrape = { status: 500, html: '' };
+
+    /* DEFAULT OFF, like NON_ICP_BLOCK and NON_ICP_LLM_BLOCK before it. A
+       new blocking mechanism that switches itself on by existing is the
+       one thing this repo has never allowed. */
+    {
+      const d = stubDeps({ ...failScrape, apiBody: answer({ business_type: 'insurance', confidence: 0.98, evidence_quote: 'insurance', reason: 'r' }) });
+      const M = V2(ENV, d);
+      out.push(['V2 name: the fallback is OFF by default', M.NON_ICP_NAME_FALLBACK === false]);
+      /* THE SOURCE, NOT JUST THE BEHAVIOUR. On 23 Sept 2026 this exact line
+         was committed as `!== 'false'` -- a surviving mutation from a
+         background run that got swept up by `git add -A` -- and PUSHED. The
+         assertion above still passed, because the harness passes an env
+         with the flag absent and `!== 'false'` reads the same as
+         `=== 'true'` when the variable is unset. Only setting it to
+         something else tells them apart. A default that silently inverts is
+         the difference between a feature that ships dark and one that ships
+         live, so both the text and the discriminating case are pinned. */
+      out.push(['V2 name: the default is opt-IN in source, not opt-out',
+                /NON_ICP_NAME_FALLBACK === 'true'/.test(src)]);
+      out.push(['V2 name: an unrelated env value does NOT enable it',
+                V2({ ...ENV, NON_ICP_NAME_FALLBACK: 'yes' }, d).NON_ICP_NAME_FALLBACK === false]);
+      const v = await M.nonIcpClassifyDomain('westexinsurance.com');
+      out.push(['V2 name: OFF means the scrape failure is unchanged', v.source === 'llm_unreachable', v.source]);
+      out.push(['V2 name: OFF makes no API call at all', d.calls.fetches.length === 0, String(d.calls.fetches.length)]);
+    }
+
+    /* ON: the leak closes. */
+    {
+      const d = stubDeps({ ...failScrape, apiBody: answer({ business_type: 'insurance', confidence: 0.98, evidence_quote: 'insurance', reason: 'the name contains insurance' }) });
+      const M = V2(NAME_ENV, d);
+      /* A domain that appears NOWHERE in the prompt, so the system-prompt
+         assertion below cannot pass or fail by coincidence -- the prompt
+         carries westexinsurance.com as a worked example, which is exactly
+         the kind of accidental match that makes a test meaningless. */
+      const v = await M.nonIcpClassifyDomain('zzqbrokerageservices.com');
+      out.push(['V2 name: ON, an unreadable insurance domain now classifies', v.business_type === 'insurance', v.business_type]);
+      out.push(['V2 name: it BLOCKS above the name floor', v.blocking === true]);
+      /* A DISTINCT SOURCE. A verdict from a hostname and one from a page
+         are different claims and must never be counted together. */
+      out.push(['V2 name: source is llm_name_only, not llm', v.source === 'llm_name_only', v.source]);
+      /* THE REAL SCRAPE OUTCOME SURVIVES. The dashboard's scrape panel
+         counts these; a name verdict must not read as a page we fetched. */
+      out.push(['V2 name: the real scrape_status is preserved, not overwritten', v.scrape_status !== 'ok' && !!v.scrape_status, String(v.scrape_status)]);
+      out.push(['V2 name: its own prompt version is stamped', v.prompt_version === M.NON_ICP_NAME_PROMPT_VERSION, v.prompt_version]);
+      /* No page was read, so there is nothing to hash and nothing to cite. */
+      out.push(['V2 name: no page hash is invented', v.page_text_sha256 === null]);
+      out.push(['V2 name: no page length is invented', v.page_text_chars === null]);
+      /* THE PROMPT MUST NOT CARRY PAGE TEXT -- there is none, and a
+         wrapper claiming otherwise would be a lie in the transcript. */
+      const body = d.calls.bodies[0];
+      out.push(['V2 name: the request carries no page-text wrapper', !JSON.stringify(body.messages).includes('untrusted_page_text')]);
+      out.push(['V2 name: the domain is sent as user data, never in the system prompt', !body.system.includes('zzqbrokerageservices.com')]);
+      out.push(['V2 name: the domain IS in the user message', JSON.stringify(body.messages).includes('zzqbrokerageservices.com')]);
+      out.push(['V2 name: the enum is still declared as a structured output',
+                JSON.stringify(body.output_config.format.schema) === JSON.stringify(M.NON_ICP_OUTPUT_SCHEMA)]);
+    }
+
+    /* THE HIGHER FLOOR IS THE WHOLE SAFETY ARGUMENT. A confidence that
+       would block from a PAGE (>= 0.75) must NOT block from a NAME. */
+    {
+      const d = stubDeps({ ...failScrape, apiBody: answer({ business_type: 'real_estate', confidence: 0.8, evidence_quote: 'realty', reason: 'r' }) });
+      const M = V2(NAME_ENV, d);
+      const v = await M.nonIcpClassifyDomain('premierproperties.com');
+      out.push(['V2 name: the name floor is HIGHER than the page floor',
+                M.NON_ICP_NAME_CONFIDENCE_FLOOR > M.NON_ICP_LLM_CONFIDENCE_FLOOR,
+                `${M.NON_ICP_NAME_CONFIDENCE_FLOOR} vs ${M.NON_ICP_LLM_CONFIDENCE_FLOOR}`]);
+      out.push(['V2 name: 0.80 blocks from a page but NOT from a name', v.blocking === false, String(v.confidence)]);
+      out.push(['V2 name: the verdict is still recorded, just not blocking', v.business_type === 'real_estate']);
+    }
+
+    /* UNKNOWN IS NOT A VERDICT. Returning null hands back the plain
+       llm_unreachable row, so the six-hour failure TTL applies and the
+       domain is retried -- rather than a 180-day "we decided nothing"
+       that a guess from a string has not earned. */
+    {
+      const d = stubDeps({ ...failScrape, apiBody: answer({ business_type: 'unknown', confidence: 0.4, evidence_quote: '', reason: 'cannot tell' }) });
+      const M = V2(NAME_ENV, d);
+      const v = await M.nonIcpClassifyDomain('aia.com');
+      out.push(['V2 name: unknown falls back to llm_unreachable, keeping the 6h TTL', v.source === 'llm_unreachable', v.source]);
+    }
+
+    /* FAIL OPEN on every path, like the rest of the feature. */
+    {
+      const d = stubDeps({ ...failScrape, apiStatus: 500 });
+      const M = V2(NAME_ENV, d);
+      const v = await M.nonIcpClassifyDomain('westexinsurance.com');
+      out.push(['V2 name: an API error falls back to llm_unreachable', v.source === 'llm_unreachable' && v.blocking === false]);
+    }
+    {
+      const d = stubDeps({ ...failScrape, apiThrow: 'timeout' });
+      const M = V2(NAME_ENV, d);
+      const v = await M.nonIcpClassifyDomain('westexinsurance.com');
+      out.push(['V2 name: a timeout falls back to llm_unreachable', v.source === 'llm_unreachable' && v.blocking === false]);
+    }
+    /* A refusal arrives as a 200 and is not a verdict -- same guard the
+       page classifier needs, for the same reason. */
+    {
+      const d = stubDeps({ ...failScrape, apiBody: { stop_reason: 'refusal', content: [] } });
+      const M = V2(NAME_ENV, d);
+      const v = await M.nonIcpClassifyDomain('westexinsurance.com');
+      out.push(['V2 name: a refusal is not a verdict', v.source === 'llm_unreachable']);
+    }
+    /* A type outside the enum is no answer, never a new category. */
+    {
+      const d = stubDeps({ ...failScrape, apiBody: answer({ business_type: 'realtor_stuff', confidence: 0.99, evidence_quote: 'x', reason: 'r' }) });
+      const M = V2(NAME_ENV, d);
+      const v = await M.nonIcpClassifyDomain('x.com');
+      out.push(['V2 name: an off-enum type is refused, not adopted', v.source === 'llm_unreachable']);
+    }
+    /* THE MODEL STILL DOES NOT DECIDE BLOCKING. Same rule as the page
+       classifier: a model-supplied blocking field is ignored and the enum
+       decides. home_services suppresses Meta but never blocks. */
+    {
+      const d = stubDeps({ ...failScrape, apiBody: answer({ business_type: 'home_services', confidence: 0.99, blocking: true, evidence_quote: 'plumbing', reason: 'r' }) });
+      const M = V2(NAME_ENV, d);
+      const v = await M.nonIcpClassifyDomain('acmeplumbing.com');
+      out.push(['V2 name: a model-supplied blocking flag is ignored, the enum decides', v.blocking === false]);
+    }
+    /* AND IT NEVER RUNS ON A GOOD SCRAPE. A page verdict must not be
+       quietly replaced by a weaker one. */
+    {
+      const d = stubDeps({ html: PAGE_INSURANCE, apiBody: answer({ business_type: 'insurance', confidence: 0.96, evidence_quote: 'independent insurance agency', reason: 'r' }) });
+      const M = V2(NAME_ENV, d);
+      const v = await M.nonIcpClassifyDomain('rockwellinsurance.com');
+      out.push(['V2 name: a SUCCESSFUL scrape never reaches the fallback', v.source === 'llm' && v.scrape_status === 'ok', v.source]);
+      out.push(['V2 name: the page prompt is still the page prompt', JSON.stringify(d.calls.bodies[0].messages).includes('untrusted_page_text')]);
+    }
+  }
+
+  /* ── 13s. THE LATE-VERDICT SWEEP (23 Sept 2026) ──────────────────
+     The other half of the late-verdict fix. nonIcpScheduleSuppressed
+     stops the Meta event; this stamps the lead and tells a human, because
+     the booking is already real and only a person can cancel it.
+
+     Mostly source assertions -- the function is a query plus a loop --
+     but the RULES it must not lose are each pinned, and the SQL is
+     executed against the real database in the test below it. */
+  {
+    const sweep = between('async function runNonIcpBookedRecheck()', '/* Its own post rather than alertOps');
+    out.push(['V2 sweep: only BLOCKING verdicts act, never Meta-only flags',
+              /hit\.action !== 'block'/.test(sweep)]);
+    out.push(['V2 sweep: it respects NON_ICP_LLM_BLOCK', /!NON_ICP_LLM_BLOCK/.test(sweep)]);
+    /* A PAYING CUSTOMER IS NEVER TURNED AWAY, and this sweep must not be
+       the one place that forgets the bypass every other path runs. */
+    out.push(['V2 sweep: the known-customer bypass runs here too',
+              /nonIcpCustomerBypass\(/.test(sweep)]);
+    /* THE STAMP IS THE CURSOR. Without this the same lead is alerted
+       every five minutes forever. */
+    out.push(['V2 sweep: it only looks at leads not already blocked',
+              /non_icp_blocked IS NOT TRUE/.test(sweep)]);
+    out.push(['V2 sweep: it stamps non_icp_blocked, which is what stops a repeat alert',
+              /SET non_icp_blocked\s*=\s*TRUE/.test(sweep)]);
+    /* A DISTINCT SOURCE. A lead turned away at the form and one marked
+       after it booked are different events with different consequences,
+       and a reader has to be able to tell them apart. */
+    out.push(['V2 sweep: it stamps its own source, not llm',
+              /non_icp_source\s*=\s*'llm_late'/.test(sweep)]);
+    /* leads.start_time is TEXT. CLAUDE.md: a bare cast in a WHERE clause
+       is not safe, because Postgres does not guarantee the regex runs
+       first and one malformed row takes the whole sweep down. */
+    out.push(['V2 sweep: the start_time cast is regex-guarded',
+              /start_time !~ '\^\[0-9\]\{4\}-\[0-9\]\{2\}-\[0-9\]\{2\}'[\s\S]{0,80}start_time::timestamptz/.test(sweep)]);
+    out.push(['V2 sweep: a demo that already happened is skipped', /start_time::timestamptz >= NOW\(\)/.test(sweep)]);
+    /* IT NEVER CANCELS. Authorised shape: mark and tell a human. */
+    out.push(['V2 sweep: it never cancels a booking', !/cancel|DELETE FROM leads/i.test(sweep.replace(/\/\*[\s\S]*?\*\//g, ''))]);
+    /* The mirror write is TARGETED, never syncToAWS -- that upsert sets
+       disqualified = EXCLUDED.disqualified with no COALESCE and would
+       clear a real disqualification on the dialer's feed. */
+    out.push(['V2 sweep: the AWS write is targeted, not syncToAWS',
+              /syncNonIcpBlockToAWS\(/.test(sweep) && !/syncToAWS\(/.test(sweep)]);
+    const awsFn = between('function syncNonIcpBlockToAWS(session_id, reason)', '/* A targeted UPDATE, NOT syncToAWS');
+    out.push(['V2 sweep: the mirror write can only SET the flag, never clear it',
+              /SET non_icp_blocked = TRUE/.test(awsFn) && !/non_icp_blocked = \$/.test(awsFn)]);
+    /* Its own Slack post, not alertOps: alertOps keys its cooldown on
+       severity+source+title, so a second person inside the window would be
+       folded into a counter instead of named. */
+    const post = between('function slackNonIcpLateBlock(d)', 'function startNonIcpBookedRecheck()');
+    out.push(['V2 sweep: it posts per lead rather than through the alertOps cooldown',
+              /sendSlack\(/.test(post) && !/alertOps\(/.test(post)]);
+    out.push(['V2 sweep: the post carries the evidence quote', /evidence_quote/.test(post)]);
+    out.push(['V2 sweep: the post says the booking was NOT cancelled', /Nothing here has been cancelled/.test(post)]);
+    out.push(['V2 sweep: the post says the Meta Lead cannot be recalled', /cannot be recalled/.test(post)]);
+    /* Boot-then-interval, or every deploy loses its first window. */
+    const starter = between('function startNonIcpBookedRecheck()', 'async function rejectBookingIfNonIcp');
+    out.push(['V2 sweep: boot-then-interval, like the five partner jobs',
+              /run\('boot'\)/.test(starter) && /setInterval/.test(starter)]);
+    out.push(['V2 sweep: it is actually started at boot', /startNonIcpBookedRecheck\(\);/.test(src)]);
+    out.push(['V2 sweep: an overlapping run is refused', /_nonIcpRecheckRunning/.test(sweep)]);
+  }
+
+  /* ── 13b2. The new brand-domain entries (23 Sept 2026) ───────────
+     Added from the leak audit, not from a brand list. Pinned so a tidy-up
+     cannot quietly drop the one that a scraper can never read. */
+  {
+    const d = stubDeps();
+    for (const dom of ['longandfoster.com', 'globelife.com', 'ailife.com', 'brightway.com']) {
+      out.push([`V2 list: ${dom} is on the brand list`, new RegExp("'" + dom.replace(/\./g, '\\.') + "':").test(src)]);
+    }
+    /* IN ICP BY NAME in the Non-ICP doc. If this ever appears, somebody
+       has started blocking financial advisors by accident. */
+    out.push(['V2 list: primerica.com is NOT blocked (financial advisory is in ICP)',
+              !/'primerica\.com':/.test(src)]);
+  }
+
+  /* ── 13s2. THE SWEEP, EXECUTED ───────────────────────────────────
+     ADDED BECAUSE A MUTATION SURVIVED. The source assertions above check
+     that nonIcpCustomerBypass is CALLED; turning `if (bypass) continue;`
+     into `if (false) continue;` leaves the call sitting there, so every
+     one of them still passed while a paying customer would have been
+     blocked. That is the repo's oldest lesson -- presence is not
+     reachability -- and the answer is the same as everywhere else: drive
+     the function and watch what it does.
+
+     The sweep is lifted whole and run against a stubbed pool, so the
+     branches are real code paths rather than regexes. */
+  {
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+    const mkSweep = async (opts) => {
+      const st = { updates: [], slack: [], aws: [], bypassAsked: [] };
+      const lead = { session_id: 'sess-1', email: 'a@b.com', website: 'https://b.com',
+                     company: 'B', first_name: 'A', last_name: 'B', phone: '1',
+                     booking_uid: 'bk1', booked_at: new Date(), start_time: null };
+      const fn = await (new AsyncFunction(
+        'NON_ICP_LLM_ENABLED', 'NON_ICP_BLOCK_ENABLED', 'NON_ICP_LLM_BLOCK',
+        'pool', 'nonIcpLlmCachedVerdict', 'nonIcpCustomerBypass',
+        'syncNonIcpBlockToAWS', 'slackNonIcpLateBlock', 'NON_ICP_BUSINESS_TYPES', 'console',
+        between('const NON_ICP_RECHECK_INTERVAL_MS', '/* Its own post rather than alertOps')
+        + '\nreturn runNonIcpBookedRecheck;'
+      ))(
+        opts.enabled !== false, true, opts.llmBlock !== false,
+        { query: async (sql) => (/^\s*SELECT/i.test(sql) ? { rows: opts.rows || [lead] }
+                                                         : (st.updates.push(sql), { rowCount: 1 })) },
+        async () => opts.verdict === undefined
+          ? { action: 'block', row: { domain: 'b.com', business_type: 'insurance', confidence: 0.97 } }
+          : opts.verdict,
+        async () => { st.bypassAsked.push(1); return opts.bypass || null; },
+        (...a) => st.aws.push(a),
+        (...a) => st.slack.push(a),
+        { insurance: { blocks: true, label: 'Insurance' }, home_services: { blocks: false, label: 'Home services' } },
+        { log() {}, warn() {}, error() {} }
+      );
+      return { fn, st };
+    };
+
+    {
+      const { fn, st } = await mkSweep({});
+      await fn();
+      out.push(['V2 sweep EXEC: a late blocking verdict stamps the lead', st.updates.length === 1, String(st.updates.length)]);
+      out.push(['V2 sweep EXEC: it posts to Slack', st.slack.length === 1]);
+      out.push(['V2 sweep EXEC: it writes the mirror', st.aws.length === 1]);
+      out.push(['V2 sweep EXEC: the stamp is llm_late', /llm_late/.test(st.updates[0] || '')]);
+    }
+    /* THE MUTATION THAT SURVIVED. A paying customer must never be stamped,
+       and this is the assertion that notices when the branch stops firing. */
+    {
+      const { fn, st } = await mkSweep({ bypass: { blocked: false, reason: 'known_customer' } });
+      await fn();
+      out.push(['V2 sweep EXEC: a KNOWN CUSTOMER is never stamped', st.updates.length === 0, String(st.updates.length)]);
+      out.push(['V2 sweep EXEC: a known customer gets no Slack post', st.slack.length === 0]);
+      out.push(['V2 sweep EXEC: a known customer is not mirrored', st.aws.length === 0]);
+      out.push(['V2 sweep EXEC: the bypass was actually consulted', st.bypassAsked.length === 1]);
+    }
+    /* Meta-only flags are handled at booking time and must not wake anyone. */
+    {
+      const { fn, st } = await mkSweep({ verdict: { action: 'meta', row: { domain: 'b.com', business_type: 'home_services', confidence: 0.95 } } });
+      await fn();
+      out.push(['V2 sweep EXEC: a META-only verdict does NOT stamp or alert', st.updates.length === 0 && st.slack.length === 0]);
+    }
+    /* Nothing in the cache is the common case and must stay quiet. */
+    {
+      const { fn, st } = await mkSweep({ verdict: null });
+      await fn();
+      out.push(['V2 sweep EXEC: an empty cache does nothing', st.updates.length === 0 && st.slack.length === 0]);
+    }
+    /* The kill switch has to reach the sweep too, or turning the model
+       layer off would leave this still blocking people. */
+    {
+      const { fn, st } = await mkSweep({ llmBlock: false });
+      await fn();
+      out.push(['V2 sweep EXEC: NON_ICP_LLM_BLOCK=false stops it stamping', st.updates.length === 0]);
+    }
+  }
+
+  /* ── 13t. FOUR SOURCE VALUES, NOT TWO ────────────────────────────
+     Adding llm_name_only and llm_late re-scoped every consumer that
+     compared against the literal 'llm'. Found while writing the review
+     card, not by a test, which is why these exist now. */
+  {
+    /* The server helper is the single place the question is asked. */
+    const H = (new Function(between('const NON_ICP_MODEL_SOURCES =', 'function nonIcpTypeBlocks')
+      + '\nreturn { NON_ICP_MODEL_SOURCES, nonIcpSourceIsModel };'))();
+    out.push(['V2 src: llm counts as a model decision', H.nonIcpSourceIsModel('llm') === true]);
+    out.push(['V2 src: llm_name_only counts as a model decision', H.nonIcpSourceIsModel('llm_name_only') === true]);
+    out.push(['V2 src: llm_late counts as a model decision', H.nonIcpSourceIsModel('llm_late') === true]);
+    out.push(['V2 src: the brand list does NOT', H.nonIcpSourceIsModel('domain_list') === false]);
+    /* A pre-feature row has no source and means the list, which was the
+       only mechanism that existed then. */
+    out.push(['V2 src: a null source does NOT', H.nonIcpSourceIsModel(null) === false]);
+
+    /* NO LITERAL 'llm' COMPARISON MAY SURVIVE on the lead's stamped column.
+       That is the exact shape that made all three Model-tab buckets answer
+       "brand list" for a model block. */
+    out.push(['V2 src: nothing compares non_icp_source to the bare literal',
+              !/non_icp_source === 'llm'/.test(src)]);
+    out.push(['V2 src: all three Model-tab buckets ask the helper',
+              (src.match(/nonIcpSourceIsModel\(lead\.non_icp_source\)/g) || []).length === 3]);
+
+    /* THE CLIENT COPY MUST KNOW THE SAME FOUR. Same shape as WLBL and the
+       SDR search pair: two copies, one meaning. A blocked lead's tooltip is
+       one of only two human-facing records it has, so a label saying "Brand
+       list" about a model block is a false statement to an SDR. */
+    const shortFn = between('function nonIcpSourceShort(src){', 'function nonIcpSourceWhy(src){');
+    const whyFn   = between("'function nonIcpSourceWhy(src){'", 'TOP LEVEL, like every other shared helper');
+    for (const v of ['llm_name_only', 'llm_late']) {
+      out.push([`V2 src: the dashboard label knows ${v}`, shortFn.includes(v)]);
+      out.push([`V2 src: the dashboard explanation knows ${v}`, whyFn.includes(v)]);
+    }
+    /* EXECUTED, not read -- the helpers live inside a JS string sent to the
+       browser, so a syntax slip in them is invisible to node --check. */
+    const L = (new Function('return ' + JSON.stringify('x') + ';')) && null;
+    const clientSrc = between("'function nonIcpSourceShort(src){'", "'function leadRowsHtml(leads,ns)");
+    const glued = clientSrc.split('\n').map((l) => {
+      const m = l.match(/^\s*\+?\s*'(.*)'\s*\+?\s*$/);
+      return m ? m[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\') : '';
+    }).join('');
+    let fns = null;
+    try { fns = (new Function(glued + '\nreturn { nonIcpSourceShort, nonIcpSourceWhy };'))(); } catch (e) { fns = null; }
+    out.push(['V2 src: the client helpers parse and run', !!fns, fns ? '' : 'did not evaluate']);
+    if (fns) {
+      out.push(['V2 src EXEC: llm_late is not labelled "Brand list"',
+                fns.nonIcpSourceShort('llm_late') !== 'Brand list', fns.nonIcpSourceShort('llm_late')]);
+      out.push(['V2 src EXEC: llm_name_only is not labelled "Brand list"',
+                fns.nonIcpSourceShort('llm_name_only') !== 'Brand list', fns.nonIcpSourceShort('llm_name_only')]);
+      out.push(['V2 src EXEC: domain_list still IS "Brand list"',
+                fns.nonIcpSourceShort('domain_list') === 'Brand list']);
+      out.push(['V2 src EXEC: llm_late does not claim the domain is on a list',
+                !/on our list/.test(fns.nonIcpSourceWhy('llm_late'))]);
+      out.push(['V2 src EXEC: llm_name_only does not claim the domain is on a list',
+                !/on our list/.test(fns.nonIcpSourceWhy('llm_name_only'))]);
+      out.push(['V2 src EXEC: llm_late says the booking was not cancelled',
+                /NOT cancelled/i.test(fns.nonIcpSourceWhy('llm_late'))]);
+    }
+  }
   return out;
 })();
 
 /* ============================================================ */
 results7
+  .then((rows) => { for (const [n, c, x] of rows) ok(n, c, x); return results8; })
   .then((rows) => { for (const [n, c, x] of rows) ok(n, c, x); return results10d; })
   .then((rows) => { for (const [n, c, x] of rows) ok(n, c, x); return results13; })
   .then((rows) => { for (const [n, c, x] of rows) ok(n, c, x); })
