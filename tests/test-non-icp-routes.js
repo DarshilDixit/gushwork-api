@@ -1371,6 +1371,7 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     const L = (over) => ({
       session_id: 's', email: 'x@ex.test', website: null, company: null,
       first_name: null, last_name: null, created_at: now, product: 'aeo',
+      page_url: 'https://www.gushwork.ai/demo',
       booked: false, completed: true, non_icp_blocked: false, non_icp_reason: null,
       non_icp_source: null, non_icp_llm_flagged: false, non_icp_checked_at: now, ...over,
     });
@@ -1409,6 +1410,14 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
          assertion below says so by name. */
       L({ session_id: 'g', email: 'agent@allstate.com', website: 'https://saas.test',
           non_icp_blocked: true, non_icp_source: 'domain_list', non_icp_reason: 'allstate.com' }),
+      /* OURS BY THE PAGE, NOT THE ADDRESS. A personal Gmail submitted
+         from the Webflow staging host -- which is 19 of the 40 real rows
+         found on 19 Sept 2026, and exactly the shape isInternalLead can
+         never recognise. This tab counted such a lead as an ordinary
+         prospect until 22 Sept while every other consumer in the repo
+         already treated it as ours. */
+      L({ session_id: 'h', email: 'someone@gmail.com', website: 'https://saas.test',
+          page_url: 'https://gushwork.webflow.io/demo' }),
     ];
     S.reportVerdicts = [
       { domain: 'kw.test', business_type: 'real_estate', blocking: true, confidence: 0.97,
@@ -1444,7 +1453,12 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     ok('report: the brand-list block lands in blocked_list',  by.blocked_list === 2,  JSON.stringify(by));
     ok('report: the model block lands in blocked_model',      by.blocked_model === 1, JSON.stringify(by));
     ok('report: the flagged-not-blocked lead lands in meta_only', by.meta_only === 1, JSON.stringify(by));
-    ok('report: the judged-and-cleared lead lands in checked_clear', by.checked_clear === 1, JSON.stringify(by));
+    /* TWO now: the original saas.test lead, and the staging submission
+       added 22 Sept, whose website is also saas.test and therefore also
+       carries a verdict. That it lands in a CLEAR bucket is the point --
+       our own traffic was quietly padding the healthy rows, not the
+       blocked ones, which is why nobody noticed. */
+    ok('report: the judged-and-cleared leads land in checked_clear', by.checked_clear === 2, JSON.stringify(by));
     /* THE ONE THE LEAD COLUMNS CANNOT ANSWER. A failure row is not a
        verdict, so this lead is undecided however stamped it looks. */
     ok('report: a lead with only a FAILURE row is not decided',   by.not_decided === 2, JSON.stringify(by));
@@ -1453,14 +1467,21 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
        panel rests on and the one a deleted branch breaks silently. */
     const sum = Object.values(by).reduce((a, b) => a + b, 0);
     ok('report: the five rows sum to the lead total',
-       sum === d.ladder.total && d.ladder.total === 7, sum + ' vs ' + (d.ladder && d.ladder.total));
+       sum === d.ladder.total && d.ladder.total === 8, sum + ' vs ' + (d.ladder && d.ladder.total));
 
     /* OURS, COUNTED ALONGSIDE AND NEVER SUBTRACTED. The ladder still
        totals every lead -- that is the property it exists for -- and
        the internal count rides beside it so a quotable figure exists
        without a filter. */
     ok('report: our own test submissions are counted, not removed',
-       d.ladder.ours === 1 && by.blocked_list === 2, JSON.stringify({ ours: d.ladder.ours, by }));
+       d.ladder.ours === 2 && by.blocked_list === 2, JSON.stringify({ ours: d.ladder.ours, by }));
+    /* THE STAGING ONE SPECIFICALLY. Counting it needs isInternalSubmission;
+       isInternalLead cannot see it, and with the old rule ours stayed at 1
+       while this lead sat in the ladder as an ordinary prospect. It is NOT
+       blocked and NOT flagged, so it lands in a clear bucket -- which is
+       the point: our own traffic was padding the healthy rows. */
+    ok('report: a STAGING submission counts as ours even under a personal address',
+       d.ladder.ours === 2, JSON.stringify({ ours: d.ladder.ours }));
     const blRow = d.ladder.rows.find((r) => r.key === 'blocked_list');
     ok('report: the row says how many of its own are ours', blRow && blRow.ours === 1, JSON.stringify(blRow));
     ok('report: the decision row is flagged as ours',

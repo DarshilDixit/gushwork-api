@@ -11350,6 +11350,10 @@ async function nonIcpModelReport({ days, product } = {}) {
 
   const leadRows = await pool.query(`
     SELECT l.session_id, l.email, l.website, l.company,
+           /* page_url is here ONLY so "is this one of ours" can ask the
+              same question the rest of the repo asks. It is not rendered
+              and not filtered on. */
+           l.page_url,
            l.first_name, l.last_name, l.created_at, l.product,
            l.booking_uid IS NOT NULL                         AS booked,
            l.completed, l.non_icp_blocked, l.non_icp_reason,
@@ -11416,7 +11420,27 @@ async function nonIcpModelReport({ days, product } = {}) {
   for (const { lead, domains } of perLead) {
     const verdicts = domains.map((x) => byDomain.get(x)).filter(Boolean);
 
-    const mine = isInternalLead(lead.email);
+    /* THE SAME QUESTION THE REST OF THE REPO ASKS, which this was not.
+
+       It called isInternalLead, which reads the ADDRESS only. Everything
+       else that decides "is this one of ours" -- the All Leads marker,
+       the Meta guard, the Salesforce push, the AWS mirror -- calls
+       isInternalSubmission, which also matches the staging host. So a
+       submission from gushwork.webflow.io under somebody's personal
+       Gmail was suppressed from Meta, kept out of Salesforce, kept off
+       the dialer AND marked as ours on All Leads, while counting here as
+       an ordinary lead.
+
+       Measured 22 Sept 2026 over all 5,582 rows: 21 leads match both
+       rules, 66 the address alone, and 19 ONLY the staging host. Those 19
+       are what this line was missing. None of them fall in the last 30
+       days, so the tab's default 7-day view does not move -- a 90-day
+       window does.
+
+       Why the page is a signal at all: nobody FINDS the staging site, so
+       everyone who submitted from it was handed the URL. See the 19 Sept
+       note above isInternalSubmission. */
+    const mine = isInternalSubmission(lead.email, lead.page_url);
     let bucket;
     if (lead.non_icp_blocked === true) {
       bucket = lead.non_icp_source === 'llm' ? 'blocked_model' : 'blocked_list';
