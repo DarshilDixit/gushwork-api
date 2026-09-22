@@ -3811,6 +3811,71 @@ async function section12() {
    what is asserted is whether a query was issued, not whether a line
    of source exists.
    ============================================================ */
+
+/* ============================================================
+   30. THE CLIENT IP SENT TO META
+
+   Every Meta call site passed `req.headers['x-forwarded-for']` RAW.
+   Railway sits behind a proxy chain, so that can be a comma-separated
+   list, and readPartnerStackRequestContext ~4,000 lines earlier already
+   splits it with a comment explaining why a list "looks like a value and
+   will never match anything". One integration was fixed, the other was
+   not.
+
+   VERIFIED AGAINST THE LIVE API on 23 Sept 2026: a clean IP, a two-hop
+   list and a three-hop list each returned HTTP 200, events_received 1 and
+   an EMPTY messages array. Meta never complains, so nothing downstream can
+   catch this -- it has to be right on the way out.
+   ============================================================ */
+{
+  const capi = require('../meta-capi');
+  const n = capi.normalizeClientIp;
+
+  /* THE BUG, executed. */
+  eq('30: a two-hop XFF yields the client address', n('203.0.113.45, 10.0.0.1'), '203.0.113.45');
+  eq('30: a three-hop XFF yields the client address', n('203.0.113.45, 10.0.0.1, 172.16.0.9'), '203.0.113.45');
+  /* THE NO-OP, which is why this fix is safe whatever the header holds. */
+  eq('30: a single-entry XFF is unchanged', n('203.0.113.45'), '203.0.113.45');
+  eq('30: whitespace is trimmed', n('  203.0.113.45  '), '203.0.113.45');
+  /* IPv6, which Railway does send. */
+  eq('30: IPv6 survives', n('2001:db8::1'), '2001:db8::1');
+  eq('30: IPv6 with a hop yields the client address', n('2001:db8::1, 10.0.0.1'), '2001:db8::1');
+  eq('30: bracketed IPv6 is unwrapped', n('[2001:db8::1]'), '2001:db8::1');
+
+  /* JUNK IS DROPPED, NOT FORWARDED. A key absent from user_data is
+     honest; a key holding a non-address is a value that looks real and
+     matches nobody -- the same reason normalizePhone returns undefined
+     rather than an empty string. */
+  for (const bad of ['', '   ', 'not-an-ip', '999.1.1.1', '1.2.3', 'localhost', ',,,']) {
+    ok(`30: junk is dropped, not sent: ${JSON.stringify(bad)}`, n(bad) === undefined, String(n(bad)));
+  }
+  ok('30: undefined in, undefined out', n(undefined) === undefined);
+  ok('30: null in, undefined out', n(null) === undefined);
+
+  /* THE CHOKE POINT IS THE POINT. Six call sites pass this value and a
+     seventh will exist one day; normalising at any of them is how the
+     PartnerStack path and the Meta path drifted apart in the first place.
+     So the payload must read the normaliser, and no call site may be
+     trusted to have done it. */
+  const src = fs.readFileSync(path.join(__dirname, '..', 'meta-capi.js'), 'utf8');
+  ok('30: the payload normalises rather than passing the raw option',
+     /client_ip_address: normalizeClientIp\(options\.clientIpAddress\)/.test(src));
+  ok('30: the raw option never reaches the payload',
+     !/client_ip_address: options\.clientIpAddress/.test(src));
+
+  /* META'S WARNINGS WERE DISCARDED. Only events_received was logged, so a
+     malformed field could be wrong for months while every line read like a
+     success. */
+  ok('30: Meta’s messages array is read, not thrown away',
+     /result\.messages/.test(src) && /Meta returned/.test(src));
+
+  /* The webhook Schedule sites deliberately send NO ip: the request comes
+     from Cal or RevenueHero, so their address is not the visitor's and
+     sending it would be worse than sending nothing. */
+  const idx = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+  eq('30: the two webhook Schedule sites still send no client ip',
+     (idx.match(/clientIpAddress:''/g) || []).length, 2);
+}
 {
   const liftTop = (name) => {
     const m = new RegExp('\\nfunction ' + name + '\\s*\\(').exec(src);

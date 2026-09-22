@@ -36,6 +36,43 @@ function normalizePhone(value) {
   return digits.length > 0 ? digits : undefined;
 }
 
+/* Take the CLIENT's address out of an X-Forwarded-For value.
+
+   THE CALL SITES PASS THE RAW HEADER, and Railway sits behind a proxy
+   chain, so what arrives can be "203.0.113.45, 10.0.0.1" -- a comma list
+   that Meta accepts with a 200 and no warning, and that matches nobody. It
+   looks like a value, which is what makes it worse than sending nothing.
+
+   THIS REPO ALREADY KNEW. readPartnerStackRequestContext in index.js does
+   exactly this split, with a comment explaining exactly this reasoning,
+   about 4,000 lines above the Meta call sites that do not. One integration
+   was fixed and the other was not, which is the shape CLAUDE.md keeps
+   naming: a fix applied to the site you are thinking about, not to its
+   siblings.
+
+   NORMALISED HERE, IN sendEvent, NOT AT THE CALL SITES. There are six and
+   a seventh will be added one day. A choke point every event already
+   passes through cannot be bypassed by a new caller; six call sites can,
+   and that is how this happened in the first place.
+
+   Verified against the live API on 23 Sept 2026: a clean IP, a two-hop
+   list and a three-hop list all return HTTP 200, events_received 1, and an
+   EMPTY messages array. Meta will never tell us this is wrong, so nothing
+   downstream can catch it -- it has to be right on the way out.
+
+   Returns undefined for anything that is not a plausible address, so the
+   key is dropped from user_data rather than sent as junk. */
+function normalizeClientIp(value) {
+  if (!value) return undefined;
+  const first = String(value).split(',')[0].trim();
+  if (!first) return undefined;
+  /* IPv4, or something with a colon in it (IPv6, which Railway does send).
+     A bare hostname or a stray label is not an address and is dropped. */
+  const isV4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(first) && first.split('.').every((o) => Number(o) <= 255);
+  const isV6 = first.includes(':') && /^[0-9a-f:.\[\]%]+$/i.test(first);
+  return (isV4 || isV6) ? first.replace(/^\[|\]$/g, '') : undefined;
+}
+
 /* ── Which product is this form selling? ──────────────────────────
    Meta needs to tell two products apart on the SAME pixel: AEO, the
    original business, and CRM, sold by the form on /ai-demo — a Webflow
@@ -439,7 +476,7 @@ function buildEventData(eventName, payload, options = {}) {
       country: sha256(payload.enriched_country),
       fbc: payload.fbc || undefined,
       fbp: payload.fbp || undefined,
-      client_ip_address: options.clientIpAddress || undefined,
+      client_ip_address: normalizeClientIp(options.clientIpAddress),
       client_user_agent: options.clientUserAgent || undefined,
     },
 
@@ -566,6 +603,15 @@ async function sendEvent(eventName, payload, options = {}) {
     return { success: false, error: result };
   }
 
+  /* MESSAGES WERE DISCARDED UNTIL 23 SEPT 2026, and that is why nobody
+     could ever have noticed a malformed field. Meta returns warnings in
+     this array alongside a 200, so a payload can be wrong for months while
+     every log line reads like a success. Printed only when non-empty, so
+     the normal case stays one line. */
+  if (Array.isArray(result.messages) && result.messages.length) {
+    console.warn(`[Meta CAPI] ⚠ [${eventName}] Meta returned ${result.messages.length} message(s):`,
+      JSON.stringify(result.messages).slice(0, 600));
+  }
   console.log(`[Meta CAPI] ✅ [${eventName}] sent: ${result.events_received} events received`);
   reportOutcome({ ok: true, eventName });
   return { success: true, eventName, eventsReceived: result.events_received };
@@ -687,6 +733,7 @@ async function pushContactToMeta(payload, options = {}) {
 
 module.exports = {
   pushFormEventsToMeta,
+  normalizeClientIp,
   setMetaOutcomeReporter,
   pushStartTrialToMeta,
   pushContactToMeta,
