@@ -888,6 +888,12 @@ const results7 = (async () => {
       ok(`meta labels: the server labels ${r}`,
          new RegExp("^\\s*" + r + ":", 'm').test(between('const META_WITHHELD_LABELS = {', '};')));
       ok(`meta labels: the dashboard labels ${r}`, src.includes('r==="' + r + '"'));
+      /* BOTH forms: the long one for the tooltip, the short one for the
+         visible chip. A reason with only the long form renders "Meta: "
+         with nothing after it. */
+      ok(`meta labels: the chip has a short form for ${r}`,
+         new RegExp('if\\(r==="' + r + '"\\)return "[^"]+";').test(
+           between("'function metaWithheldShort(r){'", "return \"\";}'")));
     }
     /* And the control offers every one of them, so a reason can never be
        reportable but unfilterable. */

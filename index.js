@@ -5206,8 +5206,32 @@ app.get('/monitor', (req, res) => {
     + 'if(r==="website")return "Website not verified";'
     + 'if(r==="disqualified")return "Disqualified (B2C / Mixed)";'
     + 'return "";}' +
-  'function metaMark(l){if(!l||!l.meta_withheld_reason)return "";'
-    + 'return "<span title=\\"No Meta conversion was sent for this lead \\u2014 "+esc(metaWithheldLabel(l.meta_withheld_reason))+". The lead is unaffected: it still books, still reaches Salesforce and is still counted in every total on this page.\\" style=\\"color:#b45309\\">&#128201; </span>";}' +
+  /* THE SHORT FORM, for the chip. The long one stays on the tooltip.
+     Two lengths because the chip sits in a table cell next to an email
+     address and has to survive 25 rows without wrapping the column. */
+  'function metaWithheldShort(r){'
+    + 'if(r==="internal")return "internal";'
+    + 'if(r==="blocked")return "blocked";'
+    + 'if(r==="model")return "model";'
+    + 'if(r==="website")return "no website";'
+    + 'if(r==="disqualified")return "B2C";'
+    + 'return "";}' +
+  /* A VISIBLE CHIP, not a glyph with the answer hidden in a tooltip.
+
+     It shipped as a bare amber triangle whose reason you had to hover to
+     read, which is useless for the thing this feature is for: scanning
+     25 rows and seeing which ones did not fire and why. Swapnil asked
+     where the reason was shown, and the honest answer was "nowhere you
+     can see". Same class ".badge ba" the Model tab already uses for this
+     exact idea, so the two tabs say it the same way.
+
+     NOT REPEATED ON THE BLOCKED TAB when the reason IS "blocked": every
+     row there is blocked by definition, so a column of identical chips
+     is noise that hides the rows where the reason is something else --
+     an internal submission, say. Elsewhere it always renders. */
+  'function metaMark(l,ns){if(!l||!l.meta_withheld_reason)return "";'
+    + 'if(ns==="b"&&l.meta_withheld_reason==="blocked")return "";'
+    + 'return "<span class=\\"badge ba\\" title=\\"No Meta conversion was sent for this lead \\u2014 "+esc(metaWithheldLabel(l.meta_withheld_reason))+". The lead is unaffected: it still books, still reaches Salesforce and is still counted in every total on this page.\\">Meta: "+esc(metaWithheldShort(l.meta_withheld_reason))+"</span> ";}' +
   /* Every control in the filter bar with the value that means "not
      filtering". Kept as data rather than a chain of ifs so a control
      added to the bar and forgotten here shows up as a filter that never
@@ -5227,7 +5251,7 @@ app.get('/monitor', (req, res) => {
      Leads and Blocked, so anything it calls has to be visible to both -- the
      scope bug that made Blocked rows silently unexpandable. */
   'function leadRowsHtml(leads,ns){return leads.map(function(l){var sid=esc(l.session_id),key=esc(ns||"x")+"-"+sid,name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\\u2014",src=l.utm_source?esc(l.utm_source)+(l.utm_medium?" / "+esc(l.utm_medium):""):(l.referrer?"referral":"\\u2014");' +
-  'return"<tr"+(l.non_icp_blocked?" style=\\"background:#fff7ed\\"":"")+"><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+key+"\',\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.is_internal?"<span title=\\"One of our own test submissions. Counted in every total, like everything else \\u2014 use the filter to take them out of a number you are about to quote.\\" style=\\"color:#6b7280\\">&#129514; </span>":"")+(l.non_icp_blocked?"<span title=\\"Blocked \\u2014 non-ICP ("+esc(l.non_icp_reason||"")+"). Blocked by: "+esc(nonIcpSourceShort(l.non_icp_source))+". "+esc(nonIcpSourceWhy(l.non_icp_source))+" Still counted in every total.\\" style=\\"color:#c2410c\\">&#128683; </span>":"")+((l.non_icp_blocked&&ns==="b")?"<span class=\\"pschip\\" title=\\""+esc(nonIcpSourceWhy(l.non_icp_source))+"\\">"+esc(nonIcpSourceShort(l.non_icp_source))+"</span> ":"")+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+metaMark(l)+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+esc(l.product||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
+  'return"<tr"+(l.non_icp_blocked?" style=\\"background:#fff7ed\\"":"")+"><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+key+"\',\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.is_internal?"<span title=\\"One of our own test submissions. Counted in every total, like everything else \\u2014 use the filter to take them out of a number you are about to quote.\\" style=\\"color:#6b7280\\">&#129514; </span>":"")+(l.non_icp_blocked?"<span title=\\"Blocked \\u2014 non-ICP ("+esc(l.non_icp_reason||"")+"). Blocked by: "+esc(nonIcpSourceShort(l.non_icp_source))+". "+esc(nonIcpSourceWhy(l.non_icp_source))+" Still counted in every total.\\" style=\\"color:#c2410c\\">&#128683; </span>":"")+((l.non_icp_blocked&&ns==="b")?"<span class=\\"pschip\\" title=\\""+esc(nonIcpSourceWhy(l.non_icp_source))+"\\">"+esc(nonIcpSourceShort(l.non_icp_source))+"</span> ":"")+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+metaMark(l,ns)+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+esc(l.product||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
   '"<tr class=\\"erow\\" id=\\"er-"+key+"\\" style=\\"display:none\\"><td></td><td colspan=\\"10\\">"+enrichPanel(l)+"<div id=\\"lc-"+key+"\\"></div></td></tr>";}).join("");}' +
   'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,product=document.getElementById("fproduct").value,interest=document.getElementById("finterest").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
   'var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"page="+curPage+"&stage="+stage+"&sort="+curSort+"&dir="+curDir;' +
