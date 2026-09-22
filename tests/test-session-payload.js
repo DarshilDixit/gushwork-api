@@ -77,7 +77,9 @@ function drive(file, opts = {}) {
      bug in the code under test. */
   const cookieJar = (opts.cookies || []).slice();
   const documentFake = {
-    referrer: THIS_HIT_REF,
+    /* Overridable, because the third offer rung reads document.referrer
+       and the whole question is what it carries. */
+    referrer: 'referrer' in opts ? opts.referrer : THIS_HIT_REF,
     getElementById: () => null,
     get cookie() { return cookieJar.join('; '); },
     set cookie(v) { cookieJar.push(String(v)); },
@@ -105,6 +107,10 @@ function drive(file, opts = {}) {
        throws and the suite reports a crash rather than a payload. */
     [lift(src, 'initSession'), lift(src, 'captureUTMs'), lift(src, 'saveSession'),
      lift(src, 'rememberCampaign'), lift(src, 'getCookie'),
+     /* THE THIRD OFFER RUNG, added 22 Sept 2026. captureUTMs calls it, so
+        without it here the factory throws and the suite reports a crash
+        instead of a payload -- which is how it announced itself. */
+     lift(src, 'offerFromReferrer'),
      (/const OFFER_COOKIE_DAYS = \d+;/.exec(src) || [''])[0],
      'return { initSession, captureUTMs, saveSession };'].join('\n')
   );
@@ -385,6 +391,82 @@ for (const file of ['gushwork-form.js', 'gushwork-form-popup.js']) {
     ok(`${tag}/geo: nothing calls setCountry after init any more`,
        !/\.setCountry\(/.test(src));
   }
+}
+
+/* ── THE THIRD OFFER RUNG: an internal referrer that still has the
+      campaign ───────────────────────────────────────────────────────
+
+   WHY IT EXISTS. The cookie above it has never fired once in production
+   -- 0 of 207 leads since the campaign rule shipped, including all 14
+   whose campaign was provably lost in transit, which is the exact case
+   it was written for. Whatever Meta's in-app browser does to storage
+   between webviews takes the cookie with it. document.referrer survives,
+   because the browser supplies it.
+
+   EXECUTED, not read: captureUTMs is driven for real and the resulting
+   payload inspected, because the thing that matters is which of the
+   three rungs wins and what ends up in WHICH column. */
+for (const file of ['gushwork-form.js', 'gushwork-form-popup.js']) {
+  const tag = file.replace('gushwork-form', 'form').replace('.js', '');
+  const BARE = 'https://www.gushwork.ai/demo';                 // no UTMs at all
+  const AD_REF = 'https://www.gushwork.ai/start?utm_source=facebook&utm_medium=paid&utm_campaign=FLI__Prospecting__CreativeTesting__CBO';
+
+  /* The exact shape of the 22 Sept lead: bare landing page, session
+     wiped, campaign only in the referrer. */
+  const lost = drive(file, { page: BARE, referrer: AD_REF,
+                             session: { gw_referrer: '', gw_utm_campaign: '', gw_utm_medium: '' } });
+  ok(`${tag}/offer: an internal referrer supplies the offer campaign`,
+     lost.state.offer_campaign === 'FLI__Prospecting__CreativeTesting__CBO',
+     JSON.stringify(lost.state.offer_campaign));
+  ok(`${tag}/offer: and its medium, from the SAME referrer`,
+     lost.state.offer_medium === 'paid', JSON.stringify(lost.state.offer_medium));
+
+  /* THE INVARIANT THAT MATTERS MOST. utm_campaign answers "which campaign
+     brought THIS visit". Feeding a remembered value into it would
+     re-attribute organic leads to paid and desync Source_Bucket__c --
+     the comment in the file says so at length, and this is that comment
+     as an assertion. */
+  ok(`${tag}/offer: utm_campaign is NOT polluted by the referrer`,
+     !lost.state.utm_campaign, JSON.stringify(lost.state.utm_campaign));
+  ok(`${tag}/offer: utm_medium is NOT polluted either`,
+     !lost.state.utm_medium, JSON.stringify(lost.state.utm_medium));
+
+  /* AN OUTSIDE PAGE MUST NOT DECIDE WHAT WE SELL. Anyone can put
+     utm_campaign=crm on a link to us. */
+  const external = drive(file, { page: BARE,
+                                 referrer: 'https://evil.example.com/?utm_campaign=crm-offer&utm_medium=paid',
+                                 session: { gw_referrer: '', gw_utm_campaign: '', gw_utm_medium: '' } });
+  ok(`${tag}/offer: an EXTERNAL referrer is ignored`,
+     !external.state.offer_campaign, JSON.stringify(external.state.offer_campaign));
+  /* And a lookalike host, which an includes() test would wave through. */
+  const lookalike = drive(file, { page: BARE,
+                                  referrer: 'https://gushwork.ai.evil.com/?utm_campaign=crm-offer',
+                                  session: { gw_referrer: '', gw_utm_campaign: '', gw_utm_medium: '' } });
+  ok(`${tag}/offer: a lookalike host is ignored`,
+     !lookalike.state.offer_campaign, JSON.stringify(lookalike.state.offer_campaign));
+
+  /* PRECEDENCE. The referrer is the LAST resort: this visit's own URL
+     wins, and the cookie wins over the referrer. */
+  const urlWins = drive(file, { referrer: AD_REF });   // PAGE carries utm_campaign=CAMP
+  ok(`${tag}/offer: this visit's own URL outranks the referrer`,
+     urlWins.state.offer_campaign === 'CAMP', JSON.stringify(urlWins.state.offer_campaign));
+  const cookieWins = drive(file, { page: BARE, referrer: AD_REF,
+                                   cookies: ['gw_utm_campaign=FROM_COOKIE', 'gw_utm_medium=cpc'],
+                                   session: { gw_referrer: '', gw_utm_campaign: '', gw_utm_medium: '' } });
+  ok(`${tag}/offer: the cookie outranks the referrer`,
+     cookieWins.state.offer_campaign === 'FROM_COOKIE',
+     JSON.stringify(cookieWins.state.offer_campaign));
+
+  /* No referrer at all must be inert, not a throw -- this runs during
+     init, before the form exists. */
+  const none = drive(file, { page: BARE, referrer: '',
+                             session: { gw_referrer: '', gw_utm_campaign: '', gw_utm_medium: '' } });
+  ok(`${tag}/offer: no referrer is inert`, !none.state.offer_campaign,
+     JSON.stringify(none.state.offer_campaign));
+  const junk = drive(file, { page: BARE, referrer: 'not a url',
+                             session: { gw_referrer: '', gw_utm_campaign: '', gw_utm_medium: '' } });
+  ok(`${tag}/offer: an unparseable referrer does not throw`,
+     !junk.state.offer_campaign, JSON.stringify(junk.state.offer_campaign));
 }
 
 console.log('');
