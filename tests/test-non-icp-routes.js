@@ -2038,14 +2038,29 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
        Driven because the columns are assembled in the route. */
     const srch = await whereFor('&search=smith');
     ok('search: answers 200', srch.status === 200, String(srch.status));
+    /* THE STANDALONE CLAUSE, not merely the column name appearing
+       somewhere. Dropping last_name from LEADS_SEARCH_COLUMNS left it
+       visible inside the concatenated-names clause, so a bare
+       includes('l.last_name') stayed true while surname search was gone
+       -- found by mutating it. */
     for (const col of ['l.email', 'l.company', 'l.first_name', 'l.last_name', 'l.website']) {
-      ok(`search: covers ${col}`, srch.sql.includes(col), srch.sql.slice(0, 400));
+      ok(`search: covers ${col} in its own right`,
+         srch.sql.includes(`LOWER(COALESCE(${col},'')) LIKE`), srch.sql.slice(0, 400));
     }
     ok('search: matches the two names concatenated',
        srch.sql.includes("COALESCE(l.first_name,'') || ' ' || COALESCE(l.last_name,'')"),
        srch.sql.slice(0, 500));
     ok('search: a word does NOT trigger the phone scan',
        !/REGEXP_REPLACE/.test(srch.sql), srch.sql.slice(0, 300));
+
+    /* PRODUCT AND META TOGETHER. Swapnil's actual question was about AEO
+       demos specifically, so the two dimensions have to AND rather than
+       one quietly replacing the other -- which is what a filter bar that
+       rebuilds the URL per control can get wrong without any error. */
+    const combo = await whereFor('&product=aeo&meta=withheld');
+    ok('meta filter: product AND meta both reach the SQL',
+       combo.status === 200 && /l\.product = \$/.test(combo.sql) && /non_icp_llm_flagged IS TRUE/.test(combo.sql),
+       combo.sql.slice(0, 400));
 
     const phone = await whereFor('&search=' + encodeURIComponent('(415) 555-0134'));
     ok('search: a number DOES compare phones as digits',
