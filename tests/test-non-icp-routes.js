@@ -805,6 +805,7 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
            + ' stageBadge: typeof stageBadge === "function" ? stageBadge : null,'
            + ' metaMark: typeof metaMark === "function" ? metaMark : null,'
            + ' metaWithheldLabel: typeof metaWithheldLabel === "function" ? metaWithheldLabel : null,'
+           + ' metaWithheldShort: typeof metaWithheldShort === "function" ? metaWithheldShort : null,'
            + ' activeFilters: typeof activeFilters === "function" ? activeFilters : null,'
            + ' renderFilterState: typeof renderFilterState === "function" ? renderFilterState : null,'
            + ' loadModel: typeof loadModel === "function" ? loadModel : null,'
@@ -912,7 +913,8 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
                            exactly. The filter-state pair is here for the
                            same reason: loadLeads and the empty-state
                            button both call them. */
-                        'metaMark', 'metaWithheldLabel', 'activeFilters', 'renderFilterState',
+                        'metaMark', 'metaWithheldLabel', 'metaWithheldShort',
+                        'activeFilters', 'renderFilterState',
                         'showTab', 'loadLeads', 'loadBlocked', 'loadSDR',
                         'loadDupes', 'loadLM', 'loadPartners', 'checkHealth',
                         /* The Model tab's own helpers. Every one is used by
@@ -1121,24 +1123,51 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
          row is rendered and then inspected for the marker and its
          reason, and a clean row is required NOT to carry one. */
       if (scope.leadRowsHtml && scope.metaMark) {
-        const withReason = scope.leadRowsHtml([{ session_id: 's9', email: 'a@b.com',
-          first_name: 'A', created_at: new Date().toISOString(),
-          meta_withheld_reason: 'model' }], 'l');
-        ok('dashboard: a withheld row paints the Meta marker',
-           /&#128201;/.test(withReason), withReason.slice(0, 300));
-        ok('dashboard: the marker names the reason in its tooltip',
+        /* VISIBLE TEXT, not a tooltip. It shipped as an amber glyph whose
+           reason you had to hover to read, which is useless for the job
+           this feature exists for -- scanning a page of leads and seeing
+           which did not fire and why. So the assertion strips the markup
+           and reads what a person would actually see on the row. */
+        const seen = (html) => html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+        const row = (over, ns) => scope.leadRowsHtml([{ session_id: 's9', email: 'a@b.com',
+          first_name: 'A', created_at: new Date().toISOString(), ...over }], ns || 'l');
+
+        const withReason = row({ meta_withheld_reason: 'model' });
+        ok('dashboard: the reason is VISIBLE on the row, not only on hover',
+           seen(withReason).includes('Meta: model'), seen(withReason).slice(0, 200));
+        ok('dashboard: the chip still carries the long reason as a tooltip',
            /Model flagged the industry/.test(withReason), withReason.slice(0, 400));
-        const clean = scope.leadRowsHtml([{ session_id: 's8', email: 'c@d.com',
-          first_name: 'C', created_at: new Date().toISOString() }], 'l');
-        ok('dashboard: a lead with no withheld reason paints NO marker',
-           !/&#128201;/.test(clean), clean.slice(0, 300));
-        /* Every reason the server can emit must render something. A
-           reason with no label paints an empty tooltip and reads as a
-           bug in the data rather than a missing case here. */
+
+        const clean = row({});
+        ok('dashboard: a lead with no withheld reason paints NO chip',
+           !/Meta: /.test(seen(clean)), seen(clean).slice(0, 200));
+
+        /* Every reason the server can emit must render BOTH forms. A
+           reason with no short label paints "Meta: " and reads as a data
+           bug rather than a missing case here. */
         for (const r of ['internal', 'blocked', 'model', 'website', 'disqualified']) {
-          ok(`dashboard: the marker labels ${r}`,
-             scope.metaWithheldLabel(r).length > 0, r);
+          ok(`dashboard: ${r} has a long label`, scope.metaWithheldLabel(r).length > 0, r);
+          ok(`dashboard: ${r} has a short label for the chip`,
+             scope.metaWithheldShort(r).length > 0, r);
+          ok(`dashboard: ${r} renders as visible text`,
+             seen(row({ meta_withheld_reason: r })).includes(
+               'Meta: ' + scope.metaWithheldShort(r)), r);
         }
+
+        /* NOT REPEATED ON THE BLOCKED TAB where it says nothing: every row
+           there is blocked, so a column of identical "Meta: blocked" chips
+           buries the rows whose reason is something else. */
+        ok('dashboard: Blocked tab does not repeat "blocked" on every row',
+           !/Meta: /.test(seen(row({ meta_withheld_reason: 'blocked' }, 'b'))),
+           seen(row({ meta_withheld_reason: 'blocked' }, 'b')).slice(0, 200));
+        ok('dashboard: but Blocked tab DOES show a reason that is not "blocked"',
+           seen(row({ meta_withheld_reason: 'internal' }, 'b')).includes('Meta: internal'),
+           seen(row({ meta_withheld_reason: 'internal' }, 'b')).slice(0, 200));
+        /* And All Leads still shows it -- the suppression is scoped to the
+           one tab that already asserts it, not global. */
+        ok('dashboard: All Leads DOES show "blocked"',
+           seen(row({ meta_withheld_reason: 'blocked' }, 'l')).includes('Meta: blocked'),
+           seen(row({ meta_withheld_reason: 'blocked' }, 'l')).slice(0, 200));
       }
       ok('dashboard: a blocked row is marked in the rendered HTML', /kw\.com/.test(rowsHtml));
     }
