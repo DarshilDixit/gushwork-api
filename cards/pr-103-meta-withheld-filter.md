@@ -59,3 +59,64 @@ straightforward DELIBERATE entry with a written reason.
 
 **Unchanged.** Every predicate added is read-only and lives in `/monitor/leads`.
 No lead's block status, Meta event, Salesforce push or SDR eligibility is touched.
+
+---
+
+# Addendum — the Model tab product filter (third commit)
+
+`63e7a60`. Added after the first review card was written.
+
+## What it does
+
+A product dropdown on the Model tab, same vocabulary as All Leads (`all`,
+`aeo`, `crm`, `__none`). It narrows **every panel** — ladder, industry groups,
+decisions, scrape blind spot — because they all derive from the same `perLead`
+array.
+
+**Narrowed in SQL, not after the fetch.** The row cap is a `LIMIT`, so a
+JavaScript filter would cap the population first and narrow it second: "2 CRM
+leads" could then come out of a window whose newest rows were all AEO. In the
+`WHERE`, the cap and the filter compose the right way round.
+
+**The caption reads the server's echo, never the dropdown.** An unrecognised
+value falls back to the whole population; a caption built from the control would
+then describe a filter that was never applied.
+
+## What was verified
+
+- **Full bar: 12 suites, 4052 assertions, zero failures**, run bare. Baseline
+  re-saved (+33).
+- **The ladder-sum property is re-asserted under every filter value** against a
+  deliberately lopsided mixed-product population (3 AEO, 2 CRM, 1 untagged).
+  That is the property the whole tab rests on and a filter is exactly what can
+  break it.
+- **The stub was taught to honour the product predicate.** Before that it
+  returned the whole population whatever the WHERE said, which could only ever
+  prove the SQL *carried* a filter — never that the sum survived it.
+- **Four mutations, all CAUGHT**: predicate removed from the WHERE (7
+  assertions), the echo made to lie, `__none` folded into "no filter", and the
+  loader never sending the param.
+- Two of my own assertions were **wrong on first run** — `/l\.product/` matched
+  the SELECT list, so they passed with no filter applied. Anchored to
+  `AND l.product` and re-run. Recorded because the first version was wrong.
+
+## Something I found and did NOT change
+
+**The Model tab's "ours" count uses a different rule to All Leads.**
+`nonIcpModelReport` calls `isInternalLead(lead.email)` — email only. All Leads
+calls `isInternalSubmission(email, page_url)`, which also catches the staging
+host. So a submission from `gushwork.webflow.io` is marked as ours on All Leads
+and **not** marked as ours on the Model tab.
+
+That predates this work — it is the 19 Sept staging arm not having reached this
+function. I left it alone because fixing it changes a number already on screen,
+and CLAUDE.md says to flag that rather than quietly fix it. **It is a one-line
+change (`page_url` would need adding to the report's SELECT) and it is worth
+doing** — say so and I will.
+
+## Scope note
+
+I added **product only**. An "exclude our own tests" filter is the obvious
+companion — the ladder already prints "N of them are our own test submissions" —
+but it would have to resolve the inconsistency above first, so it is an offer,
+not something I did unasked.
