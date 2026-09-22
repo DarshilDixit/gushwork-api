@@ -324,11 +324,26 @@ nothing and it is the only thing that makes the banner mean something. The
 version lives in the `Form initialised v…` string in both files and must move in
 both, like everything else in the fork.
 
-**A TEST PINS THAT STRING, so the bump is three edits, not two.**
-`tests/test-partnerstack.js` asserts the banner reads the current version in
-both files. Bump the files without bumping the assertion and the bar goes red
-on `main` — which has happened here before, and sat there for days as a red bar
-nobody read rather than as a caught bug. Do all three in one commit.
+**THE BUMP IS FIVE EDITS, NOT THREE — CORRECTED 22 SEPT 2026.** This said
+three and it was wrong by two, because the version does not live only in the
+banner: each form file carries it in a **header comment at the top** as well.
+
+| Where | Count |
+|---|---|
+| `Form initialised v…` banner, one per form file | 2 |
+| Header comment at the top of each form file | 2 |
+| The pinned assertion in `tests/test-partnerstack.js` | 1 |
+
+`test-partnerstack.js` asserts the banner reads the current version in both
+files. Bump the files without bumping the assertion and the bar goes red on
+`main` — which has happened here before, and sat there for days as a red bar
+nobody read rather than as a caught bug.
+
+**The two header edits are caught by a DIFFERENT test**, and that is the only
+reason this correction exists: `test-ads-parity.js` asserts *"init banner
+agrees with the header"* in each file, so bumping the banner alone fails with
+`header=v5.16.0 banner=v5.17.0`. Found on the v5.17.0 bump by following this
+very paragraph and getting a red bar. Do all five in one commit.
 
 **And when the version did not move, these two are what actually discriminate:**
 
