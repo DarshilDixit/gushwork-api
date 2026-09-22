@@ -5775,9 +5775,26 @@ function internalLeadSqlClause(emailCol, pageCol, params) {
      host, so it is an EXACT match and not a LIKE -- a substring test here
      would make gushwork.webflow.io.evil.com read as our staging site.
      Kept in step with the JS by a test that drives both. */
+  /* COALESCE ON THE PAGE COLUMN, and it is not cosmetic.
+
+     SPLIT_PART(NULL, ...) is NULL, so on a lead with no page_url this arm
+     was NULL rather than false. Postgres is three-valued: false OR false
+     OR NULL is NULL, so the whole clause came back NULL, and NOT(NULL) is
+     NULL too -- the row then matched NEITHER the clause nor its negation
+     and fell out of both halves of any filter built on the pair.
+
+     Found 22 Sept 2026 by adding up the two halves of the All Leads Meta
+     filter against production: withheld 869 + sent 4706 = 5575 against a
+     population of 5582. Ten rows carry a null page_url; seven of them were
+     landing nowhere. The pre-existing internal=exclude filter had the same
+     hole for the same reason.
+
+     The JS has always read this as false -- isStagingSubmission coerces a
+     null to '' and returns false -- so the two were disagreeing, which is
+     precisely what keeping one definition was meant to prevent. */
   return `(LOWER(${emailCol}) = ANY($${a}::text[])
            OR SPLIT_PART(LOWER(${emailCol}), '@', 2) = ANY($${b}::text[])
-           OR LOWER(SPLIT_PART(SPLIT_PART(${pageCol}, '//', 2), '/', 1)) = ANY($${c}::text[]))`;
+           OR LOWER(SPLIT_PART(SPLIT_PART(COALESCE(${pageCol}, ''), '//', 2), '/', 1)) = ANY($${c}::text[]))`;
 }
 
 const _elvWindow    = [];   // [{ t: ms, bad: bool }]
