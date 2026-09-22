@@ -561,6 +561,27 @@ function syncPartnerIdentityToAWS(session_id, name, email) {
   ).catch(err => console.warn('[AWS] ⚠ Partner identity sync failed:', err.message));
 }
 
+/* The non-ICP block arriving LATE, from runNonIcpBookedRecheck. Targeted for
+   exactly the reason spelled out below — the sweep holds a session id and two
+   fields, and handing that to syncToAWS would clear disqualified on the
+   mirror the dialer reads.
+
+   STICKY, like all three upserts on the Railway side: the mirror's own
+   conflict clause is `non_icp_blocked IS TRUE OR EXCLUDED... IS TRUE`, so an
+   ordinary `= $2` here would be the one write in the system able to unblock
+   somebody. It can only ever set the flag, never clear it. */
+function syncNonIcpBlockToAWS(session_id, reason) {
+  if (!awsPool) return;
+  awsPool.query(
+    `UPDATE gw_form_leads
+        SET non_icp_blocked = TRUE,
+            non_icp_reason  = COALESCE($2, non_icp_reason),
+            updated_at      = NOW()
+      WHERE session_id = $1`,
+    [session_id, reason || null]
+  ).catch(err => console.warn('[AWS] ⚠ Late non-ICP block sync failed:', err.message));
+}
+
 /* A targeted UPDATE, NOT syncToAWS, and the distinction matters.
    syncToAWS is a whole-row upsert whose conflict clause sets
    `disqualified = EXCLUDED.disqualified` UNCONDITIONALLY — no COALESCE. Handing
@@ -7705,6 +7726,15 @@ const NON_ICP_DOMAINS = {
   // prefix rule below covers those; these are the two spellings seen in data.
   'bhhs.com':              'Berkshire Hathaway HomeServices',
   'foxroach.com':          'BHHS Fox & Roach',
+  /* ADDED 23 SEPT 2026, from the leak audit rather than from a brand list.
+     longandfoster.com booked a demo on 21 Sept and was NOT blocked: the
+     model never saw the site because it answers 403 to our scraper even
+     with the full Chrome header set, so the verdict was llm_unreachable
+     and the check failed open exactly as designed. This is precisely the
+     case CLAUDE.md gives for keeping the list -- "national brands are
+     exactly the sites a scraper cannot read". Top-five US brokerage
+     (HomeServices of America), so it is national by any reading. */
+  'longandfoster.com':     'Long & Foster',
 
   // ── Insurance: national carrier and captive-agent brands ──
   'statefarm.com':         'State Farm',
@@ -7726,6 +7756,25 @@ const NON_ICP_DOMAINS = {
   'healthmarketsjax.com':  'HealthMarkets',
   'ushadvisors.com':       'USHEALTH Advisors',
   'goldencare.com':        'GoldenCare',
+  /* ADDED 23 SEPT 2026, same audit as longandfoster.com above. All three
+     are national carriers by the same test already applied to GEICO and
+     New York Life, and all three appeared in real lead data.
+
+     NOT ADDED, deliberately, though they appeared in the same scan:
+       primerica.com  -- financial advisory, IN ICP BY NAME in the Non-ICP
+                         doc alongside Edward Jones and LPL. CLAUDE.md is
+                         explicit that these are not blocked.
+       windermereca.com -- one regional franchise spelling of many, and the
+                         only safe catch-all would be a 'windermere' prefix
+                         rule that also hits Windermere Dental. One lead,
+                         did not book. Left to the model.
+       deleyorganizationglobelife.com -- ENDS WITH globelife.com but is not
+                         a subdomain of it, so nothing here can match it
+                         without substring matching, which is the
+                         paycompass.com trap. Left to the model. */
+  'globelife.com':         'Globe Life',
+  'ailife.com':            'American Income Life (Globe Life)',
+  'brightway.com':         'Brightway Insurance',
 };
 
 /* Regional franchise suffixes that cannot be enumerated. Matched as a LABEL
@@ -8317,6 +8366,155 @@ async function nonIcpFetchPageText(domain) {
    parameterised SQL, escaped before it reaches the dashboard, and truncated
    before it reaches Slack. Never interpolated into a query, a block kit
    payload or HTML. */
+/* ── THE NAME-ONLY FALLBACK ──────────────────────────────────────────
+   Runs ONLY when the scrape failed, and judges the DOMAIN NAME alone.
+
+   DOMAIN ONLY, NEVER THE COMPANY FIELD THE VISITOR TYPED, and that is a
+   correctness point rather than a simplification. The cache is keyed by
+   domain, so feeding it a per-lead field would make the stored verdict
+   depend on which lead happened to warm it first: two people on the same
+   domain typing different company names would get whichever answer landed
+   first, forever. The domain is the one input that belongs to the domain.
+
+   IT IS WEAKER EVIDENCE AND IS TREATED AS SUCH. A hostname is a hint, not
+   a page: a 0.75 that means "the page says we sell insurance" and a 0.75
+   that means "the hostname contains the letters insurance" are not the
+   same claim. So this carries its own, higher floor, its own source value
+   and its own prompt version, and nothing merges the two populations on
+   the dashboard.
+
+   DEFAULT OFF. Every blocking mechanism in this repo has shipped dark and
+   been switched on deliberately -- NON_ICP_BLOCK and NON_ICP_LLM_BLOCK
+   both did. Set NON_ICP_NAME_FALLBACK=true in the Railway env to turn it
+   on; no rebuild. */
+const NON_ICP_NAME_FALLBACK        = process.env.NON_ICP_NAME_FALLBACK === 'true';
+const NON_ICP_NAME_PROMPT_VERSION  = 'name-v1-2026-09-23';
+/* HIGHER THAN THE PAGE FLOOR (0.75) ON PURPOSE. "realtor" inside a
+   hostname is close to conclusive; almost everything else is not, and the
+   cost of being wrong here is a real prospect turned away on the strength
+   of a string. */
+const NON_ICP_NAME_CONFIDENCE_FLOOR = Number(process.env.NON_ICP_NAME_CONFIDENCE_FLOOR || 0.9);
+
+const NON_ICP_NAME_SYSTEM_PROMPT = [
+  'You are shown ONLY a domain name. Its website could not be read — it refused our',
+  'request, failed to load, or renders entirely in JavaScript. You have no page text.',
+  '',
+  'Decide whether the domain name ITSELF makes the business type obvious.',
+  '',
+  'Answer with a business type ONLY when the name says so plainly, in a way a careful',
+  'person would agree with without looking anything up. Examples of plainly:',
+  '  westexinsurance.com        -> insurance   (the word "insurance" is in the name)',
+  '  adrianadearaujorealtor.com -> real_estate (the word "realtor" is in the name)',
+  '  longandfoster.com          -> real_estate (a well-known national brokerage)',
+  '',
+  'Answer unknown for everything else, and be quick to do it. You are guessing from a',
+  'string, so the bar is much higher than it would be with a page in front of you:',
+  '  - An abbreviation or initialism you would have to decode. "aia.com" is unknown.',
+  '  - A personal name with no trade word. "adrianadearaujo.com" is unknown.',
+  '  - A word that merely SUGGESTS a sector. "premierproperties.com" could be property',
+  '    management, a developer, or a cleaning company. Unknown.',
+  '  - A brand you are not confident about. If you are reaching for it, it is unknown.',
+  '',
+  'Remember the boundaries that decide these two types:',
+  '  - A mortgage broker or lender is mortgage_lending, never real_estate.',
+  '  - A wealth, retirement or investment advisor is financial_advisory even when they',
+  '    also sell insurance products.',
+  '  - Software sold TO realtors or insurers is software_technology.',
+  '',
+  'confidence is your probability that a careful human, shown only this domain name,',
+  'would pick the same business_type. A name-only guess deserves a lower number than',
+  'the same guess made from a page. Report it honestly.',
+  '',
+  'evidence_quote must be the exact part of the domain name your answer rests on, or an',
+  'empty string if you are answering unknown. You have no page to quote from — do not',
+  'invent one.',
+].join('\n');
+
+async function nonIcpClassifyFromName(domain, scrapeStatus, scrapeDetail) {
+  if (!NON_ICP_NAME_FALLBACK) return null;
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return null;
+
+  const base = { domain, prompt_version: NON_ICP_NAME_PROMPT_VERSION, model_id: NON_ICP_LLM_MODEL };
+  try {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), NON_ICP_LLM_TIMEOUT_MS);
+    let response;
+    try {
+      response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'content-type':      'application/json',
+          'x-api-key':         apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: NON_ICP_LLM_MODEL,
+          max_tokens: 1024,
+          output_config: {
+            ...(nonIcpModelTakesEffort(NON_ICP_LLM_MODEL) ? { effort: 'low' } : {}),
+            format: { type: 'json_schema', schema: NON_ICP_OUTPUT_SCHEMA },
+          },
+          system: NON_ICP_NAME_SYSTEM_PROMPT,
+          /* NO <untrusted_page_text> WRAPPER, because there is no page. The
+             domain is still attacker-chosen, so it stays a plain data line
+             in a user message and never reaches the system prompt -- the
+             same handling, for the same reason, on a much smaller input. */
+          messages: [{ role: 'user', content: `Domain name: ${domain}\n\nClassify from the name alone.` }],
+        }),
+      });
+      clearTimeout(t);
+    } catch (err) { clearTimeout(t); throw err; }
+
+    if (!response.ok) return null;
+    const body = await response.json();
+    if (body && body.stop_reason === 'refusal') return null;
+
+    let parsed = null;
+    try {
+      const textBlock = (body.content || []).find((b) => b && b.type === 'text');
+      parsed = textBlock ? JSON.parse(textBlock.text) : null;
+    } catch { parsed = null; }
+    if (!parsed || !NON_ICP_BUSINESS_TYPES[parsed.business_type]) return null;
+
+    const confidence = Number(parsed.confidence);
+    const type       = parsed.business_type;
+    /* An unknown answer is the common case and is NOT a verdict. Returning
+       null hands back the plain llm_unreachable row, so the failure TTL of
+       six hours applies and the domain is retried -- rather than a 180-day
+       "we decided nothing" that a name guess does not earn. */
+    if (type === 'unknown') return null;
+
+    const blocking = nonIcpTypeBlocks(type)
+      && Number.isFinite(confidence) && confidence >= NON_ICP_NAME_CONFIDENCE_FLOOR;
+    console.log(`[non-ICP] name-only verdict for ${domain}: ${type} @ ${confidence} ` +
+      `(scrape ${scrapeStatus}) -> ${blocking ? 'BLOCKING' : 'not blocking'}`);
+    return {
+      ...base,
+      source:         'llm_name_only',
+      /* The REAL scrape outcome is preserved, not overwritten with 'ok'.
+         The dashboard's scrape panel counts these, and a name-only verdict
+         must not read as a page we managed to fetch. */
+      scrape_status:   scrapeStatus,
+      business_type:   type,
+      blocking,
+      confidence:      Number.isFinite(confidence) ? confidence : null,
+      evidence_quote:  String(parsed.evidence_quote || '').slice(0, 500),
+      reason:          String(parsed.reason || '').slice(0, 1000),
+      page_text_sha256: null,
+      page_url_used:    null,
+      page_text_chars:  null,
+      error:           scrapeDetail || null,
+    };
+  } catch (err) {
+    /* Fails to the caller's llm_unreachable row. A fallback that throws
+       must never be worse than not having one. */
+    console.warn(`[non-ICP] name-only fallback failed for ${domain} (ignored):`, err && err.message);
+    return null;
+  }
+}
+
 async function nonIcpClassifyDomain(domain) {
   const base = { domain, prompt_version: NON_ICP_PROMPT_VERSION, model_id: NON_ICP_LLM_MODEL };
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -8331,6 +8529,23 @@ async function nonIcpClassifyDomain(domain) {
 
   const page = await nonIcpFetchPageText(domain);
   if (page.status !== 'ok') {
+    /* THE SCRAPE FAILING IS NOT THE END OF THE EVIDENCE. Measured 23 Sept
+       2026: 36 of 254 domains since the model went live came back
+       unreachable, thin or blocked, and three of the five insurance /
+       real-estate demos that leaked through were exactly these. All three
+       are obvious from the domain name without reading a byte --
+       longandfoster.com, westexinsurance.com, adrianadearaujorealtor.com.
+
+       And it is NOT fixable by trying harder to fetch. Checked, one at a
+       time, with the full Chrome header set attemptFetch already sends:
+       longandfoster.com answers 403 behind an enterprise bot wall,
+       westexinsurance.com does not complete a connection at all, and
+       adrianadearaujorealtor.com returns 200 with 64 characters because it
+       renders client-side. Getting past those needs a headless browser,
+       which is an arms race this does not need to enter to read the word
+       "realtor" in a hostname. */
+    const fallback = await nonIcpClassifyFromName(domain, page.status, page.detail || null);
+    if (fallback) return fallback;
     return { ...base, source: 'llm_unreachable', scrape_status: page.status, blocking: false,
              business_type: null, error: page.detail || null };
   }
@@ -13389,6 +13604,163 @@ app.post('/submit', async (req, res) => {
    recording the booking: the slot would still be taken and nobody would know.
 
    Returns true when the booking was refused, so each route can bail. */
+/* ── THE LATE-VERDICT SWEEP ──────────────────────────────────────────
+   The other half of the fix that nonIcpScheduleSuppressed does for Meta.
+
+   WHY A SWEEP AND NOT A FASTER CHECK. The cost this feature exists to
+   avoid is an AE spending an hour with a non-ICP prospect, and that cost
+   is incurred at the MEETING, not at the booking. Measured:
+
+     booking -> demo, median          35 hours
+     booking -> demo, 10th percentile  3.3 hours
+     demos within 1 hour of booking   60 of 1,543 (3.9%)
+
+   So there is no 2.6-second race to win here. There are hours. The
+   calendar hold in the two form files already covers the seconds; this
+   covers everything slower than its 4s cap, including a 19.6s scrape,
+   a cold cache after a deploy, and the name-only fallback.
+
+   IT STAMPS AND IT TELLS A HUMAN. It does not cancel. Cancelling on a
+   model verdict with nobody in the loop would be the most aggressive
+   action in this codebase, and the person is already holding a
+   confirmation email. Authorised shape, Darshil, 23 Sept 2026: mark the
+   lead and post it so an AE can decide.
+
+   ONLY BLOCKING VERDICTS. A Meta-only flag is already handled at booking
+   time by nonIcpScheduleSuppressed and does not need a human -- those
+   people keep their slot by design, so waking somebody for one would be
+   training them to ignore the channel.
+
+   THE STAMP IS ITS OWN CURSOR. Once non_icp_blocked is true the row drops
+   out of this query, so nothing can be alerted twice and no new column is
+   needed to remember what was seen. */
+const NON_ICP_RECHECK_INTERVAL_MS = Number(process.env.NON_ICP_RECHECK_INTERVAL_MS || 5 * 60 * 1000);
+const NON_ICP_RECHECK_WINDOW_H    = Number(process.env.NON_ICP_RECHECK_WINDOW_H    || 48);
+let _nonIcpRecheckRunning = false;
+
+async function runNonIcpBookedRecheck() {
+  if (!NON_ICP_LLM_ENABLED && !NON_ICP_BLOCK_ENABLED) return;
+  /* Overlap guard, same shape as the Salesforce retry sweep. A slow run
+     must not have a second copy reading the same rows behind it. */
+  if (_nonIcpRecheckRunning) return;
+  _nonIcpRecheckRunning = true;
+  try {
+    const { rows } = await pool.query(`
+      SELECT session_id, email, website, company, first_name, last_name, phone,
+             booking_uid, booked_at, start_time
+        FROM leads
+       WHERE booking_uid IS NOT NULL
+         AND booked_at >= NOW() - ($1 || ' hours')::interval
+         AND non_icp_blocked IS NOT TRUE
+         /* start_time is TEXT, so the cast is guarded by the regex in the
+            same expression -- a bare cast in a WHERE clause is not safe
+            here, because Postgres does not guarantee the regex runs first
+            and one malformed row would take the whole sweep down.
+            Leads whose demo has already happened are skipped: the hour is
+            spent, and an alert about it is noise rather than action. */
+         AND (start_time IS NULL
+              OR start_time !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
+              OR start_time::timestamptz >= NOW())
+       ORDER BY booked_at DESC
+       LIMIT 200`, [NON_ICP_RECHECK_WINDOW_H]);
+
+    let found = 0;
+    for (const lead of rows) {
+      let hit;
+      try {
+        hit = await nonIcpLlmCachedVerdict({ email: lead.email, website: lead.website });
+      } catch (err) {
+        console.warn(`[non-ICP recheck] Verdict read failed for ${lead.session_id} (skipped):`, err && err.message);
+        continue;
+      }
+      if (!hit || hit.action !== 'block' || !NON_ICP_LLM_BLOCK) continue;
+
+      /* The known-customer bypass runs here too. A paying customer who
+         books is not somebody to turn away, and this sweep must not be
+         the one place that forgets that. */
+      let bypass = null;
+      try {
+        bypass = await nonIcpCustomerBypass({ email: lead.email, website: lead.website, matched_domain: hit.row.domain });
+      } catch { bypass = null; }
+      if (bypass) continue;
+
+      found++;
+      await pool.query(`
+        UPDATE leads
+           SET non_icp_blocked    = TRUE,
+               non_icp_reason     = COALESCE(non_icp_reason, $2),
+               /* A DISTINCT SOURCE, not 'llm'. Someone reading this row
+                  later has to be able to tell a lead we turned away at the
+                  form from one we marked after they had already booked --
+                  they are different events with different consequences. */
+               non_icp_source     = 'llm_late',
+               non_icp_llm_flagged = TRUE,
+               non_icp_checked_at = NOW(),
+               updated_at         = NOW()
+         WHERE session_id = $1`, [lead.session_id, hit.row.domain]);
+      syncNonIcpBlockToAWS(lead.session_id, hit.row.domain);
+      slackNonIcpLateBlock({ ...lead, ...hit.row,
+        business_type_label: (NON_ICP_BUSINESS_TYPES[hit.row.business_type] || {}).label || hit.row.business_type });
+      console.warn(`[non-ICP recheck] 🚩 Booked lead is non-ICP: ${lead.email} | ` +
+        `${hit.row.business_type} @ ${hit.row.domain} | demo ${lead.start_time || 'unknown'}`);
+    }
+    if (found) console.log(`[non-ICP recheck] ${found} of ${rows.length} recently booked leads now resolve blocking`);
+  } finally {
+    _nonIcpRecheckRunning = false;
+  }
+}
+
+/* Its own post rather than alertOps, deliberately: alertOps keys its
+   cooldown on severity+source+title, so a second lead inside the window
+   would be folded into a counter. This one names a specific person whose
+   meeting somebody has to decide about, and every one of them has to
+   arrive. Same reasoning as slackNonIcpBlocked, which also posts direct. */
+function slackNonIcpLateBlock(d) {
+  const name = [d.first_name, d.last_name].filter(Boolean).join(' ');
+  const blocks = [];
+  blocks.push(bHeader('🚩 Booked lead is non-ICP — decide before the call'));
+  blocks.push(bDivider());
+  blocks.push(bSection(
+    `*They already have a slot.* The verdict arrived after they submitted, so nothing ` +
+    `could stop the booking. Nothing here has been cancelled.`));
+  blocks.push(bSection(
+    `*Read their website and judged:* ${d.business_type_label || d.business_type || 'unknown'}` +
+    (d.confidence != null ? `  _(confidence ${Math.round(Number(d.confidence) * 100)}%)_` : '') +
+    (d.domain ? `\n*Matched on:* \`${d.domain}\`` : '')));
+  if (d.evidence_quote) blocks.push(bSection(`*Evidence, quoted from their site:*\n> ${slackTruncate(d.evidence_quote)}`));
+  const lf = bFields([
+    { label: '👤 Name',     value: name },
+    { label: '📧 Email',    value: d.email },
+    { label: '🏢 Company',  value: d.company },
+    { label: '🌐 Website',  value: d.website },
+    { label: '📞 Phone',    value: d.phone },
+    { label: '📅 Demo',     value: d.start_time || 'unknown' },
+  ]);
+  if (lf) blocks.push(lf);
+  blocks.push(bSection(
+    '_The lead is now marked non-ICP: it drops out of the SDR list and Salesforce pushes, ' +
+    'and no further Meta events will fire for it. The Meta `Lead` event sent at submit ' +
+    'cannot be recalled._'));
+  blocks.push(bSection(
+    '*Wrong?* `NON_ICP_LLM_BLOCK=false` on Railway stops the model layer blocking without a deploy. ' +
+    '`NON_ICP_RECHECK_INTERVAL_MS` controls how often this runs.'));
+  sendSlack(blocks,
+    `🚩 Booked lead is non-ICP: ${d.email || name || 'unknown'} — ${d.business_type || '?'} @ ${d.domain || '?'}`);
+}
+
+/* Boot-then-interval, matching the five PartnerStack jobs. A sweep that
+   only runs on an interval loses its first window to every deploy, which
+   for this one means the leads booked while the dyno was restarting. */
+function startNonIcpBookedRecheck() {
+  const run = (why) => runNonIcpBookedRecheck()
+    .catch((err) => console.warn(`[non-ICP recheck] Sweep failed (${why}, non-blocking):`, err && err.message));
+  run('boot');
+  const t = setInterval(() => run('scheduled'), NON_ICP_RECHECK_INTERVAL_MS);
+  if (t.unref) t.unref();
+  console.log(`[non-ICP recheck] Started (boot + every ${NON_ICP_RECHECK_INTERVAL_MS / 60000} min, ` +
+    `${NON_ICP_RECHECK_WINDOW_H}h window)`);
+}
+
 async function rejectBookingIfNonIcp(routeTag, sessionId, bookingUid, startTime) {
   if (!sessionId) return false;
   let row;
@@ -13430,7 +13802,7 @@ async function rejectBookingIfNonIcp(routeTag, sessionId, bookingUid, startTime)
    missed, so the condition now lives in one place and the routes call it.
 
    Returns true when the event must NOT fire, having already logged why. */
-function nonIcpScheduleSuppressed(fullLead, routeTag) {
+async function nonIcpScheduleSuppressed(fullLead, routeTag) {
   if (!fullLead) return false;
   if (fullLead.non_icp_blocked === true) {
     console.log(`[${routeTag}] \u23ed Meta CAPI Schedule suppressed \u2014 non-ICP (${fullLead.non_icp_reason}): session ${fullLead.session_id}`);
@@ -13443,7 +13815,53 @@ function nonIcpScheduleSuppressed(fullLead, routeTag) {
     console.log(`[${routeTag}] \u23ed Meta CAPI Schedule suppressed \u2014 non-ICP/model flagged (${fullLead.non_icp_reason}): session ${fullLead.session_id}`);
     return true;
   }
-  return false;
+
+  /* \u2500\u2500 THE TWO CONDITIONS ABOVE READ A COLUMN STAMPED AT /submit, AND
+        THAT COLUMN CAN BE WRONG IN ONE DIRECTION. \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+     /submit is a cache read and nothing else. When the warm has not
+     finished, it correctly stamps non_icp_blocked=false -- "we could not
+     check" -- and the verdict lands seconds later with nobody listening.
+     Measured on 18 Sept 2026: steenhoekinsurance.com came back
+     business_type=insurance at confidence 0.97, 2.6 SECONDS after the
+     submit, and dla1972@me.com 11.7 seconds after. Both booked. See
+     docs/tickets/non-icp-verdict-arrives-after-submit.md, which names
+     this exact guard as not catching it: "nonIcpScheduleSuppressed reads
+     fullLead.non_icp_blocked ... It does not re-read
+     non_icp_domain_verdicts. A verdict that landed afterwards is
+     invisible to it."
+
+     So ask the verdict table again, here, where the booking gives us a
+     second look seconds-to-minutes after the submit. Both of those
+     verdicts predated their booking (by 14.0s and 28.9s), so both would
+     have been caught.
+
+     THIS ONLY EVER WITHHOLDS A META EVENT. It does not block, cancel or
+     notify -- the booking is already real and the person is already
+     looking at a confirmation. Turning a slot back is the sweep's job
+     (runNonIcpBookedRecheck), which has hours to do it properly and a
+     human in the loop. Here we are only deciding what to tell Facebook,
+     and telling Facebook to find more realtors is the one thing we can
+     still cheaply refuse to do.
+
+     FAILS OPEN on any throw, like every other read in this feature: a
+     database wobble must never suppress a real lead's conversion. */
+  try {
+    const hit = await nonIcpLlmCachedVerdict({ email: fullLead.email, website: fullLead.website });
+    if (!hit) return false;
+    /* Same rule the /submit gate uses: a blocking verdict always
+       suppresses, a Meta-only one suppresses only with the flag on. Read
+       from the shared helper rather than restated, so the six-industry
+       scope cannot drift between here and nonIcpVerdict. */
+    const suppress = hit.action === 'block' || NON_ICP_LLM_META;
+    if (!suppress) return false;
+    console.log(`[${routeTag}] \u23ed Meta CAPI Schedule suppressed \u2014 verdict arrived AFTER submit ` +
+      `(${hit.row.business_type} @ ${hit.row.domain}, confidence ${hit.row.confidence}): session ${fullLead.session_id}`);
+    return true;
+  } catch (err) {
+    console.warn(`[${routeTag}] Late non-ICP verdict re-read failed \u2014 firing Schedule anyway (fail open):`, err && err.message);
+    return false;
+  }
 }
 
 const SCHEDULE_LEAD_SQL = `
@@ -13465,7 +13883,12 @@ const SCHEDULE_LEAD_SQL = `
             here rather than re-queried per route because this statement is
             the only thing the three share -- CLAUDE.md's "a fix on one is a
             fix on one third" is about exactly this shape. */
-         l.non_icp_blocked, l.non_icp_reason, l.non_icp_llm_flagged,
+         /* l.website is read for the LATE-VERDICT re-read in
+            nonIcpScheduleSuppressed, which needs the lead's candidate
+            domains and not just the stamp. Selected here rather than in a
+            fourth query for the same reason the three columns below are:
+            this statement is the only thing the three routes share. */
+         l.non_icp_blocked, l.non_icp_reason, l.non_icp_llm_flagged, l.website,
          COALESCE(e.enriched_company_size,  l.enriched_company_size)  AS enriched_company_size,
          COALESCE(e.enriched_industry,      l.enriched_industry)      AS enriched_industry,
          COALESCE(e.enriched_seniority,     l.enriched_seniority)     AS enriched_seniority,
@@ -13508,14 +13931,14 @@ app.post('/booking-confirmed', async (req, res) => {
       findSFLeadByEmail(email).then(leadId => {
         if (leadId) return updateSFLead(leadId, { booking_uid__c: booking_uid, booking_start_time__c: start_time || '', booking_event_type__c: event_type || '', completed__c: true });
       }).catch(err => { console.warn('[/booking-confirmed] SF update failed (non-blocking):', err.message); salesforceFailureAlert('booking', err, { 'Session': session_id }); });
-      pool.query(SCHEDULE_LEAD_SQL, [session_id]).then(r => {
+      pool.query(SCHEDULE_LEAD_SQL, [session_id]).then(async r => {
         const fullLead = r.rows[0] || {};
         /* Meta suppression, event 3 of 3 (Schedule). Guarded EXPLICITLY rather
            than trusting that a blocked lead never reaches a calendar: a lead
            blocked at /submit may already have had RevenueHero fired alongside
            it, and this webhook does not care what the browser did. */
         if (internalLeadSuppressesMeta(fullLead.email, fullLead.page_url, '/booking-confirmed')) return;
-        if (nonIcpScheduleSuppressed(fullLead, '/booking-confirmed')) return;
+        if (await nonIcpScheduleSuppressed(fullLead, '/booking-confirmed')) return;
         if (!isWebsiteVerified(fullLead)) { console.log(`[/booking-confirmed] ⏭ Meta CAPI Schedule skipped — website not verified: session ${session_id}`); return; }
         return pushFormEventsToMeta({...fullLead, booking_uid}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''});
       }).catch(err => { console.warn('[/booking-confirmed] Meta CAPI failed (non-blocking):', err.message); recordFailure('Meta CAPI', session_id + ' (Schedule)', err.message); });
@@ -13591,14 +14014,14 @@ app.post('/booking-confirmed-webhook', async (req, res) => {
         findSFLeadByEmail(email).then(leadId => {
           if (leadId) return updateSFLead(leadId, { booking_uid__c: bookingUid, booking_start_time__c: startTime || '', booking_event_type__c: eventType || '', completed__c: true });
         }).catch(err => { console.warn('[/cal-webhook] SF update failed (non-blocking):', err.message); salesforceFailureAlert('booking', err, { 'Email': email }); });
-        pool.query(SCHEDULE_LEAD_SQL, [lead.session_id]).then(r => {
+        pool.query(SCHEDULE_LEAD_SQL, [lead.session_id]).then(async r => {
           const fullLead = r.rows[0] || {};
           /* Meta suppression, event 3 of 3 (Schedule). Guarded EXPLICITLY rather
              than trusting that a blocked lead never reaches a calendar: a lead
              blocked at /submit may already have had RevenueHero fired alongside
              it, and this webhook does not care what the browser did. */
           if (internalLeadSuppressesMeta(fullLead.email, fullLead.page_url, '/cal-webhook')) return;
-        if (nonIcpScheduleSuppressed(fullLead, '/cal-webhook')) return;
+        if (await nonIcpScheduleSuppressed(fullLead, '/cal-webhook')) return;
           if (!isWebsiteVerified(fullLead)) { console.log(`[/cal-webhook] ⏭ Meta CAPI Schedule skipped — website not verified: session ${lead.session_id}`); return; }
           return pushFormEventsToMeta({...fullLead, booking_uid: bookingUid}, {clientIpAddress:'',clientUserAgent:''});
         }).catch(err => { console.warn('[/cal-webhook] Meta CAPI failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (Schedule)', err.message); });
@@ -13955,14 +14378,14 @@ if (rhRouter && !RH_ALLOWED_ROUTERS.some((r) => r.toLowerCase() === rhRouter)) {
           if (leadId) return updateSFLead(leadId, { booking_uid__c: bookingUid, booking_start_time__c: startTime || '', booking_event_type__c: eventType || '', completed__c: true });
         }).catch(err => { console.warn('[/rh-webhook] ⚠ SF update failed (non-blocking):', err.message); salesforceFailureAlert('booking', err, { 'Email': email }); });
 
-        pool.query(SCHEDULE_LEAD_SQL, [lead.session_id]).then(r => {
+        pool.query(SCHEDULE_LEAD_SQL, [lead.session_id]).then(async r => {
           const fullLead = r.rows[0] || {};
           /* Meta suppression, event 3 of 3 (Schedule). Guarded EXPLICITLY rather
              than trusting that a blocked lead never reaches a calendar: a lead
              blocked at /submit may already have had RevenueHero fired alongside
              it, and this webhook does not care what the browser did. */
           if (internalLeadSuppressesMeta(fullLead.email, fullLead.page_url, '/rh-webhook')) return;
-        if (nonIcpScheduleSuppressed(fullLead, '/rh-webhook')) return;
+        if (await nonIcpScheduleSuppressed(fullLead, '/rh-webhook')) return;
           if (!isWebsiteVerified(fullLead)) { console.log(`[/rh-webhook] ⏭ Meta CAPI Schedule skipped — website not verified: session ${lead.session_id}`); return; }
           return pushFormEventsToMeta({...fullLead, booking_uid: bookingUid}, {clientIpAddress:'',clientUserAgent:''});
         }).catch(err => { console.warn('[/rh-webhook] ⚠ Meta CAPI failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (Schedule)', err.message); });
@@ -14057,6 +14480,7 @@ async function start() {
       startPartnerStackConversionRecheck();
       startPartnerStackConversionRetry();
       startPartnerStackSfStateRefresh();
+      startNonIcpBookedRecheck();
     });
   } catch (err) { console.error('[GW API] Failed to start:', err); process.exit(1); }
 }
