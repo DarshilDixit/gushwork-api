@@ -2249,6 +2249,85 @@ results13 = (async () => {
     out.push(['V2 list: primerica.com is NOT blocked (financial advisory is in ICP)',
               !/'primerica\.com':/.test(src)]);
   }
+
+  /* ── 13s2. THE SWEEP, EXECUTED ───────────────────────────────────
+     ADDED BECAUSE A MUTATION SURVIVED. The source assertions above check
+     that nonIcpCustomerBypass is CALLED; turning `if (bypass) continue;`
+     into `if (false) continue;` leaves the call sitting there, so every
+     one of them still passed while a paying customer would have been
+     blocked. That is the repo's oldest lesson -- presence is not
+     reachability -- and the answer is the same as everywhere else: drive
+     the function and watch what it does.
+
+     The sweep is lifted whole and run against a stubbed pool, so the
+     branches are real code paths rather than regexes. */
+  {
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+    const mkSweep = async (opts) => {
+      const st = { updates: [], slack: [], aws: [], bypassAsked: [] };
+      const lead = { session_id: 'sess-1', email: 'a@b.com', website: 'https://b.com',
+                     company: 'B', first_name: 'A', last_name: 'B', phone: '1',
+                     booking_uid: 'bk1', booked_at: new Date(), start_time: null };
+      const fn = await (new AsyncFunction(
+        'NON_ICP_LLM_ENABLED', 'NON_ICP_BLOCK_ENABLED', 'NON_ICP_LLM_BLOCK',
+        'pool', 'nonIcpLlmCachedVerdict', 'nonIcpCustomerBypass',
+        'syncNonIcpBlockToAWS', 'slackNonIcpLateBlock', 'NON_ICP_BUSINESS_TYPES', 'console',
+        between('const NON_ICP_RECHECK_INTERVAL_MS', '/* Its own post rather than alertOps')
+        + '\nreturn runNonIcpBookedRecheck;'
+      ))(
+        opts.enabled !== false, true, opts.llmBlock !== false,
+        { query: async (sql) => (/^\s*SELECT/i.test(sql) ? { rows: opts.rows || [lead] }
+                                                         : (st.updates.push(sql), { rowCount: 1 })) },
+        async () => opts.verdict === undefined
+          ? { action: 'block', row: { domain: 'b.com', business_type: 'insurance', confidence: 0.97 } }
+          : opts.verdict,
+        async () => { st.bypassAsked.push(1); return opts.bypass || null; },
+        (...a) => st.aws.push(a),
+        (...a) => st.slack.push(a),
+        { insurance: { blocks: true, label: 'Insurance' }, home_services: { blocks: false, label: 'Home services' } },
+        { log() {}, warn() {}, error() {} }
+      );
+      return { fn, st };
+    };
+
+    {
+      const { fn, st } = await mkSweep({});
+      await fn();
+      out.push(['V2 sweep EXEC: a late blocking verdict stamps the lead', st.updates.length === 1, String(st.updates.length)]);
+      out.push(['V2 sweep EXEC: it posts to Slack', st.slack.length === 1]);
+      out.push(['V2 sweep EXEC: it writes the mirror', st.aws.length === 1]);
+      out.push(['V2 sweep EXEC: the stamp is llm_late', /llm_late/.test(st.updates[0] || '')]);
+    }
+    /* THE MUTATION THAT SURVIVED. A paying customer must never be stamped,
+       and this is the assertion that notices when the branch stops firing. */
+    {
+      const { fn, st } = await mkSweep({ bypass: { blocked: false, reason: 'known_customer' } });
+      await fn();
+      out.push(['V2 sweep EXEC: a KNOWN CUSTOMER is never stamped', st.updates.length === 0, String(st.updates.length)]);
+      out.push(['V2 sweep EXEC: a known customer gets no Slack post', st.slack.length === 0]);
+      out.push(['V2 sweep EXEC: a known customer is not mirrored', st.aws.length === 0]);
+      out.push(['V2 sweep EXEC: the bypass was actually consulted', st.bypassAsked.length === 1]);
+    }
+    /* Meta-only flags are handled at booking time and must not wake anyone. */
+    {
+      const { fn, st } = await mkSweep({ verdict: { action: 'meta', row: { domain: 'b.com', business_type: 'home_services', confidence: 0.95 } } });
+      await fn();
+      out.push(['V2 sweep EXEC: a META-only verdict does NOT stamp or alert', st.updates.length === 0 && st.slack.length === 0]);
+    }
+    /* Nothing in the cache is the common case and must stay quiet. */
+    {
+      const { fn, st } = await mkSweep({ verdict: null });
+      await fn();
+      out.push(['V2 sweep EXEC: an empty cache does nothing', st.updates.length === 0 && st.slack.length === 0]);
+    }
+    /* The kill switch has to reach the sweep too, or turning the model
+       layer off would leave this still blocking people. */
+    {
+      const { fn, st } = await mkSweep({ llmBlock: false });
+      await fn();
+      out.push(['V2 sweep EXEC: NON_ICP_LLM_BLOCK=false stops it stamping', st.updates.length === 0]);
+    }
+  }
   return out;
 })();
 

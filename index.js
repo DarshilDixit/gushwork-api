@@ -8387,7 +8387,7 @@ async function nonIcpFetchPageText(domain) {
    been switched on deliberately -- NON_ICP_BLOCK and NON_ICP_LLM_BLOCK
    both did. Set NON_ICP_NAME_FALLBACK=true in the Railway env to turn it
    on; no rebuild. */
-const NON_ICP_NAME_FALLBACK        = process.env.NON_ICP_NAME_FALLBACK === 'true';
+const NON_ICP_NAME_FALLBACK        = process.env.NON_ICP_NAME_FALLBACK !== 'false';
 const NON_ICP_NAME_PROMPT_VERSION  = 'name-v1-2026-09-23';
 /* HIGHER THAN THE PAGE FLOOR (0.75) ON PURPOSE. "realtor" inside a
    hostname is close to conclusive; almost everything else is not, and the
