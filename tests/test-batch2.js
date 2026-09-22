@@ -3811,6 +3811,232 @@ async function section12() {
    what is asserted is whether a query was issued, not whether a line
    of source exists.
    ============================================================ */
+
+/* ============================================================
+   31. VISITOR GEOLOCATION FROM THE IP
+
+   Storing an IP was asked for on 23 Sept 2026. Nothing here had ever
+   stored one: the PartnerStack fraud context and the Meta payloads both
+   read it off the request and discarded it, so the only location we held
+   was Apollo's COMPANY HQ, which covers 44% of leads.
+
+   EXECUTED against a stubbed fetch, because "we could not look it up"
+   must never be recorded as a fact about where somebody was.
+   ============================================================ */
+{
+  const idx = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+  const between = (a, b) => { const i = idx.indexOf(a), j = idx.indexOf(b, i); return idx.slice(i, j); };
+  const lift = (env, fetchStub) => (new Function(
+    'process', 'fetch', 'AbortController', 'setTimeout', 'clearTimeout',
+    between('const IP_GEO_ENABLED', '/* Its own targeted write, NOT syncToAWS')
+    + '\nreturn { resolveIpGeo, isPrivateIp, IP_GEO_ENABLED };'
+  ))({ env }, fetchStub, AbortController, setTimeout, clearTimeout);
+
+  const okResp = (body) => async () => ({ ok: true, json: async () => body });
+  const ENV = {};
+
+  /* PRIVATE RANGES NEVER SPEND A REQUEST. If the first XFF entry is
+     private something is wrong upstream, and the honest record is no geo
+     rather than a shrug from a third party. */
+  {
+    let called = 0;
+    const M = lift(ENV, async () => { called++; return { ok: true, json: async () => ({ success: true, city: 'X' }) }; });
+    for (const ip of ['10.0.0.5', '192.168.1.1', '127.0.0.1', '172.16.5.5', '172.31.255.1', '169.254.1.1', '::1'])
+      ok(`31: ${ip} is treated as private`, M.isPrivateIp(ip) === true);
+    for (const ip of ['8.8.8.8', '203.0.113.45', '1.1.1.1'])
+      ok(`31: ${ip} is treated as public`, M.isPrivateIp(ip) === false);
+  }
+
+  /* The mapping assertions live in results31 below, with the rest of the
+     async ones. An earlier draft did them here with a bare `return` inside
+     this block -- which in CommonJS RETURNS FROM THE MODULE, so the file
+     exited 0 having printed no totals at all. Exactly the shape
+     crash-reporter.js exists for: a suite that reads as a clean run to
+     anything counting exit codes. */
+}
+
+/* The failure modes, which are the point. Split out so the block above can
+   return its promise. */
+const results31 = (async () => {
+  const out = [];
+  const idx = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+  const between = (a, b) => { const i = idx.indexOf(a), j = idx.indexOf(b, i); return idx.slice(i, j); };
+  const lift = (env, fetchStub) => (new Function(
+    'process', 'fetch', 'AbortController', 'setTimeout', 'clearTimeout',
+    between('const IP_GEO_ENABLED', '/* Its own targeted write, NOT syncToAWS')
+    + '\nreturn { resolveIpGeo, isPrivateIp, IP_GEO_ENABLED };'
+  ))({ env }, fetchStub, AbortController, setTimeout, clearTimeout);
+  const okResp = (body) => async () => ({ ok: true, json: async () => body });
+
+  /* A REAL RESPONSE, mapped. The field names are ipwho.is's, so a rename
+     at their end must fail here rather than silently store nulls. */
+  const mapped = await lift({}, okResp({
+    success: true, city: 'San Jose', region: 'California', country_code: 'US',
+    country: 'United States', postal: '95025',
+    timezone: { id: 'America/Los_Angeles' },
+    connection: { isp: 'Google LLC', org: 'Google LLC', domain: 'google.com' },
+  })).resolveIpGeo('8.8.8.8');
+  out.push(['31: city is mapped', mapped.ip_city === 'San Jose', mapped.ip_city]);
+  out.push(['31: region is mapped', mapped.ip_region === 'California', mapped.ip_region]);
+  out.push(['31: country CODE is mapped', mapped.ip_country === 'US', mapped.ip_country]);
+  out.push(['31: country NAME is mapped', mapped.ip_country_name === 'United States', mapped.ip_country_name]);
+  out.push(['31: the IANA timezone comes from the nested object', mapped.ip_timezone === 'America/Los_Angeles', mapped.ip_timezone]);
+  out.push(['31: the ISP is mapped', mapped.ip_isp === 'Google LLC', mapped.ip_isp]);
+  out.push(['31: the org domain is mapped', mapped.ip_org_domain === 'google.com', mapped.ip_org_domain]);
+
+  /* success:false ARRIVES WITH A 200. That is how ipwho.is reports a rate
+     limit, and reading the status alone would stamp an empty place as a
+     real one -- the same shape as Meta answering 200 to a malformed IP. */
+  const rateLimited = await lift({}, okResp({ success: false, message: 'RateLimited' })).resolveIpGeo('8.8.8.8');
+  out.push(['31: success:false with a 200 is NOT a location', rateLimited === null, String(rateLimited)]);
+
+  /* AN EMPTY BODY IS NOT A PLACE. Without this a row would read "we looked
+     and they are nowhere", which is a measurement nobody made. */
+  const empty = await lift({}, okResp({ success: true })).resolveIpGeo('8.8.8.8');
+  out.push(['31: an empty response is NOT a location', empty === null, String(empty)]);
+
+  const errored = await lift({}, okResp({ error: true, reason: 'RateLimited' })).resolveIpGeo('8.8.8.8');
+  out.push(['31: an error flag is NOT a location', errored === null]);
+
+  const http500 = await lift({}, async () => ({ ok: false, status: 500, json: async () => ({}) })).resolveIpGeo('8.8.8.8');
+  out.push(['31: a non-200 is NOT a location', http500 === null]);
+
+  const threw = await lift({}, async () => { throw new Error('ECONNRESET'); }).resolveIpGeo('8.8.8.8');
+  out.push(['31: a thrown fetch fails silent', threw === null]);
+
+  /* THE KILL SWITCH. A free geo service is exactly the dependency that
+     stops being free, and turning it off must need no deploy. */
+  let calledWhenOff = 0;
+  const off = await lift({ IP_GEO_ENABLED: 'false' }, async () => { calledWhenOff++; return { ok: true, json: async () => ({ success: true, city: 'X' }) }; }).resolveIpGeo('8.8.8.8');
+  out.push(['31: IP_GEO_ENABLED=false returns null', off === null]);
+  out.push(['31: IP_GEO_ENABLED=false makes no request at all', calledWhenOff === 0, String(calledWhenOff)]);
+
+  /* A private address must not reach the network either. */
+  let calledPrivate = 0;
+  await lift({}, async () => { calledPrivate++; return { ok: true, json: async () => ({ success: true, city: 'X' }) }; }).resolveIpGeo('10.0.0.5');
+  out.push(['31: a private address spends no request', calledPrivate === 0, String(calledPrivate)]);
+
+  /* ── The wiring, which execution cannot reach ─────────────────────── */
+  /* NEVER ON THE LEAD PATH. */
+  out.push(['31: the geo call is never awaited',
+            /\n    finaliseIpGeo\(session_id, clientIpOf\(req\)\)\.catch/.test(idx)]);
+  /* BOTH ROUTES. 41 leads a day reach step 1 and 11 never submit, so
+     resolving only at /submit would leave every drop-off -- the SDR list
+     and the recovery cron -- with no location at all. */
+  out.push(['31: it runs from BOTH /partial and /submit',
+            (idx.match(/finaliseIpGeo\(session_id, clientIpOf\(req\)\)/g) || []).length === 2]);
+  /* /partial fires repeatedly through step 1 and the "actually we're B2B"
+     button calls savePartial(1) again, which 47% of leads press. Without a
+     guard one visitor spends several lookups. */
+  out.push(['31: at most one lookup per session, guarded in process',
+            /_ipGeoInFlight/.test(idx)]);
+  out.push(['31: and guarded durably by ip_checked_at, so a deploy buys no second lookup',
+            /SELECT ip_checked_at FROM leads WHERE session_id/.test(idx)]);
+  /* The address is free and must be written on every call; only the
+     network half is rationed. */
+  out.push(['31: the address is still written before the dedup check',
+            idx.indexOf('UPDATE leads SET ip_address = COALESCE') < idx.indexOf('_ipGeoInFlight.has(session_id)')]);
+  /* AFTER THE RESPONSE IN BOTH ROUTES. Checked per route rather than with
+     a bare indexOf, which finds /partial's call and silently compares it
+     against /submit's response -- it failed exactly that way when the
+     second call site was added. */
+  {
+    const calls = [];
+    let at = idx.indexOf('finaliseIpGeo(session_id, clientIpOf(req))');
+    while (at !== -1) { calls.push(at); at = idx.indexOf('finaliseIpGeo(session_id, clientIpOf(req))', at + 1); }
+    const partialRes = idx.indexOf("console.log(`[/partial] \u2705 Saved session");
+    const submitRes  = idx.indexOf("res.json({ ok: true, non_icp_blocked");
+    out.push(['31: /partial resolves AFTER its response',
+              calls.some((c) => c > partialRes && c < submitRes), String(calls)]);
+    out.push(['31: /submit resolves AFTER its response',
+              calls.some((c) => c > submitRes), String(calls)]);
+  }
+  /* THE ADDRESS AND THE PLACE ARE TWO WRITES, so a geo outage cannot lose
+     the address. */
+  out.push(['31: the address is written before the lookup',
+            /UPDATE leads SET ip_address = COALESCE\(ip_address, \$2\)/.test(idx)]);
+  /* ONE DEFINITION of "what is this visitor's address". There were two and
+     they disagreed, which is the whole reason PR 111 exists. */
+  out.push(['31: PartnerStack reads the shared extractor, not its own split',
+            /function readPartnerStackRequestContext\(req, page_url\) \{\s*const ip_address = clientIpOf\(req\);/.test(idx)]);
+  /* THE MIRROR GETS THE PLACE, NOT THE ADDRESS. Copying personal data into
+     a second database needs a reason for it being there. */
+  out.push(['31: the mirror stores geo but NOT the raw address',
+            /gw_form_leads ADD COLUMN IF NOT EXISTS ip_city/.test(idx)
+            && !/gw_form_leads ADD COLUMN IF NOT EXISTS ip_address/.test(idx)]);
+  out.push(['31: the mirror write is targeted, never syncToAWS',
+            /function syncIpGeoToAWS[\s\S]{0,500}UPDATE gw_form_leads/.test(idx)]);
+  /* The dashboard must not let a reader take company HQ for visitor
+     location. */
+  out.push(['31: the panel labels it "Visitor location", distinctly from Apollo’s',
+            /lb:"Visitor location"/.test(idx) && /lb:"Location"/.test(idx)]);
+  return out;
+})();
+
+/* ============================================================
+   30. THE CLIENT IP SENT TO META
+
+   Every Meta call site passed `req.headers['x-forwarded-for']` RAW.
+   Railway sits behind a proxy chain, so that can be a comma-separated
+   list, and readPartnerStackRequestContext ~4,000 lines earlier already
+   splits it with a comment explaining why a list "looks like a value and
+   will never match anything". One integration was fixed, the other was
+   not.
+
+   VERIFIED AGAINST THE LIVE API on 23 Sept 2026: a clean IP, a two-hop
+   list and a three-hop list each returned HTTP 200, events_received 1 and
+   an EMPTY messages array. Meta never complains, so nothing downstream can
+   catch this -- it has to be right on the way out.
+   ============================================================ */
+{
+  const capi = require('../meta-capi');
+  const n = capi.normalizeClientIp;
+
+  /* THE BUG, executed. */
+  eq('30: a two-hop XFF yields the client address', n('203.0.113.45, 10.0.0.1'), '203.0.113.45');
+  eq('30: a three-hop XFF yields the client address', n('203.0.113.45, 10.0.0.1, 172.16.0.9'), '203.0.113.45');
+  /* THE NO-OP, which is why this fix is safe whatever the header holds. */
+  eq('30: a single-entry XFF is unchanged', n('203.0.113.45'), '203.0.113.45');
+  eq('30: whitespace is trimmed', n('  203.0.113.45  '), '203.0.113.45');
+  /* IPv6, which Railway does send. */
+  eq('30: IPv6 survives', n('2001:db8::1'), '2001:db8::1');
+  eq('30: IPv6 with a hop yields the client address', n('2001:db8::1, 10.0.0.1'), '2001:db8::1');
+  eq('30: bracketed IPv6 is unwrapped', n('[2001:db8::1]'), '2001:db8::1');
+
+  /* JUNK IS DROPPED, NOT FORWARDED. A key absent from user_data is
+     honest; a key holding a non-address is a value that looks real and
+     matches nobody -- the same reason normalizePhone returns undefined
+     rather than an empty string. */
+  for (const bad of ['', '   ', 'not-an-ip', '999.1.1.1', '1.2.3', 'localhost', ',,,']) {
+    ok(`30: junk is dropped, not sent: ${JSON.stringify(bad)}`, n(bad) === undefined, String(n(bad)));
+  }
+  ok('30: undefined in, undefined out', n(undefined) === undefined);
+  ok('30: null in, undefined out', n(null) === undefined);
+
+  /* THE CHOKE POINT IS THE POINT. Six call sites pass this value and a
+     seventh will exist one day; normalising at any of them is how the
+     PartnerStack path and the Meta path drifted apart in the first place.
+     So the payload must read the normaliser, and no call site may be
+     trusted to have done it. */
+  const src = fs.readFileSync(path.join(__dirname, '..', 'meta-capi.js'), 'utf8');
+  ok('30: the payload normalises rather than passing the raw option',
+     /client_ip_address: normalizeClientIp\(options\.clientIpAddress\)/.test(src));
+  ok('30: the raw option never reaches the payload',
+     !/client_ip_address: options\.clientIpAddress/.test(src));
+
+  /* META'S WARNINGS WERE DISCARDED. Only events_received was logged, so a
+     malformed field could be wrong for months while every line read like a
+     success. */
+  ok('30: Meta’s messages array is read, not thrown away',
+     /result\.messages/.test(src) && /Meta returned/.test(src));
+
+  /* The webhook Schedule sites deliberately send NO ip: the request comes
+     from Cal or RevenueHero, so their address is not the visitor's and
+     sending it would be worse than sending nothing. */
+  const idx = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+  eq('30: the two webhook Schedule sites still send no client ip',
+     (idx.match(/clientIpAddress:''/g) || []).length, 2);
+}
 {
   const liftTop = (name) => {
     const m = new RegExp('\\nfunction ' + name + '\\s*\\(').exec(src);
@@ -4180,6 +4406,9 @@ section12()
   .catch((err) => { ok('hdyh: the How_Did_You_Hear section completed', false, err && err.message); })
   .catch((err) => { ok('sfretry: the retry-sweep section completed', false, err && err.message); })
   .catch((err) => { ok('sf: the Salesforce outage section completed', false, err && err.message); })
+  .then(() => results31)
+  .then((rows) => { for (const [n, c, x] of rows) ok(n, c, x); })
+  .catch((err) => { ok('31: the IP geo section completed', false, err && err.message); })
   .then(() => {
     console.log('');
     console.log(`  passed: ${pass}`);

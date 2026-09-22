@@ -238,6 +238,16 @@ async function initAWSTable() {
          collected until step 2, and No Booking requires one). */
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS non_icp_blocked BOOLEAN DEFAULT FALSE`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS non_icp_reason TEXT`,
+      /* The dialer's feed gets the geo but NOT the raw address. An SDR
+         about to ring somebody benefits from knowing the city and the
+         timezone; nobody on that side of the WAN has a use for the IP
+         itself, and copying personal data into a second database without
+         a reason for it there is how it ends up somewhere nobody
+         remembers. The raw value stays on Railway. */
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ip_city      TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ip_region    TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ip_country   TEXT`,
+      `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS ip_timezone  TEXT`,
       `ALTER TABLE gw_form_leads ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ`,
       /* The cheapest possible fix for a misnamed column that external
          consumers read. A COMMENT is discoverable by anyone who inspects the
@@ -3673,6 +3683,12 @@ app.get('/monitor/leads', async (req, res) => {
          predicate outside the enumerated dashboard filter -- see
          test-non-icp.js section 10f. */
       l.non_icp_llm_flagged,
+      /* WHERE THE VISITOR ACTUALLY WAS, as opposed to enriched_* which is
+         the COMPANY HQ Apollo holds and which covers 44% of leads. Two
+         different facts, shown side by side on the panel and labelled so
+         nobody reads one as the other. */
+      l.ip_address, l.ip_city, l.ip_region, l.ip_country, l.ip_timezone,
+      l.ip_isp, l.ip_org_domain,
       l.loops_sent, l.created_at, l.submitted_at, l.page_url,
       l.landing_page, l.previous_page, l.website_check_failed, l.website_check_reason,
       l.elv_status, l.elv_checked_at,
@@ -4786,7 +4802,17 @@ app.get('/monitor', (req, res) => {
   '+"<td class=\'psna\'>"+C(c.xid||"—")+"</td></tr>";}).join("");' +
   'h+="</table>";}' +
   'return h+"</div>";}' +
+  /* ipLoc is the VISITOR's location, from their IP. enrichPanel's `loc`
+     below is Apollo's COMPANY HQ. They are different facts and are labelled
+     as such -- "Visitor location" against "Location" -- because a reader
+     who takes one for the other will believe a lead is somewhere they are
+     not. Apollo covers 44% of leads; this covers everyone who submitted. */
+  'function ipLoc(l){return [l.ip_city,l.ip_region,l.ip_country].filter(Boolean).join(", ");}' +
   'function enrichPanel(l){var loc=[l.enriched_city,l.enriched_state,l.enriched_country].filter(Boolean).join(", ");var fields=[' +
+  '{g:1,lb:"Visitor location",v:ipLoc(l)},' +
+  '{g:1,lb:"Visitor timezone",v:l.ip_timezone},' +
+  '{g:1,lb:"Visitor network",v:l.ip_isp?(l.ip_isp+(l.ip_org_domain?" ("+l.ip_org_domain+")":"")):""},' +
+  '{g:1,lb:"IP address",v:l.ip_address},' +
   '{g:1,lb:"Title",v:l.enriched_title},' +
   '{g:1,lb:"Seniority",v:l.enriched_seniority},' +
   '{g:1,lb:"Department",v:l.enriched_departments},' +
@@ -9154,9 +9180,209 @@ function parsePartnerStackClickHistory(raw) {
    not the browser's Origin header. The Origin header is absent on same-origin
    non-CORS posts, and a bare scheme+host cannot tell /demo from an ads lander,
    which is exactly the distinction a fraud review wants to see. */
-function readPartnerStackRequestContext(req, page_url) {
+/* ── VISITOR GEOLOCATION ──────────────────────────────────────────────
+   Turns the address we now store into a place. Requested 23 Sept 2026,
+   alongside storing the IP itself.
+
+   ipwho.is, NOT ipapi.co, AND THAT IS A CORRECTION RATHER THAN A
+   PREFERENCE. ipapi.co was the choice; it answers "RateLimited" on the
+   FIRST request of the day, from this machine and from Railway's egress
+   alike, so its free tier is not a tier. Checked both, one at a time,
+   before writing any of this. ipwho.is answers over HTTPS with no key, and
+   returns MORE than ipapi.co would have: an IANA timezone, and the ISP,
+   ASN and org domain that are the only corporate-versus-residential signal
+   available here. Swappable from the env, because a free geo service is
+   exactly the kind of dependency that stops being free.
+
+   NEVER CALLED ON THE LEAD PATH. Fire-and-forget after res.json(), beside
+   finaliseElvVerdict and the PartnerStack eligibility check, for the
+   reason CLAUDE.md gives about all three: a third-party lookup in front of
+   a submitting visitor is the failure that shape exists to prevent. The
+   raw address is written during the upsert, costs no network and cannot
+   fail. Everything else arrives a moment later or not at all.
+
+   FAILS SILENT, NOT LOUD, and stamps nothing when it could not decide --
+   the same rule non_icp_checked_at follows. "We could not look it up" must
+   never be recorded as a fact about where somebody was. */
+const IP_GEO_ENABLED  = process.env.IP_GEO_ENABLED !== 'false';
+const IP_GEO_URL      = process.env.IP_GEO_URL || 'https://ipwho.is/';
+const IP_GEO_TIMEOUT_MS = Number(process.env.IP_GEO_TIMEOUT_MS || 4000);
+
+/* Private and loopback ranges resolve to nothing useful and would spend a
+   request to be told so. If the first XFF entry is one of these something
+   is wrong upstream, and the honest record is no geo rather than a shrug
+   from a third party. */
+function isPrivateIp(ip) {
+  if (!ip) return true;
+  if (ip === '::1' || ip.startsWith('fe80:') || ip.startsWith('fc') || ip.startsWith('fd')) return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+  if (!m) return false;
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+}
+
+async function resolveIpGeo(ip) {
+  if (!IP_GEO_ENABLED || !ip || isPrivateIp(ip)) return null;
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), IP_GEO_TIMEOUT_MS);
+  try {
+    const r = await fetch(IP_GEO_URL + encodeURIComponent(ip), {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'gushwork-api/1.0 (+https://www.gushwork.ai)' },
+    });
+    clearTimeout(t);
+    if (!r.ok) return null;
+    const d = await r.json();
+    /* success:false is how ipwho.is reports a rate limit or a bad address,
+       WITH a 200. Reading the status alone would record an empty place as
+       a real one -- the same shape as Meta answering 200 to a malformed
+       IP. */
+    if (!d || d.success === false || d.error) return null;
+    const conn = d.connection || {};
+    const tz   = d.timezone || {};
+    const out = {
+      ip_city:         d.city || null,
+      ip_region:       d.region || null,
+      ip_country:      d.country_code || null,
+      ip_country_name: d.country || null,
+      ip_postal:       d.postal || null,
+      ip_timezone:     tz.id || null,
+      ip_isp:          conn.isp || conn.org || null,
+      ip_org_domain:   conn.domain || null,
+    };
+    /* A response with nothing in it is not a location. Without this a
+       rate-limited empty body would stamp ip_checked_at and the row would
+       read as "we looked and they are nowhere". */
+    return Object.values(out).some(Boolean) ? out : null;
+  } catch (err) {
+    clearTimeout(t);
+    return null;
+  }
+}
+
+/* Its own targeted write, NOT syncToAWS, for the reason spelled out above
+   syncHearAboutUsToAWS: that upsert sets disqualified = EXCLUDED with no
+   COALESCE, so handing it a partial object clears a real disqualification
+   on the feed the dialer reads. */
+function syncIpGeoToAWS(session_id, geo) {
+  if (!awsPool || !geo) return;
+  awsPool.query(
+    `UPDATE gw_form_leads
+        SET ip_city = COALESCE($2, ip_city), ip_region = COALESCE($3, ip_region),
+            ip_country = COALESCE($4, ip_country), ip_timezone = COALESCE($5, ip_timezone),
+            updated_at = NOW()
+      WHERE session_id = $1`,
+    [session_id, geo.ip_city, geo.ip_region, geo.ip_country, geo.ip_timezone]
+  ).catch((err) => console.warn('[AWS] \u26a0 IP geo sync failed:', err.message));
+}
+
+/* ONE LOOKUP PER SESSION, PER PROCESS. /partial fires REPEATEDLY through
+   step 1 -- CLAUDE.md is explicit, and the "actually we're B2B" button
+   calls savePartial(1) again, which 47% of leads press. Without this a
+   single visitor could spend five lookups. A plain Set, lost on deploy,
+   which costs one extra lookup per session per dyno and nothing else; the
+   ip_checked_at column below is the durable half.
+
+   NOT a claiming UPDATE. Stamping ip_checked_at before the answer exists
+   would put an inferred timestamp in an observational column, which is the
+   thing non_icp_checked_at's comment says never to do. */
+const _ipGeoInFlight = new Set();
+
+/* Called fire-and-forget from /partial AND /submit. Writes the ADDRESS
+   first and the PLACE second, as two statements, because they are two different
+   observations with two different failure modes: the address is ours and
+   cannot fail, the place comes from a third party and often will. Folding
+   them into one write would mean a geo outage loses the address too.
+
+   NOT APPENDED TO THE /submit INSERT, deliberately. That statement carries
+   about fifty placeholders and a comment two columns up recording that the
+   last pair were "appended, nothing renumbered". Adding to it to save a
+   round trip is how an off-by-one lands in the middle of the money path;
+   a targeted UPDATE on an indexed key costs a millisecond and cannot
+   renumber anything. */
+async function finaliseIpGeo(session_id, ip) {
+  if (!session_id) return;
+  try {
+    /* The ADDRESS is written on every call, because it is free and because
+       COALESCE means the first one seen is the one kept -- a visitor who
+       moves between step 1 and submit should not rewrite where they
+       started. */
+    if (ip) {
+      await pool.query(
+        'UPDATE leads SET ip_address = COALESCE(ip_address, $2), updated_at = NOW() WHERE session_id = $1',
+        [session_id, ip]);
+    }
+    if (_ipGeoInFlight.has(session_id)) return;
+    /* Already resolved on an earlier /partial: nothing to ask. Reads the
+       row we just wrote rather than trusting the Set, so a deploy between
+       step 1 and submit does not buy a second lookup. */
+    const have = await pool.query(
+      'SELECT ip_checked_at FROM leads WHERE session_id = $1', [session_id]);
+    if (have.rows[0] && have.rows[0].ip_checked_at) return;
+
+    _ipGeoInFlight.add(session_id);
+    let geo;
+    try { geo = await resolveIpGeo(ip); } finally { _ipGeoInFlight.delete(session_id); }
+    if (!geo) return;
+    await pool.query(
+      `UPDATE leads
+          SET ip_city = $2, ip_region = $3, ip_country = $4, ip_country_name = $5,
+              ip_postal = $6, ip_timezone = $7, ip_isp = $8, ip_org_domain = $9,
+              ip_checked_at = NOW(), updated_at = NOW()
+        WHERE session_id = $1`,
+      [session_id, geo.ip_city, geo.ip_region, geo.ip_country, geo.ip_country_name,
+       geo.ip_postal, geo.ip_timezone, geo.ip_isp, geo.ip_org_domain]);
+    syncIpGeoToAWS(session_id, geo);
+    console.log(`[ip-geo] ${session_id}: ${[geo.ip_city, geo.ip_region, geo.ip_country].filter(Boolean).join(', ') || 'unknown'}` +
+      (geo.ip_isp ? ` | ${geo.ip_isp}` : ''));
+  } catch (err) {
+    console.warn('[ip-geo] failed (non-blocking):', err && err.message);
+  }
+}
+
+/* ── WHAT IS ACTUALLY IN x-forwarded-for? ONE LINE, ONCE PER BOOT. ──
+   The comment above asserts Railway sends a comma-separated list, and the
+   Meta call sites were built as if it sends a single address. Both cannot
+   be right, and nothing in this repo has ever printed the value -- so the
+   question has been open for as long as both have existed.
+
+   It is normalised on the way out now (normalizeClientIp in meta-capi.js),
+   which is correct whichever the answer is: a one-entry header splits to
+   itself. This exists to CLOSE the question rather than keep working
+   around it.
+
+   Once per process, not once per request: the shape does not vary by
+   visitor, and a per-request log of an IP is a per-request log of personal
+   data. Prints the SHAPE and a redacted sample, never the full address.
+   Delete once somebody has read it -- same as the [verify-website][diag]
+   block above. */
+let _xffShapeLogged = false;
+function logXffShapeOnce(req) {
+  if (_xffShapeLogged) return;
+  _xffShapeLogged = true;
+  try {
+    const raw = (req.headers['x-forwarded-for'] || '').toString();
+    const parts = raw.split(',').map((x) => x.trim()).filter(Boolean);
+    const redact = (ip) => (ip || '').replace(/\.\d+$/, '.x').replace(/:[0-9a-f]*$/i, ':x');
+    console.log(`[xff-diag] entries=${parts.length} | first=${redact(parts[0])} | ` +
+      `last=${redact(parts[parts.length - 1])} | req.ip=${redact(req.ip)} | ` +
+      `sent_to_meta_would_be=${redact(parts[0] || req.ip)}`);
+  } catch (e) {
+    console.log('[xff-diag] failed (ignored):', e && e.message);
+  }
+}
+
+/* ONE DEFINITION, because there were already two and they disagreed.
+   This split lived only inside readPartnerStackRequestContext while the
+   six Meta call sites passed the raw header; pulling it out is what stops
+   a third reading appearing the next time somebody needs an address. */
+function clientIpOf(req) {
   const fwd = (req.headers['x-forwarded-for'] || '').toString();
-  const ip_address = (fwd.split(',')[0] || '').trim() || req.ip || null;
+  return (fwd.split(',')[0] || '').trim() || req.ip || null;
+}
+
+function readPartnerStackRequestContext(req, page_url) {
+  const ip_address = clientIpOf(req);
   const user_agent = (req.headers['user-agent'] || '').toString().slice(0, 500) || null;
   const origin = (page_url || '').toString().trim().slice(0, 1000) || null;
   return { ip_address, user_agent, origin };
@@ -13163,6 +13389,17 @@ app.post('/partial', async (req, res) => {
     console.log(`[/partial] ✅ Saved session ${session_id} | step ${step_reached} | disqualified: ${disqualified} | non-ICP: ${nonIcp.blocked ? nonIcp.reason : 'no'} | email ${email}`);
     res.json({ ok: true });
 
+    /* WHERE THEY ARE, FROM STEP 1, not only from submit. 41 leads a day
+       reach step 1 and 11 of them never submit -- so resolving here is the
+       only way the drop-offs, the SDR list and the recovery cron ever get a
+       location. Measured 23 Sept 2026: 41/day average, 53 on the busiest
+       day in a month, against ipwho.is's 1,000/day. About 4%.
+
+       Safe to call on every /partial even though /partial fires repeatedly:
+       finaliseIpGeo writes the free part unconditionally and does at most
+       ONE lookup per session, guarded in process and by ip_checked_at. */
+    finaliseIpGeo(session_id, clientIpOf(req)).catch(() => {});
+
     /* Off the critical path, exactly like /submit's copy: the lead is no
        longer waiting and a third-party lookup must never be in front of one.
 
@@ -13533,6 +13770,7 @@ app.post('/submit', async (req, res) => {
          website-verified branch so the logged reason is the real one, the
          same ordering /partial uses for StartTrial. A blocked lead never
          reaches this branch at all -- it took the branch above. */
+      logXffShapeOnce(req);
       if (internalLeadSuppressesMeta(email, page_url, '/submit')) {
         /* First, same ordering as /partial. */
       } else if (nonIcpSuppressMeta) {
@@ -13600,6 +13838,14 @@ app.post('/submit', async (req, res) => {
     res.json({ ok: true, non_icp_blocked: nonIcpBlocked, non_icp_reason: nonIcpReason });
 
     // Off the critical path on purpose — the lead is no longer waiting.
+    /* The address is ours and is written unconditionally; the PLACE comes
+       from a free third party and is allowed to fail. Never awaited, for
+       the reason the three calls below it are not: a visitor must not wait
+       on somebody else's uptime, and a lead must not be lost when it is
+       down. Runs on a repeat submit too -- unlike the guarded calls below,
+       because a returning visitor can legitimately be somewhere new, and
+       the write COALESCEs so the first address is the one kept. */
+    finaliseIpGeo(session_id, clientIpOf(req)).catch(() => {});
     if (!elv && !alreadySubmitted) finaliseElvVerdict({ session_id, email, website_check_reason });
     if (!alreadySubmitted) runPartnerStackIdentity({ session_id, ps })
       .then(identity => upgradePartnerHearAboutUs({ session_id, email, ps, identity }))
