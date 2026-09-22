@@ -4257,6 +4257,11 @@ app.get('/monitor', (req, res) => {
   '<div style="font-size:12px;color:#888">What the website classifier decided, and what it could not read. ' +
   'A <b>blocked</b> lead was turned away; a <b>Meta withheld</b> lead booked, went to Salesforce and is on the SDR list as normal &#8212; only the conversion events were held back.</div></div>' +
   '<div><select id="mdl-days" onchange="loadModel()"><option value="1">Last 24h</option><option value="7" selected>Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option></select> ' +
+  /* THE SAME VOCABULARY AS ALL LEADS -- aeo, crm, __none -- so the same
+     word means the same population on both tabs. Narrowed in SQL, so the
+     five ladder rows still sum to the filtered total rather than to the
+     window. */
+  '<select id="mdl-product" onchange="loadModel()" title="Narrows every panel on this tab to one product: the ladder, the industry groups, the decisions and the scrape blind spot. Untagged means the page_url could not be read, which is a real state and not a default."><option value="all">All products</option><option value="aeo">AEO</option><option value="crm">CRM</option><option value="__none">Untagged</option></select> ' +
   '<button class="btn" onclick="loadModel()">&#8635; Refresh</button></div>' +
   '</div>' +
   '<div class="card" style="padding:10px 14px;margin-bottom:16px;font-size:12px;color:#666" id="mdl-flags">Loading...</div>' +
@@ -4415,7 +4420,7 @@ app.get('/monitor', (req, res) => {
   'function mdlBar(n,total,colour){var w=total>0?Math.round(n/total*100):0;' +
   'return "<div style=\\"height:6px;background:#f0f0f0;border-radius:3px;overflow:hidden\\"><div style=\\"height:100%;width:"+w+"%;background:"+colour+"\\"></div></div>";}' +
   'var MDL_COLOUR={blocked_list:"#b91c1c",blocked_model:"#b91c1c",meta_only:"#f59e0b",checked_clear:"#1a1a1a",not_decided:"#c7c7c7"};' +
-  'function mdlLadderHtml(l){if(!l||!l.rows)return "<div class=\\"nd\\">No data</div>";' +
+  'function mdlLadderHtml(l,prod){if(!l||!l.rows)return "<div class=\\"nd\\">No data</div>";' +
   'var h=l.rows.map(function(r){return "<div style=\\"display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #f2f2f2\\">"+' +
   '"<div style=\\"flex:1;font-size:13px\\">"+esc(r.label)+"</div>"+' +
   '"<div style=\\"width:160px\\">"+mdlBar(r.n,l.total,MDL_COLOUR[r.key]||"#1a1a1a")+"</div>"+' +
@@ -4423,7 +4428,11 @@ app.get('/monitor', (req, res) => {
   /* The total is printed under the five rows so a reader can add them up.
      They are exhaustive by construction and this is what makes that
      checkable rather than claimed. */
-  'return h+"<div style=\\"padding-top:10px;font-size:12px;color:#888\\">"+l.total+" leads in the window. The five rows are mutually exclusive and sum to that total."+(l.ours?" "+l.ours+" of them are our own test submissions \\u2014 counted here like everything else, and marked on each row.":"")+"</div>";}' +
+  /* THE CAPTION READS THE ECHOED FILTER, never the control. A request
+     whose product value the server did not recognise falls back to the
+     whole population, and a caption built from the dropdown would then
+     describe a filter that was not applied. */
+  'return h+"<div style=\\"padding-top:10px;font-size:12px;color:#888\\">"+l.total+" leads in the window"+((prod&&prod!=="all")?" \\u2014 "+(prod==="__none"?"untagged product only":esc(String(prod).toUpperCase())+" only"):"")+". The five rows are mutually exclusive and sum to that total."+(l.ours?" "+l.ours+" of them are our own test submissions \\u2014 counted here like everything else, and marked on each row.":"")+"</div>";}' +
   /* TWO ARGUMENTS. `cache` is a TOP-LEVEL field of the payload, a
      sibling of `scrape` -- it was read as s.cache here, which is always
      undefined, so the summary rendered "0 companies classified all
@@ -4482,15 +4491,16 @@ app.get('/monitor', (req, res) => {
   'return h;}' +
   'async function loadModel(){' +
   'var dsel=document.getElementById("mdl-days");var days=dsel?dsel.value:7;' +
+  'var psel=document.getElementById("mdl-product");var mprod=psel?psel.value:"all";' +
   'document.getElementById("mdl-ladder").innerHTML="<div class=\\"nd\\">Loading...</div>";' +
-  'try{var r=await fetch(API+"/monitor/non-icp"+(TP||"?")+(TP?"&":"")+"days="+days,{signal:AbortSignal.timeout(20000)});' +
+  'try{var r=await fetch(API+"/monitor/non-icp"+(TP||"?")+(TP?"&":"")+"days="+days+(mprod&&mprod!=="all"?"&product="+encodeURIComponent(mprod):""),{signal:AbortSignal.timeout(20000)});' +
   'if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
   'var f=d.flags||{};' +
   'document.getElementById("mdl-flags").innerHTML="<b>Brand list:</b> "+(f.list_block?"blocking":"off")+" &#183; <b>Model:</b> "+(f.llm_enabled?"on":"off")+' +
   '" &#183; <b>Model blocks:</b> "+(f.llm_block?"yes":"no")+" &#183; <b>Meta suppressed:</b> "+(f.llm_meta?"yes":"no")+' +
   '" &#183; "+esc(f.model||"?")+" &#183; floor "+mdlConf(f.confidence_floor)+" &#183; prompt "+esc(f.prompt_version||"?")+' +
   '(d.truncated?" <span style=\\"color:#b91c1c\\">&#183; window capped &#8212; counts are a floor, not a total</span>":"");' +
-  'document.getElementById("mdl-ladder").innerHTML=mdlLadderHtml(d.ladder);' +
+  'document.getElementById("mdl-ladder").innerHTML=mdlLadderHtml(d.ladder,d.product);' +
   'document.getElementById("mdl-ind").innerHTML=mdlGroupsHtml(d.industries||[]);' +
   'var dec=d.decisions||[];' +
   'document.getElementById("mdl-dec").innerHTML=dec.length?dec.map(function(x){var sid=esc(x.session_id);' +
@@ -11267,9 +11277,24 @@ function nonIcpTypeAction(businessType) {
   return 'none';
 }
 
-async function nonIcpModelReport({ days } = {}) {
+async function nonIcpModelReport({ days, product } = {}) {
   const d = Math.min(NON_ICP_REPORT_MAX_DAYS,
                      Math.max(1, parseInt(days, 10) || 7));
+
+  /* PRODUCT, narrowed in SQL rather than after the fetch.
+
+     It has to happen here, in the WHERE, because the row cap below is
+     applied by the LIMIT: filtering in JavaScript afterwards would cap
+     the population FIRST and then narrow it, so "92 CRM leads" could be
+     reported from a window whose newest rows were all AEO. Every panel
+     on the tab derives from the same perLead array, so narrowing once
+     here narrows the ladder, the industry groups, the decisions and the
+     scrape panel together and they cannot disagree.
+
+     The vocabulary is All Leads' vocabulary on purpose -- aeo, crm and
+     __none for "we could not read the page_url" -- so the same word
+     means the same population on both tabs. */
+  const prod = ['aeo', 'crm', '__none'].includes(product) ? product : 'all';
 
   /* Every lead in the window with the columns the ladder reads. No
      LIMIT on purpose for the counts -- a capped population would make
@@ -11277,6 +11302,11 @@ async function nonIcpModelReport({ days } = {}) {
      property that makes them worth reading. NON_ICP_REPORT_MAX_LEADS is
      a guard against a silly days value, and when it bites the report
      says so rather than quietly reporting a sample as a total. */
+  const params = [String(d)];
+  let productCond = '';
+  if (prod === '__none') productCond = ' AND l.product IS NULL';
+  else if (prod !== 'all') { params.push(prod); productCond = ` AND l.product = $${params.length}`; }
+
   const leadRows = await pool.query(`
     SELECT l.session_id, l.email, l.website, l.company,
            l.first_name, l.last_name, l.created_at, l.product,
@@ -11284,9 +11314,9 @@ async function nonIcpModelReport({ days } = {}) {
            l.completed, l.non_icp_blocked, l.non_icp_reason,
            l.non_icp_source, l.non_icp_llm_flagged, l.non_icp_checked_at
       FROM leads l
-     WHERE l.created_at >= NOW() - ($1 || ' days')::interval
+     WHERE l.created_at >= NOW() - ($1 || ' days')::interval${productCond}
      ORDER BY l.created_at DESC
-     LIMIT ${NON_ICP_REPORT_MAX_LEADS + 1}`, [String(d)]);
+     LIMIT ${NON_ICP_REPORT_MAX_LEADS + 1}`, params);
 
   const truncated = leadRows.rows.length > NON_ICP_REPORT_MAX_LEADS;
   const leads     = truncated ? leadRows.rows.slice(0, NON_ICP_REPORT_MAX_LEADS) : leadRows.rows;
@@ -11535,6 +11565,11 @@ async function nonIcpModelReport({ days } = {}) {
 
   return {
     windowDays: d,
+    /* ECHOED BACK, not assumed. The caption under the ladder says which
+       population it summed, and it reads this rather than the control --
+       a request that silently ignored an unknown value would otherwise
+       be captioned with the filter the user THOUGHT they had applied. */
+    product: prod,
     generatedAt: new Date().toISOString(),
     truncated,
     flags: {
@@ -11639,7 +11674,7 @@ app.get('/monitor/non-icp', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    res.json(await nonIcpModelReport({ days: req.query.days }));
+    res.json(await nonIcpModelReport({ days: req.query.days, product: req.query.product }));
   } catch (err) {
     console.error('[/monitor/non-icp]', err.message);
     res.status(500).json({ error: 'Non-ICP report failed', detail: err.message });

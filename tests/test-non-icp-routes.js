@@ -126,7 +126,19 @@ function stubQuery(q, params) {
     return { rows, rowCount: rows.length };
   }
   if (/FROM leads l WHERE l\.created_at >=/.test(flat)) {
-    const rows = S.reportLeads || [];
+    let rows = S.reportLeads || [];
+    /* HONOURS THE PRODUCT PREDICATE rather than ignoring it. A stub that
+       returns the whole population whatever the WHERE says can only ever
+       prove the SQL contained a filter -- not that the ladder still sums
+       to the total once it has been applied, which is the property the
+       whole tab rests on. */
+    const m = /AND l\.product = \$(\d+)/.exec(flat);
+    if (m) {
+      const want = (params || [])[Number(m[1]) - 1];
+      rows = rows.filter((r) => r.product === want);
+    } else if (/AND l\.product IS NULL/.test(flat)) {
+      rows = rows.filter((r) => r.product === null || r.product === undefined);
+    }
     return { rows, rowCount: rows.length };
   }
   /* The standing cache inventory. Matched on the real column list: an
@@ -2065,6 +2077,136 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     const phone = await whereFor('&search=' + encodeURIComponent('(415) 555-0134'));
     ok('search: a number DOES compare phones as digits',
        /REGEXP_REPLACE/.test(phone.sql), phone.sql.slice(0, 300));
+  }
+
+  /* ========================================================
+     THE MODEL TAB'S PRODUCT FILTER — DRIVEN, AND THE LADDER
+     RE-CHECKED UNDER IT
+
+     The five ladder rows summing to the total is the one property that
+     makes this tab worth reading, and a filter is exactly the change
+     that can break it: narrow the population after the row cap and the
+     rows sum to something that is not the printed total, with no error
+     anywhere.
+
+     So this drives the real route with a MIXED-product population and
+     re-asserts the sum for each filter value, not just that the SQL
+     carried a predicate.
+     ======================================================== */
+  {
+    reset();
+    const now = new Date().toISOString();
+    const L = (over) => ({
+      session_id: 's', email: 'x@ex.test', website: null, company: null,
+      first_name: null, last_name: null, created_at: now, product: 'aeo',
+      booked: false, completed: true, non_icp_blocked: false, non_icp_reason: null,
+      non_icp_source: null, non_icp_llm_flagged: false, non_icp_checked_at: now, ...over,
+    });
+    /* Three AEO, two CRM, one untagged. Deliberately NOT one of each
+       ladder state per product: the point is that the sum holds for a
+       lopsided population, which is what real ones are. */
+    S.reportLeads = [
+      L({ session_id: 'p1', email: 'a@kw.test',    website: 'https://kw.test', product: 'aeo',
+          non_icp_blocked: true, non_icp_source: 'domain_list', non_icp_reason: 'kw.test' }),
+      L({ session_id: 'p2', email: 'b@realty.test', website: 'https://realty.test', product: 'aeo',
+          non_icp_blocked: true, non_icp_source: 'llm', non_icp_reason: 'realty.test' }),
+      L({ session_id: 'p3', email: 'c@saas.test',  website: 'https://saas.test', product: 'aeo' }),
+      L({ session_id: 'p4', email: 'd@solar.test', website: 'https://solar.test', product: 'crm',
+          non_icp_llm_flagged: true, non_icp_source: 'llm', non_icp_reason: 'solar.test' }),
+      L({ session_id: 'p5', email: 'e@saas.test',  website: 'https://saas.test', product: 'crm' }),
+      L({ session_id: 'p6', email: 'f@saas.test',  website: 'https://saas.test', product: null }),
+    ];
+    S.reportVerdicts = [
+      { domain: 'kw.test', business_type: 'real_estate', blocking: true, confidence: 0.97,
+        evidence_quote: 'We are a brokerage', reason: 'brokerage', source: 'llm',
+        model_id: 'm', prompt_version: 'v1', scrape_status: 'ok', error: null,
+        page_url_used: 'https://kw.test', page_text_chars: 900, checked_at: now },
+      { domain: 'realty.test', business_type: 'real_estate', blocking: true, confidence: 0.96,
+        evidence_quote: 'Homes for sale', reason: 'brokerage', source: 'llm',
+        model_id: 'm', prompt_version: 'v1', scrape_status: 'ok', error: null,
+        page_url_used: 'https://realty.test', page_text_chars: 800, checked_at: now },
+      { domain: 'solar.test', business_type: 'home_services', blocking: false, confidence: 0.82,
+        evidence_quote: 'Residential Solar Installation', reason: 'installer', source: 'llm',
+        model_id: 'm', prompt_version: 'v1', scrape_status: 'ok', error: null,
+        page_url_used: 'https://solar.test', page_text_chars: 700, checked_at: now },
+      { domain: 'saas.test', business_type: 'software_technology', blocking: false, confidence: 0.95,
+        evidence_quote: 'A SaaS platform', reason: 'saas', source: 'llm',
+        model_id: 'm', prompt_version: 'v1', scrape_status: 'ok', error: null,
+        page_url_used: 'https://saas.test', page_text_chars: 600, checked_at: now },
+    ];
+
+    const report = async (qs) => {
+      S.writes.length = 0;
+      const r = await realFetch(BASE + '/monitor/non-icp?days=7&token=stub' + qs,
+                                { signal: AbortSignal.timeout(20000) });
+      const body = await r.json();
+      const sql = S.writes.map((x) => x.flat).filter((f) => /FROM leads l WHERE/.test(f)).join(' || ');
+      return { status: r.status, d: body, sql };
+    };
+    const sums = (d) => (d.ladder.rows || []).reduce((a, r) => a + r.n, 0);
+
+    /* Unfiltered first, so the filtered numbers have something to be
+       smaller than. */
+    const all = await report('');
+    ok('model filter: unfiltered answers 200', all.status === 200, String(all.status));
+    ok('model filter: unfiltered echoes product=all', all.d.product === 'all', String(all.d.product));
+    ok('model filter: unfiltered counts every lead', all.d.ladder.total === 6, String(all.d.ladder.total));
+    ok('model filter: unfiltered ladder sums to its total',
+       sums(all.d) === all.d.ladder.total, sums(all.d) + ' vs ' + all.d.ladder.total);
+    /* ANCHORED ON THE PREDICATE, not the column name: l.product is in the
+       SELECT list of every one of these queries, so a bare /l\.product/
+       is true even with no filter applied at all. */
+    ok('model filter: unfiltered SQL carries NO product predicate',
+       !/AND l\.product/.test(all.sql), all.sql.slice(-200));
+
+    /* AEO. Three leads, and the two blocks are both AEO so they must
+       survive the narrowing. */
+    const aeo = await report('&product=aeo');
+    ok('model filter: aeo answers 200', aeo.status === 200, String(aeo.status));
+    ok('model filter: aeo echoes back', aeo.d.product === 'aeo', String(aeo.d.product));
+    ok('model filter: aeo narrows the SQL', /l\.product = \$/.test(aeo.sql), aeo.sql.slice(0, 250));
+    ok('model filter: aeo counts only its own', aeo.d.ladder.total === 3, String(aeo.d.ladder.total));
+    ok('model filter: aeo ladder STILL sums to its total',
+       sums(aeo.d) === aeo.d.ladder.total, sums(aeo.d) + ' vs ' + aeo.d.ladder.total);
+
+    /* CRM. The meta_only lead is CRM, so it must be here and the two
+       blocks must be gone -- a filter that narrowed the total but not
+       the rows would leave blocked_list at 1 and still "sum" if the
+       total were computed from the rows. */
+    const crm = await report('&product=crm');
+    ok('model filter: crm counts only its own', crm.d.ladder.total === 2, String(crm.d.ladder.total));
+    ok('model filter: crm ladder STILL sums to its total',
+       sums(crm.d) === crm.d.ladder.total, sums(crm.d) + ' vs ' + crm.d.ladder.total);
+    const byKey = {};
+    for (const r of crm.d.ladder.rows) byKey[r.key] = r.n;
+    ok('model filter: crm keeps its own meta_only lead', byKey.meta_only === 1, JSON.stringify(byKey));
+    ok('model filter: crm drops the AEO blocks',
+       byKey.blocked_list === 0 && byKey.blocked_model === 0, JSON.stringify(byKey));
+
+    /* UNTAGGED is a real population -- a page_url resolveProduct could
+       not read -- not a synonym for "all". */
+    const none = await report('&product=__none');
+    ok('model filter: __none narrows on IS NULL', /l\.product IS NULL/.test(none.sql), none.sql.slice(0, 250));
+    ok('model filter: __none counts only the untagged lead', none.d.ladder.total === 1, String(none.d.ladder.total));
+    ok('model filter: __none ladder sums to its total',
+       sums(none.d) === none.d.ladder.total, sums(none.d) + ' vs ' + none.d.ladder.total);
+
+    /* An unknown value must fall back to the whole population AND SAY
+       SO, because the caption is built from what came back. Silently
+       returning everything under a filter the reader thinks is applied
+       is the failure this echo exists to prevent. */
+    const junk = await report('&product=nonsense');
+    ok('model filter: an unknown product falls back to all', junk.d.product === 'all', String(junk.d.product));
+    ok('model filter: an unknown product adds no predicate',
+       !/AND l\.product/.test(junk.sql), junk.sql.slice(-200));
+    ok('model filter: an unknown product counts everything', junk.d.ladder.total === 6, String(junk.d.ladder.total));
+
+    /* THE OTHER PANELS NARROW WITH IT. They all derive from the same
+       perLead array, so this is really asserting that nothing re-reads
+       the unfiltered population behind the ladder's back. */
+    ok('model filter: the decisions panel narrows too',
+       (crm.d.decisions || []).every((x) => /solar\.test|saas\.test/.test(x.email || '')),
+       JSON.stringify((crm.d.decisions || []).map((x) => x.email)));
   }
 
   loud();

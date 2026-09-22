@@ -898,6 +898,30 @@ const results7 = (async () => {
     }
   }
 
+  /* THE MODEL TAB'S PRODUCT FILTER, same wiring check. It shares All
+     Leads' vocabulary on purpose, so the same word means the same
+     population on both tabs -- asserted against fproduct rather than
+     restated, which is what stops the two drifting. */
+  {
+    const mdl = between("'<select id=\"mdl-product\"", '</select>');
+    const all = between("'<select id=\"fproduct\"", '</select>');
+    for (const v of ['all', 'aeo', 'crm', '__none']) {
+      ok(`model filter: the Model control offers ${v}`, mdl.includes('value="' + v + '"'));
+      ok(`model filter: All Leads offers the same ${v}`, all.includes('value="' + v + '"'));
+    }
+    ok('model filter: loadModel reads the control',
+       src.includes('document.getElementById("mdl-product")'));
+    ok('model filter: loadModel sends it only when it is set',
+       src.includes('(mprod&&mprod!=="all"?"&product="+encodeURIComponent(mprod):"")'));
+    /* THE CAPTION READS THE SERVER'S ECHO, not the dropdown. A caption
+       built from the control would describe a filter the server had
+       rejected and silently not applied. */
+    ok('model filter: the ladder is given the echoed product',
+       src.includes('mdlLadderHtml(d.ladder,d.product)'));
+    ok('model filter: the caption names the narrowed population',
+       /mdlLadderHtml\(l,prod\)/.test(src) && src.includes('untagged product only'));
+  }
+
   /* THE WIRING. A control the loader never reads is a filter that does
      nothing, and it looks completely normal on screen. */
   ok('meta filter: loadLeads sends it', (src.match(/url\+="&meta="/g) || []).length === 2);
