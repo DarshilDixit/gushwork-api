@@ -534,6 +534,13 @@ const results7 = (async () => {
     const DELIBERATE = {
       '/monitor/metrics': 'the two disqualified COUNTERS -- they count disqualified leads, which is unrelated',
       '/monitor/leads':   'the stage ladder (a blocked lead is still a lead and belongs in a stage) and prior_disqualified (per-email history)',
+      /* metaWithheldSql builds the All Leads "why was Meta withheld"
+         filter. Its disqualified arm is there because a disqualified lead
+         genuinely stops firing StartTrial and Lead, so a reader asking
+         "which leads sent no conversion" has to be shown them -- the
+         column is being REPORTED, not acted on. It reaches no lead: the
+         only caller is /monitor/leads, which section 10f pins. */
+      'metaWithheldSql':  'the dashboard filter that REPORTS why a Meta event was withheld; observational, only caller is /monitor/leads',
     };
 
     const sites = [];
@@ -674,10 +681,63 @@ const results7 = (async () => {
        the inner paren and silently classifies those as gates. */
     return /COUNT\((?:[^()]|\([^()]*\))*\)\s*FILTER\s*\(\s*WHERE\s*$/.test(before);
   };
+  /* THE THIRD CATEGORY, added 22 Sept 2026: a DASHBOARD FILTER.
+
+     A WHERE predicate that narrows which ROWS A HUMAN IS SHOWN on
+     /monitor/leads, and nothing else. It is not a counter, so the
+     exemption above does not cover it, and the blunt WHERE-versus-COUNT
+     test above reads it as a gate -- but it decides no conversion, no
+     Salesforce record and no SDR call, which is the distinction this
+     section is actually drawing.
+
+     It exists because Swapnil asked in #i-gtm-ops on 21 Sept 2026 how to
+     filter the leads whose CAPI did not fire, and there was no way to
+     answer it. That is the same argument the counters carry: forbidding
+     the flag outright is what kept 4.2% of leads invisible until 15 Sept.
+
+     ENUMERATED, PINNED AND LOCATED, exactly like the counters. The
+     predicate may live only inside the named builder, and the builder may
+     be CALLED only from /monitor/leads -- that second check is the one
+     with the teeth, because a builder that drifted into /submit would
+     keep this list correct while becoming a real gate. */
+  const DASHBOARD_FILTERS_DELIBERATE = [
+    ['metaWithheldSql',
+     'the All Leads "Meta withheld" filter. Narrows which rows are displayed and reaches no lead; its only caller is /monitor/leads.'],
+  ];
+
+  /* The enclosing route or function of a match, the same way 10b resolves
+     its predicates -- nearest preceding top-level declaration. */
+  const enclosingOf = (idx) => {
+    const before = src.slice(0, idx);
+    const enc = [...before.matchAll(/(?:^app\.(?:get|post)\('([^']+)'|^(?:async )?function (\w+))/gm)].pop();
+    return enc ? (enc[1] || enc[2]) : '(top level)';
+  };
+  const isDashboardFilter = (m) =>
+    DASHBOARD_FILTERS_DELIBERATE.some(([fn]) => enclosingOf(m.index) === fn);
+
   const flagCounters   = allFlagPredicates.filter(isCounter);
-  const flagPredicates = allFlagPredicates.filter((m) => !isCounter(m));
+  const flagDashboard  = allFlagPredicates.filter((m) => !isCounter(m) && isDashboardFilter(m));
+  const flagPredicates = allFlagPredicates.filter((m) => !isCounter(m) && !isDashboardFilter(m));
 
   eq('10f: NO query filters a population on the flag column', flagPredicates.length, 0);
+  /* PINNED, like the counters. A second dashboard filter is a thing
+     somebody decides, not a thing that slips through. */
+  eq('10f: exactly the deliberate dashboard FILTERS exist, and no more',
+     flagDashboard.length, DASHBOARD_FILTERS_DELIBERATE.length);
+  /* AND THE BUILDER REACHES NO LEAD PATH. Every call site of every named
+     builder must sit inside /monitor/leads. This is what stops the
+     exemption from becoming a way in: the predicate is observational
+     only for as long as nothing on the lead path calls it. */
+  for (const [fn] of DASHBOARD_FILTERS_DELIBERATE) {
+    /* The lookbehind drops the DEFINITION line. Without it the definition
+       resolves to whatever function happens to precede it in the file and
+       reads as a rogue caller -- which it did, naming websiteVerifiedSqlList. */
+    const callers = [...src.matchAll(new RegExp('(?<!function\\s)\\b' + fn + '\\s*\\(', 'g'))]
+      .map((c) => enclosingOf(c.index));
+    ok(`10f: ${fn} is called only from /monitor/leads`,
+       callers.length > 0 && callers.every((name) => name === '/monitor/leads'),
+       'callers: ' + [...new Set(callers)].join(', '));
+  }
   /* PINNED. If this moves, a new counter was added and somebody has to
      decide it really is only counting -- which is the check, not a
      formality. */
@@ -763,6 +823,108 @@ const results7 = (async () => {
 
   /* ONE row builder, both tabs -- the Blocked tab gets the expandable
      panel for free and cannot drift from All Leads. */
+  /* ── THE META-WITHHELD FILTER, EXECUTED ──────────────────────────
+     The per-row reason is lifted and DRIVEN, because the thing that
+     matters about it is the ORDER -- a lead is routinely blocked AND on
+     an unverified site, and the reason a reader is shown has to be the
+     one the push path would have logged, not whichever branch happens to
+     be written first.
+
+     isWebsiteVerified is the REAL one, lifted with its real list, so the
+     website arm cannot drift from the Meta gate it mirrors.
+     isInternalSubmission is injected so the internal arm can be steered
+     from here; its own behaviour is covered by test-batch2 sections 28
+     and 29, which execute it against the staging hosts. */
+  {
+    const lift = [
+      between('const WEBSITE_VERIFIED_REASONS = [', '\n// Reasons that mean'),
+      between('function isWebsiteVerified(row)', '\nfunction websiteCheckNote'),
+      between('function metaWithheldReason(row)', '\n/* ── Eastern Time'),
+    ].join('\n');
+    const build = (metaOn, internal) => (new Function('NON_ICP_LLM_META', 'isInternalSubmission',
+      lift + '\n return metaWithheldReason;'))(metaOn, () => internal);
+
+    const on = build(true, false);
+    eq('meta reason: a clean lead withholds nothing', on({ email: 'a@b.com' }), null);
+    eq('meta reason: a blocked lead reads blocked',
+       on({ email: 'a@kw.com', non_icp_blocked: true }), 'blocked');
+    eq('meta reason: a flagged lead reads model',
+       on({ email: 'a@b.com', non_icp_llm_flagged: true }), 'model');
+    eq('meta reason: an unverified site reads website',
+       on({ email: 'a@b.com', website_check_reason: 'social_profile_url' }), 'website');
+    eq('meta reason: a disqualified lead reads disqualified',
+       on({ email: 'a@b.com', disqualified: true }), 'disqualified');
+    /* A verdict we could not reach is NOT a reason to report a withheld
+       event -- check_blocked is on WEBSITE_VERIFIED_REASONS precisely
+       because a bot wall is positive evidence. */
+    eq('meta reason: a captive-wall site is still verified',
+       on({ email: 'a@b.com', website_check_reason: 'check_blocked' }), null);
+    eq('meta reason: a pre-feature row with no reason is verified',
+       on({ email: 'a@b.com', website_check_reason: null }), null);
+
+    /* THE PRIORITY, on a lead that trips three arms at once. */
+    const three = { email: 'a@kw.com', non_icp_blocked: true, non_icp_llm_flagged: true,
+                    website_check_failed: true, disqualified: true };
+    eq('meta reason: blocked outranks model, website and disqualified', on(three), 'blocked');
+    eq('meta reason: internal outranks everything',
+       build(true, true)(three), 'internal');
+
+    /* THE FLAG THAT IS A SEPARATE FLAG ON PURPOSE. With NON_ICP_LLM_META
+       off a flagged lead fires Meta exactly as normal, so reporting it as
+       withheld would be a straight falsehood. */
+    eq('meta reason: with NON_ICP_LLM_META off, a flagged lead is NOT withheld',
+       build(false, false)({ email: 'a@b.com', non_icp_llm_flagged: true }), null);
+  }
+
+  /* The two label lists -- the server's META_WITHHELD_LABELS and the
+     dashboard's metaWithheldLabel -- name the same five reasons. Same
+     shape as the WEBSITE_REASON_LABELS pair CLAUDE.md warns about: two
+     copies, one of them inside a string sent to the browser. */
+  {
+    const reasons = JSON.parse(between("const META_WITHHELD_REASONS = [", "];")
+      .replace("const META_WITHHELD_REASONS = ", "").replace(/'/g, '"') + ']');
+    eq('meta labels: five reasons on the server', reasons.length, 5);
+    for (const r of reasons) {
+      ok(`meta labels: the server labels ${r}`,
+         new RegExp("^\\s*" + r + ":", 'm').test(between('const META_WITHHELD_LABELS = {', '};')));
+      ok(`meta labels: the dashboard labels ${r}`, src.includes('r==="' + r + '"'));
+    }
+    /* And the control offers every one of them, so a reason can never be
+       reportable but unfilterable. */
+    const sel = between("'<select id=\"fmeta\"", "+ '</select>'");
+    for (const r of reasons) ok(`meta filter: the control offers ${r}`, sel.includes('value="' + r + '"'));
+    for (const v of ['all', 'withheld', 'sent']) {
+      ok(`meta filter: the control offers ${v}`, sel.includes('value="' + v + '"'));
+    }
+  }
+
+  /* THE WIRING. A control the loader never reads is a filter that does
+     nothing, and it looks completely normal on screen. */
+  ok('meta filter: loadLeads sends it', (src.match(/url\+="&meta="/g) || []).length === 2);
+  ok('meta filter: clearF resets it', src.includes('document.getElementById("fmeta").value="all";'));
+
+  /* THE SEARCH BOX AND ITS PLACEHOLDER NAME THE SAME FIELDS. A box that
+     silently does not search a column reads as "no such lead". */
+  {
+    const cols = between('const LEADS_SEARCH_COLUMNS = [', '];');
+    for (const c of ['email', 'company', 'first_name', 'last_name', 'website']) {
+      ok(`search: ${c} is in the column list`, cols.includes("'" + c + "'"));
+    }
+    const ph = between("id=\"fsearch\"", 'oninput');
+    for (const word of ['email', 'name', 'company', 'website', 'phone']) {
+      ok(`search: the placeholder names ${word}`, ph.toLowerCase().includes(word));
+    }
+  }
+
+  /* THE TWO OVERVIEW CARDS SAY WHICH WINDOW THEY COUNT. They read 17 and
+     32 all-time beside a Model tab reading 14 and 22 for seven days, with
+     nothing on either saying so -- which is what sent Darshil looking for
+     a bug on 22 Sept 2026. */
+  for (const id of ['m-nonicp-sub', 'm-metaonly-sub']) {
+    ok(`overview: ${id} says it is all time`,
+       new RegExp('set\\("' + id + '","all time').test(src));
+  }
+
   ok('dash: there is a single shared row builder', src.includes("'function leadRowsHtml(leads,ns){"));
   eq('dash: both tabs render through it',
      (src.match(/leadRowsHtml\(d\.leads,"[a-z]+"\)/g) || []).length, 2);

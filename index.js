@@ -848,6 +848,88 @@ function websiteCheckNote(row) {
   return '';
 }
 
+/* ── "Why was this lead's Meta conversion withheld?" ───────────────────
+   Swapnil asked this in #i-gtm-ops on 21 Sept 2026 and there was no way
+   to answer it on the dashboard: the Model tab shows the leads the MODEL
+   held back and nothing shows the other three reasons. This is that
+   filter, on All Leads where the rest of the dimensions already live.
+
+   THE LIST IS DERIVED, NOT RESTATED. Each arm is built from the same
+   constant the runtime gate reads -- internalLeadSqlClause for the
+   internal/staging arm, WEBSITE_VERIFIED_REASONS for the website arm,
+   NON_ICP_LLM_META for the model arm -- so the filter cannot answer a
+   different question to the one the code actually asks. A test drives
+   the JS gates and this SQL over the same rows and requires them to
+   agree; that is the only thing keeping a fourth reason from being added
+   to the push path and silently missing here.
+
+   THE ORDER IS THE BOOKING ROUTES' ORDER: internal, then non-ICP, then
+   the website check. A lead can trip more than one -- a blocked lead on
+   an unverified site is common -- and the FIRST match is what the route
+   would have logged, so it is what a reader is shown.
+
+   OBSERVATIONAL, AND THAT IS THE WHOLE POINT. These predicates run in
+   /monitor/leads. They decide which rows a human sees on a page; they
+   reach no lead, no conversion, no Salesforce record and no SDR call.
+   test-non-icp.js section 10f enumerates every use of the flag column
+   and draws exactly this line -- see the DASHBOARD_FILTERS_DELIBERATE
+   list there, which names these and pins the count. */
+/* The columns the All Leads search box matches. Paired with the
+   placeholder text in the dashboard, which names them to the reader, and
+   pinned together by a test. */
+const LEADS_SEARCH_COLUMNS = ['email', 'company', 'first_name', 'last_name', 'website'];
+
+const META_WITHHELD_REASONS = ['internal', 'blocked', 'model', 'website', 'disqualified'];
+
+const META_WITHHELD_LABELS = {
+  internal:     'Internal or staging submission',
+  blocked:      'Blocked — non-ICP',
+  model:        'Model flagged the industry',
+  website:      'Website not verified',
+  disqualified: 'Disqualified (B2C / Mixed)',
+};
+
+/* The verified-reason list as a SQL literal. Extracted so the website arm
+   below and the existing websiteCheck=unverified filter cannot drift:
+   they were the same expression written twice. The regex filter is
+   belt-and-braces -- these are internal literals, never user input. */
+function websiteVerifiedSqlList() {
+  return WEBSITE_VERIFIED_REASONS.filter((r) => /^[a-z0-9_]+$/.test(r)).map((r) => `'${r}'`).join(',');
+}
+
+function metaWithheldSql(reason, a, params) {
+  if (reason === 'internal') return internalLeadSqlClause(`${a}.email`, `${a}.page_url`, params);
+  if (reason === 'blocked')  return `${a}.non_icp_blocked IS TRUE`;
+  /* Flagged-but-not-blocked withholds ONLY while NON_ICP_LLM_META is on.
+     With that flag off these leads fire Meta exactly as normal, so
+     reporting them as withheld would be a straight falsehood -- and the
+     separation of the two env flags is deliberate, see CLAUDE.md. */
+  if (reason === 'model')    return NON_ICP_LLM_META
+    ? `(${a}.non_icp_llm_flagged IS TRUE AND ${a}.non_icp_blocked IS NOT TRUE)`
+    : 'FALSE';
+  if (reason === 'website')  return `(${a}.website_check_failed IS TRUE OR (${a}.website_check_reason IS NOT NULL AND ${a}.website_check_reason <> '' AND ${a}.website_check_reason NOT IN (${websiteVerifiedSqlList()})))`;
+  if (reason === 'disqualified') return `${a}.disqualified IS TRUE`;
+  return null;
+}
+
+/* The per-row answer, in JS, for the chip on the table.
+
+   TWO RENDERINGS OF ONE RULE, for the reason the internal filter already
+   documents one screen down: the FILTER has to be SQL because the paging
+   is SQL, and a JavaScript filter applied after the query would drop rows
+   out of a page and make the count disagree with the table. The per-row
+   REASON is JS because it reads the row we already have. A test runs both
+   over the same fixtures and requires the same answer. */
+function metaWithheldReason(row) {
+  if (!row) return null;
+  if (isInternalSubmission(row.email, row.page_url)) return 'internal';
+  if (row.non_icp_blocked === true) return 'blocked';
+  if (row.non_icp_llm_flagged === true && NON_ICP_LLM_META) return 'model';
+  if (!isWebsiteVerified(row)) return 'website';
+  if (row.disqualified === true) return 'disqualified';
+  return null;
+}
+
 /* ── Eastern Time, everywhere ──────────────────────────────────────
    The dashboard, the Slack alerts and the export filenames are all read
    by people on US Eastern time. Before this, three different zones were
@@ -3392,6 +3474,11 @@ app.get('/monitor/leads', async (req, res) => {
      once -- the distortion CLAUDE.md says to flag rather than quietly
      fix. Opt in when you want a figure to quote. */
   const internal   = req.query.internal   || null;
+  /* WHY A META CONVERSION WAS WITHHELD. 'all' is no filter; 'withheld' is
+     any reason; a single reason narrows to it; 'sent' is the complement.
+     Opt-in like every other dimension here, so the tab's totals keep
+     reconciling with the Overview cards by default. */
+  const metaFilter = req.query.meta || 'all';
   const websiteCheck = req.query.websiteCheck || 'all';
   const repeatAttempts = req.query.repeatAttempts || 'all';
   const partner      = req.query.partner      || null;
@@ -3468,6 +3555,19 @@ app.get('/monitor/leads', async (req, res) => {
   if (enrichment === 'no') {
     conditions.push(`(l.enriched_title IS NULL AND l.enriched_company_size IS NULL AND NOT EXISTS (SELECT 1 FROM enrichment_data ee WHERE ee.session_id = l.session_id AND (ee.enriched_title IS NOT NULL OR ee.enriched_company_size IS NOT NULL OR ee.enriched_company IS NOT NULL)))`);
   }
+  /* Built from metaWithheldSql so the filter and the runtime gate cannot
+     answer different questions. 'sent' is deliberately the NOT of the same
+     expression rather than a second list: a reason added to one is then
+     reflected in both halves automatically, and neither half can quietly
+     stop covering it. */
+  if (metaFilter === 'withheld') {
+    conditions.push('(' + META_WITHHELD_REASONS.map((r) => metaWithheldSql(r, 'l', params)).join(' OR ') + ')');
+  } else if (metaFilter === 'sent') {
+    conditions.push('NOT (' + META_WITHHELD_REASONS.map((r) => metaWithheldSql(r, 'l', params)).join(' OR ') + ')');
+  } else if (META_WITHHELD_REASONS.includes(metaFilter)) {
+    conditions.push(metaWithheldSql(metaFilter, 'l', params));
+  }
+
   if (websiteCheck === 'failed') conditions.push(`l.website_check_failed IS TRUE`);
   if (websiteCheck === 'passed') conditions.push(`l.website_check_failed IS NOT TRUE`); // covers false AND null (pre-migration rows)
   if (websiteCheck === 'social') conditions.push(`l.website_check_reason = 'social_profile_url'`);
@@ -3475,8 +3575,10 @@ app.get('/monitor/leads', async (req, res) => {
   // with the Meta gate. Values are internal literals; the filter below is a
   // belt-and-braces guard so nothing unexpected can reach the SQL string.
   if (websiteCheck === 'unverified') {
-    const verifiedSql = WEBSITE_VERIFIED_REASONS.filter((r) => /^[a-z0-9_]+$/.test(r)).map((r) => `'${r}'`).join(',');
-    conditions.push(`(l.website_check_failed IS TRUE OR (l.website_check_reason IS NOT NULL AND l.website_check_reason <> '' AND l.website_check_reason NOT IN (${verifiedSql})))`);
+    /* The same expression as metaWithheldSql('website'), and now literally
+       the same code: it was written out twice and the two would have had
+       to be edited together for ever. */
+    conditions.push(metaWithheldSql('website', 'l', params));
   }
   /* Partner as a DIMENSION on the existing view, not a tab of its own.
      '__any' is every partner-sourced lead; a specific value matches the key,
@@ -3504,9 +3606,31 @@ app.get('/monitor/leads', async (req, res) => {
   if (dateFrom) { params.push(dateFrom); conditions.push(`l.created_at >= ($${params.length}::date::timestamp AT TIME ZONE '${DASH_TZ}')`); }
   if (dateTo)   { params.push(dateTo);   conditions.push(`l.created_at < (($${params.length}::date + INTERVAL '1 day')::timestamp AT TIME ZONE '${DASH_TZ}')`); }
   if (search) {
+    /* WHAT THE BOX ACTUALLY SEARCHES, named once so the placeholder can
+       say it and a test can pin the two together -- the same pairing
+       SDR_SEARCH_COLUMNS / SDR_SEARCH_FIELDS needs one tab over, and for
+       the same reason: a search that silently does not cover a field
+       reads as "no such lead" rather than as a missing feature.
+
+       It used to be email, company and FIRST name only. Searching a
+       surname, a website or a phone number returned nothing at all, with
+       no indication the field was not being looked at. */
     params.push(`%${search.toLowerCase()}%`);
     const i = params.length;
-    conditions.push(`(LOWER(l.email) LIKE $${i} OR LOWER(COALESCE(l.company,'')) LIKE $${i} OR LOWER(COALESCE(l.first_name,'')) LIKE $${i})`);
+    const like = LEADS_SEARCH_COLUMNS.map((c) => `LOWER(COALESCE(l.${c},'')) LIKE $${i}`);
+    /* The two names concatenated, so "jane smith" matches a row that has
+       them in separate columns. Neither column alone can ever contain it. */
+    like.push(`LOWER(COALESCE(l.first_name,'') || ' ' || COALESCE(l.last_name,'')) LIKE $${i}`);
+    /* PHONE, COMPARED AS DIGITS. The column holds "+1 (415) 555-0134" and
+       people search "4155550134"; a plain LIKE matches neither direction.
+       Only added when the term has enough digits to mean a number, so
+       searching "smith" does not scan phones for nothing. */
+    const digits = search.replace(/[^0-9]/g, '');
+    if (digits.length >= 3) {
+      params.push(`%${digits}%`);
+      like.push(`REGEXP_REPLACE(COALESCE(l.phone,''), '[^0-9]', '', 'g') LIKE $${params.length}`);
+    }
+    conditions.push('(' + like.join(' OR ') + ')');
   }
 
   const whereClause = conditions.length > 0 ? 'AND ' + conditions.join(' AND ') : '';
@@ -3524,6 +3648,10 @@ app.get('/monitor/leads', async (req, res) => {
          string comparison anyone can re-derive from a list, or a model
          reading a website -- which is the whole reason the column exists. */
       l.non_icp_blocked, l.non_icp_reason, l.non_icp_source,
+      /* SELECT-list only, for the Meta-withheld chip. It is never a
+         predicate outside the enumerated dashboard filter -- see
+         test-non-icp.js section 10f. */
+      l.non_icp_llm_flagged,
       l.loops_sent, l.created_at, l.submitted_at, l.page_url,
       l.landing_page, l.previous_page, l.website_check_failed, l.website_check_reason,
       l.elv_status, l.elv_checked_at,
@@ -3570,7 +3698,7 @@ app.get('/monitor/leads', async (req, res) => {
         'completed','booking_uid','disqualified','non_icp_blocked','non_icp_reason','non_icp_source','step_reached','created_at','submitted_at','booked_at',
         'utm_source','utm_medium','utm_campaign','utm_term','referrer','prefill_source',
         'landing_page','previous_page','page_url','website_check_failed','website_check_reason','prior_attempts','prior_disqualified',
-        'elv_status','unverifiable_pair','is_internal',
+        'elv_status','unverifiable_pair','is_internal','meta_withheld_reason',
         'enriched_title','enriched_company_size','enriched_industry','enriched_seniority','enriched_departments',
         'enriched_linkedin','enriched_city','enriched_state','enriched_country',
         'enriched_annual_revenue','enriched_total_funding','enriched_funding_stage'
@@ -3586,6 +3714,10 @@ app.get('/monitor/leads', async (req, res) => {
         ...allRows.rows.map(r => cols.map(c => escape(
           c === 'unverifiable_pair' ? isUnverifiablePair(r)
           : c === 'is_internal'     ? isInternalSubmission(r.email, r.page_url)
+          /* The export carries it because the screen does. These two drift
+             apart the moment only one of them learns a new column, which is
+             the SDR_SEARCH_COLUMNS / SDR_SEARCH_FIELDS trap one tab over. */
+          : c === 'meta_withheld_reason' ? (metaWithheldReason(r) || '')
           : r[c])).join(','))
       ].join('\n');
       res.setHeader('Content-Type', 'text/csv');
@@ -3619,6 +3751,10 @@ app.get('/monitor/leads', async (req, res) => {
          two parameters it never references -- which Postgres rejects
          outright. Same reason unverifiable_pair is computed here. */
       is_internal: isInternalSubmission(r.email, r.page_url),
+      /* Computed here for the same reason as the two above, and from the
+         same function the filter's SQL is derived from. NULL means no
+         Meta event was withheld for this lead. */
+      meta_withheld_reason: metaWithheldReason(r),
     }));
 
     res.json({ total, page, pages: Math.ceil(total / limit), leads: leadRows });
@@ -3937,13 +4073,13 @@ app.get('/monitor', (req, res) => {
   '<div class="mc" title="People whose form reached Step 2 (completed) on at least one of their sessions."><div class="ml">People completed</div><div class="mv" id="m-comp">&#8212;</div><div class="ms" id="m-cpct">&#8212;</div></div>' +
   '<div class="mc" title="People with a booking on at least one of their sessions."><div class="ml">People booked</div><div class="mv" id="m-book">&#8212;</div><div class="ms" id="m-bpct">&#8212;</div></div>' +
   '<div class="mc" title="People marked disqualified (B2C / Mixed) on at least one session."><div class="ml">Disqualified</div><div class="mv" id="m-disq">&#8212;</div><div class="ms" id="m-dsq">B2C / Mixed</div></div>' +
-  '<div class="mc" title="LEADS stopped before the calendar by the brand-domain list, with the number of distinct PEOPLE underneath. One person who submitted five times is five leads and one person, so those two are not comparable &#8212; and neither is comparable to the Blocked tab&#39;s &quot;excluding our own tests&quot;, which is leads again. These are NOT removed from any other number on this page. Click through to the Blocked tab." style="cursor:pointer" onclick="showTab(\'blocked\')"><div class="ml">Blocked &#8212; Non-ICP</div><div class="mv" id="m-nonicp">&#8212;</div><div class="ms" id="m-nonicp-sub">still counted in every total</div></div>' +
+  '<div class="mc" title="ALL TIME. The Model tab counts the same leads inside a chosen window, so its figure is smaller and neither is wrong. LEADS stopped before the calendar by the non-ICP check &#8212; the brand-domain list OR the model &#8212; with the number of distinct PEOPLE underneath. One person who submitted five times is five leads and one person, so those two are not comparable &#8212; and neither is comparable to the Blocked tab&#39;s &quot;excluding our own tests&quot;, which is leads again. These are NOT removed from any other number on this page. Click through to the Blocked tab." style="cursor:pointer" onclick="showTab(\'blocked\')"><div class="ml">Blocked &#8212; Non-ICP</div><div class="mv" id="m-nonicp">&#8212;</div><div class="ms" id="m-nonicp-sub">still counted in every total</div></div>' +
   /* THE 4.2% NOBODY COULD SEE. A flagged lead is NOT blocked -- it books,
      it reaches Salesforce, it gets dialled -- and the only thing that
      changes is that Meta stops hearing about it. The label has to say all
      of that, because a card next to "Blocked" that shows a number will be
      read as blocking within a day. */
-  '<div class="mc" title="Leads the model judged to be one of the four rule-6 industries that suppress Meta but never block. They booked, they are in Salesforce and the SDR list, and they are counted in every total on this page. The ONLY thing withheld is the Meta conversion events. Click through for the evidence quote behind each one." style="cursor:pointer" onclick="showTab(\'model\')"><div class="ml">Meta withheld &#8212; model</div><div class="mv" id="m-metaonly">&#8212;</div><div class="ms" id="m-metaonly-sub">not blocked &#8212; events only</div></div>' +
+  '<div class="mc" title="ALL TIME. The Model tab counts the same leads inside a chosen window, so its figure is smaller and neither is wrong. Leads the model judged to be one of the four rule-6 industries that suppress Meta but never block. They booked, they are in Salesforce and the SDR list, and they are counted in every total on this page. The ONLY thing withheld is the Meta conversion events. Click through for the evidence quote behind each one." style="cursor:pointer" onclick="showTab(\'model\')"><div class="ml">Meta withheld &#8212; model</div><div class="mv" id="m-metaonly">&#8212;</div><div class="ms" id="m-metaonly-sub">not blocked &#8212; events only</div></div>' +
   '</div>' +
   /* Same three measures as the cards above, same unit (people, deduped by
      lower(email)), split by product. Deliberately a thin row rather than a
@@ -3975,12 +4111,28 @@ app.get('/monitor', (req, res) => {
   '</div>' +
   '<div class="tp" id="tp-leads">' +
   '<div class="filters">' +
-  '<input type="text" id="fsearch" placeholder="Search email, company..." oninput="debounce()">' +
+  '<input type="text" id="fsearch" placeholder="Search email, name, company, website, phone&#8230;" title="Matches email, first name, last name, the two names together, company and website. A term of three or more digits also matches the phone number with its formatting ignored, so 4155550134 finds +1 (415) 555-0134." oninput="debounce()" style="min-width:230px">' +
   '<select id="fstage" onchange="loadLeads(1)"><option value="all">All stages</option><option value="booked">Booked</option><option value="completed">Completed (not booked, not disqualified)</option><option value="step1">Step 1 only</option><option value="disqualified">Disqualified (not booked)</option></select>' +
   /* A FILTER, not a default. Blocked leads are included in All Leads unless
      you ask otherwise, so every total on this tab still reconciles with the
      Overview cards. */
   '<select id="fnonicp" onchange="loadLeads(1)" title="Blocked leads are INCLUDED by default and marked with a red sign. Filtering is opt-in so the totals keep reconciling."><option value="">Blocked: included</option><option value="only">Blocked only</option><option value="exclude">Hide blocked</option></select>' +
+  /* THE ANSWER TO "how do we filter leads jismei CAPI fire nahi hua?"
+     -- Swapnil, #i-gtm-ops, 21 Sept 2026. Every option is derived from
+     metaWithheldSql on the server, so it cannot answer a different
+     question to the one the push path asks. */
+  '<select id="fmeta" onchange="loadLeads(1)" title="Whether a Meta conversion was withheld for this lead, and why. The reasons are the same four gates the push path checks, in the same order: internal or staging, blocked, model-flagged, website not verified &#8212; plus disqualified, which stops the event at step 1. A lead can trip more than one; the first is the one shown.">'
+    + '<option value="all">Meta: all</option>'
+    + '<option value="withheld">Meta withheld (any reason)</option>'
+    + '<optgroup label="Why it was withheld">'
+      + '<option value="blocked">&#8212; Blocked (non-ICP)</option>'
+      + '<option value="model">&#8212; Model flagged the industry</option>'
+      + '<option value="internal">&#8212; Internal or staging</option>'
+      + '<option value="website">&#8212; Website not verified</option>'
+      + '<option value="disqualified">&#8212; Disqualified (B2C / Mixed)</option>'
+    + '</optgroup>'
+    + '<option value="sent">Not withheld</option>'
+  + '</select>' +
   '<select id="fsellto" onchange="loadLeads(1)"><option value="all">All sell-to</option><option value="B2B">B2B</option><option value="B2B (clarified from B2C)">B2B (clarified from B2C)</option><option value="B2B (clarified from Mixed)">B2B (clarified from Mixed)</option><option value="B2C">B2C</option><option value="Mixed">Mixed</option><option value="__clarified">Clarified (any)</option></select>' +
   '<select id="fproduct" onchange="loadLeads(1)"><option value="all">All products</option><option value="aeo">AEO</option><option value="crm">CRM</option><option value="__none">Untagged</option></select>' +
   '<select id="finterest" onchange="loadLeads(1)" title="What the visitor ticked on /demo, as opposed to the product we routed them to. Not asked anywhere else."><option value="all">Asked for: any</option><option value="aeo">Asked for: Lead Gen only</option><option value="crm">Asked for: AI-CRM only</option><option value="aeo,crm">Asked for: both</option><option value="__none">Never asked</option></select>' +
@@ -3994,9 +4146,15 @@ app.get('/monitor', (req, res) => {
   '<select id="fpreset" onchange="datePreset(this.value)"><option value="">Any date</option><option value="today">Today</option><option value="7d">Last 7 days</option><option value="30d">Last 30 days</option></select>' +
   '<input type="date" id="ffrom" onchange="dateManual()">' +
   '<input type="date" id="fto" onchange="dateManual()">' +
-  '<button class="btn" onclick="clearF()">Clear</button>' +
+  '<button class="btn" id="fclear" onclick="clearF()">Clear</button>' +
   '<button class="btn" onclick="exportLeads()" style="background:#1a1a1a;color:#fff;border-color:#1a1a1a">&#8595; Export CSV</button>' +
   '<span id="lcount" style="font-size:12px;color:#888"></span>' +
+  /* WHICH FILTERS ARE ON, said out loud. There are fourteen controls in
+     this bar and several default to something other than "off", so a
+     narrowed table and an empty one look identical to a reader who did
+     not set the filter themselves -- they conclude the leads are missing
+     rather than hidden. */
+  '<span id="factive" style="font-size:12px;color:#999"></span>' +
   '</div>' +
   '<div class="card" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table><thead><tr>' +
   '<th style="width:30px"></th>' +
@@ -4927,12 +5085,12 @@ app.get('/monitor', (req, res) => {
   'if(!has){var o=document.createElement("option");o.value=key;o.textContent="Partner: "+key;sel.appendChild(o);}' +
   'sel.value=key;}loadLeads(1);}' +
   'function debounce(){clearTimeout(stimer);stimer=setTimeout(function(){loadLeads(1);},400);}' +
-  'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("fsellto").value="all";document.getElementById("fproduct").value="all";document.getElementById("finterest").value="all";document.getElementById("fsource").value="all";document.getElementById("fenrich").value="all";document.getElementById("fwebsitecheck").value="all";document.getElementById("frepeat").value="all";document.getElementById("fpartner").value="all";document.getElementById("fnonicp").value="";document.getElementById("fhear").value="";document.getElementById("fpreset").value="";document.getElementById("ffrom").value="";document.getElementById("fto").value="";curSort="created_at";curDir="desc";renderSortArrows();loadLeads(1);}' +
+  'function clearF(){document.getElementById("fsearch").value="";document.getElementById("fstage").value="all";document.getElementById("fsellto").value="all";document.getElementById("fproduct").value="all";document.getElementById("finterest").value="all";document.getElementById("fsource").value="all";document.getElementById("fenrich").value="all";document.getElementById("fwebsitecheck").value="all";document.getElementById("frepeat").value="all";document.getElementById("fpartner").value="all";document.getElementById("fnonicp").value="";document.getElementById("fmeta").value="all";document.getElementById("fhear").value="";document.getElementById("fpreset").value="";document.getElementById("ffrom").value="";document.getElementById("fto").value="";curSort="created_at";curDir="desc";renderSortArrows();loadLeads(1);}' +
   'function renderSortArrows(){["email","name","company","sell_to","created_at"].forEach(function(c){var el=document.getElementById("sar-"+c);if(el)el.textContent=(curSort===c)?(curDir==="asc"?"\\u25B2":"\\u25BC"):"";});}' +
   'function sortBy(c){if(curSort===c){curDir=(curDir==="asc")?"desc":"asc";}else{curSort=c;curDir=(c==="created_at")?"desc":"asc";}renderSortArrows();loadLeads(1);}' +
   'function datePreset(v){var ff=document.getElementById("ffrom"),ft=document.getElementById("fto");if(!v){loadLeads(1);return;}var to=etDayShift(0),from=to;if(v==="7d")from=etDayShift(-6);else if(v==="30d")from=etDayShift(-29);ff.value=from;ft.value=to;loadLeads(1);}' +
   'function dateManual(){var p=document.getElementById("fpreset");if(p)p.value="";loadLeads(1);}' +
-  'function exportLeads(){var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,product=document.getElementById("fproduct").value,interest=document.getElementById("finterest").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"format=csv&stage="+stage+"&sort="+curSort+"&dir="+curDir;if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(product&&product!=="all")url+="&product="+encodeURIComponent(product);if(interest&&interest!=="all")url+="&interest="+encodeURIComponent(interest);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;var ni=document.getElementById("fnonicp").value;if(ni)url+="&nonicp="+encodeURIComponent(ni);window.location.href=url;}' +
+  'function exportLeads(){var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,product=document.getElementById("fproduct").value,interest=document.getElementById("finterest").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"format=csv&stage="+stage+"&sort="+curSort+"&dir="+curDir;if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(product&&product!=="all")url+="&product="+encodeURIComponent(product);if(interest&&interest!=="all")url+="&interest="+encodeURIComponent(interest);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;var ni=document.getElementById("fnonicp").value;if(ni)url+="&nonicp="+encodeURIComponent(ni);var mw=document.getElementById("fmeta").value;if(mw&&mw!=="all")url+="&meta="+encodeURIComponent(mw);window.location.href=url;}' +
   'async function loadFilterOptions(){if(filterOptsLoaded)return;try{var r=await fetch(API+"/monitor/filter-options"+(TP||"?")+(TP?"&":"")+"_="+Date.now(),{signal:AbortSignal.timeout(10000)});if(!r.ok)return;var d=await r.json();var sel=document.getElementById("fsource");if(sel&&d.utmSource){d.utmSource.forEach(function(v){var o=document.createElement("option");o.value=v;o.textContent=v;sel.appendChild(o);});}var ps=document.getElementById("fpartner");if(ps&&d.partners){d.partners.forEach(function(p){var o=document.createElement("option");o.value=p.key;o.textContent="Partner: "+(p.name||p.key)+(p.email?" <"+p.email+">":"");ps.appendChild(o);});}var dl=document.getElementById("hearlist");if(dl&&d.hearAbout){dl.innerHTML=d.hearAbout.map(function(v){return"<option value=\\""+esc(v)+"\\"></option>";}).join("");}filterOptsLoaded=true;}catch(e){}}' +
   /* TWO ARGUMENTS, AND THEY ARE NOT THE SAME THING. `key` addresses the
      DOM, `sid` addresses the lead. They were one value until 15 Sept
@@ -5025,6 +5183,31 @@ app.get('/monitor', (req, res) => {
      for no gain -- the dashboard's job is to be read, not decoded. The
      tooltip carries the provenance footnote for anyone auditing; the chip
      stays one of two words so the column scans. */
+  /* TOP LEVEL, like every other shared row helper. leadRowsHtml renders
+     both All Leads and Blocked, so anything it calls has to be reachable
+     from both -- declaring one of these inside a loader is exactly the
+     scope break that made the Blocked tab print "leadRowsHtml is not
+     defined" on 12 Sept. The labels mirror META_WITHHELD_LABELS on the
+     server and a test pins the two lists together. */
+  'function metaWithheldLabel(r){'
+    + 'if(r==="internal")return "Internal or staging submission";'
+    + 'if(r==="blocked")return "Blocked \\u2014 non-ICP";'
+    + 'if(r==="model")return "Model flagged the industry";'
+    + 'if(r==="website")return "Website not verified";'
+    + 'if(r==="disqualified")return "Disqualified (B2C / Mixed)";'
+    + 'return "";}' +
+  'function metaMark(l){if(!l||!l.meta_withheld_reason)return "";'
+    + 'return "<span title=\\"No Meta conversion was sent for this lead \\u2014 "+esc(metaWithheldLabel(l.meta_withheld_reason))+". The lead is unaffected: it still books, still reaches Salesforce and is still counted in every total on this page.\\" style=\\"color:#b45309\\">&#128201; </span>";}' +
+  /* Every control in the filter bar with the value that means "not
+     filtering". Kept as data rather than a chain of ifs so a control
+     added to the bar and forgotten here shows up as a filter that never
+     counts, not as a silent omission. */
+  'var FDEFAULTS={fsearch:"",fstage:"all",fnonicp:"",fmeta:"all",fsellto:"all",fproduct:"all",finterest:"all",fsource:"all",fenrich:"all",fpartner:"all",fwebsitecheck:"all",frepeat:"all",fhear:"",fpreset:"",ffrom:"",fto:""};' +
+  'function activeFilters(){var out=[];for(var k in FDEFAULTS){var el=document.getElementById(k);if(el&&String(el.value)!==FDEFAULTS[k])out.push(k);}return out;}' +
+  'function renderFilterState(){var a=activeFilters(),el=document.getElementById("factive");'
+    + 'if(el){el.innerHTML=a.length?("&#183; <b>"+a.length+"</b> filter"+(a.length!==1?"s":"")+" active"):"";el.style.color=a.length?"#b45309":"#999";}'
+    + 'var c=document.getElementById("fclear");'
+    + 'if(c){c.style.background=a.length?"#b45309":"";c.style.color=a.length?"#fff":"";c.style.borderColor=a.length?"#b45309":"";}}' +
   'function nonIcpSourceShort(src){return src==="llm"?"AI check":"Brand list";}' +
   'function nonIcpSourceWhy(src){'
   + 'if(src==="llm")return "The AI check read this company website and classified it as real estate or insurance. The Model tab shows the exact quote it relied on.";'
@@ -5034,15 +5217,15 @@ app.get('/monitor', (req, res) => {
      Leads and Blocked, so anything it calls has to be visible to both -- the
      scope bug that made Blocked rows silently unexpandable. */
   'function leadRowsHtml(leads,ns){return leads.map(function(l){var sid=esc(l.session_id),key=esc(ns||"x")+"-"+sid,name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\\u2014",src=l.utm_source?esc(l.utm_source)+(l.utm_medium?" / "+esc(l.utm_medium):""):(l.referrer?"referral":"\\u2014");' +
-  'return"<tr"+(l.non_icp_blocked?" style=\\"background:#fff7ed\\"":"")+"><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+key+"\',\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.is_internal?"<span title=\\"One of our own test submissions. Counted in every total, like everything else \\u2014 use the filter to take them out of a number you are about to quote.\\" style=\\"color:#6b7280\\">&#129514; </span>":"")+(l.non_icp_blocked?"<span title=\\"Blocked \\u2014 non-ICP ("+esc(l.non_icp_reason||"")+"). Blocked by: "+esc(nonIcpSourceShort(l.non_icp_source))+". "+esc(nonIcpSourceWhy(l.non_icp_source))+" Still counted in every total.\\" style=\\"color:#c2410c\\">&#128683; </span>":"")+((l.non_icp_blocked&&ns==="b")?"<span class=\\"pschip\\" title=\\""+esc(nonIcpSourceWhy(l.non_icp_source))+"\\">"+esc(nonIcpSourceShort(l.non_icp_source))+"</span> ":"")+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+esc(l.product||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
+  'return"<tr"+(l.non_icp_blocked?" style=\\"background:#fff7ed\\"":"")+"><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+key+"\',\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.is_internal?"<span title=\\"One of our own test submissions. Counted in every total, like everything else \\u2014 use the filter to take them out of a number you are about to quote.\\" style=\\"color:#6b7280\\">&#129514; </span>":"")+(l.non_icp_blocked?"<span title=\\"Blocked \\u2014 non-ICP ("+esc(l.non_icp_reason||"")+"). Blocked by: "+esc(nonIcpSourceShort(l.non_icp_source))+". "+esc(nonIcpSourceWhy(l.non_icp_source))+" Still counted in every total.\\" style=\\"color:#c2410c\\">&#128683; </span>":"")+((l.non_icp_blocked&&ns==="b")?"<span class=\\"pschip\\" title=\\""+esc(nonIcpSourceWhy(l.non_icp_source))+"\\">"+esc(nonIcpSourceShort(l.non_icp_source))+"</span> ":"")+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+metaMark(l)+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+esc(l.product||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
   '"<tr class=\\"erow\\" id=\\"er-"+key+"\\" style=\\"display:none\\"><td></td><td colspan=\\"10\\">"+enrichPanel(l)+"<div id=\\"lc-"+key+"\\"></div></td></tr>";}).join("");}' +
   'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,product=document.getElementById("fproduct").value,interest=document.getElementById("finterest").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
   'var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"page="+curPage+"&stage="+stage+"&sort="+curSort+"&dir="+curDir;' +
-  'if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(product&&product!=="all")url+="&product="+encodeURIComponent(product);if(interest&&interest!=="all")url+="&interest="+encodeURIComponent(interest);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;var ni=document.getElementById("fnonicp").value;if(ni)url+="&nonicp="+encodeURIComponent(ni);' +
+  'if(sellTo&&sellTo!=="all")url+="&sellTo="+encodeURIComponent(sellTo);if(product&&product!=="all")url+="&product="+encodeURIComponent(product);if(interest&&interest!=="all")url+="&interest="+encodeURIComponent(interest);if(source&&source!=="all")url+="&utmSource="+encodeURIComponent(source);if(enrich&&enrich!=="all")url+="&enrichment="+encodeURIComponent(enrich);if(websiteCheck&&websiteCheck!=="all")url+="&websiteCheck="+encodeURIComponent(websiteCheck);if(repeatAttempts&&repeatAttempts!=="all")url+="&repeatAttempts="+encodeURIComponent(repeatAttempts);if(partner&&partner!=="all")url+="&partner="+encodeURIComponent(partner);if(hear)url+="&hearAbout="+encodeURIComponent(hear);if(search)url+="&search="+encodeURIComponent(search);if(from)url+="&dateFrom="+from;if(to)url+="&dateTo="+to;var ni=document.getElementById("fnonicp").value;if(ni)url+="&nonicp="+encodeURIComponent(ni);var mw=document.getElementById("fmeta").value;if(mw&&mw!=="all")url+="&meta="+encodeURIComponent(mw);' +
   'document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\">Loading...</td></tr>";' +
   'try{var r=await fetch(url,{signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error("HTTP "+r.status);var d=await r.json();' +
-  'set("lcount",d.total+" lead"+(d.total!==1?"s":"")+" found");' +
-  'if(!d.leads.length){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\">No leads match your filters.</td></tr>";document.getElementById("lpag").innerHTML="";return;}' +
+  'set("lcount",d.total+" lead"+(d.total!==1?"s":"")+" found");renderFilterState();' +
+  'if(!d.leads.length){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\">No leads match "+(activeFilters().length||0)+" active filter"+(activeFilters().length!==1?"s":"")+". <button class=\\"btn\\" onclick=\\"clearF()\\">Clear filters</button></td></tr>";document.getElementById("lpag").innerHTML="";renderFilterState();return;}' +
   'document.getElementById("ltbody").innerHTML=leadRowsHtml(d.leads,"l");renderPag(d.page,d.pages);}catch(e){document.getElementById("ltbody").innerHTML="<tr><td colspan=\\"11\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function renderPag(pg,pages){if(pages<=1){document.getElementById("lpag").innerHTML="";return;}var h="";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg-1)+")\\""+(pg<=1?" disabled":"")+">&larr;</button>";var s=Math.max(1,pg-2),e=Math.min(pages,pg+2);if(s>1)h+="<button class=\\"pb\\" onclick=\\"loadLeads(1)\\">1</button>"+(s>2?"<span class=\\"pi\\">&#8230;</span>":"");for(var i=s;i<=e;i++)h+="<button class=\\"pb"+(i===pg?" act":"")+ "\\" onclick=\\"loadLeads("+i+")\\" >"+i+"</button>";if(e<pages)h+=(e<pages-1?"<span class=\\"pi\\">&#8230;</span>":"")+"<button class=\\"pb\\" onclick=\\"loadLeads("+pages+")\\" >"+pages+"</button>";h+="<button class=\\"pb\\" onclick=\\"loadLeads("+(pg+1)+")\\"" +(pg>=pages?" disabled":"")+">&rarr;</button><span class=\\"pi\\">Page "+pg+" of "+pages+"</span>";document.getElementById("lpag").innerHTML=h;}' +
   'var lmLeads=[],lmChart=null,lmFilter="all";' +
@@ -5209,8 +5392,8 @@ app.get('/monitor', (req, res) => {
      leads -- "6 people" read as a comparable figure one greater. It is
      not: 10 leads are 6 people because five of those leads are one
      address of ours. */
-  'set("m-nonicp",d.nonIcpBlocked);set("m-nonicp-sub",(d.nonIcpBlocked||0)+" leads \\u00B7 "+(d.peopleNonIcp||0)+" people \\u00B7 counted in every total");' +
-  'set("m-metaonly",d.nonIcpMetaOnly);set("m-metaonly-sub",(d.nonIcpMetaOnly||0)+" leads \\u00B7 "+(d.peopleMetaOnly||0)+" people \\u00B7 booked and dialled as normal");' +
+  'set("m-nonicp",d.nonIcpBlocked);set("m-nonicp-sub","all time \\u00B7 "+(d.nonIcpBlocked||0)+" leads \\u00B7 "+(d.peopleNonIcp||0)+" people \\u00B7 counted in every total");' +
+  'set("m-metaonly",d.nonIcpMetaOnly);set("m-metaonly-sub","all time \\u00B7 "+(d.nonIcpMetaOnly||0)+" leads \\u00B7 "+(d.peopleMetaOnly||0)+" people \\u00B7 booked and dialled as normal");' +
   'renderProductRow(d.productBreakdown);' +
   'set("m-nb",d.peopleNoBooking);set("m-nbs",d.completedNoBookingSessions+" completed sessions w/o booking");' +
   'set("m-rec",d.recoveredBookings);set("m-pend",d.pendingPartials);set("m-mail",d.loopsSent);' +
