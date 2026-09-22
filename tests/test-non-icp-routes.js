@@ -126,7 +126,19 @@ function stubQuery(q, params) {
     return { rows, rowCount: rows.length };
   }
   if (/FROM leads l WHERE l\.created_at >=/.test(flat)) {
-    const rows = S.reportLeads || [];
+    let rows = S.reportLeads || [];
+    /* HONOURS THE PRODUCT PREDICATE rather than ignoring it. A stub that
+       returns the whole population whatever the WHERE says can only ever
+       prove the SQL contained a filter -- not that the ladder still sums
+       to the total once it has been applied, which is the property the
+       whole tab rests on. */
+    const m = /AND l\.product = \$(\d+)/.exec(flat);
+    if (m) {
+      const want = (params || [])[Number(m[1]) - 1];
+      rows = rows.filter((r) => r.product === want);
+    } else if (/AND l\.product IS NULL/.test(flat)) {
+      rows = rows.filter((r) => r.product === null || r.product === undefined);
+    }
     return { rows, rowCount: rows.length };
   }
   /* The standing cache inventory. Matched on the real column list: an
@@ -791,6 +803,10 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
            + ' et: typeof et === "function" ? et : null,'
            + ' enrichPanel: typeof enrichPanel === "function" ? enrichPanel : null,'
            + ' stageBadge: typeof stageBadge === "function" ? stageBadge : null,'
+           + ' metaMark: typeof metaMark === "function" ? metaMark : null,'
+           + ' metaWithheldLabel: typeof metaWithheldLabel === "function" ? metaWithheldLabel : null,'
+           + ' activeFilters: typeof activeFilters === "function" ? activeFilters : null,'
+           + ' renderFilterState: typeof renderFilterState === "function" ? renderFilterState : null,'
            + ' loadModel: typeof loadModel === "function" ? loadModel : null,'
            + ' mdlLadderHtml: typeof mdlLadderHtml === "function" ? mdlLadderHtml : null,'
            + ' mdlScrapeHtml: typeof mdlScrapeHtml === "function" ? mdlScrapeHtml : null,'
@@ -889,6 +905,14 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
          that is not visible at top level cannot be shared between tabs. */
       for (const nm of ['leadRowsHtml', 'esc', 'escq', 'nonIcpSourceShort', 'nonIcpSourceWhy',
                         'et', 'enrichPanel', 'stageBadge',
+                        /* The Meta-withheld marker and its label, called
+                           from leadRowsHtml -- which renders BOTH All
+                           Leads and Blocked, so a declaration tucked
+                           inside either loader repeats the 12 Sept break
+                           exactly. The filter-state pair is here for the
+                           same reason: loadLeads and the empty-state
+                           button both call them. */
+                        'metaMark', 'metaWithheldLabel', 'activeFilters', 'renderFilterState',
                         'showTab', 'loadLeads', 'loadBlocked', 'loadSDR',
                         'loadDupes', 'loadLM', 'loadPartners', 'checkHealth',
                         /* The Model tab's own helpers. Every one is used by
@@ -1090,6 +1114,32 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
           created_at: new Date().toISOString(), non_icp_blocked: true, non_icp_reason: 'kw.com' }], 'l');
       } catch (err) { rowsErr = err; }
       ok('dashboard: leadRowsHtml renders a row', !rowsErr && rowsHtml.includes('<tr'), rowsErr && rowsErr.message);
+
+      /* THE MARKER, READ BACK OUT OF THE PAINTED HTML. "It rendered" is
+         one level short of the claim that matters -- the 15 Sept "0
+         companies classified" bug passed every structural check. So the
+         row is rendered and then inspected for the marker and its
+         reason, and a clean row is required NOT to carry one. */
+      if (scope.leadRowsHtml && scope.metaMark) {
+        const withReason = scope.leadRowsHtml([{ session_id: 's9', email: 'a@b.com',
+          first_name: 'A', created_at: new Date().toISOString(),
+          meta_withheld_reason: 'model' }], 'l');
+        ok('dashboard: a withheld row paints the Meta marker',
+           /&#128201;/.test(withReason), withReason.slice(0, 300));
+        ok('dashboard: the marker names the reason in its tooltip',
+           /Model flagged the industry/.test(withReason), withReason.slice(0, 400));
+        const clean = scope.leadRowsHtml([{ session_id: 's8', email: 'c@d.com',
+          first_name: 'C', created_at: new Date().toISOString() }], 'l');
+        ok('dashboard: a lead with no withheld reason paints NO marker',
+           !/&#128201;/.test(clean), clean.slice(0, 300));
+        /* Every reason the server can emit must render something. A
+           reason with no label paints an empty tooltip and reads as a
+           bug in the data rather than a missing case here. */
+        for (const r of ['internal', 'blocked', 'model', 'website', 'disqualified']) {
+          ok(`dashboard: the marker labels ${r}`,
+             scope.metaWithheldLabel(r).length > 0, r);
+        }
+      }
       ok('dashboard: a blocked row is marked in the rendered HTML', /kw\.com/.test(rowsHtml));
     }
   }
@@ -1918,6 +1968,245 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     ok('both-ticked carries BOTH ids on that one event',
        leadEvents[0] && JSON.stringify(leadEvents[0].custom_data.content_ids) === JSON.stringify(['aeo', 'crm']),
        JSON.stringify(leadEvents[0] && leadEvents[0].custom_data.content_ids));
+  }
+
+  /* ========================================================
+     THE "META WITHHELD" FILTER ON ALL LEADS — DRIVEN, NOT READ
+
+     Added 22 Sept 2026 for Swapnil's question in #i-gtm-ops: "how do we
+     filter leads jismei CAPI fire nahi hua?"
+
+     Every assertion here goes over HTTP and then reads the SQL the route
+     actually built, because the thing that breaks is the wiring -- a
+     control the loader never sends, a param the route never parses -- and
+     none of that moves a source offset. A structural assertion would pass
+     on a filter that silently returns every lead.
+     ======================================================== */
+  {
+    reset();
+    const whereFor = async (qs) => {
+      S.writes.length = 0;
+      let status = 0;
+      try {
+        const r = await realFetch(BASE + '/monitor/leads?token=stub&page=1' + qs,
+                                  { signal: AbortSignal.timeout(20000) });
+        status = r.status;
+        try { await r.json(); } catch (_) {}
+      } catch (err) { status = 0; }
+      /* The COUNT carries the same WHERE as the page query and is the
+         shortest statement to read it out of. */
+      const w = S.writes.map((x) => x.flat).filter((f) => /FROM leads l WHERE true/.test(f));
+      return { status, sql: w.join(' || ') };
+    };
+
+    const base = await whereFor('');
+    ok('meta filter: unfiltered All Leads still answers 200', base.status === 200, String(base.status));
+    ok('meta filter: no filter means no Meta predicate in the SQL',
+       base.sql && !/non_icp_llm_flagged/.test(base.sql), base.sql.slice(0, 200));
+
+    /* Each single reason reaches SQL, and reaches the RIGHT column. A
+       filter that compiled but narrowed on the wrong thing would answer
+       200 and show a plausible, wrong list. */
+    const REASON_COLUMN = {
+      blocked:      /non_icp_blocked IS TRUE/,
+      model:        /non_icp_llm_flagged IS TRUE/,
+      website:      /website_check_reason NOT IN/,
+      disqualified: /l\.disqualified IS TRUE/,
+      internal:     /SPLIT_PART/,
+    };
+    for (const [reason, re] of Object.entries(REASON_COLUMN)) {
+      const r = await whereFor('&meta=' + reason);
+      ok(`meta filter: meta=${reason} answers 200`, r.status === 200, String(r.status));
+      ok(`meta filter: meta=${reason} narrows on its own column`, re.test(r.sql), r.sql.slice(0, 300));
+    }
+
+    /* "withheld" is the union and must mention EVERY reason. This is what
+       catches a reason added to the push path and forgotten here: the
+       union is built by mapping META_WITHHELD_REASONS, so a new reason
+       appears automatically -- and if someone hand-writes the list
+       instead, this fails. */
+    const un = await whereFor('&meta=withheld');
+    ok('meta filter: withheld answers 200', un.status === 200, String(un.status));
+    for (const re of Object.values(REASON_COLUMN)) {
+      ok('meta filter: withheld covers every reason', re.test(un.sql), un.sql.slice(0, 400));
+    }
+
+    /* "sent" is the NOT of exactly that union, never a second hand-kept
+       list that could disagree with it. */
+    const sent = await whereFor('&meta=sent');
+    ok('meta filter: sent answers 200', sent.status === 200, String(sent.status));
+    ok('meta filter: sent is the negation of the same union',
+       /NOT \(/.test(sent.sql) && /non_icp_llm_flagged IS TRUE/.test(sent.sql), sent.sql.slice(0, 300));
+
+    /* An unknown value must be inert rather than an error or, worse, a
+       filter that silently matches nothing. */
+    const junk = await whereFor('&meta=nonsense');
+    ok('meta filter: an unknown value is ignored, not an error', junk.status === 200, String(junk.status));
+    ok('meta filter: an unknown value adds no predicate',
+       junk.sql && !/non_icp_llm_flagged/.test(junk.sql), junk.sql.slice(0, 200));
+
+    /* THE SEARCH BOX. It matched email, company and FIRST name only, so a
+       surname or a website returned "no leads" rather than "not searched".
+       Driven because the columns are assembled in the route. */
+    const srch = await whereFor('&search=smith');
+    ok('search: answers 200', srch.status === 200, String(srch.status));
+    /* THE STANDALONE CLAUSE, not merely the column name appearing
+       somewhere. Dropping last_name from LEADS_SEARCH_COLUMNS left it
+       visible inside the concatenated-names clause, so a bare
+       includes('l.last_name') stayed true while surname search was gone
+       -- found by mutating it. */
+    for (const col of ['l.email', 'l.company', 'l.first_name', 'l.last_name', 'l.website']) {
+      ok(`search: covers ${col} in its own right`,
+         srch.sql.includes(`LOWER(COALESCE(${col},'')) LIKE`), srch.sql.slice(0, 400));
+    }
+    ok('search: matches the two names concatenated',
+       srch.sql.includes("COALESCE(l.first_name,'') || ' ' || COALESCE(l.last_name,'')"),
+       srch.sql.slice(0, 500));
+    ok('search: a word does NOT trigger the phone scan',
+       !/REGEXP_REPLACE/.test(srch.sql), srch.sql.slice(0, 300));
+
+    /* PRODUCT AND META TOGETHER. Swapnil's actual question was about AEO
+       demos specifically, so the two dimensions have to AND rather than
+       one quietly replacing the other -- which is what a filter bar that
+       rebuilds the URL per control can get wrong without any error. */
+    const combo = await whereFor('&product=aeo&meta=withheld');
+    ok('meta filter: product AND meta both reach the SQL',
+       combo.status === 200 && /l\.product = \$/.test(combo.sql) && /non_icp_llm_flagged IS TRUE/.test(combo.sql),
+       combo.sql.slice(0, 400));
+
+    const phone = await whereFor('&search=' + encodeURIComponent('(415) 555-0134'));
+    ok('search: a number DOES compare phones as digits',
+       /REGEXP_REPLACE/.test(phone.sql), phone.sql.slice(0, 300));
+  }
+
+  /* ========================================================
+     THE MODEL TAB'S PRODUCT FILTER — DRIVEN, AND THE LADDER
+     RE-CHECKED UNDER IT
+
+     The five ladder rows summing to the total is the one property that
+     makes this tab worth reading, and a filter is exactly the change
+     that can break it: narrow the population after the row cap and the
+     rows sum to something that is not the printed total, with no error
+     anywhere.
+
+     So this drives the real route with a MIXED-product population and
+     re-asserts the sum for each filter value, not just that the SQL
+     carried a predicate.
+     ======================================================== */
+  {
+    reset();
+    const now = new Date().toISOString();
+    const L = (over) => ({
+      session_id: 's', email: 'x@ex.test', website: null, company: null,
+      first_name: null, last_name: null, created_at: now, product: 'aeo',
+      booked: false, completed: true, non_icp_blocked: false, non_icp_reason: null,
+      non_icp_source: null, non_icp_llm_flagged: false, non_icp_checked_at: now, ...over,
+    });
+    /* Three AEO, two CRM, one untagged. Deliberately NOT one of each
+       ladder state per product: the point is that the sum holds for a
+       lopsided population, which is what real ones are. */
+    S.reportLeads = [
+      L({ session_id: 'p1', email: 'a@kw.test',    website: 'https://kw.test', product: 'aeo',
+          non_icp_blocked: true, non_icp_source: 'domain_list', non_icp_reason: 'kw.test' }),
+      L({ session_id: 'p2', email: 'b@realty.test', website: 'https://realty.test', product: 'aeo',
+          non_icp_blocked: true, non_icp_source: 'llm', non_icp_reason: 'realty.test' }),
+      L({ session_id: 'p3', email: 'c@saas.test',  website: 'https://saas.test', product: 'aeo' }),
+      L({ session_id: 'p4', email: 'd@solar.test', website: 'https://solar.test', product: 'crm',
+          non_icp_llm_flagged: true, non_icp_source: 'llm', non_icp_reason: 'solar.test' }),
+      L({ session_id: 'p5', email: 'e@saas.test',  website: 'https://saas.test', product: 'crm' }),
+      L({ session_id: 'p6', email: 'f@saas.test',  website: 'https://saas.test', product: null }),
+    ];
+    S.reportVerdicts = [
+      { domain: 'kw.test', business_type: 'real_estate', blocking: true, confidence: 0.97,
+        evidence_quote: 'We are a brokerage', reason: 'brokerage', source: 'llm',
+        model_id: 'm', prompt_version: 'v1', scrape_status: 'ok', error: null,
+        page_url_used: 'https://kw.test', page_text_chars: 900, checked_at: now },
+      { domain: 'realty.test', business_type: 'real_estate', blocking: true, confidence: 0.96,
+        evidence_quote: 'Homes for sale', reason: 'brokerage', source: 'llm',
+        model_id: 'm', prompt_version: 'v1', scrape_status: 'ok', error: null,
+        page_url_used: 'https://realty.test', page_text_chars: 800, checked_at: now },
+      { domain: 'solar.test', business_type: 'home_services', blocking: false, confidence: 0.82,
+        evidence_quote: 'Residential Solar Installation', reason: 'installer', source: 'llm',
+        model_id: 'm', prompt_version: 'v1', scrape_status: 'ok', error: null,
+        page_url_used: 'https://solar.test', page_text_chars: 700, checked_at: now },
+      { domain: 'saas.test', business_type: 'software_technology', blocking: false, confidence: 0.95,
+        evidence_quote: 'A SaaS platform', reason: 'saas', source: 'llm',
+        model_id: 'm', prompt_version: 'v1', scrape_status: 'ok', error: null,
+        page_url_used: 'https://saas.test', page_text_chars: 600, checked_at: now },
+    ];
+
+    const report = async (qs) => {
+      S.writes.length = 0;
+      const r = await realFetch(BASE + '/monitor/non-icp?days=7&token=stub' + qs,
+                                { signal: AbortSignal.timeout(20000) });
+      const body = await r.json();
+      const sql = S.writes.map((x) => x.flat).filter((f) => /FROM leads l WHERE/.test(f)).join(' || ');
+      return { status: r.status, d: body, sql };
+    };
+    const sums = (d) => (d.ladder.rows || []).reduce((a, r) => a + r.n, 0);
+
+    /* Unfiltered first, so the filtered numbers have something to be
+       smaller than. */
+    const all = await report('');
+    ok('model filter: unfiltered answers 200', all.status === 200, String(all.status));
+    ok('model filter: unfiltered echoes product=all', all.d.product === 'all', String(all.d.product));
+    ok('model filter: unfiltered counts every lead', all.d.ladder.total === 6, String(all.d.ladder.total));
+    ok('model filter: unfiltered ladder sums to its total',
+       sums(all.d) === all.d.ladder.total, sums(all.d) + ' vs ' + all.d.ladder.total);
+    /* ANCHORED ON THE PREDICATE, not the column name: l.product is in the
+       SELECT list of every one of these queries, so a bare /l\.product/
+       is true even with no filter applied at all. */
+    ok('model filter: unfiltered SQL carries NO product predicate',
+       !/AND l\.product/.test(all.sql), all.sql.slice(-200));
+
+    /* AEO. Three leads, and the two blocks are both AEO so they must
+       survive the narrowing. */
+    const aeo = await report('&product=aeo');
+    ok('model filter: aeo answers 200', aeo.status === 200, String(aeo.status));
+    ok('model filter: aeo echoes back', aeo.d.product === 'aeo', String(aeo.d.product));
+    ok('model filter: aeo narrows the SQL', /l\.product = \$/.test(aeo.sql), aeo.sql.slice(0, 250));
+    ok('model filter: aeo counts only its own', aeo.d.ladder.total === 3, String(aeo.d.ladder.total));
+    ok('model filter: aeo ladder STILL sums to its total',
+       sums(aeo.d) === aeo.d.ladder.total, sums(aeo.d) + ' vs ' + aeo.d.ladder.total);
+
+    /* CRM. The meta_only lead is CRM, so it must be here and the two
+       blocks must be gone -- a filter that narrowed the total but not
+       the rows would leave blocked_list at 1 and still "sum" if the
+       total were computed from the rows. */
+    const crm = await report('&product=crm');
+    ok('model filter: crm counts only its own', crm.d.ladder.total === 2, String(crm.d.ladder.total));
+    ok('model filter: crm ladder STILL sums to its total',
+       sums(crm.d) === crm.d.ladder.total, sums(crm.d) + ' vs ' + crm.d.ladder.total);
+    const byKey = {};
+    for (const r of crm.d.ladder.rows) byKey[r.key] = r.n;
+    ok('model filter: crm keeps its own meta_only lead', byKey.meta_only === 1, JSON.stringify(byKey));
+    ok('model filter: crm drops the AEO blocks',
+       byKey.blocked_list === 0 && byKey.blocked_model === 0, JSON.stringify(byKey));
+
+    /* UNTAGGED is a real population -- a page_url resolveProduct could
+       not read -- not a synonym for "all". */
+    const none = await report('&product=__none');
+    ok('model filter: __none narrows on IS NULL', /l\.product IS NULL/.test(none.sql), none.sql.slice(0, 250));
+    ok('model filter: __none counts only the untagged lead', none.d.ladder.total === 1, String(none.d.ladder.total));
+    ok('model filter: __none ladder sums to its total',
+       sums(none.d) === none.d.ladder.total, sums(none.d) + ' vs ' + none.d.ladder.total);
+
+    /* An unknown value must fall back to the whole population AND SAY
+       SO, because the caption is built from what came back. Silently
+       returning everything under a filter the reader thinks is applied
+       is the failure this echo exists to prevent. */
+    const junk = await report('&product=nonsense');
+    ok('model filter: an unknown product falls back to all', junk.d.product === 'all', String(junk.d.product));
+    ok('model filter: an unknown product adds no predicate',
+       !/AND l\.product/.test(junk.sql), junk.sql.slice(-200));
+    ok('model filter: an unknown product counts everything', junk.d.ladder.total === 6, String(junk.d.ladder.total));
+
+    /* THE OTHER PANELS NARROW WITH IT. They all derive from the same
+       perLead array, so this is really asserting that nothing re-reads
+       the unfiltered population behind the ladder's back. */
+    ok('model filter: the decisions panel narrows too',
+       (crm.d.decisions || []).every((x) => /solar\.test|saas\.test/.test(x.email || '')),
+       JSON.stringify((crm.d.decisions || []).map((x) => x.email)));
   }
 
   loud();
