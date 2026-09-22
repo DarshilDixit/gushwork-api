@@ -2341,6 +2341,67 @@ results13 = (async () => {
       out.push(['V2 sweep EXEC: NON_ICP_LLM_BLOCK=false stops it stamping', st.updates.length === 0]);
     }
   }
+
+  /* ── 13t. FOUR SOURCE VALUES, NOT TWO ────────────────────────────
+     Adding llm_name_only and llm_late re-scoped every consumer that
+     compared against the literal 'llm'. Found while writing the review
+     card, not by a test, which is why these exist now. */
+  {
+    /* The server helper is the single place the question is asked. */
+    const H = (new Function(between('const NON_ICP_MODEL_SOURCES =', 'function nonIcpTypeBlocks')
+      + '\nreturn { NON_ICP_MODEL_SOURCES, nonIcpSourceIsModel };'))();
+    out.push(['V2 src: llm counts as a model decision', H.nonIcpSourceIsModel('llm') === true]);
+    out.push(['V2 src: llm_name_only counts as a model decision', H.nonIcpSourceIsModel('llm_name_only') === true]);
+    out.push(['V2 src: llm_late counts as a model decision', H.nonIcpSourceIsModel('llm_late') === true]);
+    out.push(['V2 src: the brand list does NOT', H.nonIcpSourceIsModel('domain_list') === false]);
+    /* A pre-feature row has no source and means the list, which was the
+       only mechanism that existed then. */
+    out.push(['V2 src: a null source does NOT', H.nonIcpSourceIsModel(null) === false]);
+
+    /* NO LITERAL 'llm' COMPARISON MAY SURVIVE on the lead's stamped column.
+       That is the exact shape that made all three Model-tab buckets answer
+       "brand list" for a model block. */
+    out.push(['V2 src: nothing compares non_icp_source to the bare literal',
+              !/non_icp_source === 'llm'/.test(src)]);
+    out.push(['V2 src: all three Model-tab buckets ask the helper',
+              (src.match(/nonIcpSourceIsModel\(lead\.non_icp_source\)/g) || []).length === 3]);
+
+    /* THE CLIENT COPY MUST KNOW THE SAME FOUR. Same shape as WLBL and the
+       SDR search pair: two copies, one meaning. A blocked lead's tooltip is
+       one of only two human-facing records it has, so a label saying "Brand
+       list" about a model block is a false statement to an SDR. */
+    const shortFn = between('function nonIcpSourceShort(src){', 'function nonIcpSourceWhy(src){');
+    const whyFn   = between("'function nonIcpSourceWhy(src){'", 'TOP LEVEL, like every other shared helper');
+    for (const v of ['llm_name_only', 'llm_late']) {
+      out.push([`V2 src: the dashboard label knows ${v}`, shortFn.includes(v)]);
+      out.push([`V2 src: the dashboard explanation knows ${v}`, whyFn.includes(v)]);
+    }
+    /* EXECUTED, not read -- the helpers live inside a JS string sent to the
+       browser, so a syntax slip in them is invisible to node --check. */
+    const L = (new Function('return ' + JSON.stringify('x') + ';')) && null;
+    const clientSrc = between("'function nonIcpSourceShort(src){'", "'function leadRowsHtml(leads,ns)");
+    const glued = clientSrc.split('\n').map((l) => {
+      const m = l.match(/^\s*\+?\s*'(.*)'\s*\+?\s*$/);
+      return m ? m[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\') : '';
+    }).join('');
+    let fns = null;
+    try { fns = (new Function(glued + '\nreturn { nonIcpSourceShort, nonIcpSourceWhy };'))(); } catch (e) { fns = null; }
+    out.push(['V2 src: the client helpers parse and run', !!fns, fns ? '' : 'did not evaluate']);
+    if (fns) {
+      out.push(['V2 src EXEC: llm_late is not labelled "Brand list"',
+                fns.nonIcpSourceShort('llm_late') !== 'Brand list', fns.nonIcpSourceShort('llm_late')]);
+      out.push(['V2 src EXEC: llm_name_only is not labelled "Brand list"',
+                fns.nonIcpSourceShort('llm_name_only') !== 'Brand list', fns.nonIcpSourceShort('llm_name_only')]);
+      out.push(['V2 src EXEC: domain_list still IS "Brand list"',
+                fns.nonIcpSourceShort('domain_list') === 'Brand list']);
+      out.push(['V2 src EXEC: llm_late does not claim the domain is on a list',
+                !/on our list/.test(fns.nonIcpSourceWhy('llm_late'))]);
+      out.push(['V2 src EXEC: llm_name_only does not claim the domain is on a list',
+                !/on our list/.test(fns.nonIcpSourceWhy('llm_name_only'))]);
+      out.push(['V2 src EXEC: llm_late says the booking was not cancelled',
+                /NOT cancelled/i.test(fns.nonIcpSourceWhy('llm_late'))]);
+    }
+  }
   return out;
 })();
 

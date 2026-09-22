@@ -5263,9 +5263,22 @@ app.get('/monitor', (req, res) => {
     + 'if(el){el.innerHTML=a.length?("&#183; <b>"+a.length+"</b> filter"+(a.length!==1?"s":"")+" active"):"";el.style.color=a.length?"#b45309":"#999";}'
     + 'var c=document.getElementById("fclear");'
     + 'if(c){c.style.background=a.length?"#b45309":"";c.style.color=a.length?"#fff":"";c.style.borderColor=a.length?"#b45309":"";}}' +
-  'function nonIcpSourceShort(src){return src==="llm"?"AI check":"Brand list";}' +
+  /* FOUR VALUES, NOT TWO. These two helpers said `src==="llm" ? "AI check"
+     : "Brand list"`, so the two sources added on 23 Sept would each have
+     printed "Brand list" to an SDR -- and the sentence underneath would have
+     told them the domain is on a list it is not on. A wrong sentence on a
+     blocked lead is worse than no sentence: the Slack post and this tooltip
+     are the only human-facing record a blocked lead has. Kept in step with
+     NON_ICP_MODEL_SOURCES on the server; test-non-icp asserts the pair. */
+  'function nonIcpSourceShort(src){'
+  + 'if(src==="llm")return "AI check";'
+  + 'if(src==="llm_name_only")return "AI check (name only)";'
+  + 'if(src==="llm_late")return "AI check (after booking)";'
+  + 'return "Brand list";}' +
   'function nonIcpSourceWhy(src){'
   + 'if(src==="llm")return "The AI check read this company website and classified it as real estate or insurance. The Model tab shows the exact quote it relied on.";'
+  + 'if(src==="llm_name_only")return "We could not load their website -- it refused us, failed, or needs JavaScript -- so the AI check judged the domain NAME alone. Weaker evidence than reading a page, so it needs higher confidence before it counts.";'
+  + 'if(src==="llm_late")return "The AI check finished after this person had already submitted, so nothing could stop them booking. They were marked afterwards and a Slack post asked somebody to decide about the meeting. The booking was NOT cancelled.";'
   + 'if(src==="domain_list")return "This domain is on our list of national real-estate and insurance brands, so it was turned away without anything needing to read the site.";'
   + 'return "This domain is on our list of national real-estate and insurance brands. (Blocked before we started recording which check fired -- the brand list was the only one that existed then.)";}' +
   /* TOP LEVEL, like every other shared helper. leadRowsHtml renders both All
@@ -8172,6 +8185,26 @@ const NON_ICP_BUSINESS_TYPES = {
 
 const NON_ICP_BUSINESS_TYPE_KEYS = Object.keys(NON_ICP_BUSINESS_TYPES);
 
+/* ── WHICH MECHANISM DECIDED, asked in ONE place ──────────────────────
+   There are now FOUR source values, not two, and every consumer that
+   compared against the literal 'llm' silently answered "brand list" for
+   the two new ones. That is the repo's oldest shape: a second value is
+   never additive, it re-scopes every reader of the first.
+
+     domain_list    the brand list
+     llm            the model, having read the page
+     llm_name_only  the model, having read only the domain name
+     llm_late       a verdict that landed after /submit, stamped by the
+                    recheck sweep. The lead row carries this; the verdict
+                    row underneath it is 'llm' or 'llm_name_only'.
+
+   A null is a pre-feature row and means the brand list, which was the only
+   mechanism that existed then. */
+const NON_ICP_MODEL_SOURCES = ['llm', 'llm_name_only', 'llm_late'];
+function nonIcpSourceIsModel(src) {
+  return NON_ICP_MODEL_SOURCES.includes(src);
+}
+
 function nonIcpTypeBlocks(businessType) {
   const t = NON_ICP_BUSINESS_TYPES[businessType];
   return !!(t && t.blocks);
@@ -8668,6 +8701,17 @@ async function nonIcpReadVerdictRow(domain) {
   const row = r.rows[0];
   if (!row) return null;
   const ageMs = Date.now() - new Date(row.checked_at).getTime();
+  /* THREE LIFETIMES NOW, AND THE MIDDLE ONE IS DELIBERATE.
+
+     A page verdict lasts 180 days. A failure lasts hours, so a brief outage
+     cannot pin a domain to "could not check" until spring.
+
+     A NAME-ONLY verdict sits between them and takes the SHORT one, on
+     purpose rather than by falling through: it exists only because the site
+     would not load, and the right outcome is to try the site again soon.
+     Holding a hostname guess for 180 days would mean a site that came back
+     up tomorrow is never read. The cost is one cheap model call per domain
+     per failure window, and the warm path pays it, never a lead. */
   const ttlMs = row.source === 'llm'
     ? NON_ICP_VERDICT_TTL_D * 86400000
     : NON_ICP_FAILURE_TTL_H * 3600000;
@@ -11658,10 +11702,10 @@ async function nonIcpModelReport({ days, product } = {}) {
     const mine = isInternalSubmission(lead.email, lead.page_url);
     let bucket;
     if (lead.non_icp_blocked === true) {
-      bucket = lead.non_icp_source === 'llm' ? 'blocked_model' : 'blocked_list';
+      bucket = nonIcpSourceIsModel(lead.non_icp_source) ? 'blocked_model' : 'blocked_list';
     } else if (lead.non_icp_llm_flagged === true) {
       bucket = 'meta_only';
-    } else if (verdicts.some((v) => v.source === 'llm')) {
+    } else if (verdicts.some((v) => nonIcpSourceIsModel(v.source))) {
       bucket = 'checked_clear';
     } else {
       bucket = 'not_decided';
@@ -11683,7 +11727,7 @@ async function nonIcpModelReport({ days, product } = {}) {
         booked: lead.booked, completed: lead.completed,
         product: lead.product,
         action: lead.non_icp_blocked === true
-          ? (lead.non_icp_source === 'llm' ? 'blocked_model' : 'blocked_list')
+          ? (nonIcpSourceIsModel(lead.non_icp_source) ? 'blocked_model' : 'blocked_list')
           : 'meta_only',
         is_internal: mine,
         source: lead.non_icp_source || null,
@@ -11749,12 +11793,12 @@ async function nonIcpModelReport({ days, product } = {}) {
        empty. */
     if (lead.non_icp_blocked === true || lead.non_icp_llm_flagged === true) {
       const group = lead.non_icp_blocked === true
-        ? (lead.non_icp_source === 'llm' ? 'blocked_model' : 'blocked_list')
+        ? (nonIcpSourceIsModel(lead.non_icp_source) ? 'blocked_model' : 'blocked_list')
         : 'meta_only';
       /* THE DECIDING DOMAIN ONLY. non_icp_reason holds the domain that
          blocked or flagged, for both mechanisms. No fallback. */
       const v = byDomain.get(lead.non_icp_reason) || null;
-      const key = (v && v.source === 'llm' && v.business_type) ? v.business_type : '_uncategorised';
+      const key = (v && nonIcpSourceIsModel(v.source) && v.business_type) ? v.business_type : '_uncategorised';
       const gk = group + '|' + key;
       if (!industry.has(gk)) {
         industry.set(gk, { group, business_type: key, leads: 0, domains: new Set(), confs: [] });
