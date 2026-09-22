@@ -9276,8 +9276,20 @@ function syncIpGeoToAWS(session_id, geo) {
   ).catch((err) => console.warn('[AWS] \u26a0 IP geo sync failed:', err.message));
 }
 
-/* Called fire-and-forget from /submit. Writes the ADDRESS first and the
-   PLACE second, as two statements, because they are two different
+/* ONE LOOKUP PER SESSION, PER PROCESS. /partial fires REPEATEDLY through
+   step 1 -- CLAUDE.md is explicit, and the "actually we're B2B" button
+   calls savePartial(1) again, which 47% of leads press. Without this a
+   single visitor could spend five lookups. A plain Set, lost on deploy,
+   which costs one extra lookup per session per dyno and nothing else; the
+   ip_checked_at column below is the durable half.
+
+   NOT a claiming UPDATE. Stamping ip_checked_at before the answer exists
+   would put an inferred timestamp in an observational column, which is the
+   thing non_icp_checked_at's comment says never to do. */
+const _ipGeoInFlight = new Set();
+
+/* Called fire-and-forget from /partial AND /submit. Writes the ADDRESS
+   first and the PLACE second, as two statements, because they are two different
    observations with two different failure modes: the address is ours and
    cannot fail, the place comes from a third party and often will. Folding
    them into one write would mean a geo outage loses the address too.
@@ -9289,13 +9301,28 @@ function syncIpGeoToAWS(session_id, geo) {
    a targeted UPDATE on an indexed key costs a millisecond and cannot
    renumber anything. */
 async function finaliseIpGeo(session_id, ip) {
+  if (!session_id) return;
   try {
+    /* The ADDRESS is written on every call, because it is free and because
+       COALESCE means the first one seen is the one kept -- a visitor who
+       moves between step 1 and submit should not rewrite where they
+       started. */
     if (ip) {
       await pool.query(
         'UPDATE leads SET ip_address = COALESCE(ip_address, $2), updated_at = NOW() WHERE session_id = $1',
         [session_id, ip]);
     }
-    const geo = await resolveIpGeo(ip);
+    if (_ipGeoInFlight.has(session_id)) return;
+    /* Already resolved on an earlier /partial: nothing to ask. Reads the
+       row we just wrote rather than trusting the Set, so a deploy between
+       step 1 and submit does not buy a second lookup. */
+    const have = await pool.query(
+      'SELECT ip_checked_at FROM leads WHERE session_id = $1', [session_id]);
+    if (have.rows[0] && have.rows[0].ip_checked_at) return;
+
+    _ipGeoInFlight.add(session_id);
+    let geo;
+    try { geo = await resolveIpGeo(ip); } finally { _ipGeoInFlight.delete(session_id); }
     if (!geo) return;
     await pool.query(
       `UPDATE leads
@@ -13361,6 +13388,17 @@ app.post('/partial', async (req, res) => {
 
     console.log(`[/partial] ✅ Saved session ${session_id} | step ${step_reached} | disqualified: ${disqualified} | non-ICP: ${nonIcp.blocked ? nonIcp.reason : 'no'} | email ${email}`);
     res.json({ ok: true });
+
+    /* WHERE THEY ARE, FROM STEP 1, not only from submit. 41 leads a day
+       reach step 1 and 11 of them never submit -- so resolving here is the
+       only way the drop-offs, the SDR list and the recovery cron ever get a
+       location. Measured 23 Sept 2026: 41/day average, 53 on the busiest
+       day in a month, against ipwho.is's 1,000/day. About 4%.
+
+       Safe to call on every /partial even though /partial fires repeatedly:
+       finaliseIpGeo writes the free part unconditionally and does at most
+       ONE lookup per session, guarded in process and by ip_checked_at. */
+    finaliseIpGeo(session_id, clientIpOf(req)).catch(() => {});
 
     /* Off the critical path, exactly like /submit's copy: the lead is no
        longer waiting and a third-party lookup must never be in front of one.

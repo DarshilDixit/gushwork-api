@@ -3920,8 +3920,37 @@ const results31 = (async () => {
   /* NEVER ON THE LEAD PATH. */
   out.push(['31: the geo call is never awaited',
             /\n    finaliseIpGeo\(session_id, clientIpOf\(req\)\)\.catch/.test(idx)]);
-  out.push(['31: it runs AFTER res.json(), like the other finalisers',
-            idx.indexOf('res.json({ ok: true, non_icp_blocked') < idx.indexOf('finaliseIpGeo(session_id, clientIpOf(req))')]);
+  /* BOTH ROUTES. 41 leads a day reach step 1 and 11 never submit, so
+     resolving only at /submit would leave every drop-off -- the SDR list
+     and the recovery cron -- with no location at all. */
+  out.push(['31: it runs from BOTH /partial and /submit',
+            (idx.match(/finaliseIpGeo\(session_id, clientIpOf\(req\)\)/g) || []).length === 2]);
+  /* /partial fires repeatedly through step 1 and the "actually we're B2B"
+     button calls savePartial(1) again, which 47% of leads press. Without a
+     guard one visitor spends several lookups. */
+  out.push(['31: at most one lookup per session, guarded in process',
+            /_ipGeoInFlight/.test(idx)]);
+  out.push(['31: and guarded durably by ip_checked_at, so a deploy buys no second lookup',
+            /SELECT ip_checked_at FROM leads WHERE session_id/.test(idx)]);
+  /* The address is free and must be written on every call; only the
+     network half is rationed. */
+  out.push(['31: the address is still written before the dedup check',
+            idx.indexOf('UPDATE leads SET ip_address = COALESCE') < idx.indexOf('_ipGeoInFlight.has(session_id)')]);
+  /* AFTER THE RESPONSE IN BOTH ROUTES. Checked per route rather than with
+     a bare indexOf, which finds /partial's call and silently compares it
+     against /submit's response -- it failed exactly that way when the
+     second call site was added. */
+  {
+    const calls = [];
+    let at = idx.indexOf('finaliseIpGeo(session_id, clientIpOf(req))');
+    while (at !== -1) { calls.push(at); at = idx.indexOf('finaliseIpGeo(session_id, clientIpOf(req))', at + 1); }
+    const partialRes = idx.indexOf("console.log(`[/partial] \u2705 Saved session");
+    const submitRes  = idx.indexOf("res.json({ ok: true, non_icp_blocked");
+    out.push(['31: /partial resolves AFTER its response',
+              calls.some((c) => c > partialRes && c < submitRes), String(calls)]);
+    out.push(['31: /submit resolves AFTER its response',
+              calls.some((c) => c > submitRes), String(calls)]);
+  }
   /* THE ADDRESS AND THE PLACE ARE TWO WRITES, so a geo outage cannot lose
      the address. */
   out.push(['31: the address is written before the lookup',
