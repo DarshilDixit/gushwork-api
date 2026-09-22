@@ -750,6 +750,47 @@ async function initDB() {
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS offer_campaign TEXT`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS offer_medium   TEXT`,
 
+      /* ── WHERE THE VISITOR ACTUALLY WAS ───────────────────────────────
+         Requested 23 Sept 2026. Until now nothing in this repo stored an
+         IP: the PartnerStack fraud context and the Meta payloads both read
+         it off the request and threw it away, so the only location we held
+         was Apollo's, which is the COMPANY HQ and covers 44% of leads.
+         Where the person actually was is a different fact and we had none
+         of it.
+
+         ip_address IS PERSONAL DATA, unlike everything else on this table
+         except the contact fields. It is kept indefinitely -- decided 23
+         Sept 2026 -- which is the same treatment every other column gets,
+         but it is a decision rather than a default and it is written here
+         so the next person knows it was made rather than overlooked. A
+         deletion request has to clear this and the mirror copy.
+
+         THE GEO FIELDS ARE RESOLVED AFTER res.json(), NEVER ON THE LEAD
+         PATH. A third-party lookup in front of a submitting visitor is the
+         failure the PartnerStack timeout already exists to prevent. The
+         raw address is written at submit, costs no network and cannot
+         fail; everything below it arrives a moment later or not at all.
+
+         ip_isp / ip_org_domain are the corporate-versus-residential
+         signal, which is the half a city name cannot give you. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ip_address      TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ip_city         TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ip_region       TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ip_country      TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ip_country_name TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ip_postal       TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ip_timezone     TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ip_isp          TEXT`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ip_org_domain   TEXT`,
+      /* Stamped only when a lookup actually DECIDED something, never for a
+         failure or a skip -- the same rule non_icp_checked_at follows. An
+         inferred timestamp in an observational column reads as a
+         measurement to the next person. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ip_checked_at   TIMESTAMPTZ`,
+      /* The duplicate-and-junk question is "how many leads share this
+         address", which is a scan without it. */
+      `CREATE INDEX IF NOT EXISTS leads_ip_address_idx ON leads (ip_address) WHERE ip_address IS NOT NULL`,
+
       /* ── SALESFORCE SYNC STATE ────────────────────────────────────────
          Until 16 Sept 2026 nothing recorded whether a Salesforce write had
          landed. A maintenance window that afternoon dropped
