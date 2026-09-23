@@ -4328,6 +4328,7 @@ app.get('/monitor', (req, res) => {
   '<table><thead><tr><th>IP address</th><th>Leads</th><th>People</th><th>Where</th><th>Network</th><th>First seen</th><th>Last seen</th><th>Emails</th></tr></thead>' +
   '<tbody id="vis-repeats"><tr><td colspan="8" class="nd">Loading...</td></tr></tbody></table>' +
   '<div class="sl" style="margin:18px 0 8px">Where they were</div>' +
+  '<div id="vis-countries" style="margin-bottom:8px"></div>' +
   '<table><thead><tr><th>City</th><th>Region</th><th>Country</th><th>Leads</th><th>People</th><th>Booked</th></tr></thead>' +
   '<tbody id="vis-places"><tr><td colspan="6" class="nd">Loading...</td></tr></tbody></table>' +
   '<div class="sl" style="margin:18px 0 8px">Networks</div>' +
@@ -4519,9 +4520,9 @@ app.get('/monitor', (req, res) => {
   'var c=d.coverage;' +
   'document.getElementById("vis-cov").innerHTML=' +
   '"<div class=\\"egrid\\">"' +
-  '+"<div class=\\"ef\\"><div class=\\"efl\\">Leads in window</div><div class=\\"efv\\">"+visNum(c.leads)+" leads</div></div>"' +
+  '+"<div class=\\"ef\\"><div class=\\"efl\\">All leads in window</div><div class=\\"efv\\">"+visNum(c.leads)+" leads</div><div style=\\"font-size:10px;color:#aaa;margin-top:2px\\">includes leads from before IP capture</div></div>"' +
   '+"<div class=\\"ef\\"><div class=\\"efl\\">With an address</div><div class=\\"efv\\">"+visNum(c.with_address)+" leads</div></div>"' +
-  '+"<div class=\\"ef\\"><div class=\\"efl\\">Resolved to a place</div><div class=\\"efv\\">"+visNum(c.with_place)+" leads</div></div>"' +
+  '+"<div class=\\"ef\\"><div class=\\"efl\\">Resolved to a place</div><div class=\\"efv\\">"+visNum(c.with_place)+" leads</div><div style=\\"font-size:10px;color:#aaa;margin-top:2px\\">this is the working set below</div></div>"' +
   '+"<div class=\\"ef\\"><div class=\\"efl\\">Distinct addresses</div><div class=\\"efv\\">"+visNum(c.distinct_addresses)+" addresses</div></div>"' +
   '+"</div>"' +
   '+"<div style=\\"font-size:11px;color:#888;margin-top:6px\\">Leads from before this was switched on have no address and never will, so this is counted rather than shown as a rate.</div>";' +
@@ -4541,22 +4542,56 @@ app.get('/monitor', (req, res) => {
   '+"<td style=\\"font-size:11px\\">"+esc((x.emails||[]).join(", "))+"</td></tr>";}).join("");}' +
   'if(rp.total>rp.shown)rb.innerHTML+="<tr><td colspan=\\"8\\" class=\\"nd\\">Showing "+rp.shown+" of "+rp.total+" repeat addresses.</td></tr>";' +
 
+  /* A BAR, BECAUSE SEVENTEEN ROWS OF "1" ARE NOT SCANNABLE. Every number
+     was correct and the table still read as a wall -- the eye had no way
+     to find Washington's 2 among sixteen 1s. Scaled against the largest
+     row, which is what makes a difference of one visible when everything
+     is small. Reuses mdlBar rather than adding a second bar. */
+  'var pmax=d.places.rows.reduce(function(m,x){return Math.max(m,x.leads);},1);' +
   'var pb=document.getElementById("vis-places");' +
   'pb.innerHTML=d.places.rows.length?d.places.rows.map(function(x){' +
   'return "<tr><td>"+esc(x.city||"\\u2014")+"</td><td>"+esc(x.region||"\\u2014")+"</td><td>"+esc(x.country||"\\u2014")+"</td>"' +
-  '+"<td><b>"+visNum(x.leads)+"</b></td><td>"+visNum(x.people)+"</td><td>"+visNum(x.booked)+"</td></tr>";}).join("")' +
+  '+"<td style=\\"min-width:110px\\"><b>"+visNum(x.leads)+"</b>"+mdlBar(x.leads,pmax,"#f97316")+"</td>"' +
+  '+"<td>"+visNum(x.people)+"</td><td>"+visNum(x.booked)+"</td></tr>";}).join("")' +
   ':"<tr><td colspan=\\"6\\" class=\\"nd\\">Nothing resolved in this window.</td></tr>";' +
+  /* THE SHAPE BEFORE THE DETAIL. Seventeen city rows do not tell you "all
+     but one are US" -- this does, in one line, above them. */
+  'var byC={};d.places.rows.forEach(function(x){var k=x.country||"?";byC[k]=(byC[k]||0)+x.leads;});' +
+  'var cList=Object.keys(byC).sort(function(a,b){return byC[b]-byC[a];});' +
+  'document.getElementById("vis-countries").innerHTML=cList.length?cList.map(function(k){' +
+  'return "<span class=\\"pschip\\" style=\\"margin-right:6px\\">"+esc(k)+" &middot; "+byC[k]+" lead"+(byC[k]===1?"":"s")+"</span>";}).join(""):"";' +
 
+  /* MERGED BY NETWORK NAME, because the provider reports one network under
+     several domains and the table showed it as several networks. Live data
+     on 23 Sept: "Verizon Business" appeared TWICE -- once on
+     verizonbusiness.com and once on frontiernet.net -- and "AT&T
+     Enterprises, LLC" twice, on att.net and att.com. Reading that as four
+     networks when it is two is the kind of wrong number this dashboard
+     exists to prevent, and no label could have fixed it.
+
+     The domains are kept and listed together, because which one answered
+     is still the evidence for what the row claims. Merged in the browser
+     rather than in SQL, so the API keeps reporting what the provider
+     actually said. */
+  'var nmap={};d.networks.forEach(function(x){var k=x.isp||"\\u2014";' +
+  'if(!nmap[k])nmap[k]={isp:k,domains:[],leads:0,people:0,booked:0};' +
+  'var e=nmap[k];e.leads+=x.leads;e.people+=x.people;e.booked+=x.booked;' +
+  'if(x.org_domain&&e.domains.indexOf(x.org_domain)<0)e.domains.push(x.org_domain);});' +
+  'var nrows=Object.keys(nmap).map(function(k){return nmap[k];}).sort(function(a,b){return b.leads-a.leads;});' +
+  'var nmax=nrows.reduce(function(m,x){return Math.max(m,x.leads);},1);' +
   'var nb=document.getElementById("vis-networks");' +
-  'nb.innerHTML=d.networks.length?d.networks.map(function(x){' +
-  'return "<tr><td>"+esc(x.isp||"\\u2014")+"</td><td style=\\"font-size:11px;color:#666\\">"+esc(x.org_domain||"\\u2014")+"</td>"' +
-  '+"<td><b>"+visNum(x.leads)+"</b></td><td>"+visNum(x.people)+"</td><td>"+visNum(x.booked)+"</td></tr>";}).join("")' +
+  'nb.innerHTML=nrows.length?nrows.map(function(x){' +
+  'return "<tr><td>"+esc(x.isp)+"</td><td style=\\"font-size:11px;color:#666\\">"+esc(x.domains.join(", ")||"\\u2014")+"</td>"' +
+  '+"<td style=\\"min-width:110px\\"><b>"+visNum(x.leads)+"</b>"+mdlBar(x.leads,nmax,"#f97316")+"</td>"' +
+  '+"<td>"+visNum(x.people)+"</td><td>"+visNum(x.booked)+"</td></tr>";}).join("")' +
   ':"<tr><td colspan=\\"5\\" class=\\"nd\\">Nothing resolved in this window.</td></tr>";' +
 
+  'var zmax=d.timezones.reduce(function(m,x){return Math.max(m,x.leads);},1);' +
   'var zb=document.getElementById("vis-zones");' +
   'zb.innerHTML=d.timezones.length?d.timezones.map(function(x){' +
   'return "<tr><td>"+esc(x.timezone||"\\u2014")+"</td><td style=\\"color:#666\\">"+esc(visLocalTime(x.timezone))+"</td>"' +
-  '+"<td><b>"+visNum(x.leads)+"</b></td><td>"+visNum(x.booked)+"</td></tr>";}).join("")' +
+  '+"<td style=\\"min-width:110px\\"><b>"+visNum(x.leads)+"</b>"+mdlBar(x.leads,zmax,"#f97316")+"</td>"' +
+  '+"<td>"+visNum(x.booked)+"</td></tr>";}).join("")' +
   ':"<tr><td colspan=\\"4\\" class=\\"nd\\">Nothing resolved in this window.</td></tr>";' +
   'if(visMapOn)visDrawMap();}' +
 
@@ -4578,7 +4613,18 @@ app.get('/monitor', (req, res) => {
   'if(!visData)return;' +
   'if(!visMap){' +
   'visMap=L.map("vis-map",{worldCopyJump:true,scrollWheelZoom:false}).setView([25,0],2);' +
-  'L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:12,attribution:"&copy; OpenStreetMap contributors"}).addTo(visMap);' +
+  /* CARTO POSITRON, NOT RAW OSM TILES, and this is a fix rather than a
+     preference. openstreetmap.org's tile servers answer 200 to curl and
+     403 IN A BROWSER: their usage policy blocks third-party embeds by
+     Referer, so the map rendered as a wall of "Access blocked" tiles with
+     our circles floating on top. Nothing in the JS was wrong, which is why
+     it needed looking at rather than debugging.
+
+     Positron is a light grey basemap built for data overlays -- the orange
+     circles read against it far better than against OSM's own colouring,
+     where roads and landuse compete with the data. Attribution is a
+     licence condition for both OSM and CARTO; do not remove it. */
+  'L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",{maxZoom:12,subdomains:"abcd",attribution:"&copy; OpenStreetMap contributors &copy; CARTO"}).addTo(visMap);' +
   '}' +
   /* Leaflet measured the container while it was hidden if the tab was
      opened with the map already on. invalidateSize after it is visible is

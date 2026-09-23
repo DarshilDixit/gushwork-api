@@ -733,8 +733,16 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
                NAME these rather than quietly drawing fewer dots. */
             { city: 'Austin', region: 'Texas', country: 'US',
               lat: null, lon: null, leads: 77, people: 71, booked: 40 } ] },
+          /* THE REAL SHAPE FROM LIVE DATA, 23 Sept: one provider reported
+             under TWO domains, which the table showed as two networks.
+             Both rows are here so the merge is exercised rather than
+             described. */
           networks: [{ isp: 'Verizon Business', org_domain: 'verizonbusiness.com',
-                       leads: 829, people: 800, booked: 511 }],
+                       leads: 829, people: 800, booked: 511 },
+                     { isp: 'Verizon Business', org_domain: 'frontiernet.net',
+                       leads: 11, people: 10, booked: 4 },
+                     { isp: 'Comcast Cable', org_domain: 'comcast.com',
+                       leads: 37, people: 36, booked: 20 }],
           timezones: [{ timezone: 'America/New_York', leads: 937, booked: 604 }],
           total: 1, page: 1, pages: 1,
           leads: [{ session_id: '00000000-0000-4000-8000-00000000000a', email: 'a@b.com',
@@ -907,8 +915,25 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
       ok('visitors: a place with NO coordinates is still listed', pl.includes('Austin'));
 
       const nw = painted['vis-networks'] || '';
-      ok('visitors: the network is painted with its lead count',
-         nw.includes('Verizon Business') && nw.includes('>829<'));
+      /* MERGED BY NAME. The provider reports one network under several
+         domains; showing them as several networks is a wrong number, and
+         no label fixes it. 829 + 11 = 840. */
+      ok('visitors: one provider under two domains is ONE row',
+         nw.includes('>840<') && !nw.includes('>829<'), nw.slice(0, 300));
+      ok('visitors: both of its domains are still shown as the evidence',
+         nw.includes('verizonbusiness.com') && nw.includes('frontiernet.net'));
+      ok('visitors: a genuinely different network stays its own row',
+         nw.includes('Comcast Cable') && nw.includes('>37<'));
+      /* Rows are ordered by the MERGED total, not by whichever partial row
+         the API happened to return first. */
+      ok('visitors: merged rows are ordered by their combined total',
+         nw.indexOf('Verizon Business') < nw.indexOf('Comcast Cable'));
+      /* A bar is what makes seventeen rows of "1" scannable. */
+      ok('visitors: magnitude is shown as a bar, not just a number',
+         (painted['vis-places'] || '').includes('border-radius:3px'), '');
+      /* THE COUNTRY ROLL-UP: the shape before the detail. */
+      ok('visitors: countries are rolled up above the city table',
+         (painted['vis-countries'] || '').includes('US'), painted['vis-countries']);
 
       const zn = painted['vis-zones'] || '';
       ok('visitors: the timezone is painted with its lead count',
@@ -929,6 +954,17 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
          tables carry the same data. */
       let mapErr = null;
       try { scope.visDrawMap(); } catch (e) { mapErr = e; }
+      /* NOT raw openstreetmap.org tiles. Those answer 200 to curl and 403
+         IN A BROWSER -- their usage policy blocks third-party embeds by
+         Referer -- so the map rendered as a wall of "Access blocked" tiles
+         with our circles floating on top. Pinned so a tidy-up cannot put
+         it back. */
+      ok('visitors: tiles do NOT come from openstreetmap.org, which blocks embeds',
+         !/tile\.openstreetmap\.org/.test(js));
+      ok('visitors: tiles come from a basemap provider that permits this',
+         /basemaps\.cartocdn\.com/.test(js));
+      ok('visitors: attribution for both OSM and the tile provider is present',
+         /OpenStreetMap contributors/.test(js) && /CARTO/.test(js));
       ok('visitors: the map degrades rather than throwing when Leaflet is absent',
          !mapErr, mapErr && mapErr.message);
       ok('visitors: and it says so on screen',
