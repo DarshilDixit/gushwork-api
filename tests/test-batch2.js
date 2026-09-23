@@ -4211,6 +4211,19 @@ section12()
        call site that only logs err.message and never reads the flag. */
     ok('sfconv: and the thrown message itself warns against adding a duplicate',
        /do NOT add them manually/i.test(sfSrc));
+    /* IT MUST NOT CLAIM THE BOOKING IS MISSING. It used to say "the
+       booking was not recorded anywhere" -- a fact about a system this
+       code has never queried. Checked on 23 Sept for derek@dcsleds.com:
+       the calendar integration had already created the Event on his
+       Contact, at the exact start time. Following that sentence would have
+       put a SECOND meeting on the AE's timeline, which is the duplicate
+       the line above it exists to prevent. */
+    ok('sfconv: it does NOT assert the booking is missing',
+       !/booking was not recorded anywhere/i.test(sfSrc));
+    ok('sfconv: it sends the reader to CHECK the Contact first',
+       /CHECK the Contact before adding anything/i.test(sfSrc));
+    ok('sfconv: and says why a second Event is worse than none',
+       /second Event for one call is worse than none/i.test(sfSrc));
 
     /* ── ONE ALERT BUILDER, SIX CALL SITES ─────────────────────────── */
     const idx = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
