@@ -538,10 +538,27 @@ async function updateSFLead(leadId, fields) {
        the reader to do the one thing they must not do. */
     if (sfConvertedLeadError(result)) {
       console.warn(`[SF] Lead ${leadId} is CONVERTED — it is a customer, not a missing lead. Nothing written.`);
+      /* IT USED TO SAY "the booking was not recorded anywhere", AND THAT
+         WAS A CLAIM ABOUT A SYSTEM THIS CODE HAS NEVER QUERIED.
+
+         Checked on 23 Sept for derek@dcsleds.com, whose update was
+         refused here: the calendar integration had ALREADY created the
+         Event on his Contact, at the exact start time, with the company
+         name he typed that morning. The booking was recorded. Following
+         the old wording would have put a SECOND meeting on the AE's
+         timeline for one call -- the duplicate the sentence above it
+         exists to prevent, arrived at by the sentence below it.
+
+         So it now says what it knows (the Lead write was refused) and
+         what it does not (whether the meeting is logged elsewhere), and
+         sends the reader to look before adding anything. Same rule as the
+         lead-path checkers: "we could not check" is never "we checked and
+         it is missing". */
       const err = new Error(
         `[SF] Lead ${leadId} was already converted to a Contact/Account/Opportunity, so Salesforce will not accept updates to it. ` +
         `This person IS in Salesforce — do NOT add them manually, that creates a duplicate against a live Account. ` +
-        `The booking was not recorded anywhere; log it against the existing Contact instead.`
+        `Nothing was written to the Lead. CHECK the Contact before adding anything: the calendar integration often logs the meeting there already, ` +
+        `and a second Event for one call is worse than none. If it is genuinely missing, log it against the existing Contact and tell whoever owns it.`
       );
       err.sfConvertedLead = true;
       err.sfLeadId = leadId;

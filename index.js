@@ -1160,7 +1160,7 @@ const FAILURE_MONITORS = {
      is NORMAL -- measured at 8.9% of domains, and the national brands
      deliberately 403 -- so alerting on it would be permanently red and
      train people to ignore the row. */
-  'Non-ICP model': { alertAfter: 3, impact: 'Websites are not being classified, so the model layer is blocking and Meta-suppressing nobody. No lead is lost — but the long tail of realtors and agencies is getting through as it did before September.' },
+  'Non-ICP model': { alertAfter: 3, impact: 'The model itself is erroring — a bad key, a spent balance, a rate limit or an unreadable reply. This is NOT a site that refused our scraper, and NOT the name-only fallback doing its job; both of those are normal and neither reaches here. While it lasts nothing new is classified, so the model layer blocks and Meta-suppresses nobody. No lead is lost — but the long tail of realtors and agencies is getting through as it did before September.' },
   'PartnerStack': { alertAfter: 3, impact: 'An affiliate is not being credited, or the money path cannot be verified. Claims are released, so most of these retry — but nothing retries a conversion whose attempts are exhausted.' },
   /* ADDED 16 Sept 2026, and it is a SPLIT rather than a new check.
 
@@ -9069,7 +9069,7 @@ const _nonIcpLlmInFlight = new Map();
    Lost on restart, deliberately: a fresh process has made no attempts and
    should report "nothing yet" rather than inherit a stale verdict about
    its own health. */
-const _nonIcpLlmStats = { ok: 0, errored: 0, unreachable: 0, writeFailed: 0,
+const _nonIcpLlmStats = { ok: 0, nameOnly: 0, errored: 0, unreachable: 0, writeFailed: 0,
                           cacheHits: 0, cacheMisses: 0, totalMs: 0, maxMs: 0, bypassFailed: 0,
                           lastOkAt: null, lastErrorAt: null, lastError: null,
                           since: Date.now() };
@@ -9191,6 +9191,27 @@ function warmNonIcpLlm({ email, website } = {}) {
            in a row" silently means "3 since the last alert, ever" -- the
            exact defect that made the Meta CAPI streak meaningless until
            recordSuccess was wired in. */
+        recordSuccess('Non-ICP model');
+      } else if (v.source === 'llm_name_only') {
+        /* A CLASSIFICATION, NOT A FAILURE, AND THIS BRANCH IS WHY THE
+           ALERT WAS WRONG. Until 23 Sept there were three sources and this
+           chain ended in an `else` that meant "something broke". The
+           name-only fallback added a fourth, it fell straight into that
+           else, and the fallback SUCCEEDING therefore paged -- with an
+           impact line saying nothing was being classified, about six
+           domains it had just classified.
+
+           That is the "four source values, not two" trap in a fifth
+           place: adding an enum value silently re-scopes every reader of
+           the old ones, and this chain was not on the list when the other
+           six were fixed.
+
+           Counted separately rather than folded into ok, because a
+           verdict from a hostname and one from a page are different
+           claims and the health row should not imply otherwise. It still
+           resets the streak: the layer is working. */
+        _nonIcpLlmStats.nameOnly++;
+        _nonIcpLlmStats.lastOkAt = Date.now();
         recordSuccess('Non-ICP model');
       } else if (v.source === 'llm_unreachable') {
         /* NOT a failure. A site that refuses a scraper is the normal case

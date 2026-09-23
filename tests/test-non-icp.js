@@ -2342,6 +2342,39 @@ results13 = (async () => {
     }
   }
 
+  /* ── 13u. A NAME-ONLY VERDICT IS A SUCCESS, NOT A FAILURE ────────
+     The outcome chain read: llm -> success, llm_unreachable -> normal,
+     ELSE -> recordFailure. llm_name_only landed in that else, so the
+     fallback WORKING paged "Non-ICP model - Repeated failures" with an
+     impact line saying websites were not being classified, about six
+     domains it had just classified. Fired twice in production on 23 Sept
+     before anyone read it.
+
+     The same enum-widening trap as 13t, in a fifth place that was not on
+     the list when the other six were fixed. */
+  {
+    const chain = between("if (v.source === 'llm') {", '/* A bad key, a spent balance');
+    out.push(['V2 outcome: a name-only verdict is handled EXPLICITLY, not by the else',
+              /v\.source === 'llm_name_only'/.test(chain)]);
+    out.push(['V2 outcome: it resets the streak, because the layer is working',
+              /llm_name_only'[\s\S]{0,1400}?recordSuccess\('Non-ICP model'\)/.test(chain)]);
+    out.push(['V2 outcome: it NEVER records a failure',
+              !/llm_name_only'[\s\S]{0,1400}?recordFailure/.test(chain)]);
+    /* Counted apart from ok: a verdict from a hostname and one from a page
+       are different claims, and the health row must not imply otherwise. */
+    out.push(['V2 outcome: it is counted separately from a page verdict',
+              /_nonIcpLlmStats\.nameOnly\+\+/.test(chain) && /nameOnly: 0/.test(src)]);
+    /* An unreadable site is still normal and still never alerts. */
+    out.push(['V2 outcome: llm_unreachable is still not a failure',
+              /v\.source === 'llm_unreachable'[\s\S]{0,400}?unreachable\+\+/.test(chain)]);
+    /* THE ALERT MUST NOT CLAIM WHAT IS NO LONGER TRUE. */
+    const impact = between("'Non-ICP model': { alertAfter: 3", "'PartnerStack': {");
+    out.push(['V2 outcome: the impact line no longer claims nothing is classified',
+              !/Websites are not being classified/.test(impact)]);
+    out.push(['V2 outcome: and it says which cases do NOT reach it',
+              /name-only fallback/.test(impact) && /refused our scraper/.test(impact)]);
+  }
+
   /* ── 13t. FOUR SOURCE VALUES, NOT TWO ────────────────────────────
      Adding llm_name_only and llm_late re-scoped every consumer that
      compared against the literal 'llm'. Found while writing the review
