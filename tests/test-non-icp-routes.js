@@ -719,16 +719,23 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
               region: null, country: null, isp: null,
               first_seen: new Date().toISOString(), last_seen: new Date().toISOString(),
               emails: null } ] },
+          /* DELIBERATELY NOT IN LEAD ORDER. The API happens to return
+             places sorted by leads, and while the fixture copied that, the
+             map's own largest-first sort could be deleted without any
+             assertion noticing -- the mutation SURVIVED. The map must not
+             depend on an ORDER BY in a query it does not own, so the
+             smaller place comes first here and the sort has to do real
+             work. */
           places: { mappable: 2, rows: [
-            { city: 'Boston', region: 'Massachusetts', country: 'US',
-              lat: 42.3601, lon: -71.0589, leads: 613, people: 590, booked: 402 },
             /* EXACTLY A QUARTER of Boston's leads, with coordinates. Two
-               mappable points are the minimum that can tell area scaling
-               from linear: with one point both give the same radius, and
-               the mutation that swapped sqrt for a plain ratio SURVIVED
-               until this row existed. */
+               mappable points are also the minimum that can tell area
+               scaling from linear: with one point both formulas give the
+               same radius, and that mutation survived until this row
+               existed too. */
             { city: 'Denver', region: 'Colorado', country: 'US',
               lat: 39.7392, lon: -104.9903, leads: 153, people: 150, booked: 90 },
+            { city: 'Boston', region: 'Massachusetts', country: 'US',
+              lat: 42.3601, lon: -71.0589, leads: 613, people: 590, booked: 402 },
             /* No coordinates: resolved before they were stored. The map must
                NAME these rather than quietly drawing fewer dots. */
             { city: 'Austin', region: 'Texas', country: 'US',
@@ -961,10 +968,30 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
          it back. */
       ok('visitors: tiles do NOT come from openstreetmap.org, which blocks embeds',
          !/tile\.openstreetmap\.org/.test(js));
-      ok('visitors: tiles come from a basemap provider that permits this',
-         /basemaps\.cartocdn\.com/.test(js));
-      ok('visitors: attribution for both OSM and the tile provider is present',
-         /OpenStreetMap contributors/.test(js) && /CARTO/.test(js));
+      /* TWO PROVIDERS HAVE ALREADY FAILED HERE, each in a way a status
+         code could not see. Listed by name with the reason, so a future
+         change cannot quietly go back to either:
+
+           tile.openstreetmap.org  200 to curl, 403 IN A BROWSER -- their
+                                   usage policy blocks embeds by Referer
+           basemaps.cartocdn.com   200 with a real PNG that has "API KEY
+                                   REQUIRED" printed across it
+
+         Both were settled by DOWNLOADING a tile and looking at it. If a
+         third is ever needed, check it the same way before adding it. */
+      const TILE_REJECTED = [
+        ['tile.openstreetmap.org', 'blocks third-party embeds by Referer'],
+        ['basemaps.cartocdn.com', 'watermarks the tile without an API key'],
+      ];
+      for (const [host, why] of TILE_REJECTED) {
+        ok(`visitors: tiles are not from ${host} — it ${why}`,
+           !js.includes(host));
+      }
+      ok('visitors: a tile source is configured at all',
+         /L\.tileLayer\("https:\/\//.test(js));
+      /* Attribution is a licence condition of every basemap worth using. */
+      ok('visitors: the basemap is attributed',
+         /attribution:"[^"]+"/.test(js));
       ok('visitors: the map degrades rather than throwing when Leaflet is absent',
          !mapErr, mapErr && mapErr.message);
       ok('visitors: and it says so on screen',
@@ -1017,6 +1044,19 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
            Boston's (sqrt(1/4)), not a quarter. */
         const big = drawn.find((m) => /Boston/.test(m.popup));
         const small = drawn.find((m) => /Denver/.test(m.popup));
+        /* BIGGEST FIRST, so the small ones land on top. Eighteen
+           mostly-equal circles over the US north-east are one orange blob
+           in the wrong order and eighteen countable places in the right
+           one. */
+        ok('visitors: circles are drawn largest-first so small ones stay visible',
+           drawn.length > 1 && drawn[0].opts.radius >= drawn[drawn.length - 1].opts.radius,
+           drawn.map((m) => m.opts.radius).join(','));
+        /* A light ring is what separates overlapping circles of one
+           colour; the basemap is grey and the fill orange, so white is the
+           only value that reads against both. */
+        ok('visitors: circles carry a light stroke so overlaps read as separate',
+           drawn[0] && drawn[0].opts.color === '#ffffff' && drawn[0].opts.weight >= 2,
+           drawn[0] && JSON.stringify(drawn[0].opts));
         ok('visitors: circle AREA scales with lead count, not radius',
            !!(big && small) && Math.abs((small.opts.radius - 6) - (big.opts.radius - 6) / 2) < 0.5,
            big && small ? `big=${big.opts.radius} small=${small.opts.radius}` : 'markers missing');

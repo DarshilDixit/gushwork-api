@@ -4613,25 +4613,35 @@ app.get('/monitor', (req, res) => {
   'if(!visData)return;' +
   'if(!visMap){' +
   'visMap=L.map("vis-map",{worldCopyJump:true,scrollWheelZoom:false}).setView([25,0],2);' +
-  /* CARTO POSITRON, NOT RAW OSM TILES, and this is a fix rather than a
-     preference. openstreetmap.org's tile servers answer 200 to curl and
-     403 IN A BROWSER: their usage policy blocks third-party embeds by
-     Referer, so the map rendered as a wall of "Access blocked" tiles with
-     our circles floating on top. Nothing in the JS was wrong, which is why
-     it needed looking at rather than debugging.
+  /* ESRI'S LIGHT GRAY CANVAS. THIRD PROVIDER, AND THE FIRST ONE ACTUALLY
+     CHECKED PROPERLY.
 
-     Positron is a light grey basemap built for data overlays -- the orange
-     circles read against it far better than against OSM's own colouring,
-     where roads and landuse compete with the data. Attribution is a
-     licence condition for both OSM and CARTO; do not remove it. */
-  'L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",{maxZoom:12,subdomains:"abcd",attribution:"&copy; OpenStreetMap contributors &copy; CARTO"}).addTo(visMap);' +
+     openstreetmap.org answers 200 to curl and 403 IN A BROWSER -- their
+     usage policy blocks third-party embeds by Referer. Switched to CARTO,
+     which answers 200 with a real PNG... that has "API KEY REQUIRED"
+     printed diagonally across it. A 200 and 6.5KB of valid image, so
+     checking the status code saw nothing wrong either time.
+
+     THE LESSON IS THE SAME ONE THIS REPO KEEPS LEARNING: a response code
+     is not the thing you care about. Both were finally settled by
+     DOWNLOADING the tile and looking at it, at three zoom levels.
+
+     Esri's "Canvas" services exist to be a neutral backdrop for data --
+     no key, no watermark, and deliberately desaturated so an overlay is
+     the only thing with colour on the screen. Attribution is a licence
+     condition; do not remove it. */
+  'L.tileLayer("https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",{maxZoom:12,attribution:"Tiles &copy; Esri"}).addTo(visMap);' +
   '}' +
   /* Leaflet measured the container while it was hidden if the tab was
      opened with the map already on. invalidateSize after it is visible is
      what makes the tiles fill the box. */
   'setTimeout(function(){visMap.invalidateSize();},0);' +
   'if(visLayer)visMap.removeLayer(visLayer);' +
-  'var pts=visData.places.rows.filter(function(p){return p.lat!==null&&p.lon!==null;});' +
+  /* BIGGEST FIRST, so the small ones land ON TOP rather than under. With
+     eighteen mostly-equal circles clustered over the US north-east, draw
+     order is the difference between "one orange blob" and eighteen places
+     you can actually count. */
+  'var pts=visData.places.rows.filter(function(p){return p.lat!==null&&p.lon!==null;}).slice().sort(function(a,b){return b.leads-a.leads;});' +
   'var max=pts.reduce(function(m,p){return Math.max(m,p.leads);},1);' +
   'visLayer=L.layerGroup();' +
   'pts.forEach(function(p){' +
@@ -4639,7 +4649,11 @@ app.get('/monitor', (req, res) => {
      proportional makes a city with twice the leads look four times as
      busy. sqrt is what keeps the eye honest. */
   'var r=6+16*Math.sqrt(p.leads/max);' +
-  'var m=L.circleMarker([p.lat,p.lon],{radius:r,weight:1,color:"#c2410c",fillColor:"#f97316",fillOpacity:0.55});' +
+  /* A WHITE RING, not a darker orange one. Overlapping circles of the same
+     colour merge into a single shape; a light stroke is what separates
+     them, because the basemap behind is grey and the fill is orange, so
+     white is the only value that reads against both. */
+  'var m=L.circleMarker([p.lat,p.lon],{radius:r,weight:2,color:"#ffffff",opacity:0.95,fillColor:"#ea580c",fillOpacity:0.75});' +
   'm.bindPopup("<b>"+esc([p.city,p.region,p.country].filter(Boolean).join(", "))+"</b><br>"' +
   '+p.leads+" lead"+(p.leads===1?"":"s")+"<br>"+p.people+" "+(p.people===1?"person":"people")+"<br>"+p.booked+" booked");' +
   'visLayer.addLayer(m);});' +
