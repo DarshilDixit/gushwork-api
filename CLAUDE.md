@@ -34,15 +34,43 @@ Three things follow from that, and they are not negotiable:
    decided by `nonIcpVerdict` in `index.js`, stamped on
    `leads.non_icp_blocked`, and enforced in `/partial` and `/submit`.
 
-   1. `NON_ICP_BLOCK` (default OFF) — the **brand-domain list**. A pure
-      string comparison against 41 national real-estate brokerage and
-      insurance carrier domains. **Checked FIRST**, because it is
-      deterministic, re-derivable by reading a list, and it still works when
-      a site refuses a scraper.
-   2. `NON_ICP_LLM_BLOCK` (default OFF) — the **model layer**. Reads the
-      company's own website and classifies it into one enumerated
-      `business_type`; exactly two of those block, `real_estate` and
-      `insurance`. Stamped with `non_icp_source='llm'`.
+   1. `NON_ICP_BLOCK` (default OFF, **`true` in Railway**) — the
+      **brand-domain list**. A pure string comparison against the national
+      real-estate brokerage and insurance carrier domains in
+      `NON_ICP_DOMAINS`. **Checked FIRST**, because it is deterministic,
+      re-derivable by reading a list, and it still works when a site
+      refuses a scraper. This said "41 domains" and was already wrong by
+      one before four more were added on 23 Sept; **count the constant,
+      do not trust a number written down here.**
+   2. `NON_ICP_LLM_BLOCK` (default OFF, **`true` in Railway**) — the
+      **model layer**. Reads the company's own website and classifies it
+      into one enumerated `business_type`; exactly two of those block,
+      `real_estate` and `insurance`. Stamped with `non_icp_source='llm'`.
+
+   **THE MODEL LAYER HAS TWO INPUTS SINCE 23 SEPT, NOT ONE, AND THE SECOND
+   IS WEAKER ON PURPOSE.** `NON_ICP_NAME_FALLBACK` (default OFF, **`true`
+   in Railway**) runs ONLY when the scrape failed, and judges the **domain
+   name alone** — no page, no company field. Measured: 36 of 254 domains
+   came back unreadable, and three of the five insurance / real-estate
+   demos that leaked through were exactly those. None was fixable by
+   fetching harder — `longandfoster.com` answers 403 behind a bot wall,
+   `westexinsurance.com` does not connect, `adrianadearaujorealtor.com`
+   returns 200 with 64 characters because it renders client-side.
+
+   It carries **its own higher confidence floor (0.9 against 0.75)**, its
+   own `non_icp_source='llm_name_only'` and its own prompt version, because
+   a 0.75 meaning "the page says we sell insurance" and a 0.75 meaning "the
+   hostname contains those letters" are not the same claim. `unknown`
+   returns null rather than a verdict, so the row keeps the six-hour
+   failure TTL instead of a 180-day non-answer.
+
+   **The domain, never the company field the visitor typed.** The cache is
+   keyed by domain; a per-lead input would make the stored verdict depend
+   on whichever lead warmed it first. Validated against 60 real unreadable
+   domains before switching on: 6 would block, all real estate, no false
+   positives, and the near-misses (`creativelendersllc.com` →
+   mortgage_lending, `tcwealthadvisors.com` → financial_advisory at 0.90)
+   correctly did not — the **enum** kept them safe, not the prompt.
 
    **NEITHER REPLACES THE OTHER AND THE LIST IS NOT BEING RETIRED.** An
    earlier version of the V1 ticket said it would be, attributed to Swapnil.
@@ -104,6 +132,27 @@ Three things follow from that, and they are not negotiable:
    sites and **executes** the function, which is what closes the
    reachability hole an `if (false)` inside it would otherwise leave.
 
+   **IT IS ASYNC SINCE 23 SEPT, AND IT RE-READS THE VERDICT TABLE.** The
+   two conditions above read a COLUMN stamped at `/submit`, and that column
+   can be wrong in one direction: `/submit` is a cache read and nothing
+   else, so when the warm has not finished it correctly stamps
+   `non_icp_blocked=false` — "we could not check" — and the verdict lands
+   seconds later with nobody listening. Measured on 18 Sept:
+   `steenhoekinsurance.com` came back `insurance` at **0.97 confidence 2.6
+   SECONDS after** the submit, and `dla1972@me.com` 11.7 seconds after.
+   Both booked.
+
+   So the guard now also asks `non_icp_domain_verdicts` directly, and
+   **fails open on any throw**. It withholds the Meta `Schedule` event and
+   NOTHING else — the booking is already real and the person is looking at
+   a confirmation. All three routes `await` it.
+
+   Turning it async is what broke `tests/test-non-icp.js` §8, which LIFTS
+   AND RUNS the function: `new Function` cannot hold an `await`, so the
+   suite died at load. That is the test doing its job on a signature change
+   touching all three call sites; it now builds through the AsyncFunction
+   constructor.
+
 When a change would alter which leads get blocked or which fire Meta events, say so
 explicitly in your summary. Never let that happen as a side effect.
 
@@ -125,9 +174,10 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `lead-magnet.js` | `/lm/*` routes. Separate table, deliberately not joined to `leads` |
 | `backfill-sf.js` | Manual recovery tool for re-syncing leads to Salesforce after a broken connection or outage. Not mounted by default — see below |
 | `tools/non-icp-validate.js` | Scores the model layer against history — scrapes every lead domain once, replays the same bytes to three models, joins to paying customers and showed-up bookings. LIFTS the real classifier out of `index.js` rather than copying it. Not mounted, run by hand |
-| `tools/fire-non-icp-slack.js` | Fires the TWO non-ICP Slack paths for real — the blocked-lead post and the booking-refusal critical. Lifts them out of `index.js` like `fire-alert.js`. Not mounted, not called |
+| `tools/fire-non-icp-slack.js` | Fires the non-ICP Slack paths for real: `blocked`, `llm-blocked`, `llm-meta`, `late-block`, `booking`. Lifts them out of `index.js` like `fire-alert.js`. `late-block` is the sweep's post and was fired by hand on 23 Sept — a stamped lead is NOT in Salesforce and NOT on the SDR list, so that post is the only thing telling a human a booked meeting turned out non-ICP. Not mounted, not called |
 | `tools/sf-mark-internal-test-leads.js` | Marks our own test submissions as **Invalid / Test** in Salesforce, by writing the `How_Did_You_Hear__c` the `Source_Bucket__c` formula already reads. **Marks, never deletes** — 141 Lead records match `isInternalLead` and ~100 are NOT ours. Provenance comes from `tools/internal-test-emails.json`, not from the address. Dry run by default; `--apply` writes a manifest and `--revert` undoes it. Not mounted, run by hand |
 | `tools/internal-test-emails.json` | The provenance list for the tool above: addresses our OWN form actually submitted. Point-in-time, carries the SQL that regenerates it |
+| `tools/backfill-ip-coords.js` | Fills `ip_latitude` / `ip_longitude` for leads resolved BEFORE those columns existed — they have a city and no point, so they are complete in every table and invisible on the map. Only touches rows that already resolved and have no coordinates. Lifts `resolveIpGeo` out of `index.js`. Dry run by default; `--apply` writes. Run once on 23 Sept (17 rows). Not mounted |
 | `tools/fire-alert.js` | Fires ONE real alert on purpose, to satisfy the fire-every-alert-path-once rule. Sends for real (Slack + email on a critical). Lifts `alertOps` out of `index.js` rather than reimplementing it, so what arrives is what production sends. Not mounted, not called by anything |
 | `gushwork-form.js` | The `/demo` form frontend. Lives here and is served live by jsDelivr — see below |
 | `gushwork-form-popup.js` | The Google Ads popup/modal form frontend. Lives here and is served live by jsDelivr — see below |
@@ -139,6 +189,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `docs/partnerstack.md` | PartnerStack handover: the two-step model, every ps_ column, env vars, test procedure, known gaps |
 | `docs/OPEN-ITEMS.md` | What is still open or deliberately decided in THIS repo, as of 9 Sept 2026. The meta-capi repo has its own; neither is complete alone |
 | `docs/tickets/non-icp-v1-block.md` | The non-ICP block: what the Non-ICP doc says, the two positions this reverses, the domain list with per-domain evidence, and the `sdr-calling` dependency |
+| `docs/tickets/non-icp-verdict-arrives-after-submit.md` | Why a correct model verdict can land after the lead has already booked, the four options considered, and the measurement that reframed it — booking→demo median is 35 hours, so there is no 2.6-second race to win. Records that the calendar HOLD was built and the sweep was not, and that the sweep landed on 23 Sept |
 | `docs/Non-ICP-flagging-rules-*.pdf` | Swapnil's Non-ICP flagging rules, as exported. **A screenshot with no text layer** — it does not grep. The ticket above quotes the parts that matter |
 | `CLAUDE.md` | This file |
 
@@ -439,6 +490,51 @@ delete the file.
   Salesforce and gets dialled exactly as today. Folding the two together
   would make every existing guard on `non_icp_blocked` start refusing leads
   nobody decided to refuse — the V1 incident, arriving one column earlier.
+
+  **FOUR SOURCE VALUES SINCE 23 SEPT, NOT TWO, AND EVERY CONSUMER THAT
+  COMPARED AGAINST THE LITERAL `'llm'` ANSWERED WRONG FOR THE NEW ONES.**
+
+  | value | means |
+  |---|---|
+  | `domain_list` | the brand list |
+  | `llm` | the model, having read the page |
+  | `llm_name_only` | the model, having read only the domain name |
+  | `llm_late` | a verdict that landed AFTER `/submit`, stamped by the recheck sweep. The lead row carries this; the verdict row under it is `llm` or `llm_name_only` |
+
+  A null is a pre-feature row and means the brand list, which was the only
+  mechanism that existed then.
+
+  **Ask `nonIcpSourceIsModel(src)`, never `=== 'llm'`.** Adding two values
+  silently re-scoped six readers: `nonIcpSourceShort` labelled a model
+  block **"Brand list"** to an SDR and the sentence under it claimed the
+  domain was on a list it is not on, and all three Model-tab buckets
+  counted an `llm_late` block under the brand list. A test now forbids the
+  bare literal appearing anywhere. Same shape as "a second column that
+  means we rejected this lead is not additive" below — arriving as a
+  second enum value instead.
+- **`leads.ip_address` and the nine `ip_*` columns** — where the visitor
+  actually was, from their IP. Added 23 Sept. **Different from
+  `enriched_city` / `enriched_state` / `enriched_country`**, which are
+  Apollo's record of where the COMPANY is and cover 44% of leads. On the 22
+  Sept lead those read Woburn and this read Boston — both correct, ten
+  miles apart. The lead panel puts them under separate headings for exactly
+  that reason.
+
+  `ip_address` **is personal data**, unlike everything else on that table
+  except the contact fields. **Kept indefinitely, decided 23 Sept** — the
+  same treatment every other column gets, but a decision rather than a
+  default, and a deletion request has to clear this and the mirror.
+
+  **The mirror gets the PLACE, not the ADDRESS.** `gw_form_leads` has
+  `ip_city` / `ip_region` / `ip_country` / `ip_timezone` and no
+  `ip_address`: an SDR benefits from the city and the timezone, nobody
+  across the WAN has a use for the IP itself, and copying personal data
+  into a second database without a reason for it being there is how it ends
+  up somewhere nobody remembers.
+
+  `ip_checked_at` is stamped **only when a lookup decided something**,
+  never for a failure or a skip — the same rule `non_icp_checked_at`
+  follows.
 - **`leads.ps_signup_recheck_at`** — when a verified PartnerStack conversion
   was last RE-checked, as opposed to `ps_signup_verified_at` which is when it
   was first seen to exist. Two observations, two columns.
@@ -741,10 +837,15 @@ as "we asserted it alerts" — it is one level short of the thing you actually
 care about, and the gap is where this bug lived.
 
 **The fix is not "write more assertions", it is "drive the thing".**
-`tests/test-non-icp-routes.js` boots the real app and (a) drives all eight
-`/monitor/*` routes for a 200, and (b) **evaluates the dashboard's inline
+`tests/test-non-icp-routes.js` boots the real app and (a) drives every
+`/monitor/*` route for a 200, and (b) **evaluates the dashboard's inline
 script in a stubbed DOM**, asserts every shared helper is defined at TOP
 LEVEL, calls every tab loader, and **records what each table painted**.
+
+It also stubs **Leaflet**, and that was not optional: `visDrawMap` returns
+at its first line when `L` is absent, so a mutation that stopped the map
+naming its unmappable places SURVIVED until the stub existed. The degraded
+path alone tested almost nothing.
 
 That last part is the one that matters and it is the least obvious. Each
 loader wraps its render in a `try/catch` that paints the error into the
@@ -804,6 +905,119 @@ that reaches all fourteen sites.
 is not additive.** It silently re-scopes every consumer of the first one. The
 work is not "update the guard I am thinking about", it is "enumerate which
 predicates on the old column now answer only half the question".
+
+**THE LATE-VERDICT SWEEP, AND WHY THE RACE WAS THE WRONG FRAME.**
+`runNonIcpBookedRecheck` runs at boot and every 5 minutes over leads booked
+in the last 48 hours, re-reads `non_icp_domain_verdicts`, and stamps
+anything that now resolves blocking.
+
+**It exists because the cost is incurred at the MEETING, not at the
+booking.** Measured: booking→demo median **35 hours**, 10th percentile
+**3.3 hours**, only 3.9% of demos within an hour of booking. There is no
+2.6-second race to win — there are hours. The 4s calendar hold in the two
+form files covers the seconds; this covers everything slower, including a
+19.6s scrape, a cold cache after a deploy, and the name-only fallback.
+
+**IT MARKS AND TELLS A HUMAN. IT NEVER CANCELS.** Authorised shape,
+Darshil, 23 Sept 2026. Cancelling on a model verdict with nobody in the
+loop would be the most aggressive action in this codebase, and the person
+is already holding a confirmation email. `slackNonIcpLateBlock` posts
+direct rather than through `alertOps`, whose cooldown keys on
+severity+source+title and would fold a second person into a counter.
+
+**Only BLOCKING verdicts.** A Meta-only flag is already handled at booking
+time by `nonIcpScheduleSuppressed` and does not need a human — those
+people keep their slot by design, so waking somebody for one trains them
+to ignore the channel. The `non_icp_blocked` stamp is its own cursor, so
+nothing is alerted twice and no new column was needed.
+
+---
+
+**META WAS SENT THE WHOLE `x-forwarded-for` HEADER, NOT THE CLIENT IP, AND
+IT WAS A LIVE BUG.** Every Meta call site passed
+`req.headers['x-forwarded-for']` raw. Railway sends **two entries**, proved
+in production on 23 Sept:
+
+```
+entries=2 | first=97.208.126.x | last=152.233.40.x
+req.ip=152.233.40.x | sent_to_meta_would_be=97.208.126.x
+```
+
+So `client_ip_address` carried `"97.208.126.x, 152.233.40.x"` — a comma
+list where an address belongs. **`readPartnerStackRequestContext` had
+already fixed exactly this, ~4,000 lines above, with a comment explaining
+why.** One integration was fixed and the other was not.
+
+**Normalised in `sendEvent`, not at the call sites.** There are six and a
+seventh will exist one day; a choke point every event already passes
+through cannot be bypassed by a new caller. `normalizeClientIp` drops junk
+rather than forwarding it, so the key is absent from `user_data` instead of
+holding a value that matches nobody.
+
+**`req.ip` IS ALSO THE WRONG ONE.** It resolves to the LAST entry, a proxy
+hop, so the `|| req.ip` fallback would have been wrong too had the header
+been absent. `clientIpOf(req)` is now the ONE definition and PartnerStack
+reads it too.
+
+**META NEVER COMPLAINS, SO NOTHING DOWNSTREAM CAN CATCH THIS.** Checked
+against the live API: a clean IP, a two-hop list and a three-hop list each
+returned HTTP 200, `events_received` 1, and an **empty `messages` array**.
+That array was also being discarded — only `events_received` was logged —
+so a malformed field could be wrong for months while every line read like a
+success. It is now printed when non-empty.
+
+---
+
+**THE VISITORS TAB, AND THE THREE TILE PROVIDERS IT TOOK.**
+`/monitor/visitors` plus the **Visitors** tab: coverage, repeat addresses,
+places, networks, timezones, and a map toggle.
+
+**Repeat addresses is what earns the tab.** The other panels could live on
+a lead row; "which address sent more than one lead" cannot — it is a
+question about the set. When `pt.lancon@gmail.com` was investigated on 22
+Sept there was no way to ask it.
+
+**A 200 IS NOT A WORKING TILE, and that cost two deploys.**
+
+| provider | what happened |
+|---|---|
+| `tile.openstreetmap.org` | 200 to curl, **403 in a browser** — usage policy blocks embeds by Referer |
+| `basemaps.cartocdn.com` | 200, a real 6.5KB PNG — with **"API KEY REQUIRED" printed across it** |
+| `services.arcgisonline.com` Canvas | clean, keyless, desaturated for data overlay |
+
+Both failures were invisible to a status-code check and were settled by
+**downloading a tile and looking at it**, at three zoom levels. Both are
+named in a rejected list in `tests/test-non-icp-routes.js` with the reason.
+If a fourth is ever needed, check it the same way before adding it.
+
+**Circle AREA scales with lead count, never radius** — a radius
+proportional to the count makes twice the leads look four times as busy.
+Drawn largest-first so small circles land on top, with a white ring,
+because eighteen same-coloured circles over the US north-east otherwise
+render as one blob.
+
+**Networks are merged by NAME in the browser.** The provider reports one
+network under several domains: live data had "Verizon Business" twice, on
+`verizonbusiness.com` and `frontiernet.net`, and "AT&T Enterprises, LLC"
+twice. Four rows, two networks — a wrong number no label could fix. Merged
+client-side so the API keeps reporting what the provider actually said.
+
+**Geo is `ipwho.is`, NOT `ipapi.co`.** ipapi.co answers `RateLimited` on
+the first request of the day from this machine and from Railway's egress
+alike, so its free tier is not a tier. ipwho.is allows 1,000/day against
+our ~41 leads/day, and returns more: an IANA timezone, and the ISP, ASN and
+org domain that are the only corporate-versus-residential signal here.
+`IP_GEO_URL` swaps it from the env, because a free geo service is exactly
+the dependency that stops being free.
+
+**The lookup NEVER touches the lead path.** Fire-and-forget after
+`res.json()` in BOTH `/partial` and `/submit` — 41 leads a day reach step 1
+and 11 never submit, so resolving only at submit would leave every drop-off
+with no location. `/partial` fires repeatedly, so `finaliseIpGeo` does at
+most ONE lookup per session, guarded in process and by `ip_checked_at`. The
+ADDRESS is written on every call because it costs no network; only the
+network half is rationed. **Two writes, not one** — a geo outage must not
+lose the address too.
 
 **THE MODEL LAYER'S OWN TRAPS.** Four, and the first is the one that
 decides whether this feature is safe at all.
@@ -1480,6 +1694,11 @@ have fired. Nothing in the UI calls it; run it with
 **`/monitor` is not one page.** It's the dashboard plus several sub-routes that
 feed it data. A reader who greps for a single `/monitor` handler expecting to find
 everything will miss most of it.
+
+**Ten tabs as of 23 Sept** — the list lives in `showTab`, and `Visitors` is
+the newest. A tab needs a `t-<name>` button, a `tp-<name>` panel, an entry
+in that array and a loader guard, or it renders nowhere and nothing says
+so.
 
 **Booking arrives by three routes.** `/booking-confirmed` (browser-fired),
 `/booking-confirmed-webhook` (Cal), `/booking-confirmed-webhook-rh` (RevenueHero).

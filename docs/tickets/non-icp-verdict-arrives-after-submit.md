@@ -250,3 +250,43 @@ not answered by building the hold. It was avoided for the common case.
 because `/submit` ran before the verdict existed. Strictly better than
 the same lead also taking a slot, but not clean. The fix is server-side
 and is still open.
+
+---
+
+## RESOLVED, 23 Sept 2026 — the residual above is now built
+
+The two things this ticket left open are done, and the open question it
+kept asking was answered.
+
+**The action, decided by Darshil on 23 Sept: option (b) — MARK AND TELL A
+HUMAN.** Not (a) stamp-only, which leaves the AE's hour spent; not (c)
+auto-cancel, which would be the most aggressive action in this codebase
+taken on a model verdict with nobody in the loop, on somebody already
+holding a confirmation email.
+
+**Option A was built after all, alongside the hold rather than instead of
+it.** `runNonIcpBookedRecheck` runs at boot and every 5 minutes over leads
+booked in the last 48 hours, re-reads `non_icp_domain_verdicts`, stamps
+`non_icp_blocked` with `non_icp_source='llm_late'`, mirrors the flag, and
+posts `slackNonIcpLateBlock` so somebody can decide about the meeting. The
+`non_icp_blocked` stamp is its own cursor, so nothing is alerted twice.
+
+The framing in "THE RACE IS THE WRONG FRAME" above is what made this
+uncontroversial: the 4s hold covers the seconds, the sweep covers the
+hours, and the 35-hour median means the sweep almost always wins.
+
+**The Meta half of the gap is closed too.** `nonIcpScheduleSuppressed` was
+named in this ticket as not catching it — "it does not re-read
+non_icp_domain_verdicts" — and now does. It withholds the `Schedule` event
+only; it does not block, cancel or notify.
+
+**What is still NOT recovered, and cannot be:** the Meta `Lead` event
+fired at `/submit`. Meta has no retraction. The only lever is reducing how
+often the cache is cold at submit time, which is what the name-only
+fallback (`NON_ICP_NAME_FALLBACK`, live 23 Sept) does for the 14% of
+domains that fail to scrape.
+
+**Still unexercised at the time of writing.** The sweep is running and its
+Slack post was fired by hand through `tools/fire-non-icp-slack.js
+late-block`, but no real lead has been stamped by it yet, and the
+name-only fallback has not blocked anyone. Both fail open.
