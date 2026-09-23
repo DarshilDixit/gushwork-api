@@ -2435,6 +2435,95 @@ results13 = (async () => {
                 /NOT cancelled/i.test(fns.nonIcpSourceWhy('llm_late'))]);
     }
   }
+
+  /* ── 13v. NEAR MISSES: the panel and the weekly digest ───────────
+     A domain judged real estate or insurance that did NOT block because
+     confidence sat under the floor. Added 23 Sept after
+     planrightlegacyins.com scored insurance at 0.82 against a 0.9 name
+     floor and got through -- the first evidence the floor may be one
+     notch too conservative, and not enough on its own to move it. */
+  {
+    const fn = between('const NEAR_BAND = 0.10;', '  return {\n    windowDays: d,');
+
+    /* NARROWED IN SQL, AND THE FIRST VERSION WAS NOT. It selected every
+       non-blocking verdict, ordered by confidence and took 500. With
+       3,270 rows the 500th sits at 0.96, so every near miss (0.70-0.85)
+       fell below the cut and the panel reported ZERO -- a truncation that
+       looked like a clean result. */
+    out.push(['V2 near: the query narrows to blocking types in SQL, not after the LIMIT',
+              /business_type = ANY\(\$1\)/.test(fn)]);
+    /* ...but the LIST still comes from the enum, so there is no second
+       copy of "which types block" living in SQL. */
+    out.push(['V2 near: the type list is derived from the enum, not restated',
+              /NON_ICP_BUSINESS_TYPE_KEYS\.filter\(nonIcpTypeBlocks\)/.test(fn)]);
+    /* "NEAR" IS RELATIVE TO ITS OWN FLOOR. The two differ -- 0.75 from a
+       page, 0.9 from a hostname -- so a fixed number would mean
+       "comfortably blocked" for one source and "just missed" for the
+       other. */
+    out.push(['V2 near: the floor is chosen per SOURCE, not fixed',
+              /source === 'llm_name_only'[\s\S]{0,120}NON_ICP_NAME_CONFIDENCE_FLOOR[\s\S]{0,60}NON_ICP_LLM_CONFIDENCE_FLOOR/.test(fn)]);
+    out.push(['V2 near: and the band is relative to that floor',
+              /confidence < r\.floor && r\.confidence >= r\.floor - NEAR_BAND/.test(fn)]);
+    /* Whether a lead used it is the column that decides whether a row
+       matters, and it reuses the tab's existing lead-to-domain join. */
+    out.push(['V2 near: it reports whether a lead actually used the domain',
+              /nearLeadCount\.get\(r\.domain\)/.test(fn)]);
+    out.push(['V2 near: rows behind a lead sort first',
+              /\(b\.leads - a\.leads\)/.test(fn)]);
+    /* A capped list beside an unbounded count, so "shown" never reads as
+       "exist" -- the same rule Needs attention follows. */
+    /* Scoped to the RETURN, which sits past the end of `fn` above -- the
+       first version looked in the computation slice and could never have
+       matched, which is a test that passes on the wrong text rather than
+       a test that fails. */
+    const ret = between('    nearMisses: {', '    /* ECHOED BACK, not assumed.');
+    out.push(['V2 near: the count is unbounded while the list is capped',
+              /rows: nearMisses\.slice\(0, 50\)[\s\S]{0,120}total: nearMisses\.length/.test(ret), ret.slice(0, 200)]);
+    out.push(['V2 near: and it reports how many are behind a lead',
+              /withLeads: nearMisses\.filter\(\(r\) => r\.leads > 0\)\.length/.test(ret)]);
+
+    /* ── THE DIGEST ─────────────────────────────────────────────── */
+    const dg = between('async function runNearMissDigest(', 'function startNearMissDigest()');
+    /* ALERTS CHANNEL, NOT THE LEADS FEED. An SDR reading the leads channel
+       is looking at actual prospects; a calibration digest is not one. */
+    out.push(['V2 near: the digest posts to the ALERTS channel',
+              /sendOpsSlack\(/.test(dg) && !/[^s]sendSlack\(/.test(dg)]);
+    /* WEEKLY, NOT PER EVENT. A near miss is the floor working; alerting on
+       a normal outcome is how a channel gets ignored. */
+    out.push(['V2 near: it only fires on one weekday and one hour',
+              /weekday !== 'Mon' \|\| hour !== NEAR_DIGEST_HOUR_ET/.test(dg)]);
+    out.push(['V2 near: and not twice in the same week',
+              /_nearDigestSentWeek === stamp/.test(dg)]);
+    /* It must say the thing it exists to say, or it is a number with no
+       decision attached. */
+    out.push(['V2 near: the post names both floors and where to change them',
+              /NON_ICP_NAME_CONFIDENCE_FLOOR/.test(dg) && /NON_ICP_LLM_CONFIDENCE_FLOOR/.test(dg)]);
+    out.push(['V2 near: and says lowering one turns more people away',
+              /turns more people away/.test(dg)]);
+    /* Fails silent: a digest is never worth taking a process down for. */
+    out.push(['V2 near: it fails silent', /\[near-digest\] failed \(non-blocking\)/.test(dg)]);
+    out.push(['V2 near: it can be switched off from the env',
+              /NEAR_DIGEST_ENABLED !== 'false'/.test(src)]);
+    out.push(['V2 near: the digest is started at boot', /startNearMissDigest\(\);/.test(src)]);
+
+    /* ── THE ET WINDOW, EXECUTED ────────────────────────────────── */
+    const etp = (new Function('DASH_TZ', 'Intl',
+      between('function etParts(', 'async function runNearMissDigest') + '\nreturn etParts;'
+    ))('America/New_York', Intl);
+    /* 13:00 UTC is 09:00 EDT. Computed through Intl with an explicit zone
+       rather than an offset, so the hour moves with DST on its own. */
+    const mon9 = etp(new Date('2026-09-28T13:00:00Z'));
+    out.push(['V2 near EXEC: Monday 13:00 UTC reads as Mon 09:00 ET',
+              mon9.weekday === 'Mon' && mon9.hour === 9, JSON.stringify(mon9)]);
+    const mon10 = etp(new Date('2026-09-28T14:00:00Z'));
+    out.push(['V2 near EXEC: an hour later is NOT the send hour', mon10.hour === 10]);
+    const tue9 = etp(new Date('2026-09-29T13:00:00Z'));
+    out.push(['V2 near EXEC: the same hour on Tuesday is not Monday', tue9.weekday === 'Tue']);
+    /* WINTER. A fixed -04:00 would put this an hour out for half the year. */
+    const jan = etp(new Date('2027-01-11T14:00:00Z'));
+    out.push(['V2 near EXEC: in EST, 14:00 UTC is the 09:00 hour',
+              jan.weekday === 'Mon' && jan.hour === 9, JSON.stringify(jan)]);
+  }
   return out;
 })();
 

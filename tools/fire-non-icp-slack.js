@@ -91,7 +91,7 @@ const lifted = new Function('require', [
   liftDecl('function slackNonIcpLlmFlagged'),
   liftDecl('function slackNonIcpLateBlock'),
   liftDecl('const NON_ICP_BUSINESS_TYPES'),
-  'return { alertOps, slackNonIcpBlocked, slackNonIcpLlmFlagged, slackNonIcpLateBlock };',
+  'return { alertOps, slackNonIcpBlocked, slackNonIcpLlmFlagged, slackNonIcpLateBlock, sendOpsSlack, bHeader, bDivider, bSection };',
 ].join('\n'))(require);
 
 const TEST_NOTE = 'DELIBERATE TEST fired by hand via tools/fire-non-icp-slack.js — not a real blocked prospect';
@@ -193,6 +193,25 @@ const FIRES = {
     confidence: 0.97,
     evidence_quote: 'Medicare and Health Insurance for Texans — a deliberate test quote, not a real prospect.',
   }),
+
+  /* THE WEEKLY NEAR-MISS DIGEST, added 23 Sept. Fired by hand for the
+     same reason as the four above: a message nobody has watched arrive is
+     a message nobody has tested. This one is WEEKLY, so waiting for it to
+     happen naturally means shipping it unseen for up to seven days.
+
+     Built from a fixture rather than the live report, because the tool
+     must not need a database to prove the MESSAGE renders. */
+  'near-digest': () => lifted.sendOpsSlack([
+    lifted.bHeader('\u{1F4CF} Near misses \u2014 is the confidence floor right?'),
+    lifted.bDivider(),
+    lifted.bSection('*3* domains in the cache were judged real estate or insurance and did NOT block, because confidence sat under the floor. *1* of them is behind a lead from the last 7 days.\n\n_A near miss is the floor working. This is here so the floor can be judged on a batch rather than on one domain._'),
+    lifted.bSection('*Floors:* 0.75 from a page, *0.9* from a domain name alone. "Near" is within 0.1 of whichever applied.'),
+    lifted.bSection('*Closest to blocking:*\n'
+      + '\u2022 `deliberate-non-icp-test.invalid` \u2014 insurance at *0.85* (floor 0.9, short by 0.05) _(from the name)_\n'
+      + '\u2022 `deliberate-two.invalid` \u2014 insurance at *0.82* (floor 0.9, short by 0.08) \u2014 *1 lead* _(from the name)_\n'
+      + '\u2022 `deliberate-three.invalid` \u2014 real_estate at *0.72* (floor 0.75, short by 0.03)'),
+    lifted.bSection('*' + TEST_NOTE + '* \u2014 no action needed. If several look genuinely wrong, the name floor is `NON_ICP_NAME_CONFIDENCE_FLOOR` and the page floor is `NON_ICP_LLM_CONFIDENCE_FLOOR`, both settable in the Railway env. Lowering one turns more people away, so it is a decision rather than a tuning knob.'),
+  ], 'Near misses: 3 under the floor, 1 behind a lead (DELIBERATE TEST)'),
 
   /* The critical. Payload shape copied from rejectBookingIfNonIcp(). */
   booking: () => lifted.alertOps('critical', 'Non-ICP', 'A blocked lead took a calendar slot', {

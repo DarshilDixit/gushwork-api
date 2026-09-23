@@ -4376,6 +4376,13 @@ app.get('/monitor', (req, res) => {
 
   '<div class="sl">What we could not read</div>' +
   '<div class="card" style="padding:14px;margin-bottom:16px" id="mdl-scrape"><div class="nd">Loading...</div></div>' +
+  /* NEAR MISSES. A panel, not an alert: a near miss is the floor working,
+     and the question it informs -- is the floor set right -- is a batch
+     question you cannot answer from one row. */
+  '<div class="sl" style="margin:18px 0 6px">Near misses</div>' +
+  '<div id="mdl-near-note" style="font-size:12px;color:#888;margin-bottom:8px"></div>' +
+  '<table><thead><tr><th>Domain</th><th>Judged</th><th>Confidence</th><th>Floor</th><th>Short by</th><th>Leads</th><th>From</th></tr></thead>' +
+  '<tbody id="mdl-near"><tr><td colspan="7" class="nd">Loading...</td></tr></tbody></table>' +
   '<div class="sl">What the cache knows &#8212; companies, all time</div>' +
   '<div class="card" style="padding:12px 14px;margin-bottom:8px;font-size:12px;color:#666">' +
   'A standing inventory of every domain ever classified, mostly the historical backfill. ' +
@@ -4686,6 +4693,31 @@ app.get('/monitor', (req, res) => {
   /* A percentage we could not compute is a dash, never a zero. Same rule
      the lead-path checkers follow: "we could not tell" is not "none". */
   'function mdlPct(p){return p==null?"\\u2014":p+"%";}' +
+  /* NEAR MISSES, rendered. TOP LEVEL like every other helper on this page
+     -- a loader declared inside another function is the scope bug that
+     made Blocked rows silently unexpandable.
+
+     NOTE THE \\" ESCAPING. These strings are concatenated into a <script>
+     the browser parses, so a double quote that must survive into the
+     emitted JS needs TWO backslashes here. Writing one produces
+     `innerHTML="<td colspan="7">"`, which ends the string at colspan= and
+     takes the whole dashboard down -- node --check cannot see it, because
+     this file is still valid JavaScript. */
+  'function mdlNearHtml(nm){' +
+  'var b=document.getElementById("mdl-near"),n=document.getElementById("mdl-near-note");' +
+  'if(!nm){b.innerHTML="<tr><td colspan=\\"7\\" class=\\"nd\\">No data</td></tr>";return;}' +
+  'n.innerHTML="Judged real estate or insurance, but under the confidence floor, so NOT blocked. "' +
+  '+"\\u201cNear\\u201d means within "+nm.band+" of its own floor \\u2014 "+nm.floors.page+" from a page, "+nm.floors.name+" from a domain name alone. "' +
+  '+"<b>"+nm.total+"</b> in the cache, <b>"+nm.withLeads+"</b> behind a lead in this window. "' +
+  '+"A near miss is the floor working; this is here to judge whether the floor is set right, which takes a batch rather than one row.";' +
+  'if(!nm.rows.length){b.innerHTML="<tr><td colspan=\\"7\\" class=\\"nd\\">Nothing came close to the floor without crossing it.</td></tr>";return;}' +
+  'b.innerHTML=nm.rows.map(function(x){' +
+  'return "<tr"+(x.leads>0?" style=\\"background:#fff7ed\\"":"")+"><td>"+esc(x.domain)+"</td>"' +
+  '+"<td>"+esc(x.business_type)+"</td><td><b>"+esc(String(x.confidence))+"</b></td>"' +
+  '+"<td style=\\"color:#666\\">"+esc(String(x.floor))+"</td>"' +
+  '+"<td>"+esc(String(x.short_by))+"</td>"' +
+  '+"<td>"+(x.leads>0?"<b>"+x.leads+"</b>":"0")+"</td>"' +
+  '+"<td style=\\"font-size:11px;color:#666\\">"+esc(x.source==="llm_name_only"?"domain name":"page")+"</td></tr>";}).join("");}' +
   'function mdlBar(n,total,colour){var w=total>0?Math.round(n/total*100):0;' +
   'return "<div style=\\"height:6px;background:#f0f0f0;border-radius:3px;overflow:hidden\\"><div style=\\"height:100%;width:"+w+"%;background:"+colour+"\\"></div></div>";}' +
   'var MDL_COLOUR={blocked_list:"#b91c1c",blocked_model:"#b91c1c",meta_only:"#f59e0b",checked_clear:"#1a1a1a",not_decided:"#c7c7c7"};' +
@@ -4790,6 +4822,7 @@ app.get('/monitor', (req, res) => {
   '"<b>Page read:</b> "+esc(x.page_url_used||"\\u2014")+" ("+(x.page_text_chars==null?"\\u2014":x.page_text_chars+" chars")+") &#183; <b>Decided at:</b> "+et(x.checked_at)+' +
   '"</td></tr>";}).join(""):"<tr><td colspan=\\"9\\" class=\\"nd\\">Nothing was blocked or suppressed in this window.</td></tr>";' +
   'document.getElementById("mdl-scrape").innerHTML=mdlScrapeHtml(d.scrape,d.cache);' +
+  'mdlNearHtml(d.nearMisses);' +
   'var cb=(d.cache&&d.cache.byType)||[];' +
   'document.getElementById("mdl-cache").innerHTML=cb.length?cb.map(function(i){' +
   'return "<tr><td>"+esc(i.label)+"</td><td>"+mdlChip(i.action)+"</td><td>"+i.domains+"</td></tr>";' +
@@ -12355,8 +12388,78 @@ async function nonIcpModelReport({ days, product } = {}) {
   const S = nonIcpLlmHealthSnapshot();
   const attempts = S.cacheHits + S.cacheMisses;
 
+  /* ── NEAR MISSES ─────────────────────────────────────────────────
+     A domain the model called a BLOCKING type and then did not block,
+     because its confidence sat under the floor.
+
+     WHY THIS IS A PANEL AND NOT AN ALERT. A near miss is the floor
+     WORKING, not a failure -- alerting on a normal outcome is how a
+     channel gets ignored, which is the same reason Partner revenue gaps
+     is a work queue rather than a health check. And the question it
+     informs ("is 0.90 right?") cannot be answered from one row: you have
+     to look at fifteen at once and ask how many are genuinely insurance.
+     A per-event ping is the wrong shape for a calibration decision.
+
+     "NEAR" IS WITHIN 0.10 OF ITS OWN FLOOR, not a fixed number. The two
+     floors differ -- 0.75 from a page, 0.90 from a hostname -- so a fixed
+     0.80 would mean "comfortably blocked" for one source and "just
+     missed" for the other. Relative also keeps meaning the same thing if
+     either floor moves.
+
+     FILTERED IN JS, DELIBERATELY. The floors are constants in this file;
+     repeating them in SQL would be a second source of truth, and the one
+     that drifts is always the copy. Same reasoning as the lead-to-verdict
+     join being in JS. */
+  const NEAR_BAND = 0.10;
+  const nearLeadCount = new Map();
+  for (const { domains } of perLead) {
+    for (const dm of new Set(domains)) nearLeadCount.set(dm, (nearLeadCount.get(dm) || 0) + 1);
+  }
+  /* NARROWED TO THE BLOCKING TYPES IN SQL, and the first version was not
+     -- it selected every non-blocking verdict, ordered by confidence and
+     took 500. With 3,270 rows the 500th sits at 0.96, so every near miss
+     (0.70 to 0.85) fell below the cut and the panel reported ZERO. It
+     looked like a clean result and was a truncation.
+
+     The type list still comes from the enum, passed as a parameter, so
+     there is no second copy of "which types block" in SQL. */
+  const blockingTypes = NON_ICP_BUSINESS_TYPE_KEYS.filter(nonIcpTypeBlocks);
+  const nearRows = await pool.query(`
+    SELECT domain, business_type, confidence, source, scrape_status, checked_at
+      FROM non_icp_domain_verdicts
+     WHERE blocking IS NOT TRUE
+       AND confidence IS NOT NULL
+       AND business_type = ANY($1)
+     ORDER BY confidence DESC
+     LIMIT 500`, [blockingTypes]);
+  const nearMisses = nearRows.rows
+    .map((r) => {
+      const floor = r.source === 'llm_name_only'
+        ? NON_ICP_NAME_CONFIDENCE_FLOOR : NON_ICP_LLM_CONFIDENCE_FLOOR;
+      return { ...r, confidence: Number(r.confidence), floor,
+               short_by: Math.round((floor - Number(r.confidence)) * 100) / 100 };
+    })
+    .filter((r) => r.confidence < r.floor && r.confidence >= r.floor - NEAR_BAND)
+    /* WHETHER A LEAD IN THIS WINDOW ACTUALLY USED IT is the column that
+       matters. A near miss on a domain nobody submitted cost nothing; one
+       behind a real lead is the case worth arguing about, and a panel that
+       treats them as equal makes the reader do that sorting by hand.
+
+       Counted off perLead, which already holds each lead's candidate
+       domains through nonIcpCandidateDomains -- so this is the same
+       lead-to-domain join the rest of the tab uses, not a second one. */
+    .map((r) => ({ ...r, leads: nearLeadCount.get(r.domain) || 0 }))
+    .sort((a, b) => (b.leads - a.leads) || (a.short_by - b.short_by));
+
   return {
     windowDays: d,
+    nearMisses: {
+      band: NEAR_BAND,
+      floors: { page: NON_ICP_LLM_CONFIDENCE_FLOOR, name: NON_ICP_NAME_CONFIDENCE_FLOOR },
+      rows: nearMisses.slice(0, 50),
+      total: nearMisses.length,
+      withLeads: nearMisses.filter((r) => r.leads > 0).length,
+    },
     /* ECHOED BACK, not assumed. The caption under the ladder says which
        population it summed, and it reads this rather than the control --
        a request that silently ignored an unknown value would otherwise
@@ -14430,6 +14533,93 @@ function slackNonIcpLateBlock(d) {
 /* Boot-then-interval, matching the five PartnerStack jobs. A sweep that
    only runs on an interval loses its first window to every deploy, which
    for this one means the leads booked while the dyno was restarting. */
+/* ── THE WEEKLY NEAR-MISS DIGEST ──────────────────────────────────────
+   Monday morning ET, to the ALERTS channel.
+
+   WEEKLY AND NOT PER EVENT, deliberately. A near miss is the confidence
+   floor doing its job, so paging on each one would alert on a normal
+   outcome -- the thing that trains people to ignore a channel, and the
+   same reason Partner revenue gaps is a work queue rather than a health
+   check. It is also the wrong shape for the decision: "is 0.90 right"
+   cannot be answered from one domain, only from a batch.
+
+   ALERTS CHANNEL, NOT LEADS. sendOpsSlack, because an SDR reading the
+   leads feed is looking at actual prospects and a calibration digest is
+   not one.
+
+   THE WEEK GUARD IS IN MEMORY AND THAT IS A KNOWN, BOUNDED GAP. There is
+   no persisted marker, so a deploy inside the Monday 09:00 ET hour can
+   send it twice. That is roughly 0.6% of the week, and a duplicate digest
+   is mildly annoying where a missed one is invisible -- so the trade is
+   deliberately toward sending. If it ever matters, the fix is a row, not
+   a longer window. */
+const NEAR_DIGEST_HOUR_ET = Number(process.env.NEAR_DIGEST_HOUR_ET || 9);
+const NEAR_DIGEST_ENABLED = process.env.NEAR_DIGEST_ENABLED !== 'false';
+let _nearDigestSentWeek = null;
+
+function etParts(d = new Date()) {
+  const f = new Intl.DateTimeFormat('en-US', {
+    timeZone: DASH_TZ, weekday: 'short', hour: 'numeric', hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(d);
+  const g = (t) => (f.find((x) => x.type === t) || {}).value;
+  return { weekday: g('weekday'), hour: Number(g('hour')),
+           stamp: `${g('year')}-${g('month')}-${g('day')}` };
+}
+
+async function runNearMissDigest(force = false) {
+  if (!NEAR_DIGEST_ENABLED) return;
+  const { weekday, hour, stamp } = etParts();
+  if (!force) {
+    if (weekday !== 'Mon' || hour !== NEAR_DIGEST_HOUR_ET) return;
+    if (_nearDigestSentWeek === stamp) return;
+  }
+  _nearDigestSentWeek = stamp;
+  try {
+    const report = await nonIcpModelReport({ days: 7 });
+    const nm = report.nearMisses;
+    const blocks = [];
+    blocks.push(bHeader('\u{1F4CF} Near misses — is the confidence floor right?'));
+    blocks.push(bDivider());
+    blocks.push(bSection(
+      `*${nm.total}* domain${nm.total === 1 ? '' : 's'} in the cache were judged real estate or insurance ` +
+      `and did NOT block, because confidence sat under the floor. *${nm.withLeads}* of them are behind a lead ` +
+      `from the last 7 days.\n\n_A near miss is the floor working. This is here so the floor can be judged on a ` +
+      `batch rather than on one domain._`));
+    blocks.push(bSection(
+      `*Floors:* ${nm.floors.page} from a page, *${nm.floors.name}* from a domain name alone. ` +
+      `"Near" is within ${nm.band} of whichever applied.`));
+    const top = nm.rows.slice(0, 10);
+    if (top.length) {
+      blocks.push(bSection('*Closest to blocking:*\n' + top.map((r) =>
+        `• \`${r.domain}\` — ${r.business_type} at *${r.confidence}* ` +
+        `(floor ${r.floor}, short by ${r.short_by})` +
+        (r.leads ? ` — *${r.leads} lead${r.leads === 1 ? '' : 's'}*` : '') +
+        (r.source === 'llm_name_only' ? ' _(from the name)_' : '')).join('\n')));
+    } else {
+      blocks.push(bSection('_Nothing came close to the floor without crossing it this week._'));
+    }
+    blocks.push(bSection(
+      '*If several of these look genuinely wrong*, the name floor is `NON_ICP_NAME_CONFIDENCE_FLOOR` ' +
+      'and the page floor is `NON_ICP_LLM_CONFIDENCE_FLOOR`, both settable in the Railway env. ' +
+      'Lowering one turns more people away, so it is a decision rather than a tuning knob. ' +
+      'Full list on the dashboard, Model tab.'));
+    sendOpsSlack(blocks, `Near misses: ${nm.total} under the floor, ${nm.withLeads} behind a lead`);
+    console.log(`[near-digest] sent — ${nm.total} near misses, ${nm.withLeads} with leads`);
+  } catch (err) {
+    console.warn('[near-digest] failed (non-blocking):', err && err.message);
+  }
+}
+
+/* Hourly tick; the DAY and HOUR check inside is what makes it weekly. An
+   hourly timer that decides for itself is simpler to reason about than a
+   weekly one that has to survive restarts. */
+function startNearMissDigest() {
+  const t = setInterval(() => runNearMissDigest().catch(() => {}), 60 * 60 * 1000);
+  if (t.unref) t.unref();
+  console.log(`[near-digest] Started — Mondays at ${NEAR_DIGEST_HOUR_ET}:00 ET, to the alerts channel`);
+}
+
 function startNonIcpBookedRecheck() {
   const run = (why) => runNonIcpBookedRecheck()
     .catch((err) => console.warn(`[non-ICP recheck] Sweep failed (${why}, non-blocking):`, err && err.message));
@@ -15160,6 +15350,7 @@ async function start() {
       startPartnerStackConversionRetry();
       startPartnerStackSfStateRefresh();
       startNonIcpBookedRecheck();
+      startNearMissDigest();
     });
   } catch (err) { console.error('[GW API] Failed to start:', err); process.exit(1); }
 }
