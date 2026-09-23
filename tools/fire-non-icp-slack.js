@@ -202,16 +202,23 @@ const FIRES = {
      Built from a fixture rather than the live report, because the tool
      must not need a database to prove the MESSAGE renders. */
   'near-digest': () => lifted.sendOpsSlack([
-    lifted.bHeader('\u{1F4CF} Near misses \u2014 is the confidence floor right?'),
+    lifted.bHeader('\u{1F50D} 3 companies looked like real estate or insurance \u2014 we let them through'),
     lifted.bDivider(),
-    lifted.bSection('*3* domains in the cache were judged real estate or insurance and did NOT block, because confidence sat under the floor. *1* of them is behind a lead from the last 7 days.\n\n_A near miss is the floor working. This is here so the floor can be judged on a batch rather than on one domain._'),
-    lifted.bSection('*Floors:* 0.75 from a page, *0.9* from a domain name alone. "Near" is within 0.1 of whichever applied.'),
-    lifted.bSection('*Closest to blocking:*\n'
-      + '\u2022 `deliberate-non-icp-test.invalid` \u2014 insurance at *0.85* (floor 0.9, short by 0.05) _(from the name)_\n'
-      + '\u2022 `deliberate-two.invalid` \u2014 insurance at *0.82* (floor 0.9, short by 0.08) \u2014 *1 lead* _(from the name)_\n'
-      + '\u2022 `deliberate-three.invalid` \u2014 real_estate at *0.72* (floor 0.75, short by 0.03)'),
-    lifted.bSection('*' + TEST_NOTE + '* \u2014 no action needed. If several look genuinely wrong, the name floor is `NON_ICP_NAME_CONFIDENCE_FLOOR` and the page floor is `NON_ICP_LLM_CONFIDENCE_FLOOR`, both settable in the Railway env. Lowering one turns more people away, so it is a decision rather than a tuning knob.'),
-  ], 'Near misses: 3 under the floor, 1 behind a lead (DELIBERATE TEST)'),
+    lifted.bSection('*What this is.* We turn away real-estate and insurance companies. These looked like one, but we were not certain enough to act, so they were treated as normal leads.'),
+    lifted.bSection('*How certain we need to be before turning someone away:*\n'
+      + '\u2022 We could read their website \u2014 *75%*\n'
+      + '\u2022 We could not, so we judged the domain name alone \u2014 *90%*\n'
+      + '_The second bar is higher because a name is weaker evidence than a page._'),
+    lifted.bSection('*1 of the 3 had a real person fill in the form in the last 7 days.* The rest are judgements sitting in our cache with nobody attached.'),
+    lifted.bSection('\u2022 `deliberate-two.invalid` \u2014 *Insurance*, *82% sure*, judged from the domain name (needed 90%)\n     \u21b3 *1 lead came through this week*\n'
+      + '\u2022 `deliberate-non-icp-test.invalid` \u2014 *Insurance*, *85% sure*, judged from the domain name (needed 90%)\n'
+      + '\u2022 `deliberate-three.invalid` \u2014 *Real estate*, *72% sure*, judged from their website (needed 75%)'),
+    lifted.bSection('*What to do.* Nothing, unless several of these look plainly wrong to you. If they do, say so and the bar can be lowered \u2014 but a lower bar turns more people away, including some we want, so it is a decision rather than a setting. _Full list on the dashboard, Model tab._'),
+    /* The test marker says NOT REAL DATA. The old one said "not a real
+       blocked prospect", which contradicted the message above it: a near
+       miss is by definition somebody we did NOT block. */
+    lifted.bSection('_DELIBERATE TEST via tools/fire-non-icp-slack.js \u2014 the domains above are fake and no action is needed._'),
+  ], 'Near misses: 3 companies came close to being turned away (DELIBERATE TEST)'),
 
   /* The critical. Payload shape copied from rejectBookingIfNonIcp(). */
   booking: () => lifted.alertOps('critical', 'Non-ICP', 'A blocked lead took a calendar slot', {

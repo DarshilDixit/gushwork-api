@@ -2494,11 +2494,34 @@ results13 = (async () => {
               /weekday !== 'Mon' \|\| hour !== NEAR_DIGEST_HOUR_ET/.test(dg)]);
     out.push(['V2 near: and not twice in the same week',
               /_nearDigestSentWeek === stamp/.test(dg)]);
-    /* It must say the thing it exists to say, or it is a number with no
-       decision attached. */
-    out.push(['V2 near: the post names both floors and where to change them',
-              /NON_ICP_NAME_CONFIDENCE_FLOOR/.test(dg) && /NON_ICP_LLM_CONFIDENCE_FLOOR/.test(dg)]);
-    out.push(['V2 near: and says lowering one turns more people away',
+    /* IT MUST BE READABLE BY THE PEOPLE IN THAT CHANNEL. CLAUDE.md: "Plain,
+       direct language in Slack alerts and dashboard labels. They are read
+       by SDRs, not engineers." The first version shipped `real_estate`,
+       raw 0.85 decimals and two env-var names into the body, and it took
+       firing the post and reading it to notice -- no assertion here was
+       going to catch prose. */
+    out.push(['V2 near: no env-var names in a message humans read',
+              !/NON_ICP_[A-Z_]+/.test(dg), (dg.match(/NON_ICP_[A-Z_]+/g) || []).join(',')]);
+    out.push(['V2 near: no snake_case business keys either \u2014 the label is used',
+              !/real_estate|business_type\b(?!\])/.test(dg.replace(/\/\*[\s\S]*?\*\//g, ''))]);
+    /* Percentages, because 0.82 is a number a human has to convert. */
+    out.push(['V2 near: certainty is shown as a percentage',
+              /confidence_pct/.test(dg) && /floor_pct/.test(dg)]);
+    /* BOTH BARS AND WHY THEY DIFFER. Two numbers with no reason look
+       arbitrary, and the reason IS the name fallback. */
+    out.push(['V2 near: it states both bars',
+              /could read their website/.test(dg) && /domain name alone/.test(dg)]);
+    out.push(['V2 near: and says WHY the second is higher',
+              /weaker evidence than a page/.test(dg)]);
+    /* Each row says which evidence was used, so the reader never has to
+       remember which bar applies. */
+    out.push(['V2 near: every row says which evidence was judged',
+              /judged from \$\{r\.judged_from\}/.test(dg)]);
+    /* "Behind a lead" meant nothing. Say what happened. */
+    out.push(['V2 near: it says plainly whether a real person came through',
+              /fill in the form in the last 7 days/.test(dg)]);
+    /* The next step has to be a sentence somebody can act on. */
+    out.push(['V2 near: and says lowering the bar turns more people away',
               /turns more people away/.test(dg)]);
     /* Fails silent: a digest is never worth taking a process down for. */
     out.push(['V2 near: it fails silent', /\[near-digest\] failed \(non-blocking\)/.test(dg)]);

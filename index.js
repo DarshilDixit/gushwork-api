@@ -4381,7 +4381,7 @@ app.get('/monitor', (req, res) => {
      question you cannot answer from one row. */
   '<div class="sl" style="margin:18px 0 6px">Near misses</div>' +
   '<div id="mdl-near-note" style="font-size:12px;color:#888;margin-bottom:8px"></div>' +
-  '<table><thead><tr><th>Domain</th><th>Judged</th><th>Confidence</th><th>Floor</th><th>Short by</th><th>Leads</th><th>From</th></tr></thead>' +
+  '<table><thead><tr><th>Domain</th><th>Looked like</th><th>How sure</th><th>Needed</th><th>Judged from</th><th>Leads</th><th></th></tr></thead>' +
   '<tbody id="mdl-near"><tr><td colspan="7" class="nd">Loading...</td></tr></tbody></table>' +
   '<div class="sl">What the cache knows &#8212; companies, all time</div>' +
   '<div class="card" style="padding:12px 14px;margin-bottom:8px;font-size:12px;color:#666">' +
@@ -4706,18 +4706,17 @@ app.get('/monitor', (req, res) => {
   'function mdlNearHtml(nm){' +
   'var b=document.getElementById("mdl-near"),n=document.getElementById("mdl-near-note");' +
   'if(!nm){b.innerHTML="<tr><td colspan=\\"7\\" class=\\"nd\\">No data</td></tr>";return;}' +
-  'n.innerHTML="Judged real estate or insurance, but under the confidence floor, so NOT blocked. "' +
-  '+"\\u201cNear\\u201d means within "+nm.band+" of its own floor \\u2014 "+nm.floors.page+" from a page, "+nm.floors.name+" from a domain name alone. "' +
-  '+"<b>"+nm.total+"</b> in the cache, <b>"+nm.withLeads+"</b> behind a lead in this window. "' +
-  '+"A near miss is the floor working; this is here to judge whether the floor is set right, which takes a batch rather than one row.";' +
+  'n.innerHTML="These looked like real estate or insurance, but we were not certain enough to turn them away, so they came through as normal leads. "' +
+  '+"We need <b>"+Math.round(nm.floors.page*100)+"%</b> certainty when we can read their website, and <b>"+Math.round(nm.floors.name*100)+"%</b> when we can only judge the domain name \\u2014 a name is weaker evidence, so the bar is higher. "' +
+  '+"<b>"+nm.total+"</b> came close without crossing it. <b>"+nm.withLeads+"</b> had a real person fill in the form in this window (highlighted below); the rest are judgements with nobody attached.";' +
   'if(!nm.rows.length){b.innerHTML="<tr><td colspan=\\"7\\" class=\\"nd\\">Nothing came close to the floor without crossing it.</td></tr>";return;}' +
   'b.innerHTML=nm.rows.map(function(x){' +
   'return "<tr"+(x.leads>0?" style=\\"background:#fff7ed\\"":"")+"><td>"+esc(x.domain)+"</td>"' +
-  '+"<td>"+esc(x.business_type)+"</td><td><b>"+esc(String(x.confidence))+"</b></td>"' +
-  '+"<td style=\\"color:#666\\">"+esc(String(x.floor))+"</td>"' +
-  '+"<td>"+esc(String(x.short_by))+"</td>"' +
+  '+"<td>"+esc(x.label)+"</td><td><b>"+x.confidence_pct+"%</b></td>"' +
+  '+"<td style=\\"color:#666\\">"+x.floor_pct+"%</td>"' +
+  '+"<td style=\\"font-size:11px;color:#666\\">"+esc(x.judged_from)+"</td>"' +
   '+"<td>"+(x.leads>0?"<b>"+x.leads+"</b>":"0")+"</td>"' +
-  '+"<td style=\\"font-size:11px;color:#666\\">"+esc(x.source==="llm_name_only"?"domain name":"page")+"</td></tr>";}).join("");}' +
+  '+"<td></td></tr>";}).join("");}' +
   'function mdlBar(n,total,colour){var w=total>0?Math.round(n/total*100):0;' +
   'return "<div style=\\"height:6px;background:#f0f0f0;border-radius:3px;overflow:hidden\\"><div style=\\"height:100%;width:"+w+"%;background:"+colour+"\\"></div></div>";}' +
   'var MDL_COLOUR={blocked_list:"#b91c1c",blocked_model:"#b91c1c",meta_only:"#f59e0b",checked_clear:"#1a1a1a",not_decided:"#c7c7c7"};' +
@@ -12436,7 +12435,25 @@ async function nonIcpModelReport({ days, product } = {}) {
     .map((r) => {
       const floor = r.source === 'llm_name_only'
         ? NON_ICP_NAME_CONFIDENCE_FLOOR : NON_ICP_LLM_CONFIDENCE_FLOOR;
+      /* THE HUMAN LABEL, from the same enum the Model tab reads. CLAUDE.md:
+         "Plain, direct language in Slack alerts and dashboard labels. They
+         are read by SDRs, not engineers." real_estate is a key, not a
+         phrase, and shipping it into a message was a straight breach of
+         that -- caught by reading the fired test post rather than by any
+         assertion. */
+      const meta = NON_ICP_BUSINESS_TYPES[r.business_type] || {};
       return { ...r, confidence: Number(r.confidence), floor,
+               label: meta.label || r.business_type,
+               /* PERCENTAGES, because 0.82 is a number a human has to
+                  convert and 82% is one they read. */
+               confidence_pct: Math.round(Number(r.confidence) * 100),
+               floor_pct: Math.round(floor * 100),
+               /* WHICH EVIDENCE, spelled out per row rather than left to
+                  the reader to infer from two different floors. The two
+                  bars exist BECAUSE the evidence differs, so a row that
+                  shows its bar without showing why is asking the reader
+                  to hold the rule in their head. */
+               judged_from: r.source === 'llm_name_only' ? 'the domain name' : 'their website',
                short_by: Math.round((floor - Number(r.confidence)) * 100) / 100 };
     })
     .filter((r) => r.confidence < r.floor && r.confidence >= r.floor - NEAR_BAND)
@@ -14579,31 +14596,41 @@ async function runNearMissDigest(force = false) {
     const report = await nonIcpModelReport({ days: 7 });
     const nm = report.nearMisses;
     const blocks = [];
-    blocks.push(bHeader('\u{1F4CF} Near misses — is the confidence floor right?'));
+    blocks.push(bHeader(`\u{1F50D} ${nm.total} compan${nm.total === 1 ? 'y' : 'ies'} looked like real estate or insurance \u2014 we let them through`));
     blocks.push(bDivider());
+    /* WHAT THIS IS, in one sentence, because the reader did not ask for
+       it and has no context. */
     blocks.push(bSection(
-      `*${nm.total}* domain${nm.total === 1 ? '' : 's'} in the cache were judged real estate or insurance ` +
-      `and did NOT block, because confidence sat under the floor. *${nm.withLeads}* of them are behind a lead ` +
-      `from the last 7 days.\n\n_A near miss is the floor working. This is here so the floor can be judged on a ` +
-      `batch rather than on one domain._`));
+      '*What this is.* We turn away real-estate and insurance companies. ' +
+      'These looked like one, but we were not certain enough to act, so they were treated as normal leads.'));
+    /* THE TWO BARS AND WHY THEY DIFFER. Stating both numbers without the
+       reason makes them look arbitrary. */
     blocks.push(bSection(
-      `*Floors:* ${nm.floors.page} from a page, *${nm.floors.name}* from a domain name alone. ` +
-      `"Near" is within ${nm.band} of whichever applied.`));
+      '*How certain we need to be before turning someone away:*\n' +
+      `\u2022 We could read their website \u2014 *${Math.round(nm.floors.page * 100)}%*\n` +
+      `\u2022 We could not, so we judged the domain name alone \u2014 *${Math.round(nm.floors.name * 100)}%*\n` +
+      '_The second bar is higher because a name is weaker evidence than a page._'));
+    /* THE ONE NUMBER THAT DECIDES WHETHER THIS MATTERS. "Behind a lead"
+       meant nothing to a reader; say what actually happened. */
+    blocks.push(bSection(
+      nm.withLeads
+        ? `*${nm.withLeads} of the ${nm.total} had a real person fill in the form in the last 7 days.* ` +
+          `The rest are judgements sitting in our cache with nobody attached.`
+        : `*None of them had anyone fill in the form in the last 7 days* \u2014 these are judgements ` +
+          `sitting in our cache with nobody attached.`));
     const top = nm.rows.slice(0, 10);
     if (top.length) {
-      blocks.push(bSection('*Closest to blocking:*\n' + top.map((r) =>
-        `• \`${r.domain}\` — ${r.business_type} at *${r.confidence}* ` +
-        `(floor ${r.floor}, short by ${r.short_by})` +
-        (r.leads ? ` — *${r.leads} lead${r.leads === 1 ? '' : 's'}*` : '') +
-        (r.source === 'llm_name_only' ? ' _(from the name)_' : '')).join('\n')));
-    } else {
-      blocks.push(bSection('_Nothing came close to the floor without crossing it this week._'));
+      blocks.push(bSection(top.map((r) =>
+        `\u2022 \`${r.domain}\` \u2014 *${r.label}*, *${r.confidence_pct}% sure*, judged from ${r.judged_from} ` +
+        `(needed ${r.floor_pct}%)` +
+        (r.leads ? `\n     \u21b3 *${r.leads} lead${r.leads === 1 ? '' : 's'} came through this week*` : '')
+      ).join('\n')));
     }
     blocks.push(bSection(
-      '*If several of these look genuinely wrong*, the name floor is `NON_ICP_NAME_CONFIDENCE_FLOOR` ' +
-      'and the page floor is `NON_ICP_LLM_CONFIDENCE_FLOOR`, both settable in the Railway env. ' +
-      'Lowering one turns more people away, so it is a decision rather than a tuning knob. ' +
-      'Full list on the dashboard, Model tab.'));
+      '*What to do.* Nothing, unless several of these look plainly wrong to you. ' +
+      'If they do, say so and the bar can be lowered \u2014 but a lower bar turns more people away, ' +
+      'including some we want, so it is a decision rather than a setting. ' +
+      '_Full list on the dashboard, Model tab._'));
     sendOpsSlack(blocks, `Near misses: ${nm.total} under the floor, ${nm.withLeads} behind a lead`);
     console.log(`[near-digest] sent — ${nm.total} near misses, ${nm.withLeads} with leads`);
   } catch (err) {
