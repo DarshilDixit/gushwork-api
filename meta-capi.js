@@ -55,10 +55,30 @@ function normalizePhone(value) {
    passes through cannot be bypassed by a new caller; six call sites can,
    and that is how this happened in the first place.
 
-   Verified against the live API on 23 Sept 2026: a clean IP, a two-hop
-   list and a three-hop list all return HTTP 200, events_received 1, and an
-   EMPTY messages array. Meta will never tell us this is wrong, so nothing
-   downstream can catch it -- it has to be right on the way out.
+   MEASURED IN PRODUCTION, 23 Sept 2026, and it was a live bug rather than
+   a precaution. A one-shot diagnostic on /submit printed:
+
+     entries=2 | first=97.208.126.x | last=152.233.40.x
+     req.ip=152.233.40.x | sent_to_meta_would_be=97.208.126.x
+
+   So Railway really does send two entries, and every Meta event before
+   this fix carried "97.208.126.x, 152.233.40.x" as client_ip_address -- a
+   comma-separated string where an address belongs.
+
+   NOTE WHAT req.ip DOES. It resolves to the LAST entry, which is a proxy
+   hop and not the visitor, so the `|| req.ip` fallback at the call sites
+   would also have been wrong had the header been absent. The FIRST entry
+   is the person.
+
+   And Meta never complained. Also checked against the live API the same
+   day: a clean IP, a two-hop list and a three-hop list each returned HTTP
+   200, events_received 1, and an EMPTY messages array. Nothing downstream
+   can catch this -- it has to be right on the way out.
+
+   (The diagnostic that produced the numbers above was removed once it had
+   answered the question. Its output is quoted here so the finding outlives
+   it, which is the point of taking a temporary log out rather than leaving
+   it printing once per deploy forever.)
 
    Returns undefined for anything that is not a plausible address, so the
    key is dropped from user_data rather than sent as junk. */

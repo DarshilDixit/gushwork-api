@@ -9579,38 +9579,6 @@ async function finaliseIpGeo(session_id, ip) {
   }
 }
 
-/* ── WHAT IS ACTUALLY IN x-forwarded-for? ONE LINE, ONCE PER BOOT. ──
-   The comment above asserts Railway sends a comma-separated list, and the
-   Meta call sites were built as if it sends a single address. Both cannot
-   be right, and nothing in this repo has ever printed the value -- so the
-   question has been open for as long as both have existed.
-
-   It is normalised on the way out now (normalizeClientIp in meta-capi.js),
-   which is correct whichever the answer is: a one-entry header splits to
-   itself. This exists to CLOSE the question rather than keep working
-   around it.
-
-   Once per process, not once per request: the shape does not vary by
-   visitor, and a per-request log of an IP is a per-request log of personal
-   data. Prints the SHAPE and a redacted sample, never the full address.
-   Delete once somebody has read it -- same as the [verify-website][diag]
-   block above. */
-let _xffShapeLogged = false;
-function logXffShapeOnce(req) {
-  if (_xffShapeLogged) return;
-  _xffShapeLogged = true;
-  try {
-    const raw = (req.headers['x-forwarded-for'] || '').toString();
-    const parts = raw.split(',').map((x) => x.trim()).filter(Boolean);
-    const redact = (ip) => (ip || '').replace(/\.\d+$/, '.x').replace(/:[0-9a-f]*$/i, ':x');
-    console.log(`[xff-diag] entries=${parts.length} | first=${redact(parts[0])} | ` +
-      `last=${redact(parts[parts.length - 1])} | req.ip=${redact(req.ip)} | ` +
-      `sent_to_meta_would_be=${redact(parts[0] || req.ip)}`);
-  } catch (e) {
-    console.log('[xff-diag] failed (ignored):', e && e.message);
-  }
-}
-
 /* ONE DEFINITION, because there were already two and they disagreed.
    This split lived only inside readPartnerStackRequestContext while the
    six Meta call sites passed the raw header; pulling it out is what stops
@@ -14157,7 +14125,6 @@ app.post('/submit', async (req, res) => {
          website-verified branch so the logged reason is the real one, the
          same ordering /partial uses for StartTrial. A blocked lead never
          reaches this branch at all -- it took the branch above. */
-      logXffShapeOnce(req);
       if (internalLeadSuppressesMeta(email, page_url, '/submit')) {
         /* First, same ordering as /partial. */
       } else if (nonIcpSuppressMeta) {
