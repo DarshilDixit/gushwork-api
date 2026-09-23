@@ -3968,8 +3968,22 @@ const results31 = (async () => {
             /function syncIpGeoToAWS[\s\S]{0,500}UPDATE gw_form_leads/.test(idx)]);
   /* The dashboard must not let a reader take company HQ for visitor
      location. */
-  out.push(['31: the panel labels it "Visitor location", distinctly from Apollo’s',
-            /lb:"Visitor location"/.test(idx) && /lb:"Location"/.test(idx)]);
+  /* THE SEPARATOR IS THE POINT. The four IP fields moved into their own
+     group on 23 Sept because the panel already carried TWO locations that
+     are not the same fact -- Apollo's "Person location" is where the
+     company is registered, this is where the human actually was. On the 22
+     Sept lead they read Woburn and Boston: both correct, ten miles apart,
+     and indistinguishable in one undivided grid. */
+  out.push(['31: the visitor fields sit under their OWN separator',
+            /\[4,"Visitor &mdash; from their IP address"\]/.test(idx)]);
+  out.push(['31: that separator is rendered FIRST, above Form & enrichment',
+            idx.indexOf('[4,"Visitor &mdash;') < idx.indexOf('[1,"Form &amp; enrichment"]')]);
+  /* efCell falls back to `f.g||1`, so a group numbered 0 is falsy and would
+     land silently back in Form data. */
+  out.push(['31: the group number is truthy, or the fields fall back into Form data',
+            /\{g:4,lb:"Location"/.test(idx) && !/\{g:0,/.test(idx)]);
+  out.push(["31: Apollo's own location field is still there and still separate",
+            /lb:"Person location"/.test(idx)]);
   return out;
 })();
 

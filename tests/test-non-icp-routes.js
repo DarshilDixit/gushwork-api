@@ -704,6 +704,38 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
        of the painted HTML and compare them to this object, so it has
        to be reachable by name rather than inlined into the stub. */
     const sandboxPayload = {
+          /* THE VISITORS TAB. Numbers are deliberately odd so a value read
+             back out of the painted HTML cannot coincide with a default,
+             a length or another panel's count. */
+          window_days: 30,
+          coverage: { leads: 4471, with_address: 3312, with_place: 3301,
+                      address_only: 11, distinct_addresses: 2287 },
+          repeats: { total: 9, shown: 2, rows: [
+            { ip_address: '203.0.113.45', leads: 7, people: 3, city: 'Boston',
+              region: 'Massachusetts', country: 'US', isp: 'Verizon Business',
+              first_seen: new Date().toISOString(), last_seen: new Date().toISOString(),
+              emails: ['a@x.com', 'b@x.com'] },
+            { ip_address: '198.51.100.7', leads: 2, people: 2, city: null,
+              region: null, country: null, isp: null,
+              first_seen: new Date().toISOString(), last_seen: new Date().toISOString(),
+              emails: null } ] },
+          places: { mappable: 2, rows: [
+            { city: 'Boston', region: 'Massachusetts', country: 'US',
+              lat: 42.3601, lon: -71.0589, leads: 613, people: 590, booked: 402 },
+            /* EXACTLY A QUARTER of Boston's leads, with coordinates. Two
+               mappable points are the minimum that can tell area scaling
+               from linear: with one point both give the same radius, and
+               the mutation that swapped sqrt for a plain ratio SURVIVED
+               until this row existed. */
+            { city: 'Denver', region: 'Colorado', country: 'US',
+              lat: 39.7392, lon: -104.9903, leads: 153, people: 150, booked: 90 },
+            /* No coordinates: resolved before they were stored. The map must
+               NAME these rather than quietly drawing fewer dots. */
+            { city: 'Austin', region: 'Texas', country: 'US',
+              lat: null, lon: null, leads: 77, people: 71, booked: 40 } ] },
+          networks: [{ isp: 'Verizon Business', org_domain: 'verizonbusiness.com',
+                       leads: 829, people: 800, booked: 511 }],
+          timezones: [{ timezone: 'America/New_York', leads: 937, booked: 604 }],
           total: 1, page: 1, pages: 1,
           leads: [{ session_id: '00000000-0000-4000-8000-00000000000a', email: 'a@b.com',
                     first_name: 'A', last_name: 'B', company: 'C', sell_to: 'B2B',
@@ -815,11 +847,145 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
            + ' mdlActionChip: typeof mdlActionChip === "function" ? mdlActionChip : null,'
            + ' mdlConf: typeof mdlConf === "function" ? mdlConf : null,'
            + ' mdlPct: typeof mdlPct === "function" ? mdlPct : null,'
-           + ' mdlBar: typeof mdlBar === "function" ? mdlBar : null };'
+           + ' mdlBar: typeof mdlBar === "function" ? mdlBar : null,'
+           + ' loadVisitors: typeof loadVisitors === "function" ? loadVisitors : null,'
+           + ' visRender: typeof visRender === "function" ? visRender : null,'
+           + ' visToggleMap: typeof visToggleMap === "function" ? visToggleMap : null,'
+           + ' visDrawMap: typeof visDrawMap === "function" ? visDrawMap : null,'
+           + ' visLocalTime: typeof visLocalTime === "function" ? visLocalTime : null };'
       )(...Object.values(sandbox));
     } catch (err) { evalErr = err; }
     const eq2 = (n, a, b) => ok(n, a === b, `got ${JSON.stringify(a)}, expected ${JSON.stringify(b)}`);
     ok('dashboard: the inline script evaluates without throwing', !evalErr, evalErr && evalErr.message);
+
+    /* ── THE VISITORS TAB, DRIVEN ────────────────────────────────────
+       Not "did it render" -- that claim passed while the Model tab showed
+       "0 companies classified" above a table of 529. Every number below is
+       read back OUT of the painted HTML and compared to the payload that
+       was handed in, with fixture values distinctive enough that they
+       cannot match by accident. */
+    {
+      const P = sandboxPayload;
+      ok('visitors: every helper is defined at TOP LEVEL',
+         !!(scope.loadVisitors && scope.visRender && scope.visToggleMap
+            && scope.visDrawMap && scope.visLocalTime));
+
+      let visErr = null;
+      try { scope.visRender(P); } catch (e) { visErr = e; }
+      ok('visitors: visRender runs without throwing', !visErr, visErr && visErr.message);
+
+      /* COVERAGE, and its units. Three different ones appear on this tab
+         and they are easy to read as each other, so the label has to
+         travel with the number. */
+      const cov = painted['vis-cov'] || '';
+      ok('visitors: the lead count is the payload\\u2019s, not a length',
+         cov.includes(String(P.coverage.leads)), cov.slice(0, 160));
+      ok('visitors: with_address is painted', cov.includes(String(P.coverage.with_address)));
+      ok('visitors: with_place is painted', cov.includes(String(P.coverage.with_place)));
+      ok('visitors: distinct addresses are painted', cov.includes(String(P.coverage.distinct_addresses)));
+      ok('visitors: counts carry their UNIT, so leads cannot read as addresses',
+         /leads/.test(cov) && /addresses/.test(cov));
+      /* NOT A RATE. Leads from before the feature have no address and never
+         will; a percentage would report a permanent shortfall as breakage. */
+      ok('visitors: coverage is not shown as a percentage', !/%/.test(cov));
+
+      /* REPEAT ADDRESSES -- the panel the tab exists for. */
+      const rep = painted['vis-repeats'] || '';
+      ok('visitors: the repeat address is painted', rep.includes('203.0.113.45'));
+      ok('visitors: its lead count is the payload\\u2019s', rep.includes('>7<'), rep.slice(0, 200));
+      ok('visitors: the emails behind it are shown', rep.includes('a@x.com') && rep.includes('b@x.com'));
+      /* A row with nothing resolved must render, not vanish: the address is
+         the fact, the place is the extra. */
+      ok('visitors: an address with no place still renders', rep.includes('198.51.100.7'));
+      /* A CAPPED LIST BESIDE AN UNBOUNDED COUNT. "shown" must never read as
+         "exist" -- the same rule Needs attention follows. */
+      ok('visitors: it says how many were shown of how many exist',
+         rep.includes('Showing ' + P.repeats.shown + ' of ' + P.repeats.total));
+
+      const pl = painted['vis-places'] || '';
+      ok('visitors: a place row is painted with its lead count', pl.includes('>613<'), pl.slice(0, 200));
+      ok('visitors: a place with NO coordinates is still listed', pl.includes('Austin'));
+
+      const nw = painted['vis-networks'] || '';
+      ok('visitors: the network is painted with its lead count',
+         nw.includes('Verizon Business') && nw.includes('>829<'));
+
+      const zn = painted['vis-zones'] || '';
+      ok('visitors: the timezone is painted with its lead count',
+         zn.includes('America/New_York') && zn.includes('>937<'));
+      /* LOCAL TIME COMES FROM Intl WITH AN EXPLICIT ZONE, never from the
+         viewer's laptop -- CLAUDE.md forbids deriving a date from
+         getFullYear/getMonth/getDate for exactly this reason. */
+      ok('visitors: local time is computed for the ZONE, not the viewer',
+         typeof scope.visLocalTime('Asia/Kolkata') === 'string'
+         && scope.visLocalTime('Asia/Kolkata') !== scope.visLocalTime('America/Los_Angeles'),
+         scope.visLocalTime('Asia/Kolkata') + ' vs ' + scope.visLocalTime('America/Los_Angeles'));
+      /* A zone nobody recognises must not take the table down with it. */
+      eq2('visitors: an unknown timezone returns empty rather than throwing',
+          scope.visLocalTime('Not/AZone'), '');
+
+      /* THE MAP. Leaflet is not present in this sandbox, which is the
+         point: the toggle must say so instead of throwing, because the
+         tables carry the same data. */
+      let mapErr = null;
+      try { scope.visDrawMap(); } catch (e) { mapErr = e; }
+      ok('visitors: the map degrades rather than throwing when Leaflet is absent',
+         !mapErr, mapErr && mapErr.message);
+      ok('visitors: and it says so on screen',
+         /did not load/.test(painted['vis-mapnote'] || ''), painted['vis-mapnote']);
+
+      /* NOW WITH A STUB, because the degraded path above tests almost
+         nothing: visDrawMap returns at its first line when L is missing,
+         so a mutation that stopped the map NAMING its unmappable places
+         SURVIVED until this existed. Measured, not assumed. */
+      {
+        const drawn = [];
+        const layer = { addLayer(m) { drawn.push(m); }, addTo() { return this; } };
+        const fakeL = {
+          map: () => ({ setView() { return this; }, invalidateSize() {},
+                        removeLayer() {}, fitBounds() {} }),
+          tileLayer: () => ({ addTo() {} }),
+          circleMarker: (latlng, opts) => ({ latlng, opts, bindPopup(h) { this.popup = h; return this; } }),
+          layerGroup: () => layer,
+          marker: (latlng) => ({ latlng }),
+          featureGroup: () => ({ getBounds: () => ({ pad: () => ({}) }) }),
+        };
+        let drawErr = null;
+        try {
+          new Function('L', 'visData', 'visMap', 'visLayer', 'document', 'esc', 'setTimeout', 'Math',
+            '(' + scope.visDrawMap.toString() + ')();'
+          )(fakeL, P, null, null, doc, sandbox.esc || ((x) => String(x)), (f) => f(), Math);
+        } catch (e) { drawErr = e; }
+        ok('visitors: the map draws without throwing when Leaflet is present',
+           !drawErr, drawErr && drawErr.message);
+        const note = painted['vis-mapnote'] || '';
+        /* ONE place has coordinates and one does not. The map must draw the
+           one and SAY SO about the other -- a half-empty map with no
+           explanation is the wrong-number failure this dashboard exists to
+           prevent. */
+        ok('visitors: it reports how many places it drew',
+           new RegExp(P.places.mappable + ' places drawn').test(note), note);
+        ok('visitors: and NAMES the ones it could not place',
+           note.includes('1') && /cannot be placed/.test(note), note);
+        ok('visitors: it draws exactly the mappable places', drawn.length === P.places.mappable,
+           `drew ${drawn.length}, mappable ${P.places.mappable}`);
+        /* AREA, not radius, scales with lead count -- a radius that scales
+           linearly makes twice the leads look four times as busy. */
+        ok('visitors: the circle carries the place and its counts in the popup',
+           drawn[0] && /Boston/.test(drawn[0].popup) && /613 leads/.test(drawn[0].popup),
+           drawn[0] && drawn[0].popup);
+        /* AREA, NOT RADIUS. A radius proportional to the count makes a city
+           with twice the leads look FOUR times as busy, which is the
+           commonest way a bubble map lies. Denver has exactly a quarter of
+           Boston's leads, so its radius above the 6px base must be HALF
+           Boston's (sqrt(1/4)), not a quarter. */
+        const big = drawn.find((m) => /Boston/.test(m.popup));
+        const small = drawn.find((m) => /Denver/.test(m.popup));
+        ok('visitors: circle AREA scales with lead count, not radius',
+           !!(big && small) && Math.abs((small.opts.radius - 6) - (big.opts.radius - 6) / 2) < 0.5,
+           big && small ? `big=${big.opts.radius} small=${small.opts.radius}` : 'markers missing');
+      }
+    }
 
     /* escq exists because every HTML attribute here is SINGLE-quoted while
        esc escapes only & < > and the double quote. Two attribute values carry

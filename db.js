@@ -782,6 +782,13 @@ async function initDB() {
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ip_timezone     TEXT`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ip_isp          TEXT`,
       `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ip_org_domain   TEXT`,
+      /* Coordinates, for the map on the Visitors tab. CITY-level, which is
+         what a geo-IP lookup actually knows -- two visitors in the same
+         city get the same point, and that is honest rather than a
+         limitation. Stored as NUMERIC rather than a PostGIS type because
+         nothing here does geometry; they are two numbers to draw with. */
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ip_latitude     NUMERIC`,
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS ip_longitude    NUMERIC`,
       /* Stamped only when a lookup actually DECIDED something, never for a
          failure or a skip -- the same rule non_icp_checked_at follows. An
          inferred timestamp in an observational column reads as a
