@@ -4218,12 +4218,19 @@ section12()
        Contact, at the exact start time. Following that sentence would have
        put a SECOND meeting on the AE's timeline, which is the duplicate
        the line above it exists to prevent. */
+    /* SCOPED TO THE THROWN MESSAGE, NOT THE FILE. The first version of
+       this negative matched the whole of salesforce.js and failed on the
+       COMMENT that quotes the old wording to explain why it changed --
+       a comment cannot mislead an SDR, and a test that forbids describing
+       a fixed bug is a test that punishes documenting it. */
+    const convMsg = sfSrc.slice(sfSrc.indexOf('const err = new Error(', sfSrc.indexOf('if (sfConvertedLeadError(result))')),
+                               sfSrc.indexOf('err.sfConvertedLead = true'));
     ok('sfconv: it does NOT assert the booking is missing',
-       !/booking was not recorded anywhere/i.test(sfSrc));
+       !/booking was not recorded anywhere/i.test(convMsg), convMsg.slice(0, 200));
     ok('sfconv: it sends the reader to CHECK the Contact first',
-       /CHECK the Contact before adding anything/i.test(sfSrc));
+       /CHECK the Contact before adding anything/i.test(convMsg));
     ok('sfconv: and says why a second Event is worse than none',
-       /second Event for one call is worse than none/i.test(sfSrc));
+       /second Event for one call is worse than none/i.test(convMsg));
 
     /* ── ONE ALERT BUILDER, SIX CALL SITES ─────────────────────────── */
     const idx = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
