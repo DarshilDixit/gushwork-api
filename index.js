@@ -3999,6 +3999,15 @@ app.get('/monitor', (req, res) => {
 
   const html = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Gushwork Monitor</title>' +
   '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"><\/script>' +
+  /* LEAFLET, from the same CDN and pinned to an exact version like Chart.js
+     above it. Loaded on every dashboard render rather than lazily on the
+     tab, because a script that appends itself later has to handle its own
+     race with the loader and this does not: ~42KB once, cached.
+
+     OpenStreetMap tiles need no key and no account. The attribution line
+     is a licence condition, not decoration -- do not remove it. */
+  '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"/>' +
+  '<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"><\/script>' +
   '<style>' +
   '*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}' +
   'body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f5f5;color:#1a1a1a;font-size:14px;line-height:1.5}' +
@@ -4101,6 +4110,12 @@ app.get('/monitor', (req, res) => {
      that, and folding the two tabs together would make the one surface
      whose meaning is unambiguous mean two things. */
   '<div class="tab" id="t-model" onclick="showTab(\'model\')">Model</div>' +
+  /* SEPARATE FROM ALL LEADS, and the reason is the repeat-address panel.
+     Three of the questions here are about the SET rather than a row --
+     which address appears more than once, which networks our leads sit
+     behind, which timezones somebody is calling into -- and none of them
+     can be asked of a lead row. The per-lead fields stay on the lead. */
+  '<div class="tab" id="t-visitors" onclick="showTab(\'visitors\')">Visitors</div>' +
   '<div class="tab" id="t-health" onclick="showTab(\'health\')">System Health</div>' +
   '</div>' +
   '<div class="tp act" id="tp-overview">' +
@@ -4288,6 +4303,42 @@ app.get('/monitor', (req, res) => {
      it do, to whom, on what evidence, and what could it not see. The
      last one is the blind spot and it goes last on purpose -- it is the
      panel you read when one of the first three looks wrong. */
+  '<div class="tp" id="tp-visitors">' +
+  '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px">' +
+  '<div><div class="sl" style="margin-bottom:2px">Visitors</div>' +
+  '<div style="font-size:12px;color:#888">Where people actually were when they filled the form, from their IP address. ' +
+  'Different from <b>Person location</b> on a lead, which is Apollo&#8217;s record of where the <i>company</i> is.</div></div>' +
+  '<div>' +
+  '<select id="vis-days" onchange="loadVisitors()"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option><option value="365">Last year</option></select> ' +
+  '<button class="btn" id="vis-toggle" onclick="visToggleMap()">Show map</button>' +
+  '</div></div>' +
+  '<div id="vis-cov" class="nd">Loading...</div>' +
+  /* The map lives in its own container that starts hidden. Leaflet measures
+     the element when it initialises, so it is created only after the
+     container is visible -- a map built inside display:none renders as a
+     grey box with the tiles stacked in one corner. */
+  '<div id="vis-mapwrap" style="display:none;margin-bottom:18px">' +
+  '<div id="vis-map" style="height:460px;border:1px solid #e5e7eb;border-radius:8px"></div>' +
+  '<div id="vis-mapnote" style="font-size:11px;color:#888;margin-top:6px"></div></div>' +
+  '<div id="vis-lists">' +
+  '<div class="sl" style="margin:18px 0 8px">Repeat addresses</div>' +
+  '<div style="font-size:12px;color:#888;margin-bottom:8px">More than one lead from the same IP. ' +
+  'Not limited to the window above &#8212; two submissions months apart are exactly what this is for. ' +
+  'The same office or household can legitimately send several, so this is a place to look, not a verdict.</div>' +
+  '<table><thead><tr><th>IP address</th><th>Leads</th><th>People</th><th>Where</th><th>Network</th><th>First seen</th><th>Last seen</th><th>Emails</th></tr></thead>' +
+  '<tbody id="vis-repeats"><tr><td colspan="8" class="nd">Loading...</td></tr></tbody></table>' +
+  '<div class="sl" style="margin:18px 0 8px">Where they were</div>' +
+  '<table><thead><tr><th>City</th><th>Region</th><th>Country</th><th>Leads</th><th>People</th><th>Booked</th></tr></thead>' +
+  '<tbody id="vis-places"><tr><td colspan="6" class="nd">Loading...</td></tr></tbody></table>' +
+  '<div class="sl" style="margin:18px 0 8px">Networks</div>' +
+  '<div style="font-size:12px;color:#888;margin-bottom:8px">Who provides their connection. A business ISP is a different signal from home broadband.</div>' +
+  '<table><thead><tr><th>Network</th><th>Domain</th><th>Leads</th><th>People</th><th>Booked</th></tr></thead>' +
+  '<tbody id="vis-networks"><tr><td colspan="5" class="nd">Loading...</td></tr></tbody></table>' +
+  '<div class="sl" style="margin:18px 0 8px">Timezones</div>' +
+  '<div style="font-size:12px;color:#888;margin-bottom:8px">What time it is where they are, for whoever is scheduling the calls.</div>' +
+  '<table><thead><tr><th>Timezone</th><th>Local time now</th><th>Leads</th><th>Booked</th></tr></thead>' +
+  '<tbody id="vis-zones"><tr><td colspan="4" class="nd">Loading...</td></tr></tbody></table>' +
+  '</div></div>' +
   '<div class="tp" id="tp-model">' +
   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
   '<div><div class="sl" style="margin-bottom:2px">Model layer</div>' +
@@ -4435,7 +4486,128 @@ app.get('/monitor', (req, res) => {
   'var TZ="' + DASH_TZ + '";' +
   'var API=window.location.origin;' +
   'var lChart=null,curPage=1,stimer=null,curSort="created_at",curDir="desc",filterOptsLoaded=false;' +
-  'function showTab(n){["overview","leads","sdr","dupes","health","lm","partners","blocked","model"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="partners"&&document.getElementById("ptbody").textContent.indexOf("Loading")>=0)loadPartners();if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();if(n==="blocked"&&document.getElementById("blk-tbody").textContent.indexOf("Loading")>=0)loadBlocked();if(n==="model"&&document.getElementById("mdl-ladder").textContent.indexOf("Loading")>=0)loadModel();if(n==="health")checkHealth();}' +
+  /* ── THE VISITORS TAB ────────────────────────────────────────────────
+     TOP LEVEL, like every other shared helper on this page. Declaring a
+     loader inside another function is the scope bug that made Blocked rows
+     silently unexpandable -- All Leads could see the helper and Blocked
+     could not. */
+  'var visData=null,visMap=null,visLayer=null,visMapOn=false;' +
+  /* Local time where they are, computed through Intl with an explicit
+     timeZone. NEVER from the viewer laptop -- CLAUDE.md: a calendar date
+     derived from getFullYear/getMonth/getDate reads the machine the
+     browser is on, which is the one thing this column must not do. An
+     unknown zone returns "" rather than throwing and taking the table
+     down with it. */
+  'function visLocalTime(visitorTz){try{return new Intl.DateTimeFormat("en-US",{timeZone:visitorTz,hour:"numeric",minute:"2-digit",hour12:true}).format(new Date());}catch(e){return "";}}' +
+  'function visNum(n){return (n===null||n===undefined)?"\\u2014":String(n);}' +
+  'async function loadVisitors(){' +
+  'var d=document.getElementById("vis-days").value;' +
+  'document.getElementById("vis-cov").textContent="Loading...";' +
+  'try{' +
+  'var r=await fetch(API+"/monitor/visitors"+(TP||"?")+(TP?"&":"")+"days="+encodeURIComponent(d),{signal:AbortSignal.timeout(20000)});' +
+  'if(!r.ok)throw new Error("HTTP "+r.status);' +
+  'visData=await r.json();' +
+  'visRender(visData);' +
+  '}catch(e){document.getElementById("vis-cov").innerHTML="<span style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</span>";}}' +
+
+  /* EVERY NUMBER CARRIES ITS UNIT. Three appear on this tab -- leads,
+     people and addresses -- and they are easy to read as one another. The
+     coverage line is deliberately not a percentage: leads created before
+     this shipped have no address and never will, so a rate would report a
+     permanent shortfall that reads as breakage. */
+  'function visRender(d){' +
+  'var c=d.coverage;' +
+  'document.getElementById("vis-cov").innerHTML=' +
+  '"<div class=\\"egrid\\">"' +
+  '+"<div class=\\"ef\\"><div class=\\"efl\\">Leads in window</div><div class=\\"efv\\">"+visNum(c.leads)+" leads</div></div>"' +
+  '+"<div class=\\"ef\\"><div class=\\"efl\\">With an address</div><div class=\\"efv\\">"+visNum(c.with_address)+" leads</div></div>"' +
+  '+"<div class=\\"ef\\"><div class=\\"efl\\">Resolved to a place</div><div class=\\"efv\\">"+visNum(c.with_place)+" leads</div></div>"' +
+  '+"<div class=\\"ef\\"><div class=\\"efl\\">Distinct addresses</div><div class=\\"efv\\">"+visNum(c.distinct_addresses)+" addresses</div></div>"' +
+  '+"</div>"' +
+  '+"<div style=\\"font-size:11px;color:#888;margin-top:6px\\">Leads from before this was switched on have no address and never will, so this is counted rather than shown as a rate.</div>";' +
+
+  /* REPEAT ADDRESSES. The count above the table is UNBOUNDED and the list
+     is capped, so "shown" can never be read as "exist" -- the same rule
+     Needs attention follows on the Partners tab. */
+  'var rp=d.repeats,rb=document.getElementById("vis-repeats");' +
+  'if(!rp.rows.length){rb.innerHTML="<tr><td colspan=\\"8\\" class=\\"nd\\">No address has sent more than one lead yet.</td></tr>";}' +
+  'else{rb.innerHTML=rp.rows.map(function(x){' +
+  'return "<tr><td><code style=\\"font-size:11px\\">"+esc(x.ip_address)+"</code></td>"' +
+  '+"<td><b>"+visNum(x.leads)+"</b></td><td>"+visNum(x.people)+"</td>"' +
+  '+"<td>"+esc([x.city,x.region,x.country].filter(Boolean).join(", ")||"\\u2014")+"</td>"' +
+  '+"<td>"+esc(x.isp||"\\u2014")+"</td>"' +
+  '+"<td style=\\"color:#999;white-space:nowrap\\">"+et(x.first_seen)+"</td>"' +
+  '+"<td style=\\"color:#999;white-space:nowrap\\">"+et(x.last_seen)+"</td>"' +
+  '+"<td style=\\"font-size:11px\\">"+esc((x.emails||[]).join(", "))+"</td></tr>";}).join("");}' +
+  'if(rp.total>rp.shown)rb.innerHTML+="<tr><td colspan=\\"8\\" class=\\"nd\\">Showing "+rp.shown+" of "+rp.total+" repeat addresses.</td></tr>";' +
+
+  'var pb=document.getElementById("vis-places");' +
+  'pb.innerHTML=d.places.rows.length?d.places.rows.map(function(x){' +
+  'return "<tr><td>"+esc(x.city||"\\u2014")+"</td><td>"+esc(x.region||"\\u2014")+"</td><td>"+esc(x.country||"\\u2014")+"</td>"' +
+  '+"<td><b>"+visNum(x.leads)+"</b></td><td>"+visNum(x.people)+"</td><td>"+visNum(x.booked)+"</td></tr>";}).join("")' +
+  ':"<tr><td colspan=\\"6\\" class=\\"nd\\">Nothing resolved in this window.</td></tr>";' +
+
+  'var nb=document.getElementById("vis-networks");' +
+  'nb.innerHTML=d.networks.length?d.networks.map(function(x){' +
+  'return "<tr><td>"+esc(x.isp||"\\u2014")+"</td><td style=\\"font-size:11px;color:#666\\">"+esc(x.org_domain||"\\u2014")+"</td>"' +
+  '+"<td><b>"+visNum(x.leads)+"</b></td><td>"+visNum(x.people)+"</td><td>"+visNum(x.booked)+"</td></tr>";}).join("")' +
+  ':"<tr><td colspan=\\"5\\" class=\\"nd\\">Nothing resolved in this window.</td></tr>";' +
+
+  'var zb=document.getElementById("vis-zones");' +
+  'zb.innerHTML=d.timezones.length?d.timezones.map(function(x){' +
+  'return "<tr><td>"+esc(x.timezone||"\\u2014")+"</td><td style=\\"color:#666\\">"+esc(visLocalTime(x.timezone))+"</td>"' +
+  '+"<td><b>"+visNum(x.leads)+"</b></td><td>"+visNum(x.booked)+"</td></tr>";}).join("")' +
+  ':"<tr><td colspan=\\"4\\" class=\\"nd\\">Nothing resolved in this window.</td></tr>";' +
+  'if(visMapOn)visDrawMap();}' +
+
+  /* THE MAP IS A TOGGLE, NOT THE DEFAULT. The tables answer "how many and
+     where" exactly; the map answers "what is the shape of it" and is worse
+     at the first question. Toggling also means Leaflet initialises only
+     when the container has a size -- a map built inside display:none
+     measures zero and renders as a grey box with the tiles bunched in one
+     corner. */
+  'function visToggleMap(){' +
+  'visMapOn=!visMapOn;' +
+  'document.getElementById("vis-mapwrap").style.display=visMapOn?"block":"none";' +
+  'document.getElementById("vis-lists").style.display=visMapOn?"none":"block";' +
+  'document.getElementById("vis-toggle").textContent=visMapOn?"Show tables":"Show map";' +
+  'if(visMapOn)visDrawMap();}' +
+
+  'function visDrawMap(){' +
+  'if(typeof L==="undefined"){document.getElementById("vis-mapnote").textContent="The map library did not load \\u2014 the tables have the same data.";return;}' +
+  'if(!visData)return;' +
+  'if(!visMap){' +
+  'visMap=L.map("vis-map",{worldCopyJump:true,scrollWheelZoom:false}).setView([25,0],2);' +
+  'L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:12,attribution:"&copy; OpenStreetMap contributors"}).addTo(visMap);' +
+  '}' +
+  /* Leaflet measured the container while it was hidden if the tab was
+     opened with the map already on. invalidateSize after it is visible is
+     what makes the tiles fill the box. */
+  'setTimeout(function(){visMap.invalidateSize();},0);' +
+  'if(visLayer)visMap.removeLayer(visLayer);' +
+  'var pts=visData.places.rows.filter(function(p){return p.lat!==null&&p.lon!==null;});' +
+  'var max=pts.reduce(function(m,p){return Math.max(m,p.leads);},1);' +
+  'visLayer=L.layerGroup();' +
+  'pts.forEach(function(p){' +
+  /* AREA, not radius, scales with lead count -- a circle whose RADIUS is
+     proportional makes a city with twice the leads look four times as
+     busy. sqrt is what keeps the eye honest. */
+  'var r=6+16*Math.sqrt(p.leads/max);' +
+  'var m=L.circleMarker([p.lat,p.lon],{radius:r,weight:1,color:"#c2410c",fillColor:"#f97316",fillOpacity:0.55});' +
+  'm.bindPopup("<b>"+esc([p.city,p.region,p.country].filter(Boolean).join(", "))+"</b><br>"' +
+  '+p.leads+" lead"+(p.leads===1?"":"s")+"<br>"+p.people+" "+(p.people===1?"person":"people")+"<br>"+p.booked+" booked");' +
+  'visLayer.addLayer(m);});' +
+  'visLayer.addTo(visMap);' +
+  /* THE UNMAPPABLE ROWS ARE NAMED, not silently dropped. A half-empty map
+     with no explanation is the kind of wrong number this dashboard exists
+     to prevent -- leads resolved before coordinates were stored have a
+     city and no point. */
+  'var miss=visData.places.rows.length-pts.length;' +
+  'document.getElementById("vis-mapnote").innerHTML=pts.length+" place"+(pts.length===1?"":"s")+" drawn"' +
+  '+(miss?" &#8212; <b>"+miss+"</b> more resolved to a city but were stored before coordinates were kept, so they cannot be placed. They are all in the tables.":"")' +
+  '+". Circles are sized by lead count.";' +
+  'if(pts.length){var g=L.featureGroup(pts.map(function(p){return L.marker([p.lat,p.lon]);}));visMap.fitBounds(g.getBounds().pad(0.2));}}' +
+  'function showTab(n){["overview","leads","sdr","dupes","health","lm","partners","blocked","model","visitors"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="partners"&&document.getElementById("ptbody").textContent.indexOf("Loading")>=0)loadPartners();if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();if(n==="blocked"&&document.getElementById("blk-tbody").textContent.indexOf("Loading")>=0)loadBlocked();if(n==="model"&&document.getElementById("mdl-ladder").textContent.indexOf("Loading")>=0)loadModel();if(n==="visitors"&&document.getElementById("vis-cov").textContent.indexOf("Loading")>=0)loadVisitors();if(n==="health")checkHealth();}' +
   /* Hits /monitor/leads with nonicp=only rather than a route of its own, so
      the row shape, the panel and the change log are the same objects All
      Leads uses. One query, one contract, nothing to drift. */
@@ -4809,10 +4981,10 @@ app.get('/monitor', (req, res) => {
      not. Apollo covers 44% of leads; this covers everyone who submitted. */
   'function ipLoc(l){return [l.ip_city,l.ip_region,l.ip_country].filter(Boolean).join(", ");}' +
   'function enrichPanel(l){var loc=[l.enriched_city,l.enriched_state,l.enriched_country].filter(Boolean).join(", ");var fields=[' +
-  '{g:1,lb:"Visitor location",v:ipLoc(l)},' +
-  '{g:1,lb:"Visitor timezone",v:l.ip_timezone},' +
-  '{g:1,lb:"Visitor network",v:l.ip_isp?(l.ip_isp+(l.ip_org_domain?" ("+l.ip_org_domain+")":"")):""},' +
-  '{g:1,lb:"IP address",v:l.ip_address},' +
+  '{g:4,lb:"Location",v:ipLoc(l)},' +
+  '{g:4,lb:"Timezone",v:l.ip_timezone},' +
+  '{g:4,lb:"Network",v:l.ip_isp?(l.ip_isp+(l.ip_org_domain?" ("+l.ip_org_domain+")":"")):""},' +
+  '{g:4,lb:"IP address",v:l.ip_address,mono:true},' +
   '{g:1,lb:"Title",v:l.enriched_title},' +
   '{g:1,lb:"Seniority",v:l.enriched_seniority},' +
   '{g:1,lb:"Department",v:l.enriched_departments},' +
@@ -4873,7 +5045,18 @@ app.get('/monitor', (req, res) => {
   /* Grouped rather than one flat run of ~20 fields. Partner first, because on
      a partner lead that is the thing that changes who owns the conversation.
      A field with no group falls into Form data rather than disappearing. */
-  'var GRP=[[1,"Form &amp; enrichment"],[2,"Journey &amp; attribution"],[3,"Technical"]];' +
+  /* GROUP 4 IS RENDERED FIRST, and it is a separate group rather than four
+     cards inside "Form & enrichment" because the panel already carries TWO
+     locations that are not the same fact. Apollo's "Person location" is
+     where the company is registered; this is where the human actually was
+     when they filled the form. On the 22 Sept lead those read Woburn and
+     Boston -- both correct, ten miles apart, and indistinguishable if they
+     sit in one undivided grid.
+
+     The number 4 rather than 0: efCell's fallback is `f.g||1`, so a group
+     numbered 0 is falsy and would land silently back in Form data. Order
+     here decides render order, not the number. */
+  'var GRP=[[4,"Visitor &mdash; from their IP address"],[1,"Form &amp; enrichment"],[2,"Journey &amp; attribution"],[3,"Technical"]];' +
   'function efCell(f){var val=f.lnk&&f.v?"<a href=\\""+(f.v.startsWith("http")?"":"https://")+esc(f.v)+"\\" target=\\"_blank\\">"+esc(f.v)+"</a>":f.mono?"<code style=\\"font-size:10px\\">"+esc(f.v)+"</code>":esc(f.v);return "<div class=\\"ef\\"><div class=\\"efl\\">"+f.lb+"</div><div class=\\"efv\\">"+val+"</div></div>";}' +
   'var out=pp;' +
   'GRP.forEach(function(g){var inGroup=fields.filter(function(f){return (f.g||1)===g[0];});' +
@@ -9249,6 +9432,14 @@ async function resolveIpGeo(ip) {
       ip_timezone:     tz.id || null,
       ip_isp:          conn.isp || conn.org || null,
       ip_org_domain:   conn.domain || null,
+      /* Numbers, not strings. ipwho.is returns them as numbers already,
+         but a provider swapped in through IP_GEO_URL might not, and a
+         NUMERIC column handed "37.33" as text is a runtime error rather
+         than a coercion. Null when absent or unparseable -- a coordinate
+         we cannot read is not a coordinate at 0,0, which is in the Gulf
+         of Guinea and would put a fake dot on the map. */
+      ip_latitude:     Number.isFinite(Number(d.latitude))  ? Number(d.latitude)  : null,
+      ip_longitude:    Number.isFinite(Number(d.longitude)) ? Number(d.longitude) : null,
     };
     /* A response with nothing in it is not a location. Without this a
        rate-limited empty body would stamp ip_checked_at and the row would
@@ -9328,10 +9519,12 @@ async function finaliseIpGeo(session_id, ip) {
       `UPDATE leads
           SET ip_city = $2, ip_region = $3, ip_country = $4, ip_country_name = $5,
               ip_postal = $6, ip_timezone = $7, ip_isp = $8, ip_org_domain = $9,
+              ip_latitude = $10, ip_longitude = $11,
               ip_checked_at = NOW(), updated_at = NOW()
         WHERE session_id = $1`,
       [session_id, geo.ip_city, geo.ip_region, geo.ip_country, geo.ip_country_name,
-       geo.ip_postal, geo.ip_timezone, geo.ip_isp, geo.ip_org_domain]);
+       geo.ip_postal, geo.ip_timezone, geo.ip_isp, geo.ip_org_domain,
+       geo.ip_latitude, geo.ip_longitude]);
     syncIpGeoToAWS(session_id, geo);
     console.log(`[ip-geo] ${session_id}: ${[geo.ip_city, geo.ip_region, geo.ip_country].filter(Boolean).join(', ') || 'unknown'}` +
       (geo.ip_isp ? ` | ${geo.ip_isp}` : ''));
@@ -12219,6 +12412,154 @@ async function nonIcpModelReport({ days, product } = {}) {
     },
   };
 }
+
+/* ── THE VISITORS REPORT ──────────────────────────────────────────────
+   Everything the IP tells us, in AGGREGATE. Built 23 Sept 2026, the day
+   after the IP started being stored.
+
+   WHY A TAB AND NOT MORE CARDS ON ALL LEADS. Three of these questions
+   cannot be asked of a lead row at all, because they are questions about
+   the set: which address appears more than once, which networks our leads
+   sit behind, and which timezones an SDR is calling into. The first is the
+   one that earns the tab -- when pt.lancon@gmail.com was investigated on
+   22 Sept there was no way to ask "did anything else arrive from that same
+   connection", and a per-lead panel can never answer it.
+
+   THE PER-LEAD FIELDS STAY WHERE THEY ARE. This does not replace them; a
+   lead's own location belongs next to that lead.
+
+   EVERY NUMBER IS LABELLED WITH ITS UNIT, because three different ones
+   appear here and they are easy to mix: LEADS (rows), PEOPLE
+   (distinct lower(email)) and ADDRESSES. CLAUDE.md's Definitions section
+   governs all of them. */
+const VISITORS_WINDOW_MAX_D = 365;
+
+async function visitorsReport({ days } = {}) {
+  const win = Math.min(Math.max(Number(days) || 30, 1), VISITORS_WINDOW_MAX_D);
+
+  /* COVERAGE FIRST, AND IT IS NOT A RATE. "never tried" is its own number
+     rather than part of a denominator: every lead created before the
+     feature shipped has no IP and never will, and folding those into a
+     percentage would report a permanent 0% that reads as breakage. Same
+     rule the Model tab's scrape panel follows. */
+  const cov = await pool.query(`
+    SELECT COUNT(*)                                              AS leads,
+           COUNT(*) FILTER (WHERE ip_address IS NOT NULL)        AS with_address,
+           COUNT(*) FILTER (WHERE ip_checked_at IS NOT NULL)     AS with_place,
+           COUNT(*) FILTER (WHERE ip_address IS NOT NULL
+                              AND ip_checked_at IS NULL)         AS address_only,
+           COUNT(DISTINCT ip_address)                            AS distinct_addresses
+      FROM leads
+     WHERE created_at >= NOW() - ($1 || ' days')::interval`, [win]);
+
+  /* REPEAT ADDRESSES. The panel this tab exists for. Deliberately NOT
+     bounded by the window: an address that submitted twice three months
+     apart is exactly the shape worth seeing, and a 30-day view would hide
+     the gap that makes it interesting. LIMIT is a display cap and the
+     count above it is unbounded, so the number is never a floor rendered
+     as a total. */
+  const repeats = await pool.query(`
+    SELECT ip_address,
+           COUNT(*)                        AS leads,
+           COUNT(DISTINCT lower(email))    AS people,
+           MIN(created_at)                 AS first_seen,
+           MAX(created_at)                 AS last_seen,
+           MAX(ip_city)                    AS city,
+           MAX(ip_region)                  AS region,
+           MAX(ip_country)                 AS country,
+           MAX(ip_isp)                     AS isp,
+           ARRAY_AGG(DISTINCT lower(email)) FILTER (WHERE email IS NOT NULL) AS emails
+      FROM leads
+     WHERE ip_address IS NOT NULL
+     GROUP BY ip_address
+    HAVING COUNT(*) > 1
+     ORDER BY COUNT(*) DESC, MAX(created_at) DESC
+     LIMIT 100`);
+  const repeatTotal = await pool.query(`
+    SELECT COUNT(*) AS n FROM (
+      SELECT ip_address FROM leads WHERE ip_address IS NOT NULL
+       GROUP BY ip_address HAVING COUNT(*) > 1) t`);
+
+  /* PLACES, and the same rows feed the map. Coordinates are CITY level --
+     two visitors in one city share a point, which is what a geo-IP lookup
+     actually knows. Rows without coordinates are still returned so the
+     list is complete; the map simply cannot draw them, and says so. */
+  const places = await pool.query(`
+    SELECT ip_city AS city, ip_region AS region, ip_country AS country,
+           ROUND(AVG(ip_latitude)::numeric, 4)  AS lat,
+           ROUND(AVG(ip_longitude)::numeric, 4) AS lon,
+           COUNT(*)                             AS leads,
+           COUNT(DISTINCT lower(email))         AS people,
+           COUNT(*) FILTER (WHERE booking_uid IS NOT NULL) AS booked
+      FROM leads
+     WHERE ip_checked_at IS NOT NULL
+       AND created_at >= NOW() - ($1 || ' days')::interval
+     GROUP BY 1, 2, 3
+     ORDER BY 6 DESC, 1
+     LIMIT 500`, [win]);
+
+  const networks = await pool.query(`
+    SELECT ip_isp AS isp, ip_org_domain AS org_domain,
+           COUNT(*) AS leads, COUNT(DISTINCT lower(email)) AS people,
+           COUNT(*) FILTER (WHERE booking_uid IS NOT NULL) AS booked
+      FROM leads
+     WHERE ip_isp IS NOT NULL
+       AND created_at >= NOW() - ($1 || ' days')::interval
+     GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 100`, [win]);
+
+  /* Timezones, for whoever is scheduling the calls. */
+  const zones = await pool.query(`
+    SELECT ip_timezone AS timezone, COUNT(*) AS leads,
+           COUNT(*) FILTER (WHERE booking_uid IS NOT NULL) AS booked
+      FROM leads
+     WHERE ip_timezone IS NOT NULL
+       AND created_at >= NOW() - ($1 || ' days')::interval
+     GROUP BY 1 ORDER BY 2 DESC LIMIT 60`, [win]);
+
+  const c = cov.rows[0] || {};
+  const pl = places.rows.map((r) => ({ ...r,
+    leads: Number(r.leads), people: Number(r.people), booked: Number(r.booked),
+    lat: r.lat === null ? null : Number(r.lat), lon: r.lon === null ? null : Number(r.lon) }));
+
+  return {
+    window_days: win,
+    coverage: {
+      leads:              Number(c.leads || 0),
+      with_address:       Number(c.with_address || 0),
+      with_place:         Number(c.with_place || 0),
+      address_only:       Number(c.address_only || 0),
+      distinct_addresses: Number(c.distinct_addresses || 0),
+    },
+    repeats: {
+      /* UNBOUNDED count beside a capped list, so "12 shown" can never be
+         read as "12 exist". */
+      total: Number(repeatTotal.rows[0]?.n || 0),
+      shown: repeats.rows.length,
+      rows: repeats.rows.map((r) => ({ ...r,
+        leads: Number(r.leads), people: Number(r.people) })),
+    },
+    places: {
+      rows: pl,
+      /* The map can only draw what has coordinates. Reported rather than
+         silently dropped, so a half-empty map is explained on screen. */
+      mappable: pl.filter((r) => r.lat !== null && r.lon !== null).length,
+    },
+    networks: networks.rows.map((r) => ({ ...r,
+      leads: Number(r.leads), people: Number(r.people), booked: Number(r.booked) })),
+    timezones: zones.rows.map((r) => ({ ...r, leads: Number(r.leads), booked: Number(r.booked) })),
+  };
+}
+
+app.get('/monitor/visitors', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    res.json(await visitorsReport({ days: req.query.days }));
+  } catch (err) {
+    console.error('[/monitor/visitors]', err.message);
+    res.status(500).json({ error: 'Visitors report failed', detail: err.message });
+  }
+});
 
 app.get('/monitor/non-icp', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;

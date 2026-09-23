@@ -80,9 +80,29 @@ function between(s, startMarker, endMarker) {
   ok('tz: no Asia/Kolkata in an active zone position', !/Asia\/Kolkata/.test(zonesUsed), zonesUsed);
   ok('tz: no literal EST/EDT zone', !/E[SD]T/.test(zonesUsed), zonesUsed);
   ok('tz: no fixed numeric offset used as a zone', !/[-+]0[0-9]:[0-9]{2}/.test(zonesUsed), zonesUsed);
-  ok('tz: every active zone is ET or the injected constant',
+  /* ONE DELIBERATE EXEMPTION, named rather than allowed by a looser regex.
+
+     visitorTz is the Visitors tab's "Local time now" column: the time
+     where the PERSON is, which is the entire point of that column and the
+     one place on the dashboard that must NOT be Eastern. It is still Intl
+     with an explicit zone, so the rule this audit actually protects --
+     never derive a time from the viewer's machine -- is intact.
+
+     Named explicitly so a second non-ET zone cannot arrive by widening the
+     pattern. If another one is ever legitimate it goes on this list with
+     its own reason, the same shape as test-non-icp.js's DELIBERATE list. */
+  const TZ_DELIBERATE = ['visitorTz'];
+  ok('tz: every active zone is ET, the injected constant, or a named exemption',
      activeZone(src).split('|').filter(Boolean)
-       .every((z) => /America\/New_York|TZ|DASH_TZ/.test(z)), activeZone(src));
+       .every((z) => /America\/New_York|TZ|DASH_TZ/.test(z)
+                  || TZ_DELIBERATE.some((d) => z.includes(d))), activeZone(src));
+  /* The exemption must be REAL. A stale entry here would quietly permit a
+     zone nobody is using any more. */
+  ok('tz: the named exemption is actually used',
+     TZ_DELIBERATE.every((d) => src.includes('timeZone:' + d)), TZ_DELIBERATE.join(','));
+  /* And it must be confined to the one column it was granted for. */
+  ok('tz: visitorTz is only used by the Visitors tab local-time helper',
+     (src.match(/visitorTz/g) || []).length === 2, String((src.match(/visitorTz/g) || []).length));
   ok('tz: no (IST) column labels remain', !/\(IST\)/.test(src));
   ok('tz: dashboard advertises the zone', /All times ET/.test(src));
 }
