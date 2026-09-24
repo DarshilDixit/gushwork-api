@@ -438,6 +438,57 @@ const P = build(popup);
   ok('fork: the two files are still distinct', popup !== demo);
 }
 
+/* ── CUSTOMER NOTES ON THE CALENDAR INVITE ────────────────────────────
+   Requested by Swapnil, 24 Sept 2026: put "about the business" in front
+   of the AE on the invite. It is a CRM question -- the textarea is only
+   revealed when wantsCrm() is true -- so an AEO-only lead has nothing to
+   send and correctly sends nothing. */
+{
+  for (const [name, f] of [['demo', demo], ['ads', popup]]) {
+    /* BOTH FILES. A change to one form file is a change to half the
+       traffic, which is the whole reason this suite exists. */
+    ok(`rh(${name}): about-business is sent to RevenueHero`,
+       /'Customer Notes': formState\.about_business/.test(f));
+    /* CONDITIONAL, so an empty value never reaches the invite as a blank
+       Customer Notes field. */
+    ok(`rh(${name}): it is omitted when empty, not sent blank`,
+       /\.\.\.\(formState\.about_business \? \{ 'Customer Notes'/.test(f));
+    /* NOT GATED ON wantsCrm() AGAIN. syncAboutBusiness already shows the
+       textarea exactly when wantsCrm() is true and CLEARS the value when
+       it is not, so the visibility logic is the gate. A second copy of
+       that decision here is how the CRM path and the product slug have
+       drifted apart before. */
+    const call = f.slice(f.indexOf('hero.submit({'), f.indexOf('const submitRes'));
+    /* COMMENTS STRIPPED BEFORE THE NEGATIVE. The comment above this field
+       explains that it is NOT gated on wantsCrm(), so matching the raw
+       text finds the explanation and fails. A test that forbids
+       describing a decision is a test that punishes documenting it --
+       the same slip as the converted-lead message on 23 Sept. */
+    const callCode = call.replace(/\/\*[\s\S]*?\*\//g, '');
+    ok(`rh(${name}): the send is not re-gated on wantsCrm()`,
+       !/wantsCrm\(\)/.test(callCode), callCode.slice(0, 200));
+    /* The seven original fields must all survive the edit. */
+    for (const key of ['Email', 'First Name', 'last-name', 'Company Name',
+                       'Website URL', 'Hear about us', 'phone:']) {
+      ok(`rh(${name}): still sends ${key}`, call.includes(key));
+    }
+  }
+  /* AEO-ONLY MUST ARRIVE EMPTY, and that is the property the send relies
+     on. Executed rather than read: syncAboutBusiness clears the value, so
+     the conditional above can never fire for an AEO lead. */
+  ok('rh: syncAboutBusiness clears the value when CRM is not wanted',
+     /var show = wantsCrm\(\);[\s\S]{0,300}formState\.about_business = '';/.test(demo));
+  /* THE SPREAD ITSELF, executed over the four real shapes. */
+  const build = (about) => ({ Email: 'a', phone: 'p',
+    ...(about ? { 'Customer Notes': about } : {}) });
+  ok('rh EXEC: both ticked with notes sends them',
+     build('valves')['Customer Notes'] === 'valves');
+  ok('rh EXEC: AEO-only (cleared to empty) sends nothing',
+     !('Customer Notes' in build('')));
+  ok('rh EXEC: a page without the field sends nothing',
+     !('Customer Notes' in build(undefined)));
+}
+
 /* ============================================================
    RevenueHero router id — read from the page, in BOTH files
 
@@ -720,6 +771,7 @@ if (failures.length) {
 }
 console.log(`  passed: ${pass}`);
 console.log(`  failed: ${fail}`);
+
 console.log('');
 process.exit(fail ? 1 : 0);
 

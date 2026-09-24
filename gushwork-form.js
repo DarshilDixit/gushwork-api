@@ -1,7 +1,7 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.17.0  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.18.0  (/demo PAGE VERSION - thru github/jsdlivr)
 
-  v5.17.0 — the offer survives a lost session: an internal referrer that
+  v5.18.0 — the offer survives a lost session: an internal referrer that
   still carries the campaign now decides it, because the cookie meant to
   do that has never once fired in production. See offerFromReferrer.
   v5.16.0 — the calendar waits when an answer is seconds away. Two
@@ -3101,6 +3101,25 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
           'Website URL': formState.website,
           'Hear about us': formState.hear_about_us,
           phone: formState.phone, // key matches RH Form Mapping field "phone"
+          /* CUSTOMER NOTES, requested by Swapnil 24 Sept 2026: put "about
+             the business" in front of the AE on the calendar invite.
+
+             SENT ONLY WHEN IT HAS CONTENT, and NOT gated on wantsCrm()
+             again. syncAboutBusiness already shows the textarea exactly
+             when wantsCrm() is true and CLEARS the value to '' when it is
+             not, so an AEO-only lead arrives here empty by construction.
+             Re-testing the condition would be a second copy of the same
+             decision, which is how the CRM path and the product slug have
+             drifted apart before.
+
+             So: both ticked sends it (wantsCrm is true for a crm tick),
+             CRM-only sends it, AEO-only sends nothing, and /start and the
+             ad landers send nothing because the field is not on those
+             pages at all.
+
+             The KEY must match the RevenueHero Form Mapping field exactly,
+             the same way `phone` above does. */
+          ...(formState.about_business ? { 'Customer Notes': formState.about_business } : {}),
         });
 
         const submitRes = await submitLead();
@@ -3442,7 +3461,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.17.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.18.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

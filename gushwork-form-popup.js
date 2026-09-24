@@ -1,7 +1,7 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.17.0-ads  (ADS PAGE VERSION)
+  GUSHWORK — MULTI-STEP FORM  v5.18.0-ads  (ADS PAGE VERSION)
 
-  Tracks /demo v5.17.0. Full feature parity with /demo, EXCEPT the
+  Tracks /demo v5.18.0. Full feature parity with /demo, EXCEPT the
   booking step, which keeps the Ads page's fullscreen modal
   presentation — opened after step 2 — instead of /demo's inline
   column render, AND the close affordances that modal needs (v5.7.2).
@@ -10,9 +10,9 @@
   modal needs a way out and an inline column does not, so this
   section has no /demo counterpart to track.
 
-  v5.17.0-ads — the offer survives a lost session: an internal referrer
+  v5.18.0-ads — the offer survives a lost session: an internal referrer
     that still carries the campaign now decides it. Ported from /demo
-    v5.17.0, identical.
+    v5.18.0, identical.
   v5.16.0-ads — the calendar waits when an answer is seconds away.
     Ported from /demo v5.16.0, identical.
   v5.15.1-ads — /ai-crm joins B2C_ALLOWED_PATHS, matching /demo.
@@ -3484,6 +3484,25 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
           'Website URL': formState.website,
           'Hear about us': formState.hear_about_us,
           phone: formState.phone, // key matches RH Form Mapping field "phone"
+          /* CUSTOMER NOTES, requested by Swapnil 24 Sept 2026: put "about
+             the business" in front of the AE on the calendar invite.
+
+             SENT ONLY WHEN IT HAS CONTENT, and NOT gated on wantsCrm()
+             again. syncAboutBusiness already shows the textarea exactly
+             when wantsCrm() is true and CLEARS the value to '' when it is
+             not, so an AEO-only lead arrives here empty by construction.
+             Re-testing the condition would be a second copy of the same
+             decision, which is how the CRM path and the product slug have
+             drifted apart before.
+
+             So: both ticked sends it (wantsCrm is true for a crm tick),
+             CRM-only sends it, AEO-only sends nothing, and /start and the
+             ad landers send nothing because the field is not on those
+             pages at all.
+
+             The KEY must match the RevenueHero Form Mapping field exactly,
+             the same way `phone` above does. */
+          ...(formState.about_business ? { 'Customer Notes': formState.about_business } : {}),
         });
 
         const submitRes = await submitLead();
@@ -3848,7 +3867,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.17.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.18.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
