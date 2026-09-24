@@ -91,7 +91,7 @@ const lifted = new Function('require', [
   liftDecl('function slackNonIcpLlmFlagged'),
   liftDecl('function slackNonIcpLateBlock'),
   liftDecl('const NON_ICP_BUSINESS_TYPES'),
-  'return { alertOps, slackNonIcpBlocked, slackNonIcpLlmFlagged, slackNonIcpLateBlock };',
+  'return { alertOps, slackNonIcpBlocked, slackNonIcpLlmFlagged, slackNonIcpLateBlock, sendOpsSlack, bHeader, bDivider, bSection };',
 ].join('\n'))(require);
 
 const TEST_NOTE = 'DELIBERATE TEST fired by hand via tools/fire-non-icp-slack.js — not a real blocked prospect';
@@ -193,6 +193,32 @@ const FIRES = {
     confidence: 0.97,
     evidence_quote: 'Medicare and Health Insurance for Texans — a deliberate test quote, not a real prospect.',
   }),
+
+  /* THE WEEKLY NEAR-MISS DIGEST, added 23 Sept. Fired by hand for the
+     same reason as the four above: a message nobody has watched arrive is
+     a message nobody has tested. This one is WEEKLY, so waiting for it to
+     happen naturally means shipping it unseen for up to seven days.
+
+     Built from a fixture rather than the live report, because the tool
+     must not need a database to prove the MESSAGE renders. */
+  'near-digest': () => lifted.sendOpsSlack([
+    lifted.bHeader('\u{1F50D} 3 companies looked like real estate or insurance \u2014 we let them through'),
+    lifted.bDivider(),
+    lifted.bSection('*What this is.* We turn away real-estate and insurance companies. These looked like one, but we were not certain enough to act, so they were treated as normal leads.'),
+    lifted.bSection('*How certain we need to be before turning someone away:*\n'
+      + '\u2022 We could read their website \u2014 *75%*\n'
+      + '\u2022 We could not, so we judged the domain name alone \u2014 *90%*\n'
+      + '_The second bar is higher because a name is weaker evidence than a page._'),
+    lifted.bSection('*1 of the 3 had a real person fill in the form in the last 7 days.* The rest are judgements sitting in our cache with nobody attached.'),
+    lifted.bSection('\u2022 `deliberate-two.invalid` \u2014 *Insurance*, *82% sure*, judged from the domain name (needed 90%)\n     \u21b3 *1 lead came through this week*\n'
+      + '\u2022 `deliberate-non-icp-test.invalid` \u2014 *Insurance*, *85% sure*, judged from the domain name (needed 90%)\n'
+      + '\u2022 `deliberate-three.invalid` \u2014 *Real estate*, *72% sure*, judged from their website (needed 75%)'),
+    lifted.bSection('*What to do.* Nothing, unless several of these look plainly wrong to you. If they do, say so and the bar can be lowered \u2014 but a lower bar turns more people away, including some we want, so it is a decision rather than a setting. _Full list on the dashboard, Model tab._'),
+    /* The test marker says NOT REAL DATA. The old one said "not a real
+       blocked prospect", which contradicted the message above it: a near
+       miss is by definition somebody we did NOT block. */
+    lifted.bSection('_DELIBERATE TEST via tools/fire-non-icp-slack.js \u2014 the domains above are fake and no action is needed._'),
+  ], 'Near misses: 3 companies came close to being turned away (DELIBERATE TEST)'),
 
   /* The critical. Payload shape copied from rejectBookingIfNonIcp(). */
   booking: () => lifted.alertOps('critical', 'Non-ICP', 'A blocked lead took a calendar slot', {
