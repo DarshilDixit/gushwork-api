@@ -518,6 +518,27 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('lm: the drop-off bars are not status-coloured', !/b91c1c|f59e0b/.test(v));
   ok('lm: Mark sent is a button on an awaiting row', /data-lm-mark="1" data-undo="0"/.test(v));
 
+  /* THE HASH: "#view" (the skip link) is not ours and changes nothing; a
+     stray "%" is skipped, never fatal -- at boot it used to blank the page. */
+  const was = JSON.stringify(GW.S);
+  b.window.location.hash = '#view';
+  ok('hash: the skip link\'s #view is ignored, state untouched', GW.readHash() === false && JSON.stringify(GW.S) === was);
+  b.window.location.hash = '#tab=dupes&view=%E0%A4%A&unit=leads';
+  let hashErr = null; try { GW.readHash(); } catch (e) { hashErr = e; }
+  ok('hash: a malformed escape is skipped, the good keys still apply', !hashErr && GW.S.tab === 'dupes' && GW.S.unit === 'leads', hashErr && hashErr.message);
+  GW.S.unit = 'people'; GW.S.tab = 'lm'; GW.writeHash();   /* put back what this test changed */
+  /* GW.PAINT puts focus and open rows back after the HTML is replaced */
+  const focused = { hasAttribute: (k) => k === 'data-view', getAttribute: (k) => (k === 'data-view' ? 'week' : null), tagName: 'BUTTON' };
+  let refocused = null, reopened = null, htmlSet = null;
+  const again = { focus() { refocused = 'week'; } }, xbtn = { getAttribute: () => 'dupe-a', setAttribute: (k, v) => { if (k === 'aria-expanded') reopened = v; } };
+  const proot = { contains: (x) => x === focused, querySelectorAll: () => [xbtn], querySelector: (sel) => (sel === '[data-view="week"]' ? again : sel === '[data-x="dupe-a"]' ? xbtn : null), set innerHTML(v) { htmlSet = v; } };
+  b.document.activeElement = focused;
+  GW.paint(proot, '<p>new</p>');
+  b.document.activeElement = null;
+  ok('paint: the HTML is replaced', htmlSet === '<p>new</p>');
+  ok('paint: the focused control is focused again after the swap', refocused === 'week');
+  ok('paint: an open row is opened again after the swap', reopened === 'true' && !b.els['dupe-a-d'].hasAttribute('hidden'));
+
   /* Hash, tabs, nav */
   ok('nav: every rebuilt tab is registered with activate and deactivate', ['overview', 'health', 'dropoff', 'dupes', 'lm'].every((t) => GW.TABS[t] && GW.TABS[t].activate && GW.TABS[t].deactivate && GW.TABS[t].title));
   ok('nav: switching tab writes the hash', /tab=lm/.test(b.window.location.hash), b.window.location.hash);
