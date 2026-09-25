@@ -16,6 +16,8 @@
      errors        a console error, an exception, or a failed request
      junk          "undefined", "NaN", "[object" or "Infinity" painted on screen
      fonts         a brand font that did not load
+     keys          real key presses: the skip link on the first Tab, focus
+                   kept across a repaint, the drawer closing when focus leaves
 
    It reads and clicks nothing that writes: point it at tools/preview-monitor.js,
    which refuses every non-GET.
@@ -151,6 +153,46 @@ for (const width of WIDTHS) {
       process.stdout.write((issues.length ? '✗ ' : '✓ ') + `${width}-${theme}-drawer` + (issues.length ? '  ' + issues.length + ' issue(s)' : '') + '\n');
     }
   }
+}
+/* THE KEYBOARD, with REAL key events (CDP's are trusted, so the browser moves
+   focus itself). Four things the audits above cannot see: the first Tab lands
+   on a skip link you can SEE; Enter on it moves focus into the page and leaves
+   the hash alone; a repaint gives focus back to the control that had it; and
+   Shift+Tab out of the open drawer closes it rather than walking focus onto
+   what it covers. */
+const key = async (k, shift) => { const base = { key: k, code: k, windowsVirtualKeyCode: k === 'Tab' ? 9 : 13, modifiers: shift ? 8 : 0 };
+  await send('Input.dispatchKeyEvent', Object.assign({ type: 'rawKeyDown' }, base)); if (k === 'Enter') await send('Input.dispatchKeyEvent', Object.assign({ type: 'char', text: '\r' }, base));
+  await send('Input.dispatchKeyEvent', Object.assign({ type: 'keyUp' }, base)); await sleep(150); };
+{
+  const issues = [];
+  await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  await send('Emulation.setTouchEmulationEnabled', { enabled: false, maxTouchPoints: 1 });
+  /* about:blank FIRST: the same URL with a different #hash is a same-page
+     jump, not a load, so focus would stay wherever the checks above left it
+     and the "first Tab" would not be the first. */
+  await send('Page.navigate', { url: 'about:blank' }); await sleep(300);
+  await send('Page.navigate', { url: `${BASE}/monitor/next?token=${encodeURIComponent(TOKEN)}#tab=overview&view=week&unit=leads` }); await sleep(3000);
+  await key('Tab');
+  const sk = await ev(`(()=>{ const a=document.activeElement, r=a.getBoundingClientRect(); return { cls: a.className, w: r.width, h: r.height, top: r.top }; })()`);
+  if (sk.cls !== 'skip') issues.push({ kind: 'keys', what: 'the first Tab landed on "' + sk.cls + '", not the skip link' });
+  else if (sk.w < 44 || sk.h < 44 || sk.top < 0) issues.push({ kind: 'keys', what: 'the focused skip link is not visible at 44px (' + Math.round(sk.w) + 'x' + Math.round(sk.h) + ')' });
+  await key('Enter');
+  const af = await ev(`({ id: document.activeElement.id, hash: location.hash })`);
+  if (af.id !== 'view') issues.push({ kind: 'keys', what: 'Enter on the skip link left focus on "' + af.id + '"' });
+  if (!/tab=overview/.test(af.hash) || !/unit=leads/.test(af.hash)) issues.push({ kind: 'keys', what: 'the skip link changed the hash to ' + af.hash });
+  const kept = await ev(`(()=>{ const b=document.querySelector('[data-unit="leads"]'); b.focus(); GW.TABS.overview.render(); const a=document.activeElement; return a && a.getAttribute('data-unit'); })()`);
+  if (kept !== 'leads') issues.push({ kind: 'keys', what: 'a repaint dropped focus (it is on ' + kept + ')' });
+  await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 800, deviceScaleFactor: 1, mobile: true });
+  await sleep(400);
+  await ev(`document.querySelector('.menu-trigger').click()`); await sleep(350);
+  const open1 = await ev(`document.getElementById('drawer').classList.contains('open') && document.getElementById('drawer').contains(document.activeElement)`);
+  if (!open1) issues.push({ kind: 'keys', what: 'the drawer did not open with focus inside it' });
+  await key('Tab', true); await sleep(250);
+  const dr = await ev(`({ open: document.getElementById('drawer').classList.contains('open'), inside: document.getElementById('drawer').contains(document.activeElement) })`);
+  if (dr.open && !dr.inside) issues.push({ kind: 'keys', what: 'focus left the drawer and the drawer stayed open over it' });
+  if (dr.open && dr.inside) issues.push({ kind: 'keys', what: 'Shift+Tab from the first drawer item stayed inside the drawer' });
+  results.push({ label: 'keyboard', issues });
+  process.stdout.write((issues.length ? '✗ ' : '✓ ') + 'keyboard' + (issues.length ? '  ' + issues.length + ' issue(s)' : '') + '\n');
 }
 writeFileSync(`${OUT}/report.json`, JSON.stringify(results, null, 1));
 const bad = results.filter((r) => r.issues.length);
