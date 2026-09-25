@@ -675,6 +675,123 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     }
   }
 
+  /* ── THE DROPOFF ROUTE, DRIVEN AGAINST ITS OWN LADDER ────────────
+     The tab section below renders a FIXTURE, so it proves the painting
+     and nothing about the server's own outcome list. Mutating the label
+     in DROPOFF_STAGES survived a full bar for exactly that reason.
+     These read the real route's real payload. */
+  {
+    reset();
+    /* Two weeks, explicit dates, so the buckets are deterministic rather
+       than whatever twelve weeks back happens to be today. */
+    S.dropoffRows = [
+      { bucket: '2026-01-05', source: 'Meta',   stage: '1_booked',       n: 61, internal_n: 2, recovered_n: 11 },
+      { bucket: '2026-01-05', source: 'Meta',   stage: '7_drop_step1',   n: 17, internal_n: 1, recovered_n: 4 },
+      { bucket: '2026-01-05', source: 'Google', stage: '2_dq_b2c',       n: 5,  internal_n: 0, recovered_n: 0 },
+      { bucket: '2026-01-12', source: 'Meta',   stage: '1_booked',       n: 43, internal_n: 1, recovered_n: 8 },
+      { bucket: '2026-01-12', source: 'Meta',   stage: '6_drop_calendar', n: 9, internal_n: 0, recovered_n: 0 },
+    ];
+    S.dropoffSources = [{ source: 'Meta', n: 130 }, { source: 'Google', n: 5 }];
+    let r = null, body = null;
+    try {
+      r = await realFetch(BASE + '/monitor/dropoff?token=stub&grain=week&from=2026-01-05&to=2026-01-18',
+                          { signal: AbortSignal.timeout(20000) });
+      body = await r.json();
+    } catch (err) { body = { error: err.message }; }
+    ok('dropoff route: answers 200', r && r.status === 200, r && String(r.status));
+    ok('dropoff route: honours the explicit window',
+       body && body.from === '2026-01-05' && body.to === '2026-01-18',
+       body && (body.from + ' to ' + body.to));
+    ok('dropoff route: buckets the window into two weeks',
+       body && body.periods && body.periods.length === 2,
+       body && body.periods && String(body.periods.length));
+
+    const byKey = {};
+    (body && body.rows || []).forEach((x) => { byKey[x.key] = x; });
+
+    /* THE LADDER, AS THE SERVER DEFINES IT. Every outcome is present even
+       at zero, because a row that vanishes when empty is how a reader
+       concludes a category does not exist. */
+    ['1_booked', '2_dq_b2c', '3_dq_waitlist', '5_blocked', '6_drop_calendar', '7_drop_step1']
+      .forEach((k) => ok('dropoff route: the ladder carries ' + k, !!byKey[k]));
+
+    /* THE NAME OF THE BIGGEST BUCKET. The row is written by savePartial(1)
+       AFTER step 1 is completed, so everyone in it saw step 2 -- calling
+       it a step-1 dropoff sends somebody to fix the wrong screen. */
+    ok('dropoff route: the step-2 bucket is named for step 2',
+       byKey['7_drop_step1'] && /step 2/i.test(byKey['7_drop_step1'].label),
+       byKey['7_drop_step1'] && byKey['7_drop_step1'].label);
+    ok('dropoff route: no outcome label claims step 1',
+       (body && body.rows || []).every((x) => !/step 1$/i.test(x.label)),
+       JSON.stringify((body && body.rows || []).map((x) => x.label)));
+    ok('dropoff route: the booked row is named Booked',
+       byKey['1_booked'] && byKey['1_booked'].label === 'Booked',
+       byKey['1_booked'] && byKey['1_booked'].label);
+
+    /* THE ONE PROPERTY THE WHOLE REPORT RESTS ON: the rows are mutually
+       exclusive and exhaustive, so they sum to the total. Asserted per
+       period AND overall, because a ladder can sum globally while being
+       wrong in a single bucket. */
+    ok('dropoff route: the rows sum to the grand total',
+       body && (body.rows || []).reduce((a, x) => a + x.total, 0) === body.grand,
+       body && ((body.rows || []).reduce((a, x) => a + x.total, 0) + ' vs ' + body.grand));
+    ok('dropoff route: the rows sum to each period total',
+       body && (body.periods || []).every((pd) =>
+         (body.rows || []).reduce((a, x) => a + x.counts[pd.key], 0) === body.totals[pd.key]));
+    ok('dropoff route: grand is the fixture total', body && body.grand === 135, body && String(body.grand));
+    ok('dropoff route: booked is counted from the ladder', body && body.booked === 104, body && String(body.booked));
+    ok('dropoff route: booked plus not-booked is the grand total',
+       body && body.booked + body.not_booked === body.grand);
+
+    /* PARTIAL MEANS NOT FULLY COVERED, and this window covers two whole
+       weeks exactly -- Jan 5-11 and Jan 12-18 -- so neither is clipped.
+       Asserting the negative first is what stops "partial" degrading into
+       a flag that is always on and therefore says nothing. */
+    ok('dropoff route: two whole weeks are NOT flagged partial',
+       body && (body.periods || []).every((pd) => pd.partial === false),
+       body && JSON.stringify((body.periods || []).map((pd) => pd.key + ':' + pd.partial)));
+
+    /* PROVENANCE. Both are reported so the source split can be audited
+       rather than believed, and so our own test rows stay visible. */
+    ok('dropoff route: it reports how many leads the referrer recovered',
+       body && body.recovered === 23, body && String(body.recovered));
+    ok('dropoff route: it reports how many are our own testing',
+       body && body.internal === 4, body && String(body.internal));
+
+    /* A RATE WE COULD NOT COMPUTE IS NULL, NEVER 0 -- the same rule the
+       lead-path checkers follow, pointed at a dashboard. */
+    const empty = await (await realFetch(
+      BASE + '/monitor/dropoff?token=stub&grain=week&from=2020-01-06&to=2020-01-12',
+      { signal: AbortSignal.timeout(20000) })).json();
+    ok('dropoff route: an empty period reports a null rate, not 0%',
+       empty && empty.booked_rate && empty.booked_rate['2020-01-06'] === null,
+       empty && JSON.stringify(empty.booked_rate));
+    ok('dropoff route: an empty window reports a null overall rate',
+       empty && empty.grand_booked_rate === null, empty && String(empty.grand_booked_rate));
+
+    /* A WINDOW THAT ENDS MID-WEEK CLIPS ITS LAST BUCKET, and a clipped
+       bucket drawn plainly reads as a collapse. Jan 15 is a Thursday. */
+    const clipped = await (await realFetch(
+      BASE + '/monitor/dropoff?token=stub&grain=week&from=2026-01-05&to=2026-01-15',
+      { signal: AbortSignal.timeout(20000) })).json();
+    ok('dropoff route: a window ending mid-week flags its last bucket partial',
+       clipped && clipped.periods && clipped.periods[1] && clipped.periods[1].partial === true,
+       clipped && JSON.stringify((clipped.periods || []).map((pd) => pd.key + ':' + pd.partial)));
+    ok('dropoff route: the fully covered bucket beside it is not flagged',
+       clipped && clipped.periods && clipped.periods[0] && clipped.periods[0].partial === false);
+
+    /* MODE AND GRAIN ARE WHITELISTED, never interpolated raw -- grain
+       reaches date_trunc as an identifier and cannot be bound. */
+    const junk = await (await realFetch(
+      BASE + "/monitor/dropoff?token=stub&grain=month')--&mode=nonsense",
+      { signal: AbortSignal.timeout(20000) })).json();
+    ok('dropoff route: an unknown grain falls back to week rather than reaching SQL',
+       junk && junk.grain === 'week', junk && junk.grain);
+    ok('dropoff route: an unknown mode falls back to leads',
+       junk && junk.mode === 'leads', junk && junk.mode);
+    reset();
+  }
+
   /* ---- the browser half ---- */
   {
     const page = await realFetch(BASE + '/monitor?token=stub', { signal: AbortSignal.timeout(20000) });
