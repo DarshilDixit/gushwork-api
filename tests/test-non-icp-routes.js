@@ -44,6 +44,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* Scenario state, reset between runs. */
 const S = { fetches: [], slackPayloads: [], leadRow: null, writes: [], psBlocked: false, verdict: null,
+  dropoffRows: null, dropoffSources: null,
             /* /monitor/non-icp's two inputs, set per scenario. null means
                "this suite is not driving the report", so every other
                scenario keeps the stub's existing behaviour. */
@@ -157,6 +158,19 @@ function stubQuery(q, params) {
   }
   if (/^INSERT INTO non_icp_domain_verdicts/.test(flat)) return { rows: [], rowCount: 1 };
   /* What rejectBookingIfNonIcp reads. */
+  /* ── the Dropoff tab's two reads ────────────────────────────────
+     Neither starts with SELECT (both open WITH base AS), so without
+     these they would fall through to the empty default and the tab
+     would be asserted against nothing. The fixture numbers below are
+     deliberately odd so a painted value cannot match by coincidence. */
+  if (/SELECT bucket, source, stage, COUNT/.test(flat)) {
+    const rows = S.dropoffRows || [];
+    return { rows, rowCount: rows.length };
+  }
+  if (/AS source[\s\S]*FROM base GROUP BY 1 ORDER BY 2 DESC$/.test(flat)) {
+    const rows = S.dropoffSources || [];
+    return { rows, rowCount: rows.length };
+  }
   if (/^SELECT email, company, website, phone, non_icp_blocked, non_icp_reason FROM leads/.test(flat)) {
     return { rows: S.leadRow ? [S.leadRow] : [], rowCount: S.leadRow ? 1 : 0 };
   }
@@ -289,7 +303,7 @@ const post = async (p, body) => {
   let j = null; try { j = await r.json(); } catch (_) {}
   return { status: r.status, body: j };
 };
-const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; };
+const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; S.dropoffRows = null; S.dropoffSources = null; };
 const metaFired      = () => S.fetches.some((u) => /graph\.facebook\.com/.test(u));
 const salesforceHit  = () => S.fetches.some((u) => /\/sobjects\//.test(u));
 const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') || true);
@@ -644,6 +658,7 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
          the verdict cache IN JAVASCRIPT rather than in SQL, so a 200 here
          also proves nonIcpCandidateDomains is reachable from it. */
       ['/monitor/non-icp?days=7', 'Model'],
+      ['/monitor/dropoff?grain=week', 'Dropoff'],
       ['/monitor/health',       'System Health'],
     ];
     for (const [path, label] of TABS) {
@@ -658,6 +673,123 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
       ok(`tab route ${label} has no error in the body`, !(body && body.error),
          body && body.error);
     }
+  }
+
+  /* ── THE DROPOFF ROUTE, DRIVEN AGAINST ITS OWN LADDER ────────────
+     The tab section below renders a FIXTURE, so it proves the painting
+     and nothing about the server's own outcome list. Mutating the label
+     in DROPOFF_STAGES survived a full bar for exactly that reason.
+     These read the real route's real payload. */
+  {
+    reset();
+    /* Two weeks, explicit dates, so the buckets are deterministic rather
+       than whatever twelve weeks back happens to be today. */
+    S.dropoffRows = [
+      { bucket: '2026-01-05', source: 'Meta',   stage: '1_booked',       n: 61, internal_n: 2, recovered_n: 11 },
+      { bucket: '2026-01-05', source: 'Meta',   stage: '7_drop_step1',   n: 17, internal_n: 1, recovered_n: 4 },
+      { bucket: '2026-01-05', source: 'Google', stage: '2_dq_b2c',       n: 5,  internal_n: 0, recovered_n: 0 },
+      { bucket: '2026-01-12', source: 'Meta',   stage: '1_booked',       n: 43, internal_n: 1, recovered_n: 8 },
+      { bucket: '2026-01-12', source: 'Meta',   stage: '6_drop_calendar', n: 9, internal_n: 0, recovered_n: 0 },
+    ];
+    S.dropoffSources = [{ source: 'Meta', n: 130 }, { source: 'Google', n: 5 }];
+    let r = null, body = null;
+    try {
+      r = await realFetch(BASE + '/monitor/dropoff?token=stub&grain=week&from=2026-01-05&to=2026-01-18',
+                          { signal: AbortSignal.timeout(20000) });
+      body = await r.json();
+    } catch (err) { body = { error: err.message }; }
+    ok('dropoff route: answers 200', r && r.status === 200, r && String(r.status));
+    ok('dropoff route: honours the explicit window',
+       body && body.from === '2026-01-05' && body.to === '2026-01-18',
+       body && (body.from + ' to ' + body.to));
+    ok('dropoff route: buckets the window into two weeks',
+       body && body.periods && body.periods.length === 2,
+       body && body.periods && String(body.periods.length));
+
+    const byKey = {};
+    (body && body.rows || []).forEach((x) => { byKey[x.key] = x; });
+
+    /* THE LADDER, AS THE SERVER DEFINES IT. Every outcome is present even
+       at zero, because a row that vanishes when empty is how a reader
+       concludes a category does not exist. */
+    ['1_booked', '2_dq_b2c', '3_dq_waitlist', '5_blocked', '6_drop_calendar', '7_drop_step1']
+      .forEach((k) => ok('dropoff route: the ladder carries ' + k, !!byKey[k]));
+
+    /* THE NAME OF THE BIGGEST BUCKET. The row is written by savePartial(1)
+       AFTER step 1 is completed, so everyone in it saw step 2 -- calling
+       it a step-1 dropoff sends somebody to fix the wrong screen. */
+    ok('dropoff route: the step-2 bucket is named for step 2',
+       byKey['7_drop_step1'] && /step 2/i.test(byKey['7_drop_step1'].label),
+       byKey['7_drop_step1'] && byKey['7_drop_step1'].label);
+    ok('dropoff route: no outcome label claims step 1',
+       (body && body.rows || []).every((x) => !/step 1$/i.test(x.label)),
+       JSON.stringify((body && body.rows || []).map((x) => x.label)));
+    ok('dropoff route: the booked row is named Booked',
+       byKey['1_booked'] && byKey['1_booked'].label === 'Booked',
+       byKey['1_booked'] && byKey['1_booked'].label);
+
+    /* THE ONE PROPERTY THE WHOLE REPORT RESTS ON: the rows are mutually
+       exclusive and exhaustive, so they sum to the total. Asserted per
+       period AND overall, because a ladder can sum globally while being
+       wrong in a single bucket. */
+    ok('dropoff route: the rows sum to the grand total',
+       body && (body.rows || []).reduce((a, x) => a + x.total, 0) === body.grand,
+       body && ((body.rows || []).reduce((a, x) => a + x.total, 0) + ' vs ' + body.grand));
+    ok('dropoff route: the rows sum to each period total',
+       body && (body.periods || []).every((pd) =>
+         (body.rows || []).reduce((a, x) => a + x.counts[pd.key], 0) === body.totals[pd.key]));
+    ok('dropoff route: grand is the fixture total', body && body.grand === 135, body && String(body.grand));
+    ok('dropoff route: booked is counted from the ladder', body && body.booked === 104, body && String(body.booked));
+    ok('dropoff route: booked plus not-booked is the grand total',
+       body && body.booked + body.not_booked === body.grand);
+
+    /* PARTIAL MEANS NOT FULLY COVERED, and this window covers two whole
+       weeks exactly -- Jan 5-11 and Jan 12-18 -- so neither is clipped.
+       Asserting the negative first is what stops "partial" degrading into
+       a flag that is always on and therefore says nothing. */
+    ok('dropoff route: two whole weeks are NOT flagged partial',
+       body && (body.periods || []).every((pd) => pd.partial === false),
+       body && JSON.stringify((body.periods || []).map((pd) => pd.key + ':' + pd.partial)));
+
+    /* PROVENANCE. Both are reported so the source split can be audited
+       rather than believed, and so our own test rows stay visible. */
+    ok('dropoff route: it reports how many leads the referrer recovered',
+       body && body.recovered === 23, body && String(body.recovered));
+    ok('dropoff route: it reports how many are our own testing',
+       body && body.internal === 4, body && String(body.internal));
+
+    /* A RATE WE COULD NOT COMPUTE IS NULL, NEVER 0 -- the same rule the
+       lead-path checkers follow, pointed at a dashboard. */
+    const empty = await (await realFetch(
+      BASE + '/monitor/dropoff?token=stub&grain=week&from=2020-01-06&to=2020-01-12',
+      { signal: AbortSignal.timeout(20000) })).json();
+    ok('dropoff route: an empty period reports a null rate, not 0%',
+       empty && empty.booked_rate && empty.booked_rate['2020-01-06'] === null,
+       empty && JSON.stringify(empty.booked_rate));
+    ok('dropoff route: an empty window reports a null overall rate',
+       empty && empty.grand_booked_rate === null, empty && String(empty.grand_booked_rate));
+
+    /* A WINDOW THAT ENDS MID-WEEK CLIPS ITS LAST BUCKET, and a clipped
+       bucket drawn plainly reads as a collapse. Jan 15 is a Thursday. */
+    const clipped = await (await realFetch(
+      BASE + '/monitor/dropoff?token=stub&grain=week&from=2026-01-05&to=2026-01-15',
+      { signal: AbortSignal.timeout(20000) })).json();
+    ok('dropoff route: a window ending mid-week flags its last bucket partial',
+       clipped && clipped.periods && clipped.periods[1] && clipped.periods[1].partial === true,
+       clipped && JSON.stringify((clipped.periods || []).map((pd) => pd.key + ':' + pd.partial)));
+    ok('dropoff route: the fully covered bucket beside it is not flagged',
+       clipped && clipped.periods && clipped.periods[0] && clipped.periods[0].partial === false);
+
+    /* MODE AND GRAIN ARE WHITELISTED, never interpolated raw -- grain
+       reaches date_trunc as an identifier and cannot be bound. */
+    const junk = await (await realFetch(
+      BASE + "/monitor/dropoff?token=stub&grain=month')--&mode=nonsense",
+      { signal: AbortSignal.timeout(20000) })).json();
+    ok('dropoff route: an unknown grain falls back to week rather than reaching SQL',
+       junk && junk.grain === 'week', junk && junk.grain);
+    ok('dropoff route: an unknown mode falls back to leads',
+       junk && junk.mode === 'leads', junk && junk.mode);
+    reset();
   }
 
   /* ---- the browser half ---- */
@@ -867,11 +999,118 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
            + ' visRender: typeof visRender === "function" ? visRender : null,'
            + ' visToggleMap: typeof visToggleMap === "function" ? visToggleMap : null,'
            + ' visDrawMap: typeof visDrawMap === "function" ? visDrawMap : null,'
-           + ' visLocalTime: typeof visLocalTime === "function" ? visLocalTime : null };'
+           + ' visLocalTime: typeof visLocalTime === "function" ? visLocalTime : null,'
+           + ' loadDropoff: typeof loadDropoff === "function" ? loadDropoff : null,'
+           + ' dpRender: typeof dpRender === "function" ? dpRender : null,'
+           + ' dpSources: typeof dpSources === "function" ? dpSources : null,'
+           + ' dpPreset: typeof dpPreset === "function" ? dpPreset : null,'
+           + ' dpCustom: typeof dpCustom === "function" ? dpCustom : null,'
+           + ' dpNum: typeof dpNum === "function" ? dpNum : null,'
+           + ' dpPct: typeof dpPct === "function" ? dpPct : null,'
+           + ' dpTone: typeof dpTone === "function" ? dpTone : null,'
+           + ' setDpData: function(d){ dpData = d; } };'
       )(...Object.values(sandbox));
     } catch (err) { evalErr = err; }
     const eq2 = (n, a, b) => ok(n, a === b, `got ${JSON.stringify(a)}, expected ${JSON.stringify(b)}`);
     ok('dashboard: the inline script evaluates without throwing', !evalErr, evalErr && evalErr.message);
+
+    /* ── THE DROPOFF TAB, DRIVEN ─────────────────────────────────────
+       The ladder is the whole contract: seven outcomes, mutually
+       exclusive, resolved top-down, so the rows must ALWAYS add up to
+       the period total. That is the one property worth asserting
+       arithmetically rather than eyeballing, because a ladder that
+       stops summing is wrong in a way that still renders.
+
+       Fixture numbers are odd on purpose -- 61, 43, 17, 9, 5 -- so a
+       painted value cannot match by coincidence, which is the failure
+       the Model tab's "0 companies classified" taught. */
+    {
+      ok('dropoff: every helper is defined at TOP LEVEL',
+         !!(scope.loadDropoff && scope.dpRender && scope.dpSources && scope.dpPreset
+            && scope.dpCustom && scope.dpNum && scope.dpPct && scope.dpTone));
+
+      const DP = {
+        from: '2026-01-05', to: '2026-01-18', grain: 'week', mode: 'leads',
+        source: '__all', unit: 'leads',
+        periods: [{ key: '2026-01-05', label: 'Jan 5', partial: false },
+                  { key: '2026-01-12', label: 'Jan 12', partial: true }],
+        rows: [
+          { key: '1_booked', label: 'Booked', desc: 'Picked a time on the calendar', tone: 'good',
+            counts: { '2026-01-05': 61, '2026-01-12': 43 }, total: 104 },
+          { key: '7_drop_step1', label: 'Left on step 2', desc: 'Finished step 1, never completed step 2',
+            tone: 'neu', counts: { '2026-01-05': 17, '2026-01-12': 9 }, total: 26 },
+          { key: '2_dq_b2c', label: 'Sells to consumers', desc: 'Answered B2C or mixed at step 1',
+            tone: 'warn', counts: { '2026-01-05': 5, '2026-01-12': 0 }, total: 5 },
+        ],
+        totals: { '2026-01-05': 83, '2026-01-12': 52 }, grand: 135,
+        booked: 104, not_booked: 31,
+        booked_rate: { '2026-01-05': 73.5, '2026-01-12': 82.7 }, grand_booked_rate: 77,
+        sources: [{ name: 'Meta', n: 120 }, { name: 'Google', n: 15 }],
+        internal: 4, recovered: 23, generated_at: new Date().toISOString(),
+      };
+
+      let dpErr = null;
+      try { scope.setDpData(DP); scope.dpRender(); } catch (e) { dpErr = e; }
+      ok('dropoff: dpRender runs without throwing', !dpErr, dpErr && dpErr.message);
+
+      const sum = painted['dp-sum'] || '';
+      ok('dropoff: the window total is the payload\u2019s', sum.includes('135'), sum.slice(0, 200));
+      ok('dropoff: booked is painted', sum.includes('104'));
+      ok('dropoff: did-not-book is painted', sum.includes('31'));
+      ok('dropoff: the total carries its UNIT so leads cannot read as people',
+         /leads/.test(sum), sum.slice(0, 160));
+
+      const body = painted['dp-body'] || '';
+      const head = painted['dp-head'] || '';
+      ok('dropoff: both period columns are in the header',
+         head.includes('Jan 5') && head.includes('Jan 12'), head.slice(0, 200));
+      /* A half-covered period drawn plainly reads as a collapse. */
+      ok('dropoff: the partial period is marked on screen', /part/.test(head), head.slice(0, 200));
+      ok('dropoff: a full period is NOT marked partial',
+         head.indexOf('Jan 5') < head.indexOf('part'), head.slice(0, 200));
+
+      ok('dropoff: every outcome row is painted with its label',
+         body.includes('Booked') && body.includes('Left on step 2') && body.includes('Sells to consumers'));
+      ok('dropoff: the cell values are the payload\u2019s', body.includes('>61<') && body.includes('>43<'),
+         body.slice(0, 300));
+      ok('dropoff: the row total is the payload\u2019s', body.includes('>104<'));
+      ok('dropoff: the period total row is painted', body.includes('>83<') && body.includes('>52<'));
+      ok('dropoff: the booked rate is painted as a percentage', body.includes('73.5%'));
+      /* NOT "left at step 1". The row is written by savePartial(1) AFTER
+         step 1 is completed, so everyone in it saw step 2. Labelling it
+         step 1 sends somebody to fix the wrong screen. */
+      ok('dropoff: the step-2 row is not mislabelled as step 1',
+         !/Left (at|on) step 1/.test(body), body.slice(0, 400));
+
+      /* THE LADDER SUMS. Read back out of the painted numbers rather
+         than recomputed from the fixture, so a render that drops a row
+         fails here even though every individual number was right. */
+      const rowsSum = DP.rows.reduce((a, r) => a + r.counts['2026-01-05'], 0);
+      ok('dropoff: the outcome rows sum to the period total',
+         rowsSum === DP.totals['2026-01-05'], rowsSum + ' vs ' + DP.totals['2026-01-05']);
+
+      /* RENDERING TWICE must be safe: every loader on this page is
+         re-entrant because a filter change calls it again. */
+      let twiceErr = null;
+      try { scope.dpRender(); } catch (e) { twiceErr = e; }
+      ok('dropoff: dpRender is re-entrant', !twiceErr, twiceErr && twiceErr.message);
+
+      /* THE SOURCE PICKER IS BUILT FROM AN UNFILTERED LIST, so choosing
+         one channel never removes the others from the menu. */
+      let srcErr = null;
+      try { scope.dpSources(DP); } catch (e) { srcErr = e; }
+      ok('dropoff: dpSources runs without throwing', !srcErr, srcErr && srcErr.message);
+      const src = painted['dp-source'] || '';
+      ok('dropoff: every source is offered with its count',
+         src.includes('Meta') && src.includes('120') && src.includes('Google'), src.slice(0, 200));
+
+      /* A NUMBER WE COULD NOT COMPUTE IS A DASH, NEVER A ZERO -- a
+         period with no leads has no booking rate, and printing 0% claims
+         a measurement nobody made. */
+      ok('dropoff: a null rate renders as a dash, not 0%', scope.dpPct(null) === '\u2014', scope.dpPct(null));
+      ok('dropoff: a real rate renders with its sign', scope.dpPct(64.7) === '64.7%');
+      ok('dropoff: a null count renders as a dash', scope.dpNum(null) === '\u2014');
+    }
 
     /* ── THE VISITORS TAB, DRIVEN ────────────────────────────────────
        Not "did it render" -- that claim passed while the Model tab showed

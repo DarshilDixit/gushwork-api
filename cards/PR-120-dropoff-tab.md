@@ -1,0 +1,145 @@
+# PR 120 — Dropoff tab: where inbound leads go, by week or month
+
+Branch `feat/dropoff-tab`. Written 25 Sept 2026.
+
+## Why
+
+Swapnil asked twice in one Slack thread: 85 form fills, 51 booked, what
+happened to the other 34, and then "a week on week report for last 12 weeks
+with reasons of dropoff as rows and count in the columns, filter by source,
+so we can see if we should be worried or not". A hand-written answer is
+wrong the next morning.
+
+## What it does and does not touch
+
+**Read-only.** No blocking behaviour changes, no Meta event fires or stops
+firing, no write path is touched. The only outbound thing added is a Slack
+digest.
+
+## Verified — actually run
+
+- **Full bar green, run bare, read in full:** 12 suites, 4,402 assertions.
+  `test-non-icp-routes.js` 488 -> 538.
+- **The SQL was EXECUTED against the production Railway database** through a
+  lift of the real `dropoffReport` out of `index.js`, not a copy. 20 checks:
+  the ladder sums to the grand total and to every period total in both
+  modes, 12 buckets at both grains, the partial flags, the source filter
+  narrowing while the source LIST stays unfiltered, explicit ranges, and the
+  grain/mode fallbacks. All passed.
+- **The digest was executed** with `sendOpsSlack` stubbed, and its blocks
+  read back and checked by eye. Nothing was posted to Slack.
+- **Four mutations, all CAUGHT** via `measure.js --mutation`, against a
+  committed baseline:
+  1. mislabelling the step-2 row as step 1
+  2. `partial: false` — the partial-period flag disabled
+  3. an empty period reporting `0%` instead of `null`
+  4. the grain whitelist removed, so a raw value reaches `date_trunc`
+
+## Asserted only structurally
+
+Nothing. Every assertion added here either drives the route over HTTP or
+evaluates the dashboard JS and reads what was painted.
+
+## Never executed
+
+- ~~The Slack digest has never posted for real.~~ **Fired on purpose on 25
+  Sept**: `node tools/fire-non-icp-slack.js dropoff-digest`, Slack returned
+  200, real numbers over the real leads table (191 of 295 booked, 64.7%,
+  week of Sep 14). It lives in `tools/fire-dropoff-digest.js` so the path is
+  repeatable rather than a one-off.
+- **It went into `fire-non-icp-slack.js` first, and that was wrong.** The
+  digest has nothing to do with the non-ICP block; it went there because that
+  tool already had the lifting machinery. Moved to its own file, and that
+  tool is byte-identical to its pre-change state again.
+- **Two copy bugs, found by reading the message rather than the code.** It
+  said "295 **people** got through step 1" directly above a footer saying
+  "counts form sessions, **not people**" — the same message contradicting
+  itself. And it carried the non-ICP tool's marker, "not a real blocked
+  prospect", which is about a different feature entirely; the digest's
+  numbers are real and only its timing was not, so the marker now says that.
+- **Fired twice, and the second one is why.** The first landed in
+  `bot-n8n-alerts` because it used `sendOpsSlack`. It is a readout, not an
+  alert, so it now uses `sendSlack` (the leads channel) — authorised by
+  Darshil, 25 Sept. Re-fired to confirm: the log line changed from
+  `[alertOps]` to `[Slack]`, status 200. **That is the only way to check a
+  channel** — the code says which function, not which room.
+- **The tick went from 60 to 15 minutes.** `setInterval` counts from boot, so
+  an hourly tick plus a Monday 09:05 deploy skips the week silently. The
+  day-stamp guard still sends exactly once. Mondays in the 09:00 ET hour —
+  18:30 IST in summer, 19:30 in winter; `DROPOFF_DIGEST_ENABLED=false` stops
+  it.
+- **The tab has not been opened in a real browser.** The loader is evaluated
+  in the suite's stubbed DOM and every painted number is read back, which is
+  what caught the Model tab's "0 companies classified" class of bug — but a
+  stubbed DOM is not Chrome.
+
+## The mutation that survived first, and what changed because of it
+
+Mutating the step-2 label in `DROPOFF_STAGES` **passed a full bar**. The tab
+section renders a fixture, so it proves the painting and says nothing about
+the server's own outcome list. A second block now drives the real route and
+asserts its real payload — the ladder keys, the labels, the sums. That is
+the same shape as this repo's oldest lesson: the assertion was one level
+short of the thing worth caring about.
+
+## The bug that executing the SQL found
+
+`node-postgres` parses a `date` column into a JS `Date` in the **process's**
+local timezone. `toISOString().slice(0,10)` therefore shifted every bucket a
+day west of UTC: the report came back **completely empty on an IST laptop
+and would have been correct on Railway**. Reading the code would not have
+found it, and a test on Railway would not have either. The bucket is now
+`to_char(..., 'YYYY-MM-DD')`, so there is nothing to parse.
+
+## Numbers this depends on, and when they go stale
+
+Measured 25 Sept 2026 over the 12 weeks to that date. They are in CLAUDE.md
+and in the commit messages as measurements with a date, not as constants:
+
+- 3,309 leads / 3,096 people; booking 65.8% / 69.1%
+- 469 leads with no `utm_source` recorded by the form as paid (459 Facebook,
+  9 Instagram, 1 Google); Meta 2,051 -> 2,519, Direct 991 -> 486
+- 578 leads in the "left on step 2" bucket, all carrying `sell_to`, none
+  carrying a phone, 0 carrying a `website_check_reason`
+- booking lag: 99.6% of bookings land within an hour of step 1, which is
+  what makes a period cohort safe to close
+
+## Open, deliberately not done here
+
+1. **A lead stopped on step 2 by a blocking website verdict leaves no
+   trace.** `handleStep2Next` returns before `submitLead()`, so nothing is
+   persisted. Some unknown slice of the 578 were turned back rather than
+   leaving, and the table cannot say which. Fixing it is a change to both
+   form files plus a Webflow re-pin.
+2. **Internal test submissions are included**, per the standing house rule.
+   The payload reports the count so it is visible; it is not subtracted.
+3. **No CSV export.** The SDR list's export has a documented drift trap
+   between its server and client column lists; adding a second one is worth
+   doing deliberately, not as a side effect.
+
+## Addendum — the near-miss digest tick, 25 Sept
+
+Asked for explicitly after the dropoff one was fixed. `startNearMissDigest`
+ticked hourly and had the identical gap: `setInterval` counts from **boot**,
+so a deploy at 09:05 on a Monday puts the ticks at 10:05 and 11:05 and that
+week is silently skipped. Railway deploys on every push to `main`, so landing
+inside that hour is an ordinary Monday, not a freak event.
+
+Both now tick at 15 minutes. Nothing else changed — the week guard, the
+stamp and the hour are untouched, so the documented double-send on a deploy
+inside the hour still applies to both, in the same deliberate direction: a
+duplicate is visible, a miss is not.
+
+**Verified by execution, not by reading**, because the risk a shorter tick
+introduces is spam:
+
+- **Off-schedule:** four consecutive ticks on a Friday send nothing, for both
+  digests. The report function was stubbed to THROW if reached, so this also
+  proves the gate returns before doing any work.
+- **On schedule:** with `etParts` overridden to stand on Monday 09:00 (a
+  function declaration is a mutable binding), four ticks inside the hour send
+  **exactly one** digest, for both.
+- **Not silenced forever:** advancing the stamp to the following Monday sends
+  again.
+
+Full bar green after the change: 12 suites, 4,402 assertions.
