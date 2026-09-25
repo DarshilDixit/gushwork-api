@@ -4567,11 +4567,16 @@ app.get('/monitor', (req, res) => {
   /* Presets write the two date inputs rather than being a second way of
      saying the same thing to the server. One source of truth on screen,
      so what you see in the boxes is always what was asked for. */
+  /* Monday of the week a date falls in, matching date_trunc('week'). */
+  'function dpMonday(d){var dow=(d.getDay()+6)%7;d.setDate(d.getDate()-dow);return d;}' +
   'function dpPreset(){' +
   'var p=document.getElementById("dp-preset").value;if(p==="custom")return;' +
   'var now=new Date(),from=new Date(now),g="week";' +
-  'if(p==="12w"){from.setDate(from.getDate()-7*11);}' +
-  'else if(p==="26w"){from.setDate(from.getDate()-7*25);}' +
+  /* SNAPPED TO THE PERIOD START. Without this the window opens mid-week and
+     the first bucket is clipped, so "last 12 weeks" renders 11 full weeks
+     beside a stub that looks like a collapse. */
+  'if(p==="12w"){from.setDate(from.getDate()-7*11);dpMonday(from);}' +
+  'else if(p==="26w"){from.setDate(from.getDate()-7*25);dpMonday(from);}' +
   'else if(p==="12m"){from.setMonth(from.getMonth()-11);from.setDate(1);g="month";}' +
   'else if(p==="ytd"){from=new Date(now.getFullYear(),0,1);g="month";}' +
   'document.getElementById("dp-from").value=dpIso(from);' +
@@ -4619,7 +4624,7 @@ app.get('/monitor', (req, res) => {
   '+"</div>";' +
   'var hh="<tr><th style=\\"text-align:left;min-width:210px\\">Outcome</th>";' +
   'for(var j=0;j<d.periods.length;j++){var p=d.periods[j];' +
-  'hh+="<th style=\\"text-align:right\\"'+'"+(p.partial?" title=\\"This period is not fully covered by the window, so its numbers are lower than a full one\\"":"")+">"+esc(p.label)+(p.partial?" <span class=\\"badge bx\\">part</span>":"")+"</th>";}' +
+  'hh+="<th style=\\"text-align:right\\"'+'"+(p.partial?" title=\\"This period is not fully covered by the window, so its numbers are lower than a full one\\"":"")+">"+esc(p.label)+(p.partial?"<div style=\\"font-size:9px;font-weight:500;color:#b45309;letter-spacing:0.04em\\">part</div>":"")+"</th>";}' +
   'hh+="<th style=\\"text-align:right\\">Total</th></tr>";' +
   'document.getElementById("dp-head").innerHTML=hh;' +
   'var b="";' +
