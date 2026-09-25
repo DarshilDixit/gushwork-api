@@ -528,8 +528,16 @@ function liftClientJs(startMarker, endMarker) {
     ok('health/apollo: free mailboxes are excluded from the denominator',
        Array.isArray(gPool.calls[0].params[0]) && gPool.calls[0].params[0].includes('gmail.com')
        && /<> ALL\(\$1::text\[\]\)/.test(gPool.calls[0].sql));
+    /* STRUCTURAL, and that is the ceiling here: the bar has no database, so
+       the SQL cannot run. The first version of this assertion matched the
+       found-column DEFINITION, which survives the matched FILTER dropping
+       its AND e.found -- exactly the 23 Sept bug. So pin the filter itself. */
     ok('health/apollo: the numerator is what Apollo FOUND, not rows written',
-       /enriched_title IS NOT NULL OR enriched_company IS NOT NULL/.test(gPool.calls[0].sql));
+       /enriched_title IS NOT NULL OR enriched_company IS NOT NULL/.test(gPool.calls[0].sql)
+       && /FILTER \(WHERE e\.enriched_at >= NOW\(\)[^,]*? AND e\.found\)\s+AS matched/.test(gPool.calls[0].sql),
+       gPool.calls[0].sql.slice(0, 400));
+    ok('health/apollo: refusals are counted apart, never as matches',
+       /FILTER \(WHERE e\.enriched_at >= NOW\(\)[^,]*? AND e\.refused\)\s+AS refused/.test(gPool.calls[0].sql));
     eq('health/apollo: a healthy check never reads the reply bodies twice', gPool.calls.length, 1);
 
     const rec = await H.checkApolloHealth(apolloPool({ ...healthy, matched: 30, refused: 5,
