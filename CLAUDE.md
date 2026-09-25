@@ -1789,7 +1789,7 @@ at 09:05 on a Monday puts the ticks at 10:05 and 11:05 and **that week is
 silently skipped**. A missed weekly digest is invisible where a duplicate is
 merely annoying, so the trade goes toward sending. The guard keys on the ET
 **day** stamp, so four ticks inside the 09:00 hour still send exactly once.
-The near-miss digest still ticks hourly and still has this gap.
+**The near-miss digest had the identical gap and was fixed in the same change** — both now tick at 15 minutes, and they should stay in step. Its own week guard is unchanged, so the documented double-send on a deploy inside the hour still applies to both: that trade deliberately favours sending, because a duplicate is visible and a miss is not.
 
 **Booking arrives by three routes.** `/booking-confirmed` (browser-fired),
 `/booking-confirmed-webhook` (Cal), `/booking-confirmed-webhook-rh` (RevenueHero).

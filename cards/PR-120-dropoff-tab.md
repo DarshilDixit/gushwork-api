@@ -116,3 +116,30 @@ and in the commit messages as measurements with a date, not as constants:
 3. **No CSV export.** The SDR list's export has a documented drift trap
    between its server and client column lists; adding a second one is worth
    doing deliberately, not as a side effect.
+
+## Addendum — the near-miss digest tick, 25 Sept
+
+Asked for explicitly after the dropoff one was fixed. `startNearMissDigest`
+ticked hourly and had the identical gap: `setInterval` counts from **boot**,
+so a deploy at 09:05 on a Monday puts the ticks at 10:05 and 11:05 and that
+week is silently skipped. Railway deploys on every push to `main`, so landing
+inside that hour is an ordinary Monday, not a freak event.
+
+Both now tick at 15 minutes. Nothing else changed — the week guard, the
+stamp and the hour are untouched, so the documented double-send on a deploy
+inside the hour still applies to both, in the same deliberate direction: a
+duplicate is visible, a miss is not.
+
+**Verified by execution, not by reading**, because the risk a shorter tick
+introduces is spam:
+
+- **Off-schedule:** four consecutive ticks on a Friday send nothing, for both
+  digests. The report function was stubbed to THROW if reached, so this also
+  proves the gate returns before doing any work.
+- **On schedule:** with `etParts` overridden to stand on Monday 09:00 (a
+  function declaration is a mutable binding), four ticks inside the hour send
+  **exactly one** digest, for both.
+- **Not silenced forever:** advancing the stamp to the following Monday sends
+  again.
+
+Full bar green after the change: 12 suites, 4,402 assertions.

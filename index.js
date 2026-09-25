@@ -15050,11 +15050,27 @@ async function runNearMissDigest(force = false) {
   }
 }
 
-/* Hourly tick; the DAY and HOUR check inside is what makes it weekly. An
-   hourly timer that decides for itself is simpler to reason about than a
-   weekly one that has to survive restarts. */
+/* A tick that decides for itself is simpler to reason about than a weekly
+   timer that has to survive restarts; the DAY and HOUR check inside is what
+   makes it weekly.
+
+   FIFTEEN MINUTES, NOT SIXTY, CORRECTED 25 SEPT 2026. setInterval counts
+   from BOOT, not from the top of the hour, so an hourly tick plus a deploy
+   at 09:05 on a Monday puts the ticks at 10:05 and 11:05 -- the 09:00 hour
+   is never checked and THAT WEEK IS SILENTLY SKIPPED. Railway deploys on
+   every push to main, so landing inside that hour is an ordinary Monday
+   rather than a freak event.
+
+   A missed digest is invisible where a duplicate is merely annoying, so the
+   trade goes toward sending -- the same direction the in-memory week guard
+   above already chose. The guard keys on the ET DAY stamp, so four ticks
+   inside the 09:00 hour still send exactly once; the shorter tick costs
+   nothing and closes the miss.
+
+   Found while building the dropoff digest, which had copied this shape.
+   Both tick at 15 minutes now; keep them in step. */
 function startNearMissDigest() {
-  const t = setInterval(() => runNearMissDigest().catch(() => {}), 60 * 60 * 1000);
+  const t = setInterval(() => runNearMissDigest().catch(() => {}), 15 * 60 * 1000);
   if (t.unref) t.unref();
   console.log(`[near-digest] Started — Mondays at ${NEAR_DIGEST_HOUR_ET}:00 ET, to the alerts channel`);
 }
@@ -15146,7 +15162,10 @@ async function runDropoffDigest(force = false) {
    11:05, and that week is SILENTLY SKIPPED. A missed weekly digest is
    invisible; a duplicate is merely annoying, so the trade goes toward
    sending. The guard keys on the ET DAY stamp, so four ticks inside the
-   09:00 hour still send exactly once. */
+   09:00 hour still send exactly once.
+
+   The near-miss digest had the same shape and the same gap; both were moved
+   to 15 minutes on 25 Sept. Keep them in step. */
 function startDropoffDigest() {
   const t = setInterval(() => runDropoffDigest().catch(() => {}), 15 * 60 * 1000);
   if (t.unref) t.unref();
