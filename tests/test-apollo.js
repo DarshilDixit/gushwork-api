@@ -157,6 +157,13 @@ const LEADUP = /^UPDATE leads SET enriched_city=\$2/;
   eq('B: a second refusal inside the cooldown sends no second alert', b.slack.length, 0);
   eq('B: ...but is still recorded', wrote(b, REFUSE).length, 1);
 
+  /* One 502 now, so the success in C has a streak to RESET. Without that
+     reset the three 502s in E would alert at the second, not the third. */
+  quiet();
+  const pre = await enrich('pre@northwindtrading.com', 'b2b2b2b2-0000-4000-8000-00000000000f', { status: 502, body: 'NOT JSON' });
+  loud();
+  eq('pre: a single 502 pages nobody', pre.slack.length, 0);
+
   /* ── C. A real answer: written exactly as before the refactor ── */
   quiet();
   const c = await enrich('ada@northwindtrading.com', 'c3c3c3c3-0000-4000-8000-000000000003', { status: 200, body: FOUND_BODY });
@@ -196,7 +203,16 @@ const LEADUP = /^UPDATE leads SET enriched_city=\$2/;
   const e3 = await enrich('e3@northwindtrading.com', 'e5e5e5e5-0000-4000-8000-000000000007', { status: 502, body: 'NOT JSON' });
   loud();
   eq('E: the form still gets a 200 on a 502', e1.status, 200);
-  eq('E: the first two 502s page nobody', e1.slack.length + e2.slack.length, 0);
+  /* TWO PATHS, and which one fires is the proof. The streak is reset by a
+     success; the six-hour window deliberately is not ("three failed Apollo
+     lookups in six hours matters even if interleaved with successes"). So
+     pre + E1 + E2 is three in the window and E2 sends "Repeated failures".
+     Had C's success NOT reset the streak, it would be 3 at E2 and send
+     "Consecutive failures" instead. */
+  eq('E: the first 502 after a success pages nobody', e1.slack.length, 0);
+  ok('E: the second is the WINDOW alert, so the success in C reset the streak',
+     e2.slack.some((s) => /Repeated failures/.test(s.body)) && !e2.slack.some((s) => /Consecutive failures/.test(s.body)),
+     e2.slack.map((s) => s.body.slice(0, 120)).join(' | ') || '(nothing sent)');
   ok('E: the third in a row is "Consecutive failures"', e3.slack.some((s) => /Consecutive failures/.test(s.body)),
      e3.slack.map((s) => s.body.slice(0, 120)).join(' | ') || '(nothing sent)');
   eq('E: a 502 is recorded as a refusal, not written as an enrichment', wrote(e1, UPSERT).length, 0);
@@ -274,6 +290,18 @@ const LEADUP = /^UPDATE leads SET enriched_city=\$2/;
   ok('H: nothing was written for the refused address', !db2.log.some((q) => (q.params || [])[0] === 's3'));
   eq('H: every session written also got the lead-row update',
      db2.log.filter((q) => /^UPDATE leads SET enriched_city=\$2/.test(q.sql)).length, 3);
+
+  /* Refused on the FIRST lookup: one call, then stop -- never walk the list
+     stamping fresh refusals. The refused address is first here on purpose;
+     when it was last, a run that carried on looked identical to one that
+     stopped. */
+  const db4 = toolDb(); const p4 = await tool.plan(db4, {}); db4.log.length = 0; let calls4 = 0;
+  p4.lookups.sort((x, y) => (x.email === 'b@beta-labs.io' ? -1 : y.email === 'b@beta-labs.io' ? 1 : 0));
+  const out4 = await tool.apply(db4, async (u, o) => { calls4++; const who = JSON.parse(o.body).email;
+    const r = answers[who]; return { status: r.status, json: async () => r.body }; }, p4, { apiKey: 'k', pauseMs: 0, log: () => {} });
+  eq('H: refused on the first lookup -> exactly one call', calls4, 1);
+  ok('H: ...and it says it stopped', !!out4.stopped);
+  eq('H: ...and no lookup was written', db4.log.filter((q) => /^INSERT INTO enrichment_data/.test(q.sql) && q.params[0] !== 's4').length, 0);
 
   const db3 = toolDb(); const p3 = await tool.plan(db3, {}); db3.log.length = 0; let calls3 = 0;
   await tool.apply(db3, async (u, o) => { calls3++; return { status: 200, json: async () => FOUND_BODY }; }, p3, { apiKey: 'k', pauseMs: 0, limit: 1, log: () => {} });
