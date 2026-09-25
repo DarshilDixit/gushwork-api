@@ -5,7 +5,7 @@ current as the work moves, so a new session, or one resumed after a pause,
 can carry on without anyone re-explaining. The rules in `CLAUDE.md` still
 apply on top of everything here.
 
-Last updated: **26 Sept 2026**, as #123 goes in (merge authorised by Darshil once the bar and the layout check were green).
+Last updated: **26 Sept 2026 (IST)**. #123 merged and its deploy confirmed; PR C started.
 
 ---
 
@@ -18,7 +18,7 @@ switches them.
 | PR | What | State | Links |
 |---|---|---|---|
 | A | Apollo: page on out-of-credits, an honest System Health row, label fixes | **merged** 25 Sept | [#122](https://github.com/DarshilDixit/gushwork-api/pull/122), `cards/PR-122-apollo-honest-health.md` |
-| B | The new dashboard, five tabs: Overview, System health, Dropoff, Duplicates, Lead magnet | **merging** 26 Sept | [#123](https://github.com/DarshilDixit/gushwork-api/pull/123), `cards/PR-123-monitor-next.md` |
+| B | The new dashboard, five tabs: Overview, System health, Dropoff, Duplicates, Lead magnet | **merged** 25 Sept 22:53 UTC (`5bb0479`), deploy confirmed | [#123](https://github.com/DarshilDixit/gushwork-api/pull/123), `cards/PR-123-monitor-next.md` |
 | C | The other six tabs: All leads, Blocked, SDR list, Partners, Model, Visitors | **in progress** | branch `feat/monitor-next-c` |
 | D | The switch: `/monitor` becomes the new page; the old one stays at `/monitor/classic` for a week, then goes | not started | — |
 
@@ -34,10 +34,21 @@ Earlier, related: [#121](https://github.com/DarshilDixit/gushwork-api/pull/121)
   - the Disqualified label;
   - the CSV formula escaping;
   - Duplicates' "ours" marker.
-- **`/monitor/next`**: the new dashboard, live in production once #123
-  deploys (the deploy check is recorded here when done). Its
-  five rebuilt tabs are Overview, System health, Dropoff, Duplicates and
+- **`/monitor/next`**: the new dashboard, LIVE in production since #123.
+  Its five rebuilt tabs are Overview, System health, Dropoff, Duplicates and
   Lead magnet. Every other nav row is a marked link to the classic tab.
+- **Deploy check, read-only, right after the merge** (live about 40s after
+  it):
+  - `/monitor/next` returns 200 with the new markup.
+  - Production's `/monitor/overview` and the preview's lifted copy, asked
+    for the same instant, return IDENTICAL numbers for Today, This week and
+    All time.
+  - The Apollo check carries its new vendor-free `summary`, and System
+    health keeps the full text.
+  - `/monitor/duplicates` returns `is_internal` (338 addresses).
+  - `/monitor/metrics` keeps the same 29 keys.
+  - A before/after diff of the classic `/monitor` page shows exactly the
+    8 intended fragments and nothing else.
 - **Unmerged**: PR C, on `feat/monitor-next-c`. See "PR C" below for exactly
   where it stands.
 
