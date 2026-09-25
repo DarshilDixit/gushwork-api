@@ -1004,6 +1004,7 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
            + ' dpRender: typeof dpRender === "function" ? dpRender : null,'
            + ' dpSources: typeof dpSources === "function" ? dpSources : null,'
            + ' dpPreset: typeof dpPreset === "function" ? dpPreset : null,'
+           + ' dpPresetRange: typeof dpPresetRange === "function" ? dpPresetRange : null,'
            + ' dpCustom: typeof dpCustom === "function" ? dpCustom : null,'
            + ' dpNum: typeof dpNum === "function" ? dpNum : null,'
            + ' dpPct: typeof dpPct === "function" ? dpPct : null,'
@@ -1110,6 +1111,64 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
       ok('dropoff: a null rate renders as a dash, not 0%', scope.dpPct(null) === '\u2014', scope.dpPct(null));
       ok('dropoff: a real rate renders with its sign', scope.dpPct(64.7) === '64.7%');
       ok('dropoff: a null count renders as a dash', scope.dpNum(null) === '\u2014');
+
+      /* THE PRESETS, RUN ON THE DATES THAT BREAK THEM. Two bugs lived
+         here and neither was visible on the day it was written:
+         "last 12 weeks" opened mid-week, so the first column was a stub
+         that read as a collapse; and "last 12 months" set the month
+         before the day, so on 31 Oct it asked for "31 Nov", rolled to
+         1 Dec and showed eleven months. Every day of three years is
+         checked, so a fix that only works today cannot pass. */
+      {
+        const R = scope.dpPresetRange;
+        ok('dropoff: dpPresetRange is defined at TOP LEVEL', typeof R === 'function');
+        const pr = (p, d) => { try { return R(p, d); } catch (e) { return { err: e.message }; } };
+        const r1 = pr('12w', '2026-09-25');
+        eq2('dropoff: 12 weeks from a Friday opens on that week-11 Monday', r1 && r1.from, '2026-07-06');
+        eq2('dropoff: the window ends TODAY, not at the snap', r1 && r1.to, '2026-09-25');
+        eq2('dropoff: a week preset asks for weeks', r1 && r1.grain, 'week');
+        eq2('dropoff: 12 weeks from a Sunday opens on the same Monday',
+            (pr('12w', '2026-09-27') || {}).from, '2026-07-06');
+        eq2('dropoff: 12 weeks from a Monday opens eleven Mondays back',
+            (pr('12w', '2026-09-21') || {}).from, '2026-07-06');
+        eq2('dropoff: 12 months on 31 Oct opens on 1 Nov, not 1 Dec',
+            (pr('12m', '2026-10-31') || {}).from, '2025-11-01');
+        eq2('dropoff: 12 months on 31 Mar opens on 1 Apr, not 1 May',
+            (pr('12m', '2027-03-31') || {}).from, '2026-04-01');
+        eq2('dropoff: a month preset asks for months', (pr('12m', '2026-09-25') || {}).grain, 'month');
+        eq2('dropoff: this year opens on 1 Jan', (pr('ytd', '2026-09-25') || {}).from, '2026-01-01');
+        eq2('dropoff: Custom leaves the boxes alone', pr('custom', '2026-09-25'), null);
+
+        const DAY = 864e5, day0 = Date.UTC(2026, 0, 1, 12);
+        const bad = { w12: [], w26: [], m12: [], to: [] };
+        for (let i = 0; i < 365 * 3; i++) {
+          const t = new Date(day0 + i * DAY), today = t.toISOString().slice(0, 10);
+          const w = pr('12w', today), w6 = pr('26w', today), m = pr('12m', today);
+          const wf = new Date(w.from + 'T12:00:00Z'), w6f = new Date(w6.from + 'T12:00:00Z');
+          /* Twelve buckets means today's week plus eleven whole ones, so
+             the opening Monday is between 77 and 83 days back. */
+          const back = Math.round((t - wf) / DAY), back6 = Math.round((t - w6f) / DAY);
+          if (wf.getUTCDay() !== 1 || back < 77 || back > 83) bad.w12.push(today + '->' + w.from);
+          if (w6f.getUTCDay() !== 1 || back6 < 175 || back6 > 181) bad.w26.push(today + '->' + w6.from);
+          const months = (t.getUTCFullYear() - +m.from.slice(0, 4)) * 12 + t.getUTCMonth() - (+m.from.slice(5, 7) - 1);
+          if (m.from.slice(8) !== '01' || months !== 11) bad.m12.push(today + '->' + m.from);
+          if (w.to !== today || m.to !== today) bad.to.push(today);
+        }
+        ok('dropoff: 12 weeks always opens on a Monday and spans exactly 12 buckets, every day of 3 years',
+           bad.w12.length === 0, bad.w12.slice(0, 5).join(', '));
+        ok('dropoff: 26 weeks always opens on a Monday and spans exactly 26 buckets, every day of 3 years',
+           bad.w26.length === 0, bad.w26.slice(0, 5).join(', '));
+        ok('dropoff: 12 months always opens on the 1st, exactly 11 months back, every day of 3 years',
+           bad.m12.length === 0, bad.m12.slice(0, 5).join(', '));
+        ok('dropoff: every preset ends on the day it was given', bad.to.length === 0, bad.to.slice(0, 5).join(', '));
+
+        /* TODAY IS AN ET DATE. The presets read the laptop's clock until
+           25 Sept, a day ahead of the dashboard every IST morning. The
+           stub DOM cannot drive dpPreset, so this is read from source. */
+        const pb = (js.match(/function dpPreset\(\)\{[\s\S]*?loadDropoff\(\);\}/) || [''])[0];
+        ok('dropoff: dpPreset hands the range TODAY IN ET, never the laptop date',
+           /dpPresetRange\([^;]*,etDay\(new Date\(\)\)\)/.test(pb) && !/getDate\(|getFullYear\(/.test(pb), pb.slice(0, 200));
+      }
     }
 
     /* ── THE VISITORS TAB, DRIVEN ────────────────────────────────────

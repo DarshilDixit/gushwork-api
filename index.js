@@ -4563,25 +4563,39 @@ app.get('/monitor', (req, res) => {
      no leads has no booking rate, and printing 0% claims we measured one. */
   'function dpPct(p){return p==null?"\\u2014":p+"%";}' +
   'function dpTone(t){return t==="good"?"bg":t==="bad"?"br":t==="warn"?"ba":"bx";}' +
-  'function dpIso(d){return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");}' +
   /* Presets write the two date inputs rather than being a second way of
      saying the same thing to the server. One source of truth on screen,
      so what you see in the boxes is always what was asked for. */
   /* Monday of the week a date falls in, matching date_trunc('week'). */
-  'function dpMonday(d){var dow=(d.getDay()+6)%7;d.setDate(d.getDate()-dow);return d;}' +
-  'function dpPreset(){' +
-  'var p=document.getElementById("dp-preset").value;if(p==="custom")return;' +
-  'var now=new Date(),from=new Date(now),g="week";' +
+  'function dpMonday(d){d.setUTCDate(d.getUTCDate()-(d.getUTCDay()+6)%7);return d;}' +
+  /* The window a preset stands for, from TODAY IN ET as YYYY-MM-DD. Pure,
+     so the test runs it on the dates that break it rather than on whatever
+     today happens to be. Anchored at noon UTC like etDayShift, so neither
+     the viewer's laptop zone nor a DST change can move a day.
+
+     It read the laptop's clock until 25 Sept, so from India the presets
+     were a day ahead of the dashboard for nine and a half hours every
+     morning -- and on a Monday that put an empty future week on the end
+     of the table, which reads as a collapse. */
+  'function dpPresetRange(p,today){' +
+  'var a=String(today).split("-"),t=new Date(Date.UTC(+a[0],+a[1]-1,+a[2],12)),from=new Date(t),g="week";' +
   /* SNAPPED TO THE PERIOD START. Without this the window opens mid-week and
      the first bucket is clipped, so "last 12 weeks" renders 11 full weeks
      beside a stub that looks like a collapse. */
-  'if(p==="12w"){from.setDate(from.getDate()-7*11);dpMonday(from);}' +
-  'else if(p==="26w"){from.setDate(from.getDate()-7*25);dpMonday(from);}' +
-  'else if(p==="12m"){from.setMonth(from.getMonth()-11);from.setDate(1);g="month";}' +
-  'else if(p==="ytd"){from=new Date(now.getFullYear(),0,1);g="month";}' +
-  'document.getElementById("dp-from").value=dpIso(from);' +
-  'document.getElementById("dp-to").value=dpIso(now);' +
-  'document.getElementById("dp-grain").value=g;' +
+  'if(p==="12w"){from.setUTCDate(from.getUTCDate()-7*11);dpMonday(from);}' +
+  'else if(p==="26w"){from.setUTCDate(from.getUTCDate()-7*25);dpMonday(from);}' +
+  /* DAY FIRST, THEN MONTH. The other order overflows: on 31 Oct, eleven
+     months back is "31 Nov", which rolls over to 1 Dec, and the window
+     silently shows eleven months. Any day past the 28th can do it. */
+  'else if(p==="12m"){from.setUTCDate(1);from.setUTCMonth(from.getUTCMonth()-11);g="month";}' +
+  'else if(p==="ytd"){from=new Date(Date.UTC(t.getUTCFullYear(),0,1,12));g="month";}' +
+  'else return null;' +
+  'return {from:from.toISOString().slice(0,10),to:t.toISOString().slice(0,10),grain:g};}' +
+  'function dpPreset(){' +
+  'var r=dpPresetRange(document.getElementById("dp-preset").value,etDay(new Date()));if(!r)return;' +
+  'document.getElementById("dp-from").value=r.from;' +
+  'document.getElementById("dp-to").value=r.to;' +
+  'document.getElementById("dp-grain").value=r.grain;' +
   'loadDropoff();}' +
   'function dpCustom(){document.getElementById("dp-preset").value="custom";loadDropoff();}' +
   'async function loadDropoff(){' +
