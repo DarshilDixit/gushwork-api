@@ -1695,10 +1695,82 @@ have fired. Nothing in the UI calls it; run it with
 feed it data. A reader who greps for a single `/monitor` handler expecting to find
 everything will miss most of it.
 
-**Ten tabs as of 23 Sept** — the list lives in `showTab`, and `Visitors` is
-the newest. A tab needs a `t-<name>` button, a `tp-<name>` panel, an entry
+**Eleven tabs as of 25 Sept** — the list lives in `showTab`, and `Dropoff`
+is the newest. A tab needs a `t-<name>` button, a `tp-<name>` panel, an entry
 in that array and a loader guard, or it renders nowhere and nothing says
-so.
+so. **Count the array, do not trust this number** — it said ten the day
+before.
+
+**THE DROPOFF TAB ANSWERS "where do the people who start the form go", AND
+ITS LADDER IS THE CONTRACT.** `/monitor/dropoff`, filtered by date range,
+week or month, source, and leads-or-people. Seven outcomes in
+`DROPOFF_STAGES`, resolved top-down by the single `DROPOFF_STAGE_SQL`
+expression, mutually exclusive and exhaustive — so the rows **always sum to
+the period total**, and `test-non-icp-routes.js` asserts that sum per period
+and overall rather than trusting it. A second copy of that CASE anywhere is
+how two consumers start disagreeing; it is the `disqualified` /
+`non_icp_blocked` lesson waiting to arrive a third time.
+
+Built 25 Sept because the question had been asked twice by hand in one
+Slack thread and a hand-answer is wrong the next morning. It changes no
+blocking behaviour and fires no Meta events — it is a read.
+
+**"LEFT ON STEP 2" IS NOT "left at step 1", AND THE LABEL DECIDES WHICH
+SCREEN SOMEBODY GOES AND FIXES.** A `leads` row is written by
+`savePartial(1)` at the **end** of `handleStep1Next`, after the email and
+`sell_to` validate — so a row exists only once the visitor completed step 1
+and pressed Next, and **everyone in that bucket reached step 2**. Confirmed
+in data: all 578 such leads in the 12 weeks to 25 Sept carry `sell_to` (a
+step-1 field) and **none carries a phone** (a step-2 field). It is the
+biggest single bucket, every week since July.
+
+**And a lead stopped ON step 2 by a blocking website verdict leaves NO
+TRACE.** `handleStep2Next` returns before `submitLead()` on `nxdomain`,
+`brand_mismatch` or `mailbox_domain`, so nothing is persisted: measured, 0
+of those 578 rows carry a `website_check_reason`. You cannot tell from
+`leads` who was turned back from who simply left.
+
+**SOURCE READS TWO FIELDS, AND READING ONLY `utm_source` UNDERSTATES META BY
+ABOUT A QUARTER.** `DROPOFF_SOURCE_SQL` takes `utm_source` first, then falls
+back to `hear_about_us` — which `gushwork-form.js` prefills from the
+**referrer** as well as the utm, and then hides. So when the UTMs are lost in
+the Facebook and Instagram in-app browsers (31.2% in-app against 1.6% on a
+normal mobile browser) the referrer still names the platform. Measured over
+12 weeks to 25 Sept: **469 leads carried no `utm_source` at all** and were
+recorded by the form as paid — 459 Facebook, 9 Instagram, 1 Google. Reading
+`utm_source` alone gives Meta 2,051 and Direct/organic 991; reading both
+gives **2,519 and 486**.
+
+**The human free text in that column is deliberately NOT bucketed.** It runs
+to dozens of spellings plus junk, and keying a channel off free text is
+exactly the substring trap `Source_Bucket__c` already fell into. It stays in
+`Direct / organic`, which therefore means "no trackable click" rather than
+"arrived directly".
+
+**LEADS OR PEOPLE IS A TOGGLE, NOT A CORRECTION.** `mode=people` resolves the
+ladder per `lower(email)`, placing a person in the period they **first**
+arrived and carrying the **best** outcome any of their sessions reached.
+Measured over the same 12 weeks: **3,309 leads against 3,096 people, booking
+65.8% against 69.1%** — a repeat attempt is usually somebody who got there in
+the end, so per-person always reads better and neither is the honest number
+alone.
+
+**THE BUCKET COMES BACK AS TEXT, and that is load-bearing.**
+`node-postgres` parses a `date` column into a JS `Date` in the **process's**
+local zone, so `toISOString()` shifted every bucket a day west — silently
+empty on an IST laptop and correct on Railway. An environment-dependent bug
+is worse than a broken one. `to_char(..., 'YYYY-MM-DD')` removes the parse.
+Found by executing the query, not by reading it.
+
+**The weekly digest reports the COMPLETED week, never the current one.**
+`runDropoffDigest`, Mondays at `DROPOFF_DIGEST_HOUR_ET` (09:00 ET default,
+`DROPOFF_DIGEST_ENABLED=false` to stop it). Same hourly-tick shape as the
+near-miss digest, and the same known in-memory week guard. Sending a partial
+week to a channel is how a reader concludes the funnel collapsed on a Monday
+morning, and no caveat survives being read on a phone. It leads with whether
+the week sits **inside** the prior eleven weeks' range, because the answer is
+usually "this is normal" and a digest that always reads like an alarm gets
+muted along with the week that matters.
 
 **Booking arrives by three routes.** `/booking-confirmed` (browser-fired),
 `/booking-confirmed-webhook` (Cal), `/booking-confirmed-webhook-rh` (RevenueHero).
