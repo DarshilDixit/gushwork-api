@@ -15116,7 +15116,7 @@ async function runDropoffDigest(force = false) {
     const blocks = [];
     blocks.push(bHeader(`${inBand ? '✅' : '⚠️'} Inbound form: ${bkd} of ${total} booked last week (${cur == null ? '—' : cur + '%'})`));
     blocks.push(bDivider());
-    let body = `*Week of ${dropoffLabel(lastWeek, 'week')}.* ${total} people got through step 1 of the demo form and `
+    let body = `*Week of ${dropoffLabel(lastWeek, 'week')}.* ${total} got through step 1 of the demo form and `
       + `*${bkd}* picked a time.`;
     if (avg != null) {
       body += `\nThe 11 weeks before it ran *${lo}%\u2013${hi}%*, averaging *${avg.toFixed(1)}%*. `
@@ -15131,7 +15131,7 @@ async function runDropoffDigest(force = false) {
       blocks.push(bSection(`*Where the other ${total - bkd} went:*\n${lines.join('\n')}`));
     }
     blocks.push(bSection(
-      '_Counts form sessions, not people, so somebody who tried twice counts twice. ' +
+      '_Counts attempts, not people \u2014 somebody who tried twice counts twice. ' +
       'Full breakdown by week, month, source or person on the dashboard, Dropoff tab._'));
     sendSlack(blocks, `Inbound form: ${bkd} of ${total} booked last week`);
     console.log(`[dropoff-digest] sent — ${bkd}/${total} booked, ${cur}%`);

@@ -28,13 +28,6 @@
          node tools/fire-non-icp-slack.js llm-meta
          node tools/fire-non-icp-slack.js late-block
          node tools/fire-non-icp-slack.js booking
-         node tools/fire-non-icp-slack.js dropoff-digest
-
-   dropoff-digest is the ONLY path here that needs a DATABASE. It runs
-   the real weekly digest over real leads, so it needs DATABASE_URL --
-   which on a developer machine means the Postgres service's
-   DATABASE_PUBLIC_URL, because gushwork-api's own DATABASE_URL is on
-   Railway's private network.
 
    Needs SLACK_WEBHOOK_URL in the environment; `booking` also needs the
    alerts webhook and the Gmail vars. From a developer machine:
@@ -48,10 +41,6 @@ const fs = require('fs');
 const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const src = fs.readFileSync(path.join(ROOT, 'index.js'), 'utf8');
-/* THE REAL POOL, not a second one built from the same URL. Requiring db.js
-   creates the Pool but connects nothing and does not run initDB, so this
-   costs nothing on the five fires that never touch a database. */
-const { pool } = require(path.join(ROOT, 'db'));
 
 /* Same lifter as tools/fire-alert.js. A `const X = new Thing({...})` continues
    past its matched brace with `);` — brace matching alone truncates it and
@@ -74,20 +63,7 @@ function liftDecl(decl) {
   return src.slice(i + 1, j + 1);
 }
 
-/* liftDecl takes ONE declaration and brace-matches it, which truncates an
-   array of objects at its first element -- DROPOFF_STAGES came out
-   unterminated and the whole lift failed to parse. For a contiguous region
-   of related declarations, slice between two markers instead. Same helper
-   tools/non-icp-validate.js uses. */
-function between(a, b) {
-  const i = src.indexOf(a);
-  if (i === -1) throw new Error('marker not found in index.js: ' + a);
-  const j = src.indexOf(b, i);
-  if (j === -1) throw new Error('end marker not found in index.js: ' + b);
-  return src.slice(i, j);
-}
-
-const lifted = new Function('require', 'pool', [
+const lifted = new Function('require', [
   `const nodemailer = require('${path.join(ROOT, 'node_modules', 'nodemailer')}');`,
   liftDecl('const DASH_TZ'),
   liftDecl('const ALERT_COOLDOWN_MS'),
@@ -115,26 +91,8 @@ const lifted = new Function('require', 'pool', [
   liftDecl('function slackNonIcpLlmFlagged'),
   liftDecl('function slackNonIcpLateBlock'),
   liftDecl('const NON_ICP_BUSINESS_TYPES'),
-  /* ── the weekly dropoff digest, and what it stands on ──────────────
-     Lifted rather than reimplemented, like everything else here: the
-     whole point is that what lands in Slack is what production sends,
-     over the real leads table. */
-  /* isInternalLead and internalLeadSqlClause, which the report stamps with. */
-  between('const ELV_EXCLUDED_DOMAINS', 'function pruneElvWindow'),
-  /* the whole dropoff block: the ladder, the source resolver, the date
-     helpers and dropoffReport itself. */
-  between('const DROPOFF_STAGE_SQL', 'async function visitorsReport'),
-  /* etParts, shared with the near-miss digest. */
-  between('function etParts(', 'async function runNearMissDigest'),
-  /* the digest, minus its interval starter. */
-  between('const DROPOFF_DIGEST_HOUR_ET', 'function startDropoffDigest'),
-  /* setOpsSlack returns the ORIGINAL so the caller can wrap rather than
-     replace. A function declaration is a mutable binding, which is the
-     same property tools/non-icp-validate.js uses to replay a scrape. */
-  'return { alertOps, slackNonIcpBlocked, slackNonIcpLlmFlagged, slackNonIcpLateBlock, sendOpsSlack, bHeader, bDivider, bSection,'
-  + ' runDropoffDigest, dropoffReport,'
-  + ' setLeadSlack(f) { const prev = sendSlack; sendSlack = f; return prev; } };',
-].join('\n'))(require, pool);
+  'return { alertOps, slackNonIcpBlocked, slackNonIcpLlmFlagged, slackNonIcpLateBlock, sendOpsSlack, bHeader, bDivider, bSection };',
+].join('\n'))(require);
 
 const TEST_NOTE = 'DELIBERATE TEST fired by hand via tools/fire-non-icp-slack.js — not a real blocked prospect';
 
@@ -273,41 +231,6 @@ const FIRES = {
     'Impact':         'The booking was NOT recorded here, but the slot still exists in Cal/RevenueHero. Nothing in this service can cancel it.',
     'Action':         `${TEST_NOTE} — no action needed.`,
   }),
-
-  /* ── THE WEEKLY DROPOFF DIGEST ──────────────────────────────────
-     Mondays 09:00 ET in production. This fires the REAL function over
-     the REAL leads table, so the numbers that land in Slack are the
-     numbers next Monday would have sent -- the whole reason this tool
-     lifts rather than reimplements.
-
-     IT REPORTS THE COMPLETED WEEK, so the week it names is genuinely
-     finished and the figures will not move afterwards.
-
-     ONE EXTRA BLOCK IS APPENDED, and only one. Every other payload in
-     this file carries its test note inside a field, because those
-     messages are built here. This one is built by production code and
-     must stay byte-identical to it, so the marker is added AFTER the
-     digest is composed rather than passed into it. sendSlack is
-     wrapped, not replaced -- the original still does the sending.
-
-     IT POSTS TO THE LEADS CHANNEL, like the digest itself. */
-  'dropoff-digest': async () => {
-    if (!process.env.DATABASE_URL) {
-      throw new Error('DATABASE_URL is not set. This is the only fire here that reads the database. '
-        + 'On a developer machine use the Postgres service DATABASE_PUBLIC_URL rather than '
-        + 'gushwork-api\u2019s own DATABASE_URL, which is on the private network.');
-    }
-    const realSend = lifted.setLeadSlack((blocks, fallback) =>
-      realSend([...blocks, lifted.bSection('_' + TEST_NOTE + '_')], fallback));
-    try {
-      /* force = true skips the Monday-and-09:00 gate. Nothing else is
-         bypassed: the window, the query, the comparison band and the
-         copy are all production's. */
-      await lifted.runDropoffDigest(true);
-    } finally {
-      await pool.end();
-    }
-  },
 };
 
 const which = process.argv[2];

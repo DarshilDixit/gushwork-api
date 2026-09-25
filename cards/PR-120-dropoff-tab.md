@@ -45,8 +45,18 @@ evaluates the dashboard JS and reads what was painted.
 - ~~The Slack digest has never posted for real.~~ **Fired on purpose on 25
   Sept**: `node tools/fire-non-icp-slack.js dropoff-digest`, Slack returned
   200, real numbers over the real leads table (191 of 295 booked, 64.7%,
-  week of Sep 14). Added to the fire tool in the same change, so the path is
+  week of Sep 14). It lives in `tools/fire-dropoff-digest.js` so the path is
   repeatable rather than a one-off.
+- **It went into `fire-non-icp-slack.js` first, and that was wrong.** The
+  digest has nothing to do with the non-ICP block; it went there because that
+  tool already had the lifting machinery. Moved to its own file, and that
+  tool is byte-identical to its pre-change state again.
+- **Two copy bugs, found by reading the message rather than the code.** It
+  said "295 **people** got through step 1" directly above a footer saying
+  "counts form sessions, **not people**" — the same message contradicting
+  itself. And it carried the non-ICP tool's marker, "not a real blocked
+  prospect", which is about a different feature entirely; the digest's
+  numbers are real and only its timing was not, so the marker now says that.
 - **Fired twice, and the second one is why.** The first landed in
   `bot-n8n-alerts` because it used `sendOpsSlack`. It is a readout, not an
   alert, so it now uses `sendSlack` (the leads channel) — authorised by
