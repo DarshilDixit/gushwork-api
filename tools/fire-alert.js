@@ -19,6 +19,7 @@
    duplicated thing in this codebase.
 
    Run:  node tools/fire-alert.js exhaustion
+         node tools/fire-alert.js apollo-credits
          node tools/fire-alert.js opp-permission
          node tools/fire-alert.js conversion-failed
 
@@ -59,7 +60,7 @@ function liftDecl(decl) {
   return src.slice(i + 1, j + 1);
 }
 
-const { alertOps } = new Function('require', [
+const { alertOps, recordFailure } = new Function('require', [
   `const nodemailer = require('${path.join(ROOT, 'node_modules', 'nodemailer')}');`,
   liftDecl('const DASH_TZ'),
   liftDecl('const ALERT_COOLDOWN_MS'),
@@ -80,7 +81,24 @@ const { alertOps } = new Function('require', [
   liftDecl('function getGmailTransport'),
   liftDecl('async function sendAlertEmail'),
   liftDecl('function alertOps'),
-  'return { alertOps };',
+  /* recordFailure and everything it reads, so the Apollo scenario below goes
+     through the REAL classification -- the claim worth proving is that an
+     Apollo refusal reaches "Out of credits", not that alertOps can post. */
+  liftDecl('const FAILURE_BUFFER_TTL_MS'),
+  liftDecl('const _failBuffers'),
+  liftDecl('const FAILURE_MONITORS'),
+  liftDecl('const _failStreaks'),
+  liftDecl('const CONSECUTIVE_FAILURE_ALERT'),
+  liftDecl('const AUTH_FAILURE_PATTERNS'),
+  liftDecl('const META_AUTH_CODES'),
+  liftDecl('const META_AUTH_RE'),
+  liftDecl('function isAuthFailure'),
+  liftDecl('const AUTH_FAILURE_GUIDANCE'),
+  liftDecl('const CREDITS_EXHAUSTED_PATTERNS'),
+  liftDecl('function isCreditsExhausted'),
+  liftDecl('const CREDITS_GUIDANCE'),
+  liftDecl('function recordFailure'),
+  'return { alertOps, recordFailure };',
 ].join('\n'))(require);
 
 const TEST_NOTE = 'DELIBERATE TEST fired by hand via tools/fire-alert.js — not a real failure';
@@ -105,6 +123,13 @@ const ALERTS = {
     'Impact': 'EVERY partner domain is affected, not just this one. Partner attribution is not reaching the Opportunity an AE looks at.',
     'What to do': 'Check that the integration user can update Partner_Source__c AND has field-level access to it. Creating a field through the Tooling API does NOT grant access. PS_SF_OPP_WRITE=false stops the write from the Railway env without a deploy.',
   }),
+  /* The words Apollo actually sends, measured on 413 refused lookups, with
+     the test note appended so nobody tops up credits because of this one.
+     Goes through recordFailure, so it proves the classification as well. */
+  'apollo-credits': () => {
+    recordFailure('Apollo', 'alert-test@example.invalid', `You have insufficient credits! Upgrade your plan to increase your number of credits. — ${TEST_NOTE}`);
+    return true;
+  },
   'conversion-failed': () => alertOps('critical', 'PartnerStack', 'Conversion failed — affiliate not credited', {
     'Domain': 'deliberate-alert-test.invalid',
     'Partner': 'Test Account <alert-test@example.invalid>',

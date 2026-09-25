@@ -178,6 +178,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `tools/fire-dropoff-digest.js` | Sends the weekly dropoff digest for real, to the **leads** channel. **Its own file on purpose:** it first went into `fire-non-icp-slack.js` because that tool already had the lifting machinery, which is the wrong reason — the digest has nothing to do with the non-ICP block, and a tool named for one feature that quietly fires another is how nobody finds either later. **The only fire tool that reads a DATABASE**, so on a developer machine it needs the Postgres service's `DATABASE_PUBLIC_URL`, not `gushwork-api`'s private-network `DATABASE_URL`. The numbers are real and only the timing is not, so its marker says that rather than calling the data a test — and the marker is appended AFTER the digest is composed, because the message must stay byte-identical to what Monday sends. **`liftDecl` cannot take `DROPOFF_STAGES`** (it brace-matches one declaration and truncates an array of objects at its first element), so this lifts by REGION with a `between()` helper. Not mounted, not called |
 | `tools/sf-mark-internal-test-leads.js` | Marks our own test submissions as **Invalid / Test** in Salesforce, by writing the `How_Did_You_Hear__c` the `Source_Bucket__c` formula already reads. **Marks, never deletes** — 141 Lead records match `isInternalLead` and ~100 are NOT ours. Provenance comes from `tools/internal-test-emails.json`, not from the address. Dry run by default; `--apply` writes a manifest and `--revert` undoes it. Not mounted, run by hand |
 | `tools/internal-test-emails.json` | The provenance list for the tool above: addresses our OWN form actually submitted. Point-in-time, carries the SQL that regenerates it |
+| `tools/re-enrich-apollo.js` | Re-runs the Apollo lookups that were REFUSED — the three out-of-credit windows (24 Jun, 3–10 Sept, 23 Sept on). Dry run by default: prices it (1 credit per person FOUND, 0 for no match), one lookup per address, copies from an earlier answer for the same address at zero cost, skips our own submissions. `--since`, `--limit`, `--apply`. **Stops at the first refusal.** Writes `enrichment_data` and the lead row exactly as `/enrich` does; never Salesforce, never the mirror. Lifts the parser out of `index.js`. Not mounted, not yet run |
 | `tools/backfill-ip-coords.js` | Fills `ip_latitude` / `ip_longitude` for leads resolved BEFORE those columns existed — they have a city and no point, so they are complete in every table and invisible on the map. Only touches rows that already resolved and have no coordinates. Lifts `resolveIpGeo` out of `index.js`. Dry run by default; `--apply` writes. Run once on 23 Sept (17 rows). Not mounted |
 | `tools/fire-alert.js` | Fires ONE real alert on purpose, to satisfy the fire-every-alert-path-once rule. Sends for real (Slack + email on a critical). Lifts `alertOps` out of `index.js` rather than reimplementing it, so what arrives is what production sends. Not mounted, not called by anything |
 | `gushwork-form.js` | The `/demo` form frontend. Lives here and is served live by jsDelivr — see below |
@@ -1476,6 +1477,34 @@ has it behind the AI-CRM tick inside `#about-business-wrap`; `/ai-demo`
 and `/ai-crm` have it permanently visible with no wrapper. A change to
 "the about-business textarea" is three edits.
 
+**APOLLO REFUSES WITH A REPLY, NOT AN EXCEPTION, AND IT WENT UNNOTICED
+THREE TIMES.** Out of credits it answers `{"error":"You have insufficient
+credits!"}`: `fetch` resolves, `.json()` parses, nothing throws. `/enrich`
+read that as "no match" and wrote an empty row, System Health counted rows
+written and read **80% enriched** while Apollo had found **0 of 86**, and
+`recordFailure` sat in the catch where it could never run. 413 lookups
+were refused across 24 Jun, 3–10 Sept and 23 Sept onward before anyone
+looked.
+
+`apolloReplyError` now reads the reply, **"insufficient credits" pages
+straight away as "Out of credits"** (not "Authentication failed" — the key
+is fine), and a refusal is recorded **insert-only**, because the old upsert
+also wrote a refusal straight over a real enrichment and blanked the lead
+row to match. Health counts what Apollo FOUND, over **business-email**
+leads (free mailboxes never reach Apollo, so counting them made a perfect
+run read ~60%), and a latest-reply-was-a-refusal is red before any rate is
+looked at.
+
+**The critical repeats every 3 hours** (the normal critical cooldown)
+while credits stay empty and leads keep arriving. Re-enrich afterwards
+with `tools/re-enrich-apollo.js`.
+
+**A lifted `recordFailure` needs every name it reads.** Two suites and one
+tool lift it; adding `isCreditsExhausted` made the PartnerStack streak
+harness throw inside `recordFailure`'s own try/catch, which swallowed it
+and left the streak silently at zero. Five assertions caught it. Add the
+name to every lift, or that is what a new dependency looks like.
+
 **A Meta CAPI failure only reaches `recordFailure` because the push
 functions THROW.** They end in `Promise.allSettled`, which never rejects,
 so until `throwIfAnyFailed` existed the `.catch(...)` at all five call
@@ -2243,14 +2272,16 @@ node tests/test-non-icp.js           # the non-ICP block: list, matcher, guards,
                                     #   and section 13, which EXECUTES the model classifier against a
                                     #   stubbed fetch — fail-open, the enum, injection handling
 node tests/test-non-icp-routes.js    # BOOTS every /monitor route AND evaluates the dashboard JS
+node tests/test-apollo.js            # BOOTS /enrich against every shape Apollo replies with, and drives
+                                    #   tools/re-enrich-apollo.js against a stubbed database
 
-node tests/measure.js --check   # or just this: runs all twelve and checks the totals
+node tests/measure.js --check   # or just this: runs all thirteen and checks the totals
 node tests/test-batch1-db.js    # needs DATABASE_URL
 node tests/test-batch1-e2e.js   # boots the real server, needs DATABASE_URL
 ```
 
-**The twelve dependency-free suites are the bar.** They run anywhere in about a
-second each — run all twelve after any change to `index.js`, `lead-magnet.js`,
+**The thirteen dependency-free suites are the bar.** They run anywhere in about a
+second each — run all thirteen after any change to `index.js`, `lead-magnet.js`,
 or either form file, always. Do not install Postgres and do not point anything at
 the production database from a feature branch.
 
@@ -2275,9 +2306,9 @@ had actually been read.
 If the output is genuinely too long to read, that is a reason to fix the
 output, not to pipe it.
 
-**Five of the twelve BOOT A ROUTE** rather than reading source text —
+**Six of the thirteen BOOT A ROUTE** rather than reading source text —
 `test-submit-gate`, `test-session-page-views`, `test-lead-field-changes`,
-`test-session-payload` and `test-non-icp-routes`. The last one goes furthest:
+`test-session-payload`, `test-apollo` and `test-non-icp-routes`. The last one goes furthest:
 it also **evaluates the dashboard's inline JavaScript** in a stubbed DOM and
 calls every tab loader, because three production breaks in one night were
 runtime behaviour no source assertion could see. They stub `pg` and `global.fetch` and drive the real
@@ -2290,7 +2321,7 @@ Tests read the real functions out of `index.js` rather than a copy. A test that
 exercises a duplicate of the source can pass while production is broken. Keep it
 that way.
 
-**All twelve suites require `tests/crash-reporter.js` first, and it is not
+**All thirteen suites require `tests/crash-reporter.js` first, and it is not
 optional.** A suite that crashes prints a stack trace, zero `✗` lines and exits
 1 — which reads as a clean run to anything counting markers and as a caught
 mutation to anything counting exit codes. Three of the six did exactly that
