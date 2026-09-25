@@ -982,9 +982,15 @@ function liftClientJs(startMarker, endMarker) {
          COALESCE: it is definitionally about ordering, and it reads the full
          history including rows that predate the booked_at column, where
          comparing a null yields null and the row quietly counts as un-booked. */
+      /* ONE definition since 26 Sept: RECOVERED_BOOKINGS_SQL, read by both
+         /monitor/metrics and /monitor/overview, so the two cannot drift. */
+      const recSql = between(src, 'const RECOVERED_BOOKINGS_SQL', '`;');
       ok('booking: recovered bookings still COALESCEs booked_at with created_at',
-         /COALESCE\(booked\.booked_at, booked\.created_at\)|COALESCE\(b\.booked_at, b\.created_at\)/.test(metrics),
-         (metrics.match(/COALESCE\([^)]*booked_at[^)]*\)/g) || []).join(' | '));
+         /COALESCE\(b\.booked_at, b\.created_at\) >= l\.created_at/.test(recSql), recSql.slice(0, 300));
+      ok('booking: /monitor/metrics reads the one recovered definition, not a copy',
+         /recovered: pool\.query\(RECOVERED_BOOKINGS_SQL\)/.test(metrics) && !/AS recovered FROM \(/.test(metrics));
+      ok('booking: /monitor/overview reads the same definition',
+         /db\.query\(RECOVERED_BOOKINGS_SQL\)/.test(between(src, 'async function overviewReport', "app.get('/monitor/overview'")));
 
       /* The Pending recovery card asks question 2 and now says so. The old
          tooltip claimed "no booking on any other session of that email", which

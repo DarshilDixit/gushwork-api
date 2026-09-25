@@ -52,6 +52,7 @@ const SUITES = [
   'test-non-icp.js',
   'test-non-icp-routes.js',
   'test-apollo.js',
+  'test-monitor-next.js',
 ];
 
 const BASELINE = path.join(__dirname, '.baseline.json');

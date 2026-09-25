@@ -2139,6 +2139,16 @@ function finish() {
     }
     if (key) qText[key] = cur;
   }
+  /* A named query can be a SHARED CONSTANT rather than inline text --
+     recovered: pool.query(RECOVERED_BOOKINGS_SQL), one definition read by
+     /monitor/metrics and /monitor/overview. Resolve it to the constant's text
+     so the column check below still reads the real query. */
+  for (const k of Object.keys(qText)) {
+    const c = /pool\.query\(([A-Z][A-Z0-9_]+)\)/.exec(qText[k] || '');
+    if (!c) continue;
+    const at = src.indexOf('const ' + c[1] + ' = ');
+    if (at !== -1) qText[k] += src.slice(at, src.indexOf('`;', at) + 2);
+  }
   const bodyStart = src.indexOf('    });', src.indexOf('await allNamed({'));
   const body = src.slice(bodyStart, src.indexOf('\napp.', bodyStart));
   const selected = (q) => {

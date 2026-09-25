@@ -181,6 +181,10 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `tools/re-enrich-apollo.js` | Re-runs the Apollo lookups that were REFUSED — the three out-of-credit windows (24 Jun, 3–10 Sept, 23 Sept on). Dry run by default: prices it (1 credit per person FOUND, 0 for no match), one lookup per address, copies from an earlier answer for the same address at zero cost, skips our own submissions. `--since`, `--limit`, `--apply`. **Stops at the first refusal.** Writes `enrichment_data` and the lead row exactly as `/enrich` does; never Salesforce, never the mirror. Lifts the parser out of `index.js`. Not mounted, not yet run |
 | `tools/backfill-ip-coords.js` | Fills `ip_latitude` / `ip_longitude` for leads resolved BEFORE those columns existed — they have a city and no point, so they are complete in every table and invisible on the map. Only touches rows that already resolved and have no coordinates. Lifts `resolveIpGeo` out of `index.js`. Dry run by default; `--apply` writes. Run once on 23 Sept (17 rows). Not mounted |
 | `tools/fire-alert.js` | Fires ONE real alert on purpose, to satisfy the fire-every-alert-path-once rule. Sends for real (Slack + email on a critical). Lifts `alertOps` out of `index.js` rather than reimplementing it, so what arrives is what production sends. Not mounted, not called by anything |
+| `monitor-next.js` | Builds and serves the NEW dashboard at `/monitor/next` (side by side with `/monitor` until it is switched). Reads `monitor/` once at boot and stitches one page behind the same token -- no build step. Also the token-gated font route, an allowlist, never a path |
+| `monitor/` | The new dashboard's front end, in real files: `tokens.css` (the design system's tokens, copied verbatim from gushwork-design v1.49.0), `app.css` (both themes, components, responsive), `js/*.js` (classic scripts on one `GW` namespace, loaded in `JS_ORDER`), `icons/` (the Phosphor icons it uses, MIT), `fonts/` (Inter, Vert Grotesk Display) |
+| `tools/preview-monitor.js` | Runs THIS BRANCH's `/monitor/next` against live data: its own `overviewReport` lifted out of `index.js` on connections that are read-only AT THE DATABASE, every other `/monitor/*` GET proxied to production, every non-GET refused. Never boots `index.js`. Not mounted |
+| `tools/check-monitor-layout.mjs` | Real Chrome over every rebuilt tab and view at 360, 390, 414, 768, 1024 and 1440px in both themes; FAILS on sideways scroll, anything off-screen or clipped, a tap target under 44px, overlapping chart labels, a floating element, console errors, junk values or a missing font. Run against the preview. Not mounted |
 | `gushwork-form.js` | The `/demo` form frontend. Lives here and is served live by jsDelivr — see below |
 | `gushwork-form-popup.js` | The Google Ads popup/modal form frontend. Lives here and is served live by jsDelivr — see below |
 | `package.json` | Dependencies, scripts, Node engine constraint |
@@ -1725,7 +1729,40 @@ have fired. Nothing in the UI calls it; run it with
 feed it data. A reader who greps for a single `/monitor` handler expecting to find
 everything will miss most of it.
 
-**Eleven tabs as of 25 Sept** — the list lives in `showTab`, and `Dropoff`
+**THE NEW DASHBOARD IS `/monitor/next`, SIDE BY SIDE WITH `/monitor`, and
+the old one is not edited to build it.** Five tabs rebuilt in PR B --
+Overview, System health, Dropoff, Duplicates, Lead magnet; the rest are real
+links to the classic dashboard opened at their tab (`#tab=...`, which the old
+page now honours). The switch is its own PR: `/monitor` becomes the new page
+and the old stays at `/monitor/classic` for a week.
+
+- **Numbers come from the existing routes, plus ONE new read,
+  `overviewReport` / `/monitor/overview`**, which applies one definition set
+  to every window: "completed" is `submitted_at`; booked is AS OF the window's
+  end; disqualified and blocked are the DROPOFF LADDER (`DROPOFF_STAGE_SQL`)
+  so Overview and Dropoff cannot disagree; page loads exclude `BOT_RE`; the
+  funnel drops webhook-origin leads. Every window is cut in ET wall-clock
+  terms inside SQL, so "the same point last week" survives a DST change. It
+  takes `db` as an argument and writes nothing, which is what lets the
+  preview lift it; its two model-flag COUNTERS are named in
+  `test-non-icp.js` 10f with reasons.
+- **Every theme alias is declared in BOTH `[data-theme]` blocks** -- a test
+  compares the two sets, because a missing dark alias silently keeps its
+  light value. **No calendar date from the viewer's clock**: all formatting
+  goes through `Intl` with `GW.TZ`; a test forbids `getFullYear`/`getMonth`/
+  `getDate`/`getHours` in `monitor/js`. **Every colour is a token** in
+  `app.css`; a test forbids raw hex outside comments. **Every icon the code
+  asks for must be in `monitor/icons`**; a missing one renders as nothing.
+- **Touch targets are 44px** below 1024 wide or on any coarse pointer, and
+  **nothing floats over content** -- the design system's phone dock was
+  dropped for that rule, and theme and refresh live in the drawer instead.
+- **Two tools replace "it looked fine on my laptop"**:
+  `tools/preview-monitor.js` (the branch against live data, read-only) and
+  `tools/check-monitor-layout.mjs` (every width, both themes, fails on
+  layout). The test suite sees numbers; the layout check sees layout. Run
+  both before asking for a merge of anything under `monitor/`.
+
+**Eleven tabs as of 25 Sept** on the OLD dashboard — the list lives in `showTab`, and `Dropoff`
 is the newest. A tab needs a `t-<name>` button, a `tp-<name>` panel, an entry
 in that array and a loader guard, or it renders nowhere and nothing says
 so. **Count the array, do not trust this number** — it said ten the day
@@ -2274,14 +2311,16 @@ node tests/test-non-icp.js           # the non-ICP block: list, matcher, guards,
 node tests/test-non-icp-routes.js    # BOOTS every /monitor route AND evaluates the dashboard JS
 node tests/test-apollo.js            # BOOTS /enrich against every shape Apollo replies with, and drives
                                     #   tools/re-enrich-apollo.js against a stubbed database
+node tests/test-monitor-next.js      # BOOTS /monitor/next and /monitor/overview, and EVALUATES the new
+                                    #   dashboard's served JS: painted numbers against the payload
 
-node tests/measure.js --check   # or just this: runs all thirteen and checks the totals
+node tests/measure.js --check   # or just this: runs all fourteen and checks the totals
 node tests/test-batch1-db.js    # needs DATABASE_URL
 node tests/test-batch1-e2e.js   # boots the real server, needs DATABASE_URL
 ```
 
-**The thirteen dependency-free suites are the bar.** They run anywhere in about a
-second each — run all thirteen after any change to `index.js`, `lead-magnet.js`,
+**The fourteen dependency-free suites are the bar.** They run anywhere in about a
+second each — run all fourteen after any change to `index.js`, `lead-magnet.js`,
 or either form file, always. Do not install Postgres and do not point anything at
 the production database from a feature branch.
 
@@ -2306,9 +2345,9 @@ had actually been read.
 If the output is genuinely too long to read, that is a reason to fix the
 output, not to pipe it.
 
-**Six of the thirteen BOOT A ROUTE** rather than reading source text —
+**Seven of the fourteen BOOT A ROUTE** rather than reading source text —
 `test-submit-gate`, `test-session-page-views`, `test-lead-field-changes`,
-`test-session-payload`, `test-apollo` and `test-non-icp-routes`. The last one goes furthest:
+`test-session-payload`, `test-apollo`, `test-monitor-next` and `test-non-icp-routes`. The last one goes furthest:
 it also **evaluates the dashboard's inline JavaScript** in a stubbed DOM and
 calls every tab loader, because three production breaks in one night were
 runtime behaviour no source assertion could see. They stub `pg` and `global.fetch` and drive the real
@@ -2321,7 +2360,7 @@ Tests read the real functions out of `index.js` rather than a copy. A test that
 exercises a duplicate of the source can pass while production is broken. Keep it
 that way.
 
-**All thirteen suites require `tests/crash-reporter.js` first, and it is not
+**All fourteen suites require `tests/crash-reporter.js` first, and it is not
 optional.** A suite that crashes prints a stack trace, zero `✗` lines and exits
 1 — which reads as a clean run to anything counting markers and as a caught
 mutation to anything counting exit codes. Three of the six did exactly that

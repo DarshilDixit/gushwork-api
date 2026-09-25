@@ -1,0 +1,727 @@
+/* Gushwork design tokens -- copied VERBATIM from the gushwork-design plugin
+   v1.49.0 (foundation/tokens.css, 24 Sept 2026), with its @font-face blocks
+   removed: app.css declares the faces against /monitor/next/asset/. Do not edit
+   values here; re-copy from the plugin when it moves, so drift is a diff. */
+/* ============================================================================
+   Gushwork design tokens
+   ----------------------------------------------------------------------------
+   Generated from the BOUND FIGMA VARIABLES of Gush Design System v2.0
+   (file key VKcb4fgVyOHKfQonMgN772), unioned across component nodes on all
+   six documented pages.
+
+   Do not take token values from the swatch labels on the Figma canvas. They
+   have drifted: all 12 Neutral hex labels and 7 of 12 Primary hex labels are
+   from a superseded palette, and 10 of 31 typography spec rows contradict
+   their own variables. The variables are authoritative. This file is the
+   only place a value should be written down.
+
+   Never hardcode a hex, size, radius, or shadow in generated output. Use the
+   custom properties below. If a value you need has no token, that is a
+   finding to report, not a number to invent.
+   ============================================================================ */
+
+/* ============================================================================
+   FONT FACES
+   ----------------------------------------------------------------------------
+   Both brand faces are variable fonts, committed under fonts/. Paths are
+   relative to this file.
+
+   Axis ranges below were read out of the fvar table, not guessed:
+
+     Vert Grotesk Display   wght 300..700   default 300
+     Inter                  wght 100..900   default 400 · opsz 14..32
+
+   Two things follow from that:
+
+   1. The display face TOPS OUT AT 700. There is no 800 or 900. A heading asking
+      for either silently clamps to 700 — the type ramp never does, but custom
+      CSS might.
+   2. Its DEFAULT IS 300 (Light). Any display text rendered without an explicit
+      weight comes out Light, which reads as a wrong weight rather than a
+      missing font. Always go through a --gw-text-* token; each one sets weight
+      explicitly.
+
+   Without these declarations both faces fall back to system-ui, which has
+   different metrics and different weight rendering — the usual cause of "the
+   font weight looks off".
+   ============================================================================ */
+
+
+
+
+:root {
+
+  /* ==========================================================================
+     COLOR
+     Figma collection: Colors
+     ========================================================================== */
+
+  /* --- Primary (brand blue) -------------------------------------------------
+     Figma path Colors/Primary/*. Note the 500 step is named `500-main` in
+     Figma — the only ramp step in the file with a suffix. */
+  --gw-color-primary-25:  #f2f8ff;
+  --gw-color-primary-50:  #e5f1ff;
+  --gw-color-primary-100: #cce2ff;
+  --gw-color-primary-200: #99c6ff;
+  --gw-color-primary-300: #66a9ff;
+  --gw-color-primary-400: #338cff;
+  --gw-color-primary-500: #0070ff;  /* Colors/Primary/500-main — the brand blue */
+  --gw-color-primary-600: #0061e0;
+  --gw-color-primary-700: #004ebf;
+  --gw-color-primary-800: #003a8c;
+  --gw-color-primary-900: #002559;
+
+  --gw-color-primary-alpha-10: #0070ff1a;
+  --gw-color-primary-alpha-40: #0070ff66;
+
+  /* --- Secondary -----------------------------------------------------------
+     Figma path Colors/Secondary/500-main. A single step, no ramp. Used as the
+     dark surface on page-build, navbar, footer and the comparison table. */
+  --gw-color-secondary-500: #111827;
+
+  /* --- Neutral -------------------------------------------------------------
+     Figma path Colors/Neutral/*. Cool-tinted, not pure gray. The 35/250/850
+     steps are real variables but have no swatch on the canvas. */
+  --gw-color-neutral-25:  #f7f8f9;
+  --gw-color-neutral-35:  #f5f5f5;
+  --gw-color-neutral-50:  #f1f2f3;
+  --gw-color-neutral-100: #e7e8e9;
+  --gw-color-neutral-200: #cfd1d4;
+  --gw-color-neutral-250: #bcbec2;
+  --gw-color-neutral-300: #bbbec4;
+  --gw-color-neutral-400: #959ba4;
+  --gw-color-neutral-500: #878b94;
+  --gw-color-neutral-600: #6a7077;
+  --gw-color-neutral-700: #535a61;
+  --gw-color-neutral-800: #4d545c;
+  --gw-color-neutral-850: #333333;
+  --gw-color-neutral-900: #262a2e;
+  --gw-color-white: #ffffff;
+  --gw-color-black: #0d0d0d;
+
+  --gw-color-neutral-alpha-10-white: #ffffff1a;
+  --gw-color-neutral-alpha-20-white: #ffffff33;
+  --gw-color-neutral-alpha-30-white: #ffffff4d;
+  --gw-color-neutral-alpha-50-white: #ffffff80;
+  --gw-color-neutral-alpha-60-white: #ffffff99;
+  --gw-color-neutral-alpha-80-white: #ffffffcc;
+  --gw-color-neutral-alpha-10-black: #0101091a;
+  --gw-color-neutral-alpha-20-black: #01010933;
+  --gw-color-neutral-alpha-50-black: #01010980;
+
+  /* --- Categorical chart series — RULED, DECISIONS.md R11 -------------------
+     `Graph Type=Grouped Bar` (2143:683) binds three raw hexes. Two sit within a few
+     units of an existing ramp step across 765 — differences nobody can see — and are
+     treated as those tokens, unbound:
+         #a1cdfe -> --gw-color-primary-200      #fed14a -> --gw-color-yellow-200
+     The third is a violet and the system has NO violet ramp, so it is added here as a
+     single named colour rather than nine steps nobody drew.
+     THREE SERIES IS THE CEILING. A fourth category is a finding to report, not a
+     colour to pick. Single-series charts (`Bar`, `Line`) use --gw-color-primary-500
+     and do not touch this palette.
+     Not a Figma variable — added by ruling, 8 Aug 2026. */
+  --gw-color-chart-violet: #9784ff;
+  --gw-color-chart-1: var(--gw-color-primary-200);
+  --gw-color-chart-2: var(--gw-color-chart-violet);
+  --gw-color-chart-3: var(--gw-color-yellow-200);
+
+  /* --- Red (negative / error) ---------------------------------------------- */
+  --gw-color-red-25:  #fff1f2;
+  --gw-color-red-50:  #ffe4e6;
+  --gw-color-red-100: #fecdd3;
+  --gw-color-red-200: #fda4af;
+  --gw-color-red-300: #fb7185;
+  --gw-color-red-400: #f43f5e;
+  --gw-color-red-500: #e11d48;
+  --gw-color-red-600: #be123c;
+  --gw-color-red-700: #9f1239;
+  --gw-color-red-800: #881337;
+  --gw-color-red-900: #4c0519;
+  --gw-color-red-alpha-10: #f43f5e1a;
+  --gw-color-red-alpha-20: #f43f5e33;
+
+  /* --- Yellow (warning / in-between) --------------------------------------- */
+  --gw-color-yellow-25:  #fffbeb;
+  --gw-color-yellow-50:  #fef3c7;
+  --gw-color-yellow-100: #fde68a;
+  --gw-color-yellow-200: #fcd34d;
+  --gw-color-yellow-300: #fbbf24;
+  --gw-color-yellow-400: #f59e0b;
+  --gw-color-yellow-500: #d97706;
+  --gw-color-yellow-600: #b45309;
+  --gw-color-yellow-700: #92400e;
+  --gw-color-yellow-800: #78350f;
+  --gw-color-yellow-900: #451a03;
+  --gw-color-yellow-alpha-10: #f59e0b1a;
+  --gw-color-yellow-alpha-20: #f59e0b33;
+
+  /* --- Orange -------------------------------------------------------------
+     The color rule text calls this group "Accent". The Figma group and the
+     variable collection both name it Orange. Orange has no alpha steps. */
+  --gw-color-orange-25:  #fff7ed;
+  --gw-color-orange-50:  #ffedd5;
+  --gw-color-orange-100: #fed7aa;
+  --gw-color-orange-200: #fdba74;
+  --gw-color-orange-300: #fb923c;
+  --gw-color-orange-400: #f97316;
+  --gw-color-orange-500: #ea580c;
+  --gw-color-orange-600: #c2410c;
+  --gw-color-orange-700: #9a3412;
+  --gw-color-orange-800: #7c2d12;
+  --gw-color-orange-900: #431407;
+
+  /* --- Green (positive / success) ------------------------------------------ */
+  --gw-color-green-25:  #f0fdf4;
+  --gw-color-green-50:  #dcfce7;
+  --gw-color-green-100: #bbf7d0;
+  --gw-color-green-200: #86efac;
+  --gw-color-green-300: #4ade80;
+  --gw-color-green-400: #22c55e;
+  --gw-color-green-500: #16a34a;
+  --gw-color-green-600: #15803d;
+  --gw-color-green-700: #166534;
+  --gw-color-green-800: #14532d;
+  --gw-color-green-900: #052e16;
+  --gw-color-green-alpha-10: #22c55e1a;
+
+
+  /* ==========================================================================
+     SPACING
+     Figma collection: Spacing. Values are px.
+     The scale is not a clean progression — 28/36/44/52 and 64-76 do not exist,
+     and 60 is the only non-multiple-of-8 above 32. Do not interpolate.
+     ========================================================================== */
+  --gw-space-2:   2px;
+  --gw-space-4:   4px;
+  --gw-space-8:   8px;
+  --gw-space-12:  12px;
+  --gw-space-16:  16px;
+  --gw-space-20:  20px;
+  --gw-space-24:  24px;
+  --gw-space-32:  32px;
+  --gw-space-40:  40px;
+  --gw-space-48:  48px;
+  --gw-space-56:  56px;
+  --gw-space-60:  60px;
+  --gw-space-80:  80px;
+  --gw-space-100: 100px;
+  --gw-space-120: 120px;
+  --gw-space-160: 160px;
+
+
+  /* ==========================================================================
+     RADIUS
+     Figma collection: Radius.
+     Only the steps below are recoverable as bound variables. The canvas shows
+     23 swatches (2, 24, 28, 32, 36, 40, 44, 48, 52, 56, 64, 68, 72, 76, 80),
+     but those are unbound in the showcase frame — they render with literal
+     corner values. Use a token below; if a design needs another step, report
+     it rather than inventing a variable name.
+     Note Radius/10 is a real variable with no swatch on the canvas.
+     ========================================================================== */
+  --gw-radius-none: 0;
+  --gw-radius-4:    4px;
+  --gw-radius-8:    8px;
+  --gw-radius-10:   10px;
+  --gw-radius-12:   12px;
+  --gw-radius-16:   16px;
+  --gw-radius-20:   20px;
+  --gw-radius-60:   60px;
+  --gw-radius-full: 999px;
+
+
+  /* ==========================================================================
+     ELEVATION
+     Figma collection: Shadows.
+     S1 is fully transparent — it is the "no shadow" level, not a subtle one.
+     `Shadows/Card` is a real variable with no swatch and no mention in the
+     elevation rule text. `shadows/button` lives in a separate lowercase
+     collection and is two stacked layers.
+     ========================================================================== */
+  --gw-shadow-s1: 0 0 0 0 #1b1c1d00;
+  --gw-shadow-s2: 0 2px 4px 0 #1b1c1d0a;
+  --gw-shadow-s3: 0 16px 32px -12px #585c5f1a;
+  --gw-shadow-s4: 0 16px 40px -8px #585c5f29;
+  --gw-shadow-card: 0 3px 50px 0 #00000012;
+  --gw-shadow-button: 0 1px 12px -8px #00000066, 0 1px 2px 0 #ffffff99;
+
+
+  /* ==========================================================================
+     TYPE
+     Two families only. Vert Grotesk Display for headings and display, Inter
+     for everything else. Never substitute a third face.
+
+     Each style is emitted as a `font` shorthand plus a matching tracking
+     token, so a rule reads:
+         font: var(--gw-text-h1); letter-spacing: var(--gw-text-h1-tracking);
+
+     Line-height units are preserved exactly as authored in Figma, which mixes
+     them: styles at 18px and above carry unitless ratios, styles at 16px and
+     below carry absolute px. Converting the px ones to ratios would introduce
+     rounding (20/14 = 1.4286), so they are left as authored.
+
+     Letter-spacing is emitted in EM, because Figma's magnitude is a PERCENT
+     of the font size — not px. Measured against the rendered output on
+     ↳ web/ pattern-library, three independent confirmations:
+         body-18-med  letterSpacing -0.2 -> renders -0.036px at 18px
+         body-16-med  letterSpacing -0.2 -> renders -0.032px at 16px
+         body-18-sem  letterSpacing -0.6 -> renders -0.108px at 18px
+     -0.2% is -0.002em, and 18 x -0.002 = -0.036. An earlier revision of this
+     file read the magnitude as px, which made every tracking value 5-6x too
+     wide. Do not reintroduce that reading.
+     ========================================================================== */
+
+  --gw-font-display: 'Vert Grotesk Display', ui-sans-serif, system-ui, sans-serif;
+  --gw-font-body: 'Inter', ui-sans-serif, system-ui, sans-serif;
+
+  /* --- Headings — Vert Grotesk Display ------------------------------------
+     h1-h4 are Bold 700. h5 and h6 are Semibold 600. h7 is Medium 500.
+     Each of h5, h6, h7 has a `-bold` sibling at weight 700 — that is half the
+     ramp, and the heading rule text does not mention it.
+     The heading rule claims headings are "bold or semi-bold"; h7 is Medium. */
+  --gw-text-h1: 700 60px/1.2 var(--gw-font-display);
+  --gw-text-h1-tracking: 0;
+  --gw-text-h2: 700 56px/1.2 var(--gw-font-display);
+  --gw-text-h2-tracking: 0;
+  --gw-text-h3: 700 44px/1.2 var(--gw-font-display);
+  --gw-text-h3-tracking: 0;
+  --gw-text-h4: 700 38px/1.2 var(--gw-font-display);
+  --gw-text-h4-tracking: 0;
+  --gw-text-h5: 600 32px/1.2 var(--gw-font-display);
+  --gw-text-h5-tracking: 0;
+  --gw-text-h5-bold: 700 32px/1.2 var(--gw-font-display);
+  --gw-text-h5-bold-tracking: 0;
+  --gw-text-h6: 600 26px/1.2 var(--gw-font-display);
+  --gw-text-h6-tracking: 0;
+  --gw-text-h6-bold: 700 26px/1.2 var(--gw-font-display);
+  --gw-text-h6-bold-tracking: 0;
+  --gw-text-h7: 500 22px/1.4 var(--gw-font-display);
+  --gw-text-h7-tracking: 0;
+  --gw-text-h7-bold: 700 22px/1.4 var(--gw-font-display);
+  --gw-text-h7-bold-tracking: 0;
+
+  /* --- Body — Inter -------------------------------------------------------
+     Full ramp: 22, 20, 18, 16, 14, 12, 10 px, each in reg / med / sem. */
+  --gw-text-body-22-reg: 400 22px/1.4 var(--gw-font-body);
+  --gw-text-body-22-reg-tracking: -0.006em;
+  --gw-text-body-22-med: 500 22px/1.4 var(--gw-font-body);
+  --gw-text-body-22-med-tracking: -0.006em;
+  --gw-text-body-22-sem: 600 22px/1.4 var(--gw-font-body);
+  --gw-text-body-22-sem-tracking: -0.006em;
+
+  --gw-text-body-20-reg: 400 20px/1.4 var(--gw-font-body);
+  --gw-text-body-20-reg-tracking: -0.006em;
+  --gw-text-body-20-med: 500 20px/1.4 var(--gw-font-body);
+  --gw-text-body-20-med-tracking: -0.016em;  /* outlier — every sibling is -0.6px */
+  --gw-text-body-20-sem: 600 20px/1.4 var(--gw-font-body);
+  --gw-text-body-20-sem-tracking: -0.006em;
+
+  --gw-text-body-18-reg: 400 18px/1.6 var(--gw-font-body);
+  --gw-text-body-18-reg-tracking: -0.002em;
+  --gw-text-body-18-med: 500 18px/1.6 var(--gw-font-body);
+  --gw-text-body-18-med-tracking: -0.002em;
+  --gw-text-body-18-sem: 600 18px/1.6 var(--gw-font-body);
+  --gw-text-body-18-sem-tracking: -0.006em;
+
+  --gw-text-body-16-reg: 400 16px/24px var(--gw-font-body);
+  --gw-text-body-16-reg-tracking: -0.002em;
+  --gw-text-body-16-med: 500 16px/24px var(--gw-font-body);
+  --gw-text-body-16-med-tracking: -0.002em;
+  --gw-text-body-16-sem: 600 16px/24px var(--gw-font-body);
+  --gw-text-body-16-sem-tracking: -0.002em;
+
+  --gw-text-body-14-reg: 400 14px/20px var(--gw-font-body);
+  --gw-text-body-14-reg-tracking: -0.002em;
+  --gw-text-body-14-med: 500 14px/20px var(--gw-font-body);
+  --gw-text-body-14-med-tracking: -0.002em;
+  --gw-text-body-14-sem: 600 14px/21px var(--gw-font-body);  /* 21px, not 20px */
+  --gw-text-body-14-sem-tracking: -0.002em;
+
+  --gw-text-body-12-reg: 400 12px/16px var(--gw-font-body);
+  --gw-text-body-12-reg-tracking: -0.006em;
+  --gw-text-body-12-med: 500 12px/16px var(--gw-font-body);
+  --gw-text-body-12-med-tracking: -0.006em;
+  --gw-text-body-12-sem: 600 12px/16px var(--gw-font-body);
+  --gw-text-body-12-sem-tracking: -0.006em;
+
+  --gw-text-body-10-reg: 400 10px/15px var(--gw-font-body);
+  --gw-text-body-10-reg-tracking: 0;
+  --gw-text-body-10-med: 500 10px/15px var(--gw-font-body);
+  --gw-text-body-10-med-tracking: 0;
+  --gw-text-body-10-sem: 600 10px/15px var(--gw-font-body);
+  --gw-text-body-10-sem-tracking: 0;
+
+  /* --- Button labels — Inter Medium ---------------------------------------
+     Figma collection: Button. Line-height is 1 and tracking 0 on every step,
+     because button labels are single-line and optically centred by padding.
+     Use these for button and CTA text, not the body ramp. */
+  --gw-text-button-10: 500 10px/1 var(--gw-font-body);
+  --gw-text-button-12: 500 12px/1 var(--gw-font-body);
+  --gw-text-button-14: 500 14px/1 var(--gw-font-body);
+  --gw-text-button-16: 500 16px/1 var(--gw-font-body);
+  --gw-text-button-18: 500 18px/1 var(--gw-font-body);
+}
+
+/* ============================================================================
+   KNOWN GAPS AND CONFLICTS IN THE SOURCE
+
+   Carried here so a generator knows what it cannot rely on. All of these are
+   reported to the design owner and are not to be worked around silently.
+
+   1. Radius steps 2, 24, 28, 32, 36, 40, 44, 48, 52, 56, 64-80 are documented
+      on the canvas but have no bound variable. Not emitted above.
+
+   2. The Spacing showcase swatches labelled 60px and 160px are both bound to
+      Spacing/56. The variables Spacing/60, /80, /100, /120, /160 do all exist
+      and are emitted above; only the showcase bindings are wrong.
+
+   3. Two heading collections coexist: `Heading/*` (h1-h7 plus -bold siblings)
+      and `Headings/*` (h1, h6, h7-bold observed). They hold identical values.
+      Tokens above come from `Heading/*`. The duplicate should be retired.
+
+   4. Two shadow collections coexist: `Shadows/*` (S1-S4, Card) and
+      `shadows/button`. Both are emitted; the casing split should be resolved.
+
+   5. `Body/body-16-reg` resolves with letter-spacing -0.2 on most nodes but
+      -0.6 on fold/Comparison Table (1824:6836), which suggests a duplicate
+      variable of the same path in a second collection. -0.2 is emitted.
+
+   6. Legacy Tailwind-style variables are still bound inside real components
+      and must not be used: `gray/200 /300 /500 /700 /900`, `green/100 /500
+      /800`, `blue/50`, bare `white`. They appear in fold/ Hero (1731:55983)
+      and on two stray Cloud icon instances. Note `gray/900` (#111827) is the
+      same value as Colors/Secondary/500-main — use the token, not the legacy.
+
+   7. `_Helper/Purple` (#8427DE) is a working/debug variable bound inside the
+      badge set (1582:628) and fold/Comparison Table. Never render it.
+
+   8. `paragraph-01/P1Regular` (Inter Regular 24/36) is a legacy type variable
+      bound on all 20 icon category labels. Superseded by the Body ramp.
+
+   9. There is a bare top-level `White` variable (#ffffff) alongside
+      `Colors/Neutral/white`. Prefer --gw-color-white.
+
+  11. THIS FILE IS NOT SAFE TO FLATTEN. Some names are declared TWICE — the base value in
+      :root and an override inside a media query:
+
+        :root                                  --gw-motion-fast: 120ms ease
+        @media (prefers-reduced-motion:reduce) --gw-motion-fast: 0ms
+        @media (max-width:767px)               every --gw-bp-*, and --gw-content-width
+
+      A generator that builds a lookup with "last match wins" — the obvious
+      `dict(re.findall(...))` — therefore emits --gw-motion-fast: 0ms UNCONDITIONALLY. Every
+      transition is dead for every user and the reduced-motion guard is silently discarded. It
+      renders plausibly and is completely wrong. Take the FIRST occurrence of each name and
+      re-emit the guards you need. Found 26 Aug 2026 in two separate builders, including the
+      reference one in preview/.
+
+  10. No motion tokens exist in FIGMA. They now exist here — RULED, not
+      harvested. See the RULED section at the end of this file. Never write a
+      raw duration into a component; use --gw-motion-fast.
+
+      An earlier revision of this file also claimed no breakpoint tokens
+      existed. That was wrong — there is a whole second collection. See the
+      BREAKPOINT section below.
+   ============================================================================ */
+
+/* ============================================================================
+   BREAKPOINT
+   Figma collection: Breakpoint · 34 variables · modes Desktop (default), Phone
+   ----------------------------------------------------------------------------
+   The second variable collection. Unlike Brand, which is single-mode, every
+   variable here has a Desktop and a Phone value — this is the file's
+   responsive system, and it is why components carry a `Breakpoint` variant
+   rather than hard-coded sizes.
+
+   Consume these through the media query, not by picking a side by hand.
+
+   SOURCE NOTE: transcribed from the Gushwork Figma master specification
+   (6 Aug 2026), not read back through the MCP variable API. Values are
+   internally consistent with the components measured in exports/, with one
+   open conflict flagged on --gw-bp-content-width below.
+   ============================================================================ */
+
+:root {
+
+  /* --- Sizing ------------------------------------------------------------- */
+  --gw-bp-page-width:     1440px;
+  --gw-bp-content-width:  1400px;  /* see conflict note */
+  --gw-bp-heading-lg:     1000px;
+  --gw-bp-heading-def:     800px;
+  --gw-bp-heading-sm:      620px;
+  --gw-bp-cta-image-w:     600px;
+  --gw-bp-cta-image-h:     440px;
+  --gw-bp-navbar-h:         60px;
+
+  /* --- Padding ------------------------------------------------------------ */
+  --gw-bp-pad-navbar-h:    100px;
+  --gw-bp-pad-page-h:       20px;
+  --gw-bp-pad-cta-h:        60px;
+  --gw-bp-pad-section-v-lg: 120px;
+  --gw-bp-pad-section-v:   100px;
+  --gw-bp-pad-footer-v:     20px;
+  --gw-bp-pad-card-h:       60px;
+  --gw-bp-pad-card-v:       40px;
+
+  /* --- Spacing ------------------------------------------------------------ */
+  --gw-bp-section-gap-lg:  180px;
+  --gw-bp-section-gap:     160px;
+  --gw-bp-content-gap:      40px;
+  --gw-bp-element-gap:      20px;
+  --gw-bp-heading-gap:      20px;
+  --gw-bp-content-spacing:   0px;
+
+  /* --- Type scale ---------------------------------------------------------
+     A responsive scale separate from the Heading/* text styles. The two do
+     not agree — Heading/h1 is 60px while this h1 is 44px — because these
+     drive fold-level layout while the text styles drive the type ramp. Use
+     the Heading tokens for type; use these only where a component binds
+     them. */
+  --gw-bp-type-display:    112px;
+  --gw-bp-type-hero:        60px;
+  --gw-bp-type-h1:          44px;
+  --gw-bp-type-h2:          26px;
+  --gw-bp-type-subtitle:    18px;
+  --gw-bp-type-body:        16px;
+  --gw-bp-type-button:      14px;
+  --gw-bp-type-caption:     12px;
+
+  /* --- Radius ------------------------------------------------------------- */
+  --gw-bp-radius-large:     20px;
+  --gw-bp-radius-medium:    16px;
+  --gw-bp-radius-small:      8px;
+}
+
+@media (max-width: 767px) {
+  :root {
+    /* Phone mode */
+    --gw-bp-page-width:     375px;
+    --gw-bp-content-width:  343px;
+    --gw-bp-heading-lg:     343px;
+    --gw-bp-heading-def:    343px;
+    --gw-bp-heading-sm:     343px;
+    --gw-bp-cta-image-w:    343px;
+    --gw-bp-cta-image-h:    393px;
+    --gw-bp-navbar-h:        56px;
+
+    --gw-bp-pad-navbar-h:    16px;
+    --gw-bp-pad-page-h:      16px;
+    --gw-bp-pad-cta-h:       16px;
+    --gw-bp-pad-section-v-lg: 60px;
+    --gw-bp-pad-section-v:   60px;
+    --gw-bp-pad-footer-v:    16px;
+    --gw-bp-pad-card-h:      16px;
+    --gw-bp-pad-card-v:      24px;
+
+    --gw-bp-section-gap-lg:  80px;
+    --gw-bp-section-gap:     60px;
+    --gw-bp-content-gap:     20px;
+    --gw-bp-element-gap:     12px;
+    --gw-bp-heading-gap:     12px;
+    --gw-bp-content-spacing: 40px;
+
+    --gw-bp-type-display:    48px;
+    --gw-bp-type-hero:       44px;
+    --gw-bp-type-h1:         38px;
+    --gw-bp-type-h2:         20px;
+    --gw-bp-type-subtitle:   16px;
+    --gw-bp-type-body:       16px;
+    --gw-bp-type-button:     14px;
+    --gw-bp-type-caption:    12px;
+
+    --gw-bp-radius-large:    16px;
+    --gw-bp-radius-medium:   12px;
+    --gw-bp-radius-small:     8px;
+  }
+}
+
+/* ============================================================================
+   RESOLVED — the content column is 1240, not --gw-bp-content-width
+   ----------------------------------------------------------------------------
+   Three values competed: this collection's 1400, a measured 1240 from both
+   worked page-build instances on `↳ web/ template-library`, and ~1280 from the
+   master spec's prose.
+
+   Ruled 1240 (Utsav, 6 Aug 2026) — the only value measured off a real
+   composition. Use --gw-content-width below for the marketing content column.
+   --gw-bp-content-width is kept because the Figma variable genuinely holds
+   1400, but it is NOT the content column. Don't reach for it by name.
+   ============================================================================ */
+
+:root {
+  /* The marketing content column. 1240 centred in a 1440 page, 100px margins. */
+  --gw-content-width: 1240px;
+  --gw-content-margin: 100px;
+}
+
+@media (max-width: 767px) {
+  :root {
+    --gw-content-width: 343px;
+    --gw-content-margin: 16px;
+  }
+}
+
+/* ============================================================================
+   TYPE — Links
+   Figma path Body/link-{size} · Inter Medium, matched to the Body ramp
+   ----------------------------------------------------------------------------
+   Always pair link-{N} with body-{N} of the same size. Links are Medium
+   weight so they read as distinct from Regular body copy.
+
+   SOURCE NOTE: from the master specification, same caveat as BREAKPOINT.
+   ============================================================================ */
+
+:root {
+  --gw-text-link-10: 500 10px/15px  var(--gw-font-body);
+  --gw-text-link-12: 500 12px/16px  var(--gw-font-body);
+  --gw-text-link-14: 500 14px/20px  var(--gw-font-body);
+  --gw-text-link-16: 500 16px/24px  var(--gw-font-body);
+  --gw-text-link-18: 500 18px/1.6   var(--gw-font-body);
+  --gw-text-link-20: 500 20px/1.4   var(--gw-font-body);
+  --gw-text-link-22: 500 22px/1.4   var(--gw-font-body);
+
+  --gw-text-link-10-tracking:  0;
+  --gw-text-link-12-tracking: -0.6%;
+  --gw-text-link-14-tracking: -0.2%;
+  --gw-text-link-16-tracking: -0.2%;
+  --gw-text-link-18-tracking: -0.2%;
+  --gw-text-link-20-tracking: -1.6%;
+  --gw-text-link-22-tracking: -0.6%;
+
+  /* Button ramp — the master spec adds a 20px step the earlier harvest missed */
+  --gw-text-button-20: 500 20px/1 var(--gw-font-body);
+
+  /* Alpha steps the earlier harvest missed */
+  --gw-color-primary-alpha-20:      #0070ff33;
+  --gw-color-primary-alpha-30:      #0070ff4d;
+  --gw-color-orange-alpha-10:       #ea580c1a;
+  --gw-color-orange-alpha-20:       #ea580c33;
+  --gw-color-neutral-alpha-90-white: #ffffffe6;
+
+  /* Radius — the ramp continues in linear 4px steps from 24 to 80 */
+  --gw-radius-2:  2px;
+  --gw-radius-24: 24px;
+  --gw-radius-28: 28px;
+  --gw-radius-32: 32px;
+  --gw-radius-36: 36px;
+  --gw-radius-40: 40px;
+  --gw-radius-44: 44px;
+  --gw-radius-48: 48px;
+  --gw-radius-52: 52px;
+  --gw-radius-56: 56px;
+  --gw-radius-64: 64px;
+  --gw-radius-68: 68px;
+  --gw-radius-72: 72px;
+  --gw-radius-76: 76px;
+  --gw-radius-80: 80px;
+}
+
+/* ============================================================================
+   RULED — values decided by the design owner, NOT harvested from Figma
+   ----------------------------------------------------------------------------
+   Everything above this line came out of the Figma variables. Everything below
+   was ruled because the file had no answer and every build was inventing one.
+
+   Same standing as the --gw-content-width ruling further up: authoritative, and
+   to be mirrored into Figma when someone next opens the file. Use these tokens;
+   do not re-decide them.
+   ============================================================================ */
+
+:root {
+
+  /* --- Motion -------------------------------------------------------------
+     Ruled by Utsav, 7 Aug 2026. Figma has no motion variables and note 10 above
+     used to say "document per component" — which in practice meant every build
+     picked its own duration.
+
+     ONE duration for dashboard state changes: hover, open/close, selection,
+     toggle. It is deliberately short; a product surface should feel immediate,
+     not animated. Anything that needs a different duration is a finding.
+
+     Always pair with a prefers-reduced-motion guard. */
+  --gw-motion-fast: 120ms ease;
+
+  /* --- Focus ---------------------------------------------------------------
+     Ruled by Utsav, 7 Aug 2026. NO component in the Figma file defines a focus
+     state — not Button, not controls, not list-item, not table-row — so every
+     keyboard user got whatever the browser did.
+
+     Composed from existing tokens; introduces no new colour. Applies to every
+     focusable element on both surfaces. */
+  --gw-focus-ring: 2px solid var(--gw-color-primary-alpha-40);
+  --gw-focus-offset: 2px;
+
+  /* --- Timing --------------------------------------------------------------
+     Toast auto-dismiss. Ruled by Utsav, 7 Aug 2026 — see exports/dashboard/toast.md,
+     which previously recorded this as undefined. */
+  --gw-toast-dismiss: 4000ms;
+
+  /* ==========================================================================
+     SLIDES
+     Added 7 Sep 2026 for the slides surface. Measured from GW-Slides
+     (file R9JgCTytCKSgyBL4efP7hz) and from the Manufacturing sales deck's
+     Google Slides export, which is that file two conversions downstream.
+
+     Where the two disagree, Figma wins — R0. The export's drift is recorded
+     in exports/slides/deck.md rather than encoded here.
+     ---------------------------------------------------------------------- */
+
+  /* --- Slide geometry ------------------------------------------------------
+     Every slide is 1920x1080. The ground bleeds full-frame; the content card
+     insets by --gw-slide-margin and the cover's inner frame by 40. */
+  --gw-slide-w: 1920px;
+  --gw-slide-h: 1080px;
+  --gw-slide-margin: 20px;   /* content card inset from every slide edge */
+  --gw-slide-gap: 20px;      /* gap between step cards, measured 19.4 */
+  --gw-slide-title-x: 40px;  /* title box left edge */
+  --gw-slide-title-y: 38px;  /* title box top edge, measured 38.2 */
+  --gw-slide-cover-inset: 40px;  /* cover inner frame, measured in Figma */
+
+  /* --- Slide display face -------------------------------------------------
+     Ruled by Utsav, 7 Sep 2026. Vert Grotesk Display is first preference and
+     is what GW-Slides actually uses. Plus Jakarta Sans is the sanctioned
+     fallback ONLY because Google Slides cannot load a custom face — every
+     .pptx and Slides export lands on it. Do not "fix" a deck that renders in
+     Plus Jakarta Sans after an export round-trip; that is the fallback doing
+     its job. Caveat is the script face, for margin annotations only. */
+  --gw-font-slide-display: 'Vert Grotesk Display', 'Plus Jakarta Sans',
+                           ui-sans-serif, system-ui, sans-serif;
+  --gw-font-slide-script:  'Caveat', ui-sans-serif, system-ui, cursive;
+
+  /* --- Slide type ---------------------------------------------------------
+     The slide ramp runs above h1 (60px), so it needs its own steps. The cover
+     title is measured off the Figma node at 90px; the in-deck title at 72px
+     is the export doubled, and is the one value here still awaiting a Figma
+     measurement. Everything at 22px and below maps onto the shared ramp --
+     use --gw-text-body-22-* and --gw-text-h5/h6, not a slide-specific step. */
+  --gw-text-slide-cover: 600 90px/1.2 var(--gw-font-slide-display);
+  --gw-text-slide-cover-tracking: -0.32px;
+  --gw-text-slide-title: 700 72px/1.2 var(--gw-font-slide-display);
+  --gw-text-slide-title-tracking: 0;
+  --gw-text-slide-annotation: 600 27px/1 var(--gw-font-slide-script);
+
+  /* --- Slide ground -------------------------------------------------------
+     assets/slides/slide-ground.svg is primary-500 under a 40px/1px lattice at
+     30% opacity, whose fill ramps from primary-500 at centre to white at the
+     edge -- so the grid is invisible mid-frame and emerges at the corners.
+     These tokens rebuild it in CSS; the SVG is for the .pptx path, which has
+     no CSS. Keep the two in step. */
+  --gw-slide-grid-pitch: 40px;
+  --gw-slide-grid-line: 1px;
+  --gw-slide-grid-opacity: 0.3;
+  --gw-slide-grid-origin-x: 922.746px;   /* radial centre, off-centre by design */
+  --gw-slide-grid-origin-y: 540px;
+  --gw-slide-grid-radius-x: 1951.42px;
+  --gw-slide-grid-radius-y: 1881.56px;
+
+  /* --- Slide surfaces ----------------------------------------------------
+     The cover's blur is deliberate and measured. It does NOT license blur on
+     product surfaces, where the no-glass rule still stands. */
+  --gw-slide-cover-blur: 12px;
+  --gw-slide-cover-border: 4px;
+  --gw-slide-card-border: 1.3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --gw-motion-fast: 0ms; }
+}
