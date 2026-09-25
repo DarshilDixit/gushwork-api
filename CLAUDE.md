@@ -1765,14 +1765,30 @@ Found by executing the query, not by reading it.
 **The weekly digest was FIRED ON PURPOSE on 25 Sept** — `node tools/fire-non-icp-slack.js dropoff-digest`, Slack 200, real numbers over the real table. "We asserted it alerts" and "we watched it alert" are different claims, and the gap between them hid 21 dead call sites here.
 
 **The weekly digest reports the COMPLETED week, never the current one.**
-`runDropoffDigest`, Mondays at `DROPOFF_DIGEST_HOUR_ET` (09:00 ET default,
-`DROPOFF_DIGEST_ENABLED=false` to stop it). Same hourly-tick shape as the
-near-miss digest, and the same known in-memory week guard. Sending a partial
-week to a channel is how a reader concludes the funnel collapsed on a Monday
-morning, and no caveat survives being read on a phone. It leads with whether
-the week sits **inside** the prior eleven weeks' range, because the answer is
-usually "this is normal" and a digest that always reads like an alarm gets
-muted along with the week that matters.
+`runDropoffDigest`, Mondays in the **09:00 ET hour** (`DROPOFF_DIGEST_HOUR_ET`,
+`DROPOFF_DIGEST_ENABLED=false` to stop it). Pinned to Eastern, so the local
+time moves with US daylight saving — **18:30 IST in summer, 19:30 in winter**.
+Sending a partial week to a channel is how a reader concludes the funnel
+collapsed on a Monday morning, and no caveat survives being read on a phone.
+It leads with whether the week sits **inside** the prior eleven weeks' range,
+because the answer is usually "this is normal" and a digest that always reads
+like an alarm gets muted along with the week that matters.
+
+**IT GOES TO THE LEADS CHANNEL (`sendSlack`), NOT THE ALERTS ONE.** Authorised
+by Darshil on 25 Sept after the first hand-fired one landed in
+`bot-n8n-alerts`. Nothing in it is broken and nobody has to act on it, so it
+is not an alert; the alerts channel is where things that need fixing go, and a
+recurring no-action post there is how that channel starts being muted — taking
+the week that matters with it. The near-miss digest still uses `sendOpsSlack`,
+so the two deliberately differ.
+
+**THE TICK IS 15 MINUTES, NOT 60, AND THAT IS NOT FUSSINESS.** `setInterval`
+starts counting at **boot**, not on the hour, so with an hourly tick a deploy
+at 09:05 on a Monday puts the ticks at 10:05 and 11:05 and **that week is
+silently skipped**. A missed weekly digest is invisible where a duplicate is
+merely annoying, so the trade goes toward sending. The guard keys on the ET
+**day** stamp, so four ticks inside the 09:00 hour still send exactly once.
+The near-miss digest still ticks hourly and still has this gap.
 
 **Booking arrives by three routes.** `/booking-confirmed` (browser-fired),
 `/booking-confirmed-webhook` (Cal), `/booking-confirmed-webhook-rh` (RevenueHero).

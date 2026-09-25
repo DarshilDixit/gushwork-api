@@ -133,7 +133,7 @@ const lifted = new Function('require', 'pool', [
      same property tools/non-icp-validate.js uses to replay a scrape. */
   'return { alertOps, slackNonIcpBlocked, slackNonIcpLlmFlagged, slackNonIcpLateBlock, sendOpsSlack, bHeader, bDivider, bSection,'
   + ' runDropoffDigest, dropoffReport,'
-  + ' setOpsSlack(f) { const prev = sendOpsSlack; sendOpsSlack = f; return prev; } };',
+  + ' setLeadSlack(f) { const prev = sendSlack; sendSlack = f; return prev; } };',
 ].join('\n'))(require, pool);
 
 const TEST_NOTE = 'DELIBERATE TEST fired by hand via tools/fire-non-icp-slack.js — not a real blocked prospect';
@@ -287,15 +287,17 @@ const FIRES = {
      this file carries its test note inside a field, because those
      messages are built here. This one is built by production code and
      must stay byte-identical to it, so the marker is added AFTER the
-     digest is composed rather than passed into it. sendOpsSlack is
-     wrapped, not replaced -- the original still does the sending. */
+     digest is composed rather than passed into it. sendSlack is
+     wrapped, not replaced -- the original still does the sending.
+
+     IT POSTS TO THE LEADS CHANNEL, like the digest itself. */
   'dropoff-digest': async () => {
     if (!process.env.DATABASE_URL) {
       throw new Error('DATABASE_URL is not set. This is the only fire here that reads the database. '
         + 'On a developer machine use the Postgres service DATABASE_PUBLIC_URL rather than '
         + 'gushwork-api\u2019s own DATABASE_URL, which is on the private network.');
     }
-    const realSend = lifted.setOpsSlack((blocks, fallback) =>
+    const realSend = lifted.setLeadSlack((blocks, fallback) =>
       realSend([...blocks, lifted.bSection('_' + TEST_NOTE + '_')], fallback));
     try {
       /* force = true skips the Monday-and-09:00 gate. Nothing else is

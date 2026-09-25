@@ -15070,7 +15070,16 @@ function startNearMissDigest() {
    covers Monday-to-Sunday just ended. Sending a partial week to a
    channel is how a reader concludes the funnel collapsed on a Monday
    morning, and there is no way to caveat that out of a Slack message
-   somebody reads on a phone. */
+   somebody reads on a phone.
+
+   IT GOES TO THE LEADS CHANNEL (sendSlack), NOT THE ALERTS ONE, and
+   that is the point rather than an oversight. Nothing here is broken
+   and nobody has to act -- it is a readout, and its usual answer is
+   "this is normal". The alerts channel is where things that need
+   fixing go; a recurring no-action post there is how that channel
+   starts being muted, taking the week that matters with it.
+   Authorised by Darshil, 25 Sept 2026, after the first hand-fired one
+   landed in bot-n8n-alerts. */
 const DROPOFF_DIGEST_HOUR_ET = Number(process.env.DROPOFF_DIGEST_HOUR_ET || 9);
 const DROPOFF_DIGEST_ENABLED = process.env.DROPOFF_DIGEST_ENABLED !== 'false';
 let _dropoffDigestSentWeek = null;
@@ -15124,17 +15133,24 @@ async function runDropoffDigest(force = false) {
     blocks.push(bSection(
       '_Counts form sessions, not people, so somebody who tried twice counts twice. ' +
       'Full breakdown by week, month, source or person on the dashboard, Dropoff tab._'));
-    sendOpsSlack(blocks, `Inbound form: ${bkd} of ${total} booked last week`);
+    sendSlack(blocks, `Inbound form: ${bkd} of ${total} booked last week`);
     console.log(`[dropoff-digest] sent — ${bkd}/${total} booked, ${cur}%`);
   } catch (err) {
     console.warn('[dropoff-digest] failed (non-blocking):', err && err.message);
   }
 }
 
+/* THE TICK IS 15 MINUTES, NOT 60, AND THAT IS NOT FUSSINESS.
+   setInterval starts counting at BOOT, not on the hour -- so with an
+   hourly tick a deploy at 09:05 on a Monday puts the ticks at 10:05 and
+   11:05, and that week is SILENTLY SKIPPED. A missed weekly digest is
+   invisible; a duplicate is merely annoying, so the trade goes toward
+   sending. The guard keys on the ET DAY stamp, so four ticks inside the
+   09:00 hour still send exactly once. */
 function startDropoffDigest() {
-  const t = setInterval(() => runDropoffDigest().catch(() => {}), 60 * 60 * 1000);
+  const t = setInterval(() => runDropoffDigest().catch(() => {}), 15 * 60 * 1000);
   if (t.unref) t.unref();
-  console.log(`[dropoff-digest] Started — Mondays at ${DROPOFF_DIGEST_HOUR_ET}:00 ET, to the alerts channel`);
+  console.log(`[dropoff-digest] Started — Mondays at ${DROPOFF_DIGEST_HOUR_ET}:00 ET, to the leads channel`);
 }
 
 function startNonIcpBookedRecheck() {

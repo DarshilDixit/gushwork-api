@@ -46,8 +46,18 @@ evaluates the dashboard JS and reads what was painted.
   Sept**: `node tools/fire-non-icp-slack.js dropoff-digest`, Slack returned
   200, real numbers over the real leads table (191 of 295 booked, 64.7%,
   week of Sep 14). Added to the fire tool in the same change, so the path is
-  repeatable rather than a one-off. It fires Mondays 09:00 ET;
-  `DROPOFF_DIGEST_ENABLED=false` stops it.
+  repeatable rather than a one-off.
+- **Fired twice, and the second one is why.** The first landed in
+  `bot-n8n-alerts` because it used `sendOpsSlack`. It is a readout, not an
+  alert, so it now uses `sendSlack` (the leads channel) — authorised by
+  Darshil, 25 Sept. Re-fired to confirm: the log line changed from
+  `[alertOps]` to `[Slack]`, status 200. **That is the only way to check a
+  channel** — the code says which function, not which room.
+- **The tick went from 60 to 15 minutes.** `setInterval` counts from boot, so
+  an hourly tick plus a Monday 09:05 deploy skips the week silently. The
+  day-stamp guard still sends exactly once. Mondays in the 09:00 ET hour —
+  18:30 IST in summer, 19:30 in winter; `DROPOFF_DIGEST_ENABLED=false` stops
+  it.
 - **The tab has not been opened in a real browser.** The loader is evaluated
   in the suite's stubbed DOM and every painted number is read back, which is
   what caught the Model tab's "0 companies classified" class of bug — but a
