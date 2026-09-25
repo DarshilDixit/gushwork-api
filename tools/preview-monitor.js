@@ -86,8 +86,19 @@ function start() {
     if (req.method !== 'GET' && req.method !== 'HEAD') return res.status(405).json({ error: 'The preview is read-only: ' + req.method + ' ' + req.path + ' was not sent.' });
     next();
   });
-  app.get('/monitor/next', (req, res, next) => { monitorNext.reload(); next(); });   /* edits show on the next load */
-  monitorNext.mount(app, { tz: L.DASH_TZ });
+  /* THE PAGE IS REBUILT FROM A FRESH monitor-next.js ON EVERY LOAD, not only
+     its CSS and scripts. reload() re-reads monitor/, but the MARKUP lives in
+     page(), which was bound once at start -- so on 26 Sept the preview served
+     new CSS around old sidebar markup, and a full layout run tested a mix
+     that could never ship. Re-requiring the module re-reads both. */
+  const MN = path.join(ROOT, 'monitor-next.js');
+  app.get('/monitor/next', (req, res) => {
+    if (req.query.token !== TOKEN) return res.status(401).send('401 — Unauthorized.');
+    delete require.cache[require.resolve(MN)];
+    res.set('Cache-Control', 'no-store');
+    res.type('html').send(require(MN).page({ token: req.query.token, tz: L.DASH_TZ }));
+  });
+  monitorNext.mount(app, { tz: L.DASH_TZ });   /* the font route; /monitor/next above wins */
   app.get('/monitor/overview', async (req, res) => {
     if (req.query.token !== TOKEN) return res.status(401).json({ error: 'Unauthorized' });
     try { res.json(await L.overviewReport(db, { view: req.query.view, asof: req.query.asof })); }

@@ -105,7 +105,9 @@ GW.TABS.overview = (function (G) {
          credits! Upgrade your plan...") and was being run straight into the
          impact sentence with no stop between them. */
       (GW.HEALTH_IMPACT && GW.HEALTH_IMPACT[top.k] ? '<div class="attn-s">' + esc(GW.HEALTH_IMPACT[top.k]) + '</div>' : '') +
-      (top.c.detail ? '<div class="attn-d">' + esc(top.c.detail) + '</div>' : '') +
+      /* summary when the check offers one: the Apollo row's detail opens with
+         Apollo's own error text, which belongs on System health, not here */
+      ((top.c.summary || top.c.detail) ? '<div class="attn-d">' + esc(top.c.summary || top.c.detail) + '</div>' : '') +
       (more.length ? '<div class="attn-more">Also red: ' + more.map(function (x) { return esc(nm(x)) + ' (' + esc(x.c.text) + ')'; }).join('; ') + '</div>' : '') +
       '</div>' + side + '</section>';
   }
@@ -223,7 +225,8 @@ GW.TABS.overview = (function (G) {
     var ss0 = d.sessions[0], f = d.funnel;
     h += U.metricCard({ id: 'sessions', label: 'Sessions', value: ss0, chip: U.delta(ss0, d.sessions[1], true),
       sub: f && f.sessions ? G.pct1(f[u].step1, f.sessions) + '% got through step 1' : '', title: 'Visits to a page carrying the form, one per browser tab, bots excluded.' });
-    h += U.metricCard({ id: 'dq', label: 'Disqualified', value: k.dq[u][0], chip: U.delta(k.dq[u][0], k.dq[u][1], null), sub: dqSub(0) });
+    /* the comparison every other card carries, THEN the breakdown */
+    h += U.metricCard({ id: 'dq', label: 'Disqualified', value: k.dq[u][0], chip: U.delta(k.dq[u][0], k.dq[u][1], null), sub: fmt(k.dq[u][1]) + ' ' + cmpWord + '<span class="kbreak">' + dqSub(0) + '</span>' });
     h += U.metricCard({ id: 'blocked', label: 'Blocked — not our market', value: k.blocked[u][0], chip: U.delta(k.blocked[u][0], k.blocked[u][1], null), sub: fmt(k.blocked[u][1]) + ' ' + cmpWord, title: BLOCKED_T });
     h += U.metricCard({ id: 'withheld', label: WITHHELD_L, value: k.withheld[u][0], chip: U.delta(k.withheld[u][0], k.withheld[u][1], null), sub: fmt(k.withheld[u][1]) + ' ' + cmpWord, title: WITHHELD_T });
     return h;
@@ -263,6 +266,7 @@ GW.TABS.overview = (function (G) {
       var el = document.getElementById('ov-chart-el'); if (!el) return;
       var r = GW.chart.draw(el, { title: title, grain: d.series.grain, slots: slots, cur: series.cur, prev: series.prev, partialIdx: series.partialIdx,
         curLabel: curLabel, prevLabel: prevLabel, table: G.S.table, caps: view === 'today' ? 'key' : 'all', partialWord: view === 'today' ? 'now' : 'so far',
+        partialCap: view === 'today' ? ' so far' : '', fill: true,
         slotName: view === 'today' ? 'Hour' : view === 'week' ? 'Day' : 'Month', momText: view === 'all' ? momFn(d, slots, series) : null });
       var note = document.getElementById('ov-sumnote');
       if (note && r && r.grouped) note.textContent = sumNote(d, series) + ' On a narrow screen the hours are grouped in threes — switch to the table for every hour.';

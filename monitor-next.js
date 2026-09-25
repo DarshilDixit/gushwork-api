@@ -80,7 +80,7 @@ function page({ token, tz }) {
     '<div class="actions"><button class="btn" data-refresh aria-label="Refresh"><svg class="ic" aria-hidden="true"><use href="#i-arrow-clockwise"/></svg><span class="desktop-only">Refresh</span></button>' +
     '<div class="itg desktop-only" role="group" aria-label="Theme">' + themeBtns + '</div>' +
     '<button class="ibtn menu-trigger" aria-label="Open the menu" aria-expanded="false" aria-controls="drawer"><svg class="ic" aria-hidden="true"><use href="#i-list"/></svg></button></div></header>' +
-    '<div class="frame"><aside class="sidebar"><nav class="groups" id="nav-side" aria-label="Dashboard"></nav>' + foot + '</aside>' +
+    '<div class="frame"><aside class="sidebar"><div class="side-in"><nav class="groups" id="nav-side" aria-label="Dashboard"></nav>' + foot + '</div></aside>' +
     '<main class="slot"><div class="content" id="view" tabindex="-1"></div></main></div>' +
     '<div class="drawer-catch" id="drawer-catch"></div>' +
     '<aside class="drawer" id="drawer" aria-label="Menu"><div class="drawer-tools"><span>Theme</span><div class="itg" role="group" aria-label="Theme">' + themeBtns + '</div></div>' +
@@ -109,6 +109,7 @@ function mount(app, { tz }) {
   });
 }
 
-/* reload() is for tools/preview-monitor.js, which re-reads the files on every
-   page load so an edit shows without a restart. Production reads once. */
+/* reload() re-reads the files. tools/preview-monitor.js goes further and
+   re-requires this whole module on every page load, so an edit to the MARKUP
+   in page() shows too, not only CSS and scripts. Production reads once. */
 module.exports = { mount, page, reload, PARTS, JS_ORDER, ASSETS, DIR };

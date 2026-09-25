@@ -2475,8 +2475,12 @@ async function checkApolloHealth(db) {
       const reason = apolloReplyError(200, { error: w.error || 'refused' });
       const since  = ms(w.since);
       const what   = isCreditsExhausted(reason) ? 'Out of credits' : 'Apollo is refusing lookups';
-      return hc('apollo', 'red', what + (since ? ' for ' + fmtAge(Date.now() - since) : ''),
-        reason + ' · ' + refused + ' refused in the last ' + win + ' · ' + lastNote);
+      /* summary: the same line WITHOUT Apollo's own words ("You have
+         insufficient credits! Upgrade your plan..."), for the Overview's
+         strip, which an SDR reads. System health keeps the full detail. */
+      return Object.assign(hc('apollo', 'red', what + (since ? ' for ' + fmtAge(Date.now() - since) : ''),
+        reason + ' · ' + refused + ' refused in the last ' + win + ' · ' + lastNote),
+        { summary: refused + ' refused in the last ' + win + ' · ' + lastNote });
     }
 
     if (eligible < HEALTH_MIN_SAMPLE) {

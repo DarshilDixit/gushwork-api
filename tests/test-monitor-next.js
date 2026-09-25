@@ -269,10 +269,12 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   /* ═══ 3. THE PAGE, EXECUTED ════════════════════════════════════════════ */
   const js = (html.match(/<script>(\/\* ---- core\.js[\s\S]*?)<\/script><\/body>/) || [])[1] || '';
   ok('page: the inline script was found', js.length > 20000, js.length);
+  ok('page: the rail\'s BACKGROUND runs the page, its CONTENTS stick', /<aside class="sidebar"><div class="side-in">/.test(html) &&
+     /\.side-in \{ position: sticky;/.test(fs.readFileSync(path.join(ROOT, 'monitor', 'app.css'), 'utf8')) && !/\.sidebar \{[^}]*position: sticky/.test(fs.readFileSync(path.join(ROOT, 'monitor', 'app.css'), 'utf8')));
   ok('page: the skip link is its own class, visible when focused', /<a class="skip" href="#view">/.test(html) && /\.skip:focus \{[^}]*position: fixed/.test(fs.readFileSync(path.join(ROOT, 'monitor', 'app.css'), 'utf8')));
   ok('page: ONE live region, in the shell rather than in a tab', (html.match(/id="gw-live"/g) || []).length === 1 && /id="gw-live" class="sr-only" role="status" aria-live="polite"/.test(html));
   const HEALTH = { checks: {
-    apollo: { state: 'red', text: 'Out of credits for 2d', detail: 'You have insufficient credits! · 86 refused in the last 24h' },
+    apollo: { state: 'red', text: 'Out of credits for 2d', detail: 'You have insufficient credits! · 86 refused in the last 24h · Last enrichment 2d ago', summary: '86 refused in the last 24h · Last enrichment 2d ago' },
     partial: { state: 'green', text: '10 leads saved in the last 2h' }, submit: { state: 'green', text: '78 completions' },
     booking: { state: 'green', text: '85% booked' }, cron: { state: 'insufficient_data', text: 'No run yet' }, aws: { state: 'green', text: 'In sync' },
     recovery: { state: 'green', text: '78 follow-ups' }, partnerstack: { state: 'insufficient_data', text: 'No partner activity' }, nonicpllm: { state: 'amber', text: '80 verdicts' },
@@ -336,6 +338,8 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('overview: the disqualified split names the remainder, so it adds up', dqOther === 1 && v.includes(' · ' + dqOther + ' no reason recorded'));
   ok('overview: the withheld card says it is the MODEL, not every reason', v.includes('Meta withheld — model') && !/>Meta withheld<\/div>/.test(v));
   ok('overview: blocked and withheld cards', n.includes(String(KPI.cur.people_blocked)) && n.includes(String(KPI.cur.people_withheld)));
+  ok('overview: Disqualified carries the comparison like every card, THEN its breakdown',
+     /data-card="dq"[\s\S]*?class="ksub">12 at this point last week<span class="kbreak">13 sell to consumers · 9 asked for the waitlist · 1 no reason recorded<\/span>/.test(v), (v.match(/data-card="dq"[^]*?<\/div><\/div>/) || [''])[0].slice(-220));
   ok('overview: SESSIONS, with the step-1 rate', n.includes('5903') && />Sessions</.test(v) && !/Page loads/.test(v) && v.includes((Math.round(KPI.cur.f_people / 5903 * 1000) / 10) + '% got through step 1'));
   ok('overview: the funnel starts from sessions and says what one is', v.includes('5,903</b> sessions') && v.includes('A session is one visit to a page carrying the form'));
   ok('overview: the comparison names the same point', v.includes('at this point last week'));
@@ -348,9 +352,10 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('overview: "Everything else" names what is in it ON SCREEN', /<small class="chn">LinkedIn 3 · Partner \/ referral 3<\/small>/.test(v), (v.match(/class="chn">[^<]*/) || [''])[0]);
   /* The attention strip reads /monitor/health */
   ok('attention: the red check leads, in words', v.includes('Apollo enrichment: Out of credits for 2d'));
-  ok('attention: its detail is shown, escaped', v.includes('You have insufficient credits!'));
-  ok('attention: what it COSTS comes first, the vendor detail after, each its own line',
-     v.indexOf('they arrive without title') > 0 && v.indexOf('they arrive without title') < v.indexOf('You have insufficient credits!') && /<div class="attn-d">You have insufficient credits!/.test(v));
+  /* the plain summary, never Apollo's own error text -- that stays on System health */
+  ok('attention: the plain summary, and NOT the vendor text', /<div class="attn-d">86 refused in the last 24h · Last enrichment 2d ago<\/div>/.test(v) && !v.includes('You have insufficient credits!'));
+  ok('attention: what it COSTS comes first, the facts after, each its own line',
+     v.indexOf('they arrive without title') > 0 && v.indexOf('they arrive without title') < v.indexOf('86 refused in the last 24h'));
   /* API uptime and ELV come from their own routes and are in the count: the
      ELV fixture is quiet (grey), so three are not judged, not two. */
   ok('attention: the counts are buttons, not hover-only badges', /<button class="badge b-neu attn-chip" data-attn="insufficient_data"[^>]*>3 not judged<\/button>/.test(v), (v.match(/attn-chip[^<]*/g) || []).join(' | '));
@@ -399,6 +404,16 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   GW.TABS.overview.setView('today'); await ticks(); v = view(); n = nums(v);
   ok('overview/today: compares with yesterday at this time', v.includes('at this time yesterday'));
   ok('overview/today: says it is live and pauses when hidden', v.includes('Updates every minute') && v.includes('paused while this tab is hidden'));
+  /* the running hour's label says "so far"; hour 14 in the fixture holds (14 % 5) + 1 = 5 */
+  ok('chart/today: the current hour reads "5 so far", not a bare number', /<text class="cap"[^>]*>5 so far<\/text>/.test(b.els['ov-chart-el'].innerHTML), (b.els['ov-chart-el'].innerHTML.match(/<text class="cap"[^>]*>[^<]*/g) || []).join(' | '));
+  const zh = { innerHTML: '', clientWidth: 900, setAttribute() {}, querySelector: () => ({ style: {}, offsetHeight: 0 }), querySelectorAll: () => [] };
+  const hsl = GW.TABS.overview._slotsFor(P.today), zcur = hsl.map((_, i) => (i < 14 ? 3 : i === 14 ? 0 : null));
+  GW.chart.draw(zh, { title: 't', grain: 'hour', slots: hsl, cur: zcur, prev: null, partialIdx: 14, curLabel: 'a', prevLabel: 'b', caps: 'key', partialCap: ' so far' });
+  ok('chart/today: a current hour still at 0 gets NO label at all', !/<text class="cap"[^>]*>0( so far)?<\/text>/.test(zh.innerHTML), (zh.innerHTML.match(/<text class="cap"[^>]*>[^<]*/g) || []).join(' | '));
+  /* FILL: given 300px of room the chart is 300 tall; with none it keeps its 208 floor; never past 420 */
+  const fh = (ch) => { const e = { innerHTML: '', clientWidth: 900, clientHeight: ch, setAttribute() {}, querySelector: () => ({ style: {}, offsetHeight: 0 }), querySelectorAll: () => [] };
+    GW.chart.draw(e, { title: 't', grain: 'day', slots: hsl.slice(0, 7), cur: [1, 2, 3, 4, 5, 6, 7], prev: null, partialIdx: 6, curLabel: 'a', fill: true }); return (e.innerHTML.match(/<svg width="\d+" height="(\d+)"/) || [])[1]; };
+  eq('chart: fill takes the room its row gives it', [fh(300), fh(0), fh(900)].join(','), '300,208,420');
   GW.TABS.overview.setView('all'); await ticks(); v = view(); n = nums(v);
   ok('overview/all: month on month on the lead card', v.includes('Month on month') && v.includes('This month so far') && v.includes('Last month, same point'));
   ok('overview/all: recovered bookings card', n.includes('53'));
@@ -438,6 +453,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('health: never "reached step 2" for people who SENT it', !/reached step 2/.test(v) && v.includes('completed step 2'));
   ok('health: four-card panels are a four-column grid', (v.match(/class="sumgrid four"/g) || []).length === 2);
   ok('health: the API check has a timeout, like every other call', /AbortSignal\.timeout\(8000\)/.test(fs.readFileSync(path.join(ROOT, 'monitor', 'js', 'health.js'), 'utf8')));
+  ok('health: System health keeps Apollo\'s own words in full', v.includes('You have insufficient credits!'));
   ok('health: API uptime and ELV are rows, named', v.includes('data-check="api"') && v.includes('data-check="elv"') && v.includes('Email verification (ELV)'));
   /* every server health id is known to the new tab -- a check with no row renders nowhere */
   const serverIds = [...new Set([...fs.readFileSync(path.join(ROOT, 'index.js'), 'utf8').matchAll(/^\s{2}(\w+):\s+\{ source: '/gm)].map((m) => m[1]))];

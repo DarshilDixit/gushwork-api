@@ -113,7 +113,12 @@ h1, h2 { font-weight: inherit; }
 .brand-tag { font: var(--gw-text-body-12-med); color: var(--ink-label); white-space: nowrap; }   /* on the rail muted is 4.46:1; label clears it */
 .actions { display: flex; align-items: center; gap: var(--gw-space-8); }
 .frame { display: flex; min-height: calc(100vh - 60px); }
-.sidebar { width: 240px; flex: 0 0 240px; background: var(--chrome); border-right: 1px solid var(--chrome-line); display: flex; flex-direction: column; justify-content: space-between; position: sticky; top: 60px; height: calc(100vh - 60px); overflow-y: auto; }
+.sidebar { width: 240px; flex: 0 0 240px; background: var(--chrome); border-right: 1px solid var(--chrome-line); }
+/* THE RAIL'S BACKGROUND RUNS THE WHOLE PAGE; only its CONTENTS stick. The
+   sidebar itself was the sticky box, one screen tall, so a full-page capture
+   or the bounce at the bottom of a long page showed the canvas beneath it --
+   "the sidebar stops partway down" (26 Sept). */
+.side-in { position: sticky; top: 60px; height: calc(100vh - 60px); display: flex; flex-direction: column; justify-content: space-between; overflow-y: auto; }
 .groups { padding: var(--gw-space-20); display: flex; flex-direction: column; gap: var(--gw-space-24); }
 .group { display: flex; flex-direction: column; gap: var(--gw-space-2); }
 .glabel { padding: var(--gw-space-4) var(--gw-space-8); font: var(--gw-text-body-10-sem); color: var(--ink-faint); text-transform: uppercase; letter-spacing: .06em; }
@@ -134,7 +139,11 @@ h1, h2 { font-weight: inherit; }
 /* A CONTAINER: tables and summary grids respond to the room BESIDE the rail,
    not to the viewport -- a 1024 tablet has a 704px content column, and a
    viewport query had it laying out a desktop table in it. */
-.content { max-width: 1240px; padding: var(--gw-space-24) var(--gw-space-40) var(--gw-space-48); display: flex; flex-direction: column; gap: var(--gw-space-20); container: view / inline-size; }
+/* SPACING, one step up the design system's scale (26 Sept, "more breathing
+   room, balanced, not loose"): sections 20 -> 24, card rows 12 -> 16, card
+   padding 16/20 -> 20/24. Phones move one step too, but from their own
+   tighter base, so a 360px screen does not lose chart width to padding. */
+.content { max-width: 1240px; padding: var(--gw-space-24) var(--gw-space-40) var(--gw-space-48); display: flex; flex-direction: column; gap: var(--gw-space-24); container: view / inline-size; }
 
 /* The drawer: the rail, from the RIGHT, below the topbar (v2/phone.md). No
    scrim -- the design has none; a transparent catcher closes it on an outside
@@ -179,7 +188,7 @@ input.field { min-width: 0; }
 .live-dot.paused { background: var(--ink-disabled); box-shadow: none; }
 
 /* ── Page header ───────────────────────────────────────────────────────── */
-.ph { display: flex; flex-direction: column; gap: var(--gw-space-12); }
+.ph { display: flex; flex-direction: column; gap: var(--gw-space-16); }
 .ph-top { display: flex; align-items: center; justify-content: space-between; gap: var(--gw-space-12); flex-wrap: wrap; }
 /* h5: 32px Vert Semibold, a real token -- bigger than the 26px h6 of the second
    mockup, smaller than the untokened 44 of the first (ruled 26 Sept). */
@@ -197,7 +206,7 @@ input.field { min-width: 0; }
 .badge .ic { width: 12px; height: 12px; }
 .b-good { background: var(--good-bg); color: var(--good-ink); } .b-bad { background: var(--bad-bg); color: var(--bad-ink); }
 .b-warn { background: var(--warn-bg); color: var(--warn-ink); } .b-neu { background: var(--neu-bg); color: var(--neu-ink); }
-.panel { padding: var(--gw-space-20); display: flex; flex-direction: column; gap: var(--gw-space-16); }
+.panel { padding: var(--gw-space-24); display: flex; flex-direction: column; gap: var(--gw-space-20); }
 .sh { display: flex; align-items: center; justify-content: space-between; gap: var(--gw-space-12); flex-wrap: wrap; }
 .sh-t { display: inline; font: var(--gw-text-body-16-sem); color: var(--ink-strong); }
 .sh-q { font: var(--gw-text-body-16-reg); color: var(--qual); margin-left: var(--gw-space-8); }
@@ -217,7 +226,7 @@ input.field { min-width: 0; }
 @keyframes gw-pulse { from { opacity: 1; } to { opacity: .45; } }
 
 /* ── Attention strip ───────────────────────────────────────────────────── */
-.attn { display: flex; align-items: center; gap: var(--gw-space-16); padding: var(--gw-space-12) var(--gw-space-16); }
+.attn { display: flex; align-items: center; gap: var(--gw-space-16); padding: var(--gw-space-16) var(--gw-space-20); }
 .attn.bad { box-shadow: inset 0 0 0 1px var(--attn-line); }
 .attn-ic { width: 36px; height: 36px; border-radius: var(--gw-radius-12); display: grid; place-items: center; flex: 0 0 36px; }
 .attn.bad .attn-ic { background: var(--bad-bg); color: var(--bad-ink); }
@@ -240,8 +249,8 @@ input.field { min-width: 0; }
 .attn-explain b { color: var(--ink); font-weight: 600; }
 
 /* ── KPI layout: two leading cards, six supporting ─────────────────────── */
-.kpis { display: grid; grid-template-columns: 1.45fr 1.45fr 1fr 1fr 1fr; grid-template-rows: auto auto; gap: var(--gw-space-12); }
-.lead { grid-row: span 2; padding: var(--gw-space-20); display: flex; flex-direction: column; gap: var(--gw-space-16); }
+.kpis { display: grid; grid-template-columns: 1.45fr 1.45fr 1fr 1fr 1fr; grid-template-rows: auto auto; gap: var(--gw-space-16); }
+.lead { grid-row: span 2; padding: var(--gw-space-24); display: flex; flex-direction: column; gap: var(--gw-space-16); }
 .klabel { font: var(--gw-text-body-12-med); color: var(--ink-label); display: flex; align-items: center; gap: var(--gw-space-8); }
 .lead .klabel { font: var(--gw-text-body-14-med); }
 .kval { display: flex; align-items: baseline; gap: var(--gw-space-12); flex-wrap: wrap; }
@@ -258,15 +267,20 @@ input.field { min-width: 0; }
 .cb .tr { height: 6px; border-radius: var(--gw-radius-full); background: var(--track); overflow: hidden; }
 .cb .fi { height: 100%; border-radius: var(--gw-radius-full); }
 .cb .v { font: var(--gw-text-body-12-med); color: var(--ink-label); text-align: right; font-variant-numeric: tabular-nums; }
-.mc { padding: var(--gw-space-16); display: flex; flex-direction: column; gap: var(--gw-space-8); border-radius: var(--gw-radius-12); }
+.mc { padding: var(--gw-space-20); display: flex; flex-direction: column; gap: var(--gw-space-8); border-radius: var(--gw-radius-12); }
+.ksub .kbreak { display: block; margin-top: var(--gw-space-2); }
 .mc .row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--gw-space-8); flex-wrap: wrap; }
 
 /* ── Panels grid ───────────────────────────────────────────────────────── */
-.grid2 { display: grid; grid-template-columns: minmax(0, 1.9fr) minmax(0, 1fr); gap: var(--gw-space-12); }
+.grid2 { display: grid; grid-template-columns: minmax(0, 1.9fr) minmax(0, 1fr); gap: var(--gw-space-16); }
 .span-all { grid-column: 1 / -1; }
 
 /* ── Charts ────────────────────────────────────────────────────────────── */
 .chart { position: relative; width: 100%; min-width: 0; }
+/* The Overview chart GROWS into the height its row gives it (the Funnel
+   beside it is taller) -- chart.js reads that room when spec.fill is set --
+   so neither card has an empty band. 208 is the floor, as before. */
+#ov-chart .chart { flex: 1 1 auto; min-height: 208px; }
 .chart svg { display: block; overflow: visible; }
 .axis { font: var(--gw-text-body-10-med); fill: var(--ink-muted); }
 .axis-strong { font: var(--gw-text-body-10-sem); fill: var(--ink-label); }
@@ -360,7 +374,7 @@ input.field { min-width: 0; }
    of its row. .four is for panels of four (System health, Lead magnet),
    which left an empty fifth slot in a five-column grid and an orphan in a
    three. */
-.sumgrid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--gw-space-12); }
+.sumgrid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--gw-space-16); }
 .sumgrid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .sumgrid .mc .num { font-size: 24px; }
 @container view (max-width: 899px) {
@@ -425,7 +439,7 @@ input.field { min-width: 0; }
   .brand-name { font: 600 16px/1 var(--gw-font-display); }   /* phone title, Vert Semibold 16 -- no token (R15) */
   .logo-tile { width: 24px; height: 24px; flex-basis: 24px; }
   .logo-tile svg { width: 22px; }
-  .content { padding: var(--gw-space-16) var(--gw-space-16) var(--gw-space-40); gap: var(--gw-space-16); }
+  .content { padding: var(--gw-space-16) var(--gw-space-16) var(--gw-space-40); gap: var(--gw-space-20); }
   .title { font: var(--gw-text-h6); letter-spacing: var(--gw-text-h6-tracking); }
   .controls { flex-direction: column; align-items: stretch; gap: var(--gw-space-8); }
   /* The two toggles share a row when they fit (390 up) and wrap when they
@@ -447,11 +461,13 @@ input.field { min-width: 0; }
   .fieldset .dates { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .fieldset .dates label { flex-direction: column; align-items: stretch; gap: var(--gw-space-4); }
   .empty { padding: var(--gw-space-24) var(--gw-space-12); }
-  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--gw-space-8); }
+  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--gw-space-12); }
   .lead { grid-column: span 2; }
-  .kpis .mc { grid-column: span 1; padding: var(--gw-space-12); }
+  .kpis .mc { grid-column: span 1; padding: var(--gw-space-16); }
+  .lead { padding: var(--gw-space-20); }
+  .sumgrid, .sumgrid.four { gap: var(--gw-space-12); }
   .mc .row { flex-direction: column; align-items: flex-start; gap: var(--gw-space-4); }
-  .panel { padding: var(--gw-space-16); }
+  .panel { padding: var(--gw-space-20) var(--gw-space-16); gap: var(--gw-space-16); }
   .sh { flex-direction: column; align-items: flex-start; gap: var(--gw-space-8); }
   .sh-q { display: block; margin: var(--gw-space-4) 0 0; font: var(--gw-text-body-14-reg); }   /* phone: qualifier stacks (ruled 26 Aug) */
   .sh-r { width: 100%; justify-content: space-between; }

@@ -61,7 +61,11 @@ GW.chart = (function (G) {
   function draw(el, spec) {
     if (!el) return;
     if (spec.table) { el.innerHTML = table(spec); return; }
-    var W = Math.max(240, el.clientWidth || 0), H = spec.height || 208, L = 36, R = 8, T = 22, B = 40;
+    /* FILL: a chart sharing a row with a taller card takes the height it is
+       given instead of leaving an empty band under its note (the Today chart
+       beside the Funnel). The element is empty when measured -- render
+       replaces it -- so clientHeight is the room, never the old chart. */
+    var W = Math.max(240, el.clientWidth || 0), H = spec.height || (spec.fill ? Math.max(208, Math.min(420, el.clientHeight || 0)) : 208), L = 36, R = 8, T = 22, B = 40;
     var s0 = spec, grouped = false;
     if (spec.grain === 'hour' && (W - L - R) < 520) { s0 = Object.assign({}, spec, group(spec, 3)); grouped = true; }
     var n = s0.slots.length, band = (W - L - R) / n;
@@ -89,8 +93,13 @@ GW.chart = (function (G) {
     var peak = order.reduce(function (a, b) { return cur[b] > (cur[a] === undefined ? -1 : cur[a]) ? b : a; }, order[0]);
     var pri = order.filter(function (q) { return q === s0.partialIdx || q === peak; }).concat(order.filter(function (q) { return q !== s0.partialIdx && q !== peak; }));
     var capsWanted = spec.caps === 'all' ? pri : pri.filter(function (q) { return q === s0.partialIdx || q === peak; });
+    /* THE RUNNING SLOT says what it is ("3 so far"), and says nothing at all
+       when it is still 0 -- a bare "0" over the current hour read as a count
+       of nothing rather than an hour that has barely started. */
+    function capText(q) { return fmt(cur[q]) + (q === s0.partialIdx ? (spec.partialCap || '') : ''); }
+    capsWanted = capsWanted.filter(function (q) { return !(q === s0.partialIdx && !cur[q]); });
     capsWanted.forEach(function (q) {
-      var cx = L + band * q + band / 2, w = String(fmt(cur[q])).length * CH_W + 6;
+      var cx = L + band * q + band / 2, w = String(capText(q)).length * CH_W + 6;
       if (capAt.every(function (c) { return Math.abs(c.x - cx) > (c.w + w) / 2; })) capAt.push({ x: cx, w: w, i: q });
     });
     for (var i = 0; i < n; i++) {
@@ -104,7 +113,7 @@ GW.chart = (function (G) {
           s += '<path d="' + d + '" fill="var(--card)" stroke="var(--card)" stroke-width="4" stroke-linejoin="round"/>';
           s += '<path d="' + d + '" fill="var(--data)" opacity="' + (i === s0.partialIdx ? 0.5 : 1) + '"/>';
         }
-        if (capAt.some(function (c) { return c.i === i; })) s += '<text class="cap" x="' + cx + '" y="' + (Math.min(topC, topP === null ? topC : topP) - 6) + '" text-anchor="middle">' + fmt(cur[i]) + '</text>';
+        if (capAt.some(function (c) { return c.i === i; })) s += '<text class="cap" x="' + cx + '" y="' + (Math.min(topC, topP === null ? topC : topP) - 6) + '" text-anchor="middle">' + esc(capText(i)) + '</text>';
       }
       if (i % every === 0 || i === s0.partialIdx) {
         var clash = i !== s0.partialIdx && s0.partialIdx >= 0 && Math.abs(i - s0.partialIdx) < every;

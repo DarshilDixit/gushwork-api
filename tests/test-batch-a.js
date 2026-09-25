@@ -512,6 +512,9 @@ function liftClientJs(startMarker, endMarker) {
     ok('health/apollo: ...with Apollo’s own reason, HTML stripped',
        /insufficient credits/.test(out.detail) && !/<a/.test(out.detail), out.detail);
     ok('health/apollo: ...and how many were refused', /41 refused in the last 24h/.test(out.detail), out.detail);
+    /* the Overview strip reads summary: the same facts, WITHOUT Apollo's words */
+    ok('health/apollo: a summary for the Overview, with no vendor text in it',
+       /^41 refused in the last 24h · Last enrichment 2d ago$/.test(out.summary || '') && !/insufficient|Upgrade/i.test(out.summary || ''), out.summary);
     ok('health/apollo: the run start is read from AFTER the last answer',
        outPool.calls[1] && +new Date(outPool.calls[1].params[0]) === now - 49 * HOUR);
 
