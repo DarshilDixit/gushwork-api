@@ -9,6 +9,9 @@
      /monitor/overview      this branch's overviewReport, LIFTED out of
                             index.js and run on connections that are READ ONLY
                             at the database (default_transaction_read_only)
+     /monitor/duplicates    this branch's duplicatesReport, lifted the same
+                            way -- the branch changed it (is_internal), and a
+                            proxy to production would show the OLD query
      every other GET        proxied to production, unchanged -- the routes the
        /monitor/*, /health  page reads already exist there
      anything not a GET     REFUSED with 405. The Lead magnet tab has two write
@@ -65,7 +68,9 @@ const L = new Function([
   liftDecl('const OVERVIEW_VIEWS'), liftDecl('const OVERVIEW_WEBHOOK_SOURCES'), liftDecl('const RECOVERED_BOOKINGS_SQL'),
   liftDecl('function overviewWindowsSql'), liftDecl('async function overviewReport'), liftDecl('function dropoffTodayEtOf'),
   liftDecl('function dropoffAddDays'), liftDecl('function dropoffStep'),
-  'return { overviewReport, DASH_TZ };',
+  liftDecl('const ELV_EXCLUDED_DOMAINS'), liftDecl('const INTERNAL_TEST_EMAILS'), liftDecl('const INTERNAL_STAGING_HOSTS'),
+  liftDecl('function internalLeadSqlClause'), liftDecl('async function duplicatesReport'),
+  'return { overviewReport, duplicatesReport, DASH_TZ };',
 ].join('\n'))();
 
 function start() {
@@ -87,6 +92,11 @@ function start() {
     if (req.query.token !== TOKEN) return res.status(401).json({ error: 'Unauthorized' });
     try { res.json(await L.overviewReport(db, { view: req.query.view, asof: req.query.asof })); }
     catch (err) { res.status(err.status || 500).json({ error: err.message }); }
+  });
+  app.get('/monitor/duplicates', async (req, res) => {
+    if (req.query.token !== TOKEN) return res.status(401).json({ error: 'Unauthorized' });
+    try { res.json(await L.duplicatesReport(db)); }
+    catch (err) { res.status(500).json({ error: err.message }); }
   });
   /* Everything else the page reads: the live routes, unchanged. */
   app.get(/^\/(monitor(\/.*)?|health)$/, async (req, res) => {

@@ -71,7 +71,7 @@ function rowsFor(sql, params) {
     /* params: BOT_RE, then k, s, e triples. The funnel window of the Today
        and Week views IS the current window, so it gets the same count. */
     const w = {}; for (let i = 1; i + 2 < params.length; i += 3) w[params[i]] = params[i + 1] + '|' + params[i + 2];
-    return Object.keys(w).map((k) => ({ k, page_loads: k === 'cur' || (k === 'fun' && w.fun === w.cur) ? 5903 : k === 'cmp' ? 4697 : 31577 }));
+    return Object.keys(w).map((k) => ({ k, sessions: k === 'cur' || (k === 'fun' && w.fun === w.cur) ? 5903 : k === 'cmp' ? 4697 : 31577 }));
   }
   if (/'bucket' AS kind/.test(flat)) {
     const grain = /date_trunc\('hour'/.test(flat) ? 'hour' : /date_trunc\('day'/.test(flat) ? 'day' : 'month';
@@ -235,7 +235,8 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   eq('overview/week: the waitlist split', W.kpi.waitlist.people[0], KPI.cur.people_waitlist);
   eq('overview/week: blocked from the ladder', W.kpi.blocked.leads[0], KPI.cur.leads_blocked);
   eq('overview/week: meta withheld', W.kpi.withheld.people[0], KPI.cur.people_withheld);
-  eq('overview/week: page loads, cur', W.page_loads[0], 5903);
+  eq('overview/week: sessions, cur', W.sessions[0], 5903);
+  ok('overview: the payload calls them sessions, never page loads', !('page_loads' in W) && W.funnel.sessions === 5903);
   eq('overview/week: the funnel reads the form-only columns', W.funnel.people.step1, KPI.cur.f_people);
   eq('overview/week: seven day slots, generated', W.series.slots.length, 7);
   eq('overview/week: the slots start on the Monday', W.series.slots[0], '2026-09-21');
@@ -249,8 +250,17 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   eq('overview/all: month on month, this month', P.all.month.people[0], KPI.month.people);
   eq('overview/all: month on month, last month at the same point', P.all.month.people[1], KPI.cmp.people);
   eq('overview/all: recovered bookings from the shared definition', P.all.recovered, 53);
-  eq('overview/all: no all-time page loads (tracking began at go_live)', P.all.page_loads[0], null);
+  eq('overview/all: no all-time sessions (tracking began at go_live)', P.all.sessions[0], null);
   eq('overview/all: the funnel starts at go_live', P.all.funnel.since, B.go_live);
+  /* /monitor/duplicates, through the booted route: the SQL that reaches the
+     database groups by lower(email) ALONE -- the dedup key, always -- and
+     carries the one internal-lead clause every outbound guard asks. */
+  S.queries = [];
+  const dup = await realFetch(BASE + '/monitor/duplicates' + tq);
+  const dq = S.queries.map((q) => q.sql.replace(/\s+/g, ' ')).find((q) => /HAVING COUNT\(\*\) > 1/.test(q)) || '';
+  eq('duplicates: the route answers', dup.status, 200);
+  ok('duplicates: grouped by lower(email) alone, never the raw address too', /GROUP BY LOWER\(l\.email\) HAVING/.test(dq) && /MIN\(l\.email\) AS email/.test(dq), dq.slice(0, 200));
+  ok('duplicates: is_internal is the shared clause, with its params bound', /bool_or\(\(LOWER\(l\.email\) = ANY\(\$1::text\[\]\)/.test(dq));
   S.dbDead = true;
   const dead = await realFetch(BASE + '/monitor/overview' + tq + '&view=week');
   S.dbDead = false;
@@ -259,6 +269,8 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   /* ═══ 3. THE PAGE, EXECUTED ════════════════════════════════════════════ */
   const js = (html.match(/<script>(\/\* ---- core\.js[\s\S]*?)<\/script><\/body>/) || [])[1] || '';
   ok('page: the inline script was found', js.length > 20000, js.length);
+  ok('page: the skip link is its own class, visible when focused', /<a class="skip" href="#view">/.test(html) && /\.skip:focus \{[^}]*position: fixed/.test(fs.readFileSync(path.join(ROOT, 'monitor', 'app.css'), 'utf8')));
+  ok('page: ONE live region, in the shell rather than in a tab', (html.match(/id="gw-live"/g) || []).length === 1 && /id="gw-live" class="sr-only" role="status" aria-live="polite"/.test(html));
   const HEALTH = { checks: {
     apollo: { state: 'red', text: 'Out of credits for 2d', detail: 'You have insufficient credits! · 86 refused in the last 24h' },
     partial: { state: 'green', text: '10 leads saved in the last 2h' }, submit: { state: 'green', text: '78 completions' },
@@ -302,17 +314,30 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   if (!GW) { finish(); return; }
   await ticks();
   const view = () => b.els.view ? b.els.view.innerHTML : '';
+  /* A fake element for the page's own delegated handlers: closest() answers
+     for an attribute selector it carries, so a click is routed exactly as a
+     real one would be. */
+  const el = (attrs, extra) => Object.assign({
+    getAttribute: (k) => (k in attrs ? attrs[k] : null), hasAttribute: (k) => k in attrs,
+    closest(sel) { const m = /^\[([a-z-]+)(?:="([^"]*)")?\]$/.exec(sel); return m && m[1] in attrs && (m[2] === undefined || attrs[m[1]] === m[2]) ? this : null; },
+  }, extra || {});
+  const fire = (type, target) => (b.listeners[type] || []).forEach((f) => f({ target, preventDefault() {}, key: target.key }));
 
   /* Overview, week, people */
   let v = view(), n = nums(v);
-  ok('overview: rendered', /<h1 class="title">Overview<\/h1>/.test(v), v.slice(0, 200));
+  ok('overview: rendered', /<h1 class="title" tabindex="-1">Overview<\/h1>/.test(v), v.slice(0, 200));
   eq('overview: the people lead card is the payload’s', n[0], String(KPI.cur.people));
   eq('overview: the booking rate is booked / people', n[1], String(Math.round(KPI.cur.people_booked / KPI.cur.people * 100)));
   ok('overview: the rate change is in points', /\+2 pts|\+[0-9]+ pts/.test(v));
   ok('overview: completed card', n.includes(String(KPI.cur.people_done)));
-  ok('overview: disqualified card, with its split', n.includes(String(KPI.cur.people_dq)) && v.includes(KPI.cur.people_b2c + ' sold to consumers') && v.includes(KPI.cur.people_waitlist + ' asked for the waitlist'));
+  ok('overview: disqualified card, with its split', n.includes(String(KPI.cur.people_dq)) && v.includes(KPI.cur.people_b2c + ' sell to consumers') && v.includes(KPI.cur.people_waitlist + ' asked for the waitlist'));
+  /* THE PARTS ADD UP: 23 disqualified = 13 + 9 + the one with no reason */
+  const dqOther = KPI.cur.people_dq - KPI.cur.people_b2c - KPI.cur.people_waitlist;
+  ok('overview: the disqualified split names the remainder, so it adds up', dqOther === 1 && v.includes(' · ' + dqOther + ' no reason recorded'));
+  ok('overview: the withheld card says it is the MODEL, not every reason', v.includes('Meta withheld — model') && !/>Meta withheld<\/div>/.test(v));
   ok('overview: blocked and withheld cards', n.includes(String(KPI.cur.people_blocked)) && n.includes(String(KPI.cur.people_withheld)));
-  ok('overview: page loads with the step-1 rate', n.includes('5903') && v.includes((Math.round(KPI.cur.f_people / 5903 * 1000) / 10) + '% got through step 1'));
+  ok('overview: SESSIONS, with the step-1 rate', n.includes('5903') && />Sessions</.test(v) && !/Page loads/.test(v) && v.includes((Math.round(KPI.cur.f_people / 5903 * 1000) / 10) + '% got through step 1'));
+  ok('overview: the funnel starts from sessions and says what one is', v.includes('5,903</b> sessions') && v.includes('A session is one visit to a page carrying the form'));
   ok('overview: the comparison names the same point', v.includes('at this point last week'));
   ok('overview: the funnel is the form-only one', n.includes(String(KPI.cur.f_people)) && n.includes(String(KPI.cur.f_people_booked)));
   /* THE SUM NOTE is computed, and it is the thing the owner asked to be true. */
@@ -320,26 +345,56 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('overview: the note says why the bars add to more than the headline', v.includes('3 people came back on a second day, so the bars add to ' + barSum + ', not ' + KPI.cur.people + '.'), (v.match(/id="ov-sumnote">[^<]*/) || [''])[0]);
   ok('overview: channels show first touch, largest first', v.indexOf('>Meta<') > 0 && v.indexOf('>Meta<') < v.indexOf('>Direct / organic<'));
   ok('overview: small channels fold into "Everything else"', v.includes('Everything else'));
+  ok('overview: "Everything else" names what is in it ON SCREEN', /<small class="chn">LinkedIn 3 · Partner \/ referral 3<\/small>/.test(v), (v.match(/class="chn">[^<]*/) || [''])[0]);
   /* The attention strip reads /monitor/health */
   ok('attention: the red check leads, in words', v.includes('Apollo enrichment: Out of credits for 2d'));
   ok('attention: its detail is shown, escaped', v.includes('You have insufficient credits!'));
-  ok('attention: the counts are buttons, not hover-only badges', /<button class="badge b-neu attn-chip" data-attn="insufficient_data"[^>]*>2 too quiet to judge<\/button>/.test(v), (v.match(/attn-chip[^<]*/g) || []).join(' | '));
+  ok('attention: what it COSTS comes first, the vendor detail after, each its own line',
+     v.indexOf('they arrive without title') > 0 && v.indexOf('they arrive without title') < v.indexOf('You have insufficient credits!') && /<div class="attn-d">You have insufficient credits!/.test(v));
+  /* API uptime and ELV come from their own routes and are in the count: the
+     ELV fixture is quiet (grey), so three are not judged, not two. */
+  ok('attention: the counts are buttons, not hover-only badges', /<button class="badge b-neu attn-chip" data-attn="insufficient_data"[^>]*>3 not judged<\/button>/.test(v), (v.match(/attn-chip[^<]*/g) || []).join(' | '));
   ok('attention: amber is its own count', /data-attn="amber"[^>]*>1 to watch</.test(v));
+  ok('attention: API uptime is counted with the rest', /data-attn="green"[^>]*>6 healthy</.test(v), (v.match(/data-attn="green"[^<]*/) || [''])[0]);
+  ok('nav: the System health badge counts the red checks, and SAYS what it counts', /data-tab="health"[\s\S]*?<span class="badge b-bad">1<span class="sr-only"> check red<\/span><\/span>/.test(b.els['nav-side'] ? b.els['nav-side'].innerHTML : ''));
+  fire('click', el({ 'data-attn': 'insufficient_data' })); v = view();
+  ok('attention: a chip opens the names behind it, ELV among them', /<b>Not judged:<\/b> [^<]*Email verification \(ELV\)/.test(v), (v.match(/attn-explain[^]*?<\/div>/) || [''])[0].slice(0, 300));
+  fire('click', el({ 'data-attn': 'insufficient_data' })); v = view();
   const chart = b.els['ov-chart-el'] ? b.els['ov-chart-el'].innerHTML : '';
   ok('chart: drawn as SVG at the container width', /<svg width="960"/.test(chart), chart.slice(0, 80));
-  ok('chart: last week is a grey bar behind', /fill="var\(--prev\)"/.test(chart));
+  /* NOT "a --prev path exists": a zero-height bar is <path d=""> and matched
+     that regex while every grey bar was missing. Count bars with a shape. */
+  eq('chart: last week is a grey bar behind EVERY day', [...chart.matchAll(/<path d="M[^"]+" fill="var\(--prev\)"/g)].length, 7);
+  const wk = GW.TABS.overview._seriesFor(P.week, GW.TABS.overview._slotsFor(P.week));
+  eq('chart: last week lines up by POSITION, Monday with Monday', wk.prev.join(','), '42,49,44,42,42,31,40');
   ok('chart: this week is blue with a surface ring', /stroke="var\(--card\)" stroke-width="4"/.test(chart) && /fill="var\(--data\)"/.test(chart));
   ok('chart: the running day is faded and says so', /opacity="0\.5"/.test(chart) && />so far</.test(chart));
   /* Units: switching to Leads changes every card */
   GW.S.unit = 'leads'; GW.TABS.overview.render(); v = view(); n = nums(v);
   eq('overview/leads: the lead card switches unit', n[0], String(KPI.cur.leads));
+  ok('overview/leads: the Sessions rate is in the SAME unit as the funnel beside it', v.includes((Math.round(KPI.cur.f_leads / 5903 * 1000) / 10) + '% got through step 1') && !v.includes((Math.round(KPI.cur.f_people / 5903 * 1000) / 10) + '% got through step 1'));
   ok('overview/leads: the note says the bars add up exactly', v.includes('add up to the headline exactly'));
   ok('overview/leads: the chart title follows the unit', v.includes('Leads per day'));
   GW.S.unit = 'people';
   /* Table view */
   GW.S.table = true; GW.TABS.overview.render();
-  ok('chart: the Table switch paints a table with both weeks', /<table>/.test(b.els['ov-chart-el'].innerHTML) && b.els['ov-chart-el'].innerHTML.includes('<th>Last week</th>'));
+  const tbl = b.els['ov-chart-el'].innerHTML;
+  ok('chart: the Table switch paints a table with both weeks', /<table>/.test(tbl) && tbl.includes('<th>Last week</th>'));
+  ok('chart: the table reads last week BACK, named by its own date', /<td>Mon 21 Sep<\/td><td>41<\/td><td>42 <span class="pd">Mon 14 Sep<\/span><\/td>/.test(tbl), (tbl.match(/<td>Mon 21[^]*?<\/tr>/) || [''])[0]);
+  ok('chart: the table toggle keeps ONE name, aria-pressed carries it', /data-table-toggle aria-pressed="true" aria-label="Show as a table"/.test(view()));
   GW.S.table = false;
+  /* 3-hour blocks on a phone: each block ends where its last hour ends */
+  const hs = GW.TABS.overview._slotsFor(P.today), gp = GW.chart.group({ slots: hs, cur: hs.map(() => 1), prev: hs.map(() => 2), partialIdx: 14 }, 3);
+  eq('chart: a 3-hour block reads 12a to 3a, not 12a to 5a', gp.slots[0].label + ' ' + gp.slots[0].sub, '12a –3a');
+  eq('chart: its tooltip names one range', gp.slots[0].head, '12 AM – 3 AM');
+  eq('chart: the last block ends at midnight', gp.slots[7].sub, '–12a');
+  eq('chart: grouped values SUM', gp.cur[0] + '/' + gp.prev[0], '3/6');
+  const zc = { innerHTML: '', clientWidth: 600, setAttribute() {}, querySelector: () => ({ style: {}, offsetHeight: 0 }), querySelectorAll: () => [] };
+  GW.chart.draw(zc, { title: 't', grain: 'day', slots: hs.slice(0, 7), cur: [0, 0, 0, 0, 0, 0, 0], prev: [0, 0, 0, 0, 0, 0, 0], partialIdx: 0, curLabel: 'a', prevLabel: 'b' });
+  ok('chart: an ALL-ZERO window draws, with no NaN anywhere', zc.innerHTML.length > 200 && !/NaN|Infinity/.test(zc.innerHTML));
+  /* A week across a month keeps the start's month */
+  eq('overview: a week across a month names both months', GW.TABS.overview._meta({ view: 'week', asof: '2026-10-01T18:00:00Z', windows: { cur: { from: '2026-09-28T04:00:00Z' } } }).split(' so far')[0], 'Mon 28 Sep – Thu 1 Oct');
+  eq('overview: a week inside one month drops the repeat', GW.TABS.overview._meta({ view: 'week', asof: ASOF, windows: { cur: { from: B.w0 } } }).split(' so far')[0], 'Mon 21 – Fri 25 Sep');
   /* Today and All time */
   GW.TABS.overview.setView('today'); await ticks(); v = view(); n = nums(v);
   ok('overview/today: compares with yesterday at this time', v.includes('at this time yesterday'));
@@ -347,6 +402,9 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   GW.TABS.overview.setView('all'); await ticks(); v = view(); n = nums(v);
   ok('overview/all: month on month on the lead card', v.includes('Month on month') && v.includes('This month so far') && v.includes('Last month, same point'));
   ok('overview/all: recovered bookings card', n.includes('53'));
+  GW.S.unit = 'leads'; GW.TABS.overview.render();
+  ok('overview/all: Recovered says ON the card that it stays in people', /Recovered bookings[\s\S]*?counted in people/.test(view()));
+  GW.S.unit = 'people'; GW.TABS.overview.render();
   const all = GW.TABS.overview;
   const aslots = all._slotsFor(P.all), aser = all._seriesFor(P.all, aslots), mom = all._momFn(P.all, aslots, aser);
   ok('overview/all: April is never compared with a partial March', /March started on the 20th|Mar started on the 20th/.test(mom(1)), mom(1));
@@ -365,6 +423,11 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   b.intervals.filter((x) => x.ms === 60000).forEach((x) => x.fn()); await ticks();
   ok('refresh: a visible tab refreshes', b.calls.length > before);
 
+  /* A late answer for a tab you have left must not paint over the one you are on */
+  GW.show('dropoff'); await ticks();
+  GW.TABS.overview.render();
+  ok('tabs: a late Overview render does NOT paint over Dropoff', /<h1 class="title" tabindex="-1">Dropoff</.test(view()) && !/<h1 class="title" tabindex="-1">Overview</.test(view()));
+
   /* Health */
   GW.show('health'); await ticks(20); v = view();
   ok('health: every server check has a row', Object.keys(GW.HEALTH_NAMES).every((k) => v.includes('data-check="' + k + '"')));
@@ -372,6 +435,10 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('health: quiet is grey, not green', /data-check="cron"[\s\S]*?b-neu[^>]*>No run yet</.test(v));
   ok('health: Salesforce unreadable is UNKNOWN, never zero', v.includes('UNKNOWN, not zero') && !/Arrived in Salesforce<\/div><div class="row"><span class="num" data-v="0"/.test(v));
   ok('health: the coverage cards are the payload’s', nums(v).includes('4537'));
+  ok('health: never "reached step 2" for people who SENT it', !/reached step 2/.test(v) && v.includes('completed step 2'));
+  ok('health: four-card panels are a four-column grid', (v.match(/class="sumgrid four"/g) || []).length === 2);
+  ok('health: the API check has a timeout, like every other call', /AbortSignal\.timeout\(8000\)/.test(fs.readFileSync(path.join(ROOT, 'monitor', 'js', 'health.js'), 'utf8')));
+  ok('health: API uptime and ELV are rows, named', v.includes('data-check="api"') && v.includes('data-check="elv"') && v.includes('Email verification (ELV)'));
   /* every server health id is known to the new tab -- a check with no row renders nowhere */
   const serverIds = [...new Set([...fs.readFileSync(path.join(ROOT, 'index.js'), 'utf8').matchAll(/^\s{2}(\w+):\s+\{ source: '/gm)].map((m) => m[1]))];
   ok('health: every HEALTH_ALERT_META id has a name here', serverIds.length >= 8 && serverIds.every((k) => GW.HEALTH_NAMES[k]), serverIds.filter((k) => !GW.HEALTH_NAMES[k]).join(','));
@@ -384,6 +451,16 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('dropoff: the partial period is marked', v.includes('<span class="part">part</span>'));
   ok('dropoff: the summary reads the payload', nums(v).includes('450') && nums(v).includes('364'));
   ok('dropoff: the booked rate row', v.includes('80.9%'));
+  ok('dropoff: the window reads as dates, not ISO', v.includes('6 Jul – 25 Sep 2026') && !v.includes('2026-07-06 to'));
+  ok('dropoff: outcomes are ROW headers', /<th scope="row" class="rl"><span class="badge b-good">Booked<\/span>/.test(v));
+  eq('dropoff: the biggest leak is the biggest non-booked row', (v.match(/data-card="dp-leak"[\s\S]*?class="ksub">([^<]*)/) || [])[1], 'left on step 2');
+  const DROP2 = JSON.parse(JSON.stringify(DROP));
+  DROP2.rows.push({ key: '6_drop_calendar', label: 'Left at the calendar', desc: 'x', tone: 'neu', counts: { '2026-09-14': 60, '2026-09-21': 51 }, total: 111 });
+  GW.TABS.dropoff._set(DROP2); GW.TABS.dropoff.render(); v = view();
+  ok('dropoff: ...and it FOLLOWS the data, not the label', /data-card="dp-leak"[\s\S]*?data-v="111"[\s\S]*?class="ksub">left at the calendar</.test(v));
+  GW.TABS.dropoff._st.source = 'LinkedIn'; GW.TABS.dropoff.render(); v = view();
+  ok('dropoff: an applied source missing from the new window still shows as chosen', /<option value="LinkedIn" selected>LinkedIn — 0<\/option>/.test(v));
+  GW.TABS.dropoff._st.source = '__all'; GW.TABS.dropoff._set(DROP); GW.TABS.dropoff.render();
   /* THE PRESETS ARE THE OLD TAB'S, day for day: lift the old one from the classic page and run both over three years. */
   const oldFn = (old.match(/function dpPresetRange\(p,today\)\{[\s\S]*?grain:g\};\}/) || [''])[0];
   ok('dropoff: the classic preset function was found', oldFn.length > 100);
@@ -404,11 +481,39 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('dupes: a real address is not marked', !/peter[^<]*<span class="badge b-neu"[^>]*>ours/.test(v));
   ok('dupes: DATA IS ESCAPED before innerHTML', v.includes('peter&lt;img src=x onerror=alert(1)&gt;@flighted.co') && !v.includes('<img src=x'));
   ok('dupes: the filter counts', /data-dupes="ours"[^>]*>Only our own tests<span>1</.test(v));
+  ok('dupes: each expander is NAMED for its row', v.includes('aria-label="Details for darshil.dixit@gushwork.ai"') && !v.includes('aria-label="Show details"'));
+  ok('dupes: row keys are stable, never the index', /data-x="dupe-darshil_2edixit_40gushwork_2eai"/.test(v));
+  ok('dupes: the pill group has a name', /class="pills" role="group" aria-label="Which addresses"/.test(v));
+  fire('input', el({ 'data-dupes-q': '' }, { value: 'peter' })); v = view();
+  ok('dupes: search narrows the list', !v.includes('darshil.dixit@gushwork.ai</span>') && v.includes('peter&lt;img'));
+  fire('input', el({ 'data-dupes-q': '' }, { value: '' }));
+  const many = { total: 60, leads: Array.from({ length: 60 }, (_, i) => ({ email: 'p' + i + '@x.co', session_count: 2, is_internal: false, sessions: [] })) };
+  GW.TABS.dupes._set(many); GW.TABS.dupes.render(); v = view();
+  ok('dupes: PAGED -- 50 rows, and it says how many more', (v.match(/class="xb"/g) || []).length === 50 && v.includes('Showing 50 of 60') && v.includes('Show 10 more'));
+  fire('click', el({ 'data-more': 'dupes' })); v = view();
+  eq('dupes: Show more shows the rest', (v.match(/class="xb"/g) || []).length, 60);
+  GW.TABS.dupes._set(DUPES);
 
   /* Lead magnet */
   GW.show('lm'); await ticks(); v = view();
   ok('lm: the funnel cards are the payload’s', ['23', '11', '7', '5'].every((x) => nums(v).includes(x)));
-  ok('lm: the pills read the SERVER totals, not the loaded rows', /data-lm-pill="sent"[^>]*>Sent<span>571</.test(v) && /data-lm-pill="all"[^>]*>All<span>613</.test(v));
+  ok('lm: the pills read the SERVER totals, not the loaded rows', /data-lm-pill="sent"[^>]*>Sent<span>571</.test(v) && /data-lm-pill="all"[^>]*>All real leads<span>613</.test(v));
+  ok('lm: page views are visits, never people', v.includes('visits to the page') && !v.includes('people who loaded the page'));
+  ok('lm: the summary is a four-card grid by CLASS, so the phone rule applies', /<section class="sumgrid four">/.test(v) && !/grid-template-columns:repeat\(4/.test(v));
+  ok('lm: daily volume reads as dates', /<td class="day">Thu 24 Sep<\/td>/.test(v));
+  /* THE CSV, executed: a visitor-typed formula must arrive as text */
+  const lmSrc = fs.readFileSync(path.join(ROOT, 'monitor', 'js', 'lm.js'), 'utf8');
+  const qqSrc = (lmSrc.match(/qq = (function \(v\) \{[\s\S]*?\});/) || [])[1];
+  const qq = qqSrc && new Function('Q', 'return ' + qqSrc)('"');
+  ok('lm: the CSV escaper was found', typeof qq === 'function');
+  if (qq) {
+    ok('lm: CSV -- a leading = + - @ tab or CR becomes text', ['=HYPERLINK("x")', '+1', '-2', '@SUM(A1)', '\tx', '\rx'].every((x) => qq(x).startsWith('"\'')), ['=1', '+1'].map(qq).join(' '));
+    eq('lm: CSV -- ordinary values untouched, quotes doubled', [qq('ok'), qq(''), qq(null), qq('a"b')].join('|'), '"ok"|""|""|"a""b"');
+  }
+  const classicQ = (() => { const src = fs.readFileSync(path.join(ROOT, 'index.js'), 'utf8'); const i = src.indexOf("var q=function(v){var s=String"); if (i < 0) return null;
+    const line = src.slice(src.lastIndexOf('\n', i) + 1, src.indexOf('\n', i)).trim().replace(/\s*\+\s*$/, ''); const browser = eval(line);
+    return new Function('Q', 'AP', 'return (' + browser.replace(/^var q=/, '').replace(/;$/, '') + ')')('"', "'"); })();
+  ok('classic: its CSV export escapes formulas the same way', classicQ && classicQ('=1') === qq('=1') && classicQ('ok') === qq('ok') && classicQ('a"b') === qq('a"b'));
   ok('lm: it says when the table is a page, not the population', v.includes('the table shows the most recent 1 of 900'));
   ok('lm: the drop-off bars are not status-coloured', !/b91c1c|f59e0b/.test(v));
   ok('lm: Mark sent is a button on an awaiting row', /data-lm-mark="1" data-undo="0"/.test(v));
@@ -419,7 +524,9 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   const navHtml = b.els['nav-side'] ? b.els['nav-side'].innerHTML : '';
   ok('nav: the tabs not rebuilt link to the classic dashboard', /href="\/monitor\?token=[^"]*#tab=leads"/.test(navHtml) && /href="\/monitor\?token=[^"]*#tab=partners"/.test(navHtml));
   ok('nav: a classic link says it leaves', /\(classic dashboard\)/.test(navHtml));
-  ok('nav: the System health badge counts the red checks', /data-tab="health"[\s\S]*?<span class="badge b-bad">1<\/span>/.test(navHtml));
+  /* the last health run could not reach /monitor/health: all nine server
+     checks are red, and the badge -- now set by System health too -- says 9 */
+  ok('nav: the badge follows the LATEST run, from either tab', /data-tab="health"[\s\S]*?<span class="badge b-bad">9<span class="sr-only"> checks red<\/span>/.test(navHtml), (navHtml.match(/data-tab="health"[^]*?<\/a>/) || [''])[0].slice(0, 300));
 
   /* ═══ 4. STRUCTURE ═════════════════════════════════════════════════════ */
   const css = fs.readFileSync(path.join(ROOT, 'monitor', 'app.css'), 'utf8');

@@ -64,13 +64,18 @@ function page({ token, tz }) {
   const foot = '<div class="sfoot"><span><b>All times Eastern (ET)</b></span><a href="/monitor' + tq + '">Open the classic dashboard</a></div>';
   return '<!DOCTYPE html><html lang="en" data-theme="light"><head><meta charset="UTF-8">' +
     '<meta name="viewport" content="width=device-width,initial-scale=1">' +
-    '<meta name="robots" content="noindex,nofollow"><title>Gushwork Monitor</title>' +
+    '<meta name="robots" content="noindex,nofollow"><meta name="color-scheme" content="light dark"><title>Gushwork Monitor</title>' +
     '<style>' + PARTS.tokens + '\n' + css + '</style>' +
     /* Theme before first paint, so a dark-mode viewer never sees a white flash. */
     '<script>try{var c=localStorage.getItem("gw-theme")||"system";var d=c==="dark"||(c==="system"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.setAttribute("data-theme",d?"dark":"light");}catch(e){}</script>' +
     '</head><body>' +
     '<svg width="0" height="0" style="position:absolute" aria-hidden="true">' + PARTS.sprite + '</svg>' +
-    '<a class="sr-only" href="#view">Skip to content</a>' +
+    /* VISIBLE WHEN FOCUSED: as .sr-only it stayed a 1px box while it held
+       focus, so a sighted keyboard user's first Tab showed focus nowhere. */
+    '<a class="skip" href="#view">Skip to content</a>' +
+    /* one live region for the whole page: a region inside a tab is replaced
+       on every repaint and announces nothing */
+    '<div id="gw-live" class="sr-only" role="status" aria-live="polite"></div>' +
     '<header class="topbar"><div class="brand"><div class="logo-tile">' + PARTS.logo + '</div><span class="brand-name">Gushwork Monitor</span><span class="brand-tag">inbound leads</span></div>' +
     '<div class="actions"><button class="btn" data-refresh aria-label="Refresh"><svg class="ic" aria-hidden="true"><use href="#i-arrow-clockwise"/></svg><span class="desktop-only">Refresh</span></button>' +
     '<div class="itg desktop-only" role="group" aria-label="Theme">' + themeBtns + '</div>' +

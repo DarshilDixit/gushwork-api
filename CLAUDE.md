@@ -183,7 +183,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `tools/fire-alert.js` | Fires ONE real alert on purpose, to satisfy the fire-every-alert-path-once rule. Sends for real (Slack + email on a critical). Lifts `alertOps` out of `index.js` rather than reimplementing it, so what arrives is what production sends. Not mounted, not called by anything |
 | `monitor-next.js` | Builds and serves the NEW dashboard at `/monitor/next` (side by side with `/monitor` until it is switched). Reads `monitor/` once at boot and stitches one page behind the same token -- no build step. Also the token-gated font route, an allowlist, never a path |
 | `monitor/` | The new dashboard's front end, in real files: `tokens.css` (the design system's tokens, copied verbatim from gushwork-design v1.49.0), `app.css` (both themes, components, responsive), `js/*.js` (classic scripts on one `GW` namespace, loaded in `JS_ORDER`), `icons/` (the Phosphor icons it uses, MIT), `fonts/` (Inter, Vert Grotesk Display) |
-| `tools/preview-monitor.js` | Runs THIS BRANCH's `/monitor/next` against live data: its own `overviewReport` lifted out of `index.js` on connections that are read-only AT THE DATABASE, every other `/monitor/*` GET proxied to production, every non-GET refused. Never boots `index.js`. Not mounted |
+| `tools/preview-monitor.js` | Runs THIS BRANCH's `/monitor/next` against live data: its own `overviewReport` and `duplicatesReport` lifted out of `index.js` on connections that are read-only AT THE DATABASE, every other `/monitor/*` GET proxied to production, every non-GET refused. Never boots `index.js`. Not mounted |
 | `tools/check-monitor-layout.mjs` | Real Chrome over every rebuilt tab and view at 360, 390, 414, 768, 1024 and 1440px in both themes; FAILS on sideways scroll, anything off-screen or clipped, a tap target under 44px, overlapping chart labels, a floating element, console errors, junk values or a missing font. Run against the preview. Not mounted |
 | `gushwork-form.js` | The `/demo` form frontend. Lives here and is served live by jsDelivr — see below |
 | `gushwork-form-popup.js` | The Google Ads popup/modal form frontend. Lives here and is served live by jsDelivr — see below |
@@ -1739,13 +1739,25 @@ and the old stays at `/monitor/classic` for a week.
 - **Numbers come from the existing routes, plus ONE new read,
   `overviewReport` / `/monitor/overview`**, which applies one definition set
   to every window: "completed" is `submitted_at`; booked is AS OF the window's
-  end; disqualified and blocked are the DROPOFF LADDER (`DROPOFF_STAGE_SQL`)
-  so Overview and Dropoff cannot disagree; page loads exclude `BOT_RE`; the
-  funnel drops webhook-origin leads. Every window is cut in ET wall-clock
+  end; disqualified and blocked are the DROPOFF LADDER (`DROPOFF_STAGE_SQL`);
+  **sessions** (form_sessions rows, never "page loads" -- that label was 6-13%
+  short of the page loads it named) exclude `BOT_RE`; the funnel drops
+  webhook-origin leads. **Overview and Dropoff agree exactly in Leads mode,
+  and in People mode only when Dropoff's window is that one week** -- Dropoff
+  places a person in the period they FIRST arrived within its whole window.
+  Both are right; the Dropoff tab says so under its table. Every window is cut in ET wall-clock
   terms inside SQL, so "the same point last week" survives a DST change. It
   takes `db` as an argument and writes nothing, which is what lets the
   preview lift it; its two model-flag COUNTERS are named in
-  `test-non-icp.js` 10f with reasons.
+  `test-non-icp.js` 10f with reasons. **`duplicatesReport` is lifted the same
+  way**: a route the branch CHANGES must never be proxied to production in
+  the preview, or the screenshots show the old query and read as evidence.
+- **Last week's bars line up by POSITION, never by date.** The server keys the
+  comparison week by its own dates (the 14th-20th); the first build looked
+  them up with this week's (the 21st-27th), so every grey bar was a confident
+  zero under a "Last week" legend and every test passed -- because a
+  zero-height bar is still a `<path d="">`. The test now counts bars WITH a
+  shape and reads the value back out of the painted table.
 - **Every theme alias is declared in BOTH `[data-theme]` blocks** -- a test
   compares the two sets, because a missing dark alias silently keeps its
   light value. **No calendar date from the viewer's clock**: all formatting
@@ -1753,6 +1765,14 @@ and the old stays at `/monitor/classic` for a week.
   `getDate`/`getHours` in `monitor/js`. **Every colour is a token** in
   `app.css`; a test forbids raw hex outside comments. **Every icon the code
   asks for must be in `monitor/icons`**; a missing one renders as nothing.
+- **Text contrast is measured, not taken from the spec.** Light muted text is
+  neutral-600 (5.0:1), not the design system's neutral-500 (3.4:1, under the
+  4.5 floor); focus is solid brand blue, because the token ring (primary at
+  40% alpha) is under 3:1 everywhere. Both declared to Utsav.
+- **Every repaint goes through `GW.paint`**, which puts keyboard focus, a
+  text field's caret and every open row back after the HTML is replaced. A
+  tab that assigns `innerHTML` directly drops focus to the page body on
+  every refresh -- every 60 seconds on Today.
 - **Touch targets are 44px** below 1024 wide or on any coarse pointer, and
   **nothing floats over content** -- the design system's phone dock was
   dropped for that rule, and theme and refresh live in the drawer instead.

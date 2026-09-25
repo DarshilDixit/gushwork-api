@@ -24,7 +24,12 @@ GW.chart = (function (G) {
   function barPath(x0, w, top, base) { var r = Math.min(4, (base - top) / 2, w / 2); if (base - top < 0.5) return ''; return 'M' + x0 + ',' + base + 'V' + (top + r) + 'Q' + x0 + ',' + top + ' ' + (x0 + r) + ',' + top + 'H' + (x0 + w - r) + 'Q' + (x0 + w) + ',' + top + ' ' + (x0 + w) + ',' + (top + r) + 'V' + base + 'Z'; }
 
   /* Group hourly slots into blocks of n for a narrow plot. Values SUM; a
-     person counted in two hours is counted twice, which the note states. */
+     person counted in two hours is counted twice, which the note states.
+     A block is labelled from its FIRST hour's start to its LAST hour's end
+     (labelNext = the hour after it): reading the end from a slot's own
+     "+3" label made every 3-hour block read as five hours -- "12a -5a",
+     "3a -8a" -- overlapping its neighbour, and the tooltip joined a range
+     onto a range ("3 AM - 4 AM - 6 AM"). */
   function group(spec, n) {
     var out = { slots: [], cur: [], prev: spec.prev ? [] : null, partialIdx: -1 };
     for (var i = 0; i < spec.slots.length; i += n) {
@@ -34,7 +39,8 @@ GW.chart = (function (G) {
         if (spec.prev && spec.prev[j] !== null && spec.prev[j] !== undefined) p = (p || 0) + spec.prev[j];
       }
       if (spec.partialIdx >= i && spec.partialIdx < i + n) out.partialIdx = out.slots.length;
-      out.slots.push({ label: sl[0].label, sub: sl.length > 1 ? '–' + sl[sl.length - 1].labelEnd : '', head: sl[0].head + ' – ' + sl[sl.length - 1].headEnd });
+      var last = sl[sl.length - 1];
+      out.slots.push({ label: sl[0].label, sub: sl.length > 1 ? '–' + last.labelNext : '', head: sl.length > 1 ? sl[0].headStart + ' – ' + last.headEnd : sl[0].head });
       out.cur.push(c); if (out.prev) out.prev.push(p);
     }
     return out;
@@ -44,7 +50,9 @@ GW.chart = (function (G) {
     var hd = '<tr><th>' + esc(spec.slotName) + '</th><th>' + esc(spec.curLabel) + '</th>' + (spec.prev ? '<th>' + esc(spec.prevLabel) + '</th>' : (spec.momText ? '<th>Against the month before</th>' : '')) + '</tr>';
     var rows = spec.slots.map(function (sl, i) {
       var c = spec.cur[i] === null || spec.cur[i] === undefined ? '—' : fmt(spec.cur[i]) + (i === spec.partialIdx ? ' so far' : '');
-      var third = spec.prev ? (spec.prev[i] === null || spec.prev[i] === undefined ? '—' : fmt(spec.prev[i])) : (spec.momText ? (spec.momText(i) || '—') : null);
+      /* the grey value is named by its REAL date: last week's Monday is the
+         14th, not the 21st the row is headed with */
+      var third = spec.prev ? (spec.prev[i] === null || spec.prev[i] === undefined ? '—' : fmt(spec.prev[i]) + (sl.prevHead ? ' <span class="pd">' + esc(sl.prevHead) + '</span>' : '')) : (spec.momText ? (spec.momText(i) || '—') : null);
       return '<tr><td>' + esc(sl.head) + '</td><td>' + c + '</td>' + (third !== null ? '<td>' + third + '</td>' : '') + '</tr>';
     }).join('');
     return '<div class="tbl" tabindex="0" role="region" aria-label="' + esc(spec.title) + ', as a table"><table>' + hd + rows + '</table></div>';
@@ -60,7 +68,10 @@ GW.chart = (function (G) {
     var gw = Math.min(30, band * 0.74), bw = Math.max(4, Math.min(18, gw * 0.52));
     var cur = s0.cur, prev = s0.prev;
     var vals = cur.concat(prev || []).filter(function (x) { return x !== null && x !== undefined; });
-    var hi = (vals.length ? Math.max.apply(null, vals) : 1) * 1.12, step = niceStep(hi), mx = Math.ceil(hi / step) * step;
+    /* mx is never 0: an all-zero window (a Monday at 00:05, before the first
+       lead) made mx 0, y() divided by it, and every bar and gridline came
+       out at NaN -- an empty chart and console errors. */
+    var hi = (vals.length ? Math.max.apply(null, vals) : 1) * 1.12, step = niceStep(hi), mx = Math.max(step, Math.ceil(hi / step) * step);
     var y = function (v) { return T + (H - T - B) * (1 - v / mx); }, base = y(0);
     /* Axis labels at an interval that fits their measured width. */
     var maxLab = 0; s0.slots.forEach(function (sl) { maxLab = Math.max(maxLab, String(sl.label).length); });
@@ -106,23 +117,38 @@ GW.chart = (function (G) {
     s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + base + '" y2="' + base + '" stroke="var(--card-line)" stroke-width="1"/></svg><div class="tip" role="status"></div>';
     el.innerHTML = s;
     el.setAttribute('data-grouped', grouped ? '3h' : '');
-    var tip = el.querySelector('.tip');
+    var tip = el.querySelector('.tip'), tapped = -1;
+    /* INSIDE THE PLOT, above the slot's tallest bar. It used to sit above
+       the chart altogether, on top of the panel title, the legend and the
+       Table switch -- the chart's own accessible alternative. */
     function show(i) {
       var sl = s0.slots[i];
       var rows = (cur[i] !== null && cur[i] !== undefined ? '<div>' + esc(spec.curLabel) + ': <b>' + fmt(cur[i]) + '</b>' + (i === s0.partialIdx ? ' so far' : '') + '</div>' : '') +
-        (prev && prev[i] !== null && prev[i] !== undefined ? '<div>' + esc(spec.prevLabel) + ': <b>' + fmt(prev[i]) + '</b></div>' : '') +
+        (prev && prev[i] !== null && prev[i] !== undefined ? '<div>' + esc(spec.prevLabel) + (sl.prevHead ? ' (' + esc(sl.prevHead) + ')' : '') + ': <b>' + fmt(prev[i]) + '</b></div>' : '') +
         (!prev && spec.momText && !grouped && spec.momText(i) ? '<div><b>' + spec.momText(i) + '</b></div>' : '');
       tip.innerHTML = '<div><b>' + esc(sl.head) + '</b></div>' + rows;
-      tip.style.left = Math.max(80, Math.min(W - 80, L + band * i + band / 2)) + 'px'; tip.style.top = '8px'; tip.style.opacity = 1;
+      var tops = [cur[i], prev ? prev[i] : null].filter(function (v) { return v !== null && v !== undefined; }).map(y);
+      var barTop = tops.length ? Math.min.apply(null, tops) : base;
+      tip.style.left = Math.max(80, Math.min(W - 80, L + band * i + band / 2)) + 'px';
+      tip.style.top = Math.max((tip.offsetHeight || 48) + 4, barTop - 6) + 'px'; tip.style.opacity = 1;
     }
+    function hide() { tip.style.opacity = 0; tapped = -1; }
     var rs = el.querySelectorAll('rect[data-i]');
     for (var k = 0; k < rs.length; k++) (function (r) {
       var i = +r.getAttribute('data-i');
-      r.addEventListener('mousemove', function () { show(i); });
-      r.addEventListener('click', function () { show(i); });     /* a tap shows it too */
-      r.addEventListener('mouseleave', function () { tip.style.opacity = 0; });
+      /* A mouse hovers; a finger taps, and a second tap on the same bar puts
+         it away (touch has no mouseleave until something else is touched). */
+      r.addEventListener('pointermove', function (e) { if (e.pointerType === 'mouse') show(i); });
+      r.addEventListener('pointerleave', function (e) { if (e.pointerType === 'mouse') hide(); });
+      r.addEventListener('click', function () { if (tapped === i && String(tip.style.opacity) === '1') hide(); else { show(i); tapped = i; } });
     })(rs[k]);
     return { grouped: grouped };
+  }
+  /* Escape, or a tap anywhere outside a chart, puts every tooltip away. */
+  function hideAll() { var ts = document.querySelectorAll ? document.querySelectorAll('.chart .tip') : []; for (var i = 0; i < ts.length; i++) ts[i].style.opacity = 0; }
+  if (typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') hideAll(); });
+    document.addEventListener('click', function (e) { if (!(e.target && e.target.closest && e.target.closest('.chart'))) hideAll(); });
   }
   return { draw: draw, table: table, niceStep: niceStep, group: group };
 })(GW);

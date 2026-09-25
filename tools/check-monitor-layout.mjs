@@ -72,8 +72,13 @@ const AUDIT = `(() => {
     /* .sr-only is clipped ON PURPOSE -- it is the screen-reader label, visually hidden by design. */
     if ((cs.overflowX === 'hidden' || cs.overflowX === 'clip') && el.scrollWidth > el.clientWidth + 1 && el.textContent.trim() && !el.classList.contains('tr') && !el.closest('.tr') && !el.closest('.sr-only')) out.push(['clipped', '"' + name(el) + '" is cut off by its own box']);
   }
+  /* VISUALLY HIDDEN ON PURPOSE -- .sr-only, and the skip link until it is
+     focused -- is a 1px clipped box, not a target a thumb has to hit. Judged
+     by the rule that hides it, never by a class list, so the next hidden
+     control needs no edit here. Focused, the skip link IS measured. */
+  const srHidden = (el) => { const r = el.getBoundingClientRect(), cs = getComputedStyle(el); return r.width <= 1 && r.height <= 1 && cs.position === 'absolute' && cs.clip !== 'auto'; };
   if (touch) for (const el of document.querySelectorAll('button, a[href], select, input, summary, [tabindex]:not([tabindex="-1"])')) {
-    if (el.classList.contains('sr-only') || el.closest('.sr-only') || hiddenAncestor(el) || !vis(el)) continue;
+    if (el.classList.contains('sr-only') || el.closest('.sr-only') || srHidden(el) || hiddenAncestor(el) || !vis(el)) continue;
     if (el.closest('#drawer') && !document.getElementById('drawer').classList.contains('open')) continue;
     const r = el.getBoundingClientRect();
     if (r.width < 43.5 || r.height < 43.5) out.push(['tap', '"' + name(el) + '" is ' + Math.round(r.width) + 'x' + Math.round(r.height) + ' (needs 44x44)']);

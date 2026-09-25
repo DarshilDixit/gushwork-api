@@ -14,16 +14,22 @@
    ============================================================================ */
 GW.TABS.lm = (function (G) {
   var U = G.ui, esc = G.esc, fmt = G.fmt;
-  var days = '30', m = null, mErr = null, leads = [], totals = null, shownOf = null, lErr = null, filter = 'all', q = '', root = null;
-  var PILLS = [['all', 'All'], ['awaiting', 'Awaiting send'], ['sent', 'Sent'], ['abandoned', 'Abandoned'], ['internal', 'Internal tests']];
+  var days = '30', m = null, mErr = null, leads = [], totals = null, shownOf = null, lErr = null, filter = 'all', q = '', root = null, seq = 0;
+  /* "ALL" SAID ALL AND MEANT "all but ours": it read "All 8" beside "Internal
+     tests 9", and on the Duplicates tab next door the same kind of pill
+     includes our tests. The label now says what it counts, in the words
+     Duplicates uses. */
+  var PILLS = [['all', 'All real leads'], ['awaiting', 'Awaiting send'], ['sent', 'Sent'], ['abandoned', 'Abandoned'], ['internal', 'Our own tests']];
+  /* the latest window wins, not the last response to arrive */
   function load() {
+    var my = ++seq, m1 = m, e1 = mErr, l1 = leads, s1 = shownOf, le1 = lErr;
     return Promise.all([
-      G.api('/monitor/lm-metrics', { days: days }).then(function (d) { m = d; mErr = null; }).catch(function (e) { mErr = e.message; }),
-      G.api('/monitor/lm-leads', { days: days }).then(function (d) { leads = d.leads || []; shownOf = typeof d.total === 'number' ? d.total : null; lErr = null; }).catch(function (e) { lErr = e.message; }),
-    ]).then(function () { totals = m && m.statusTotals || null; });
+      G.api('/monitor/lm-metrics', { days: days }).then(function (d) { m1 = d; e1 = null; }).catch(function (e) { e1 = e.message; }),
+      G.api('/monitor/lm-leads', { days: days }).then(function (d) { l1 = d.leads || []; s1 = typeof d.total === 'number' ? d.total : null; le1 = null; }).catch(function (e) { le1 = e.message; }),
+    ]).then(function () { if (my !== seq) return; m = m1; mErr = e1; leads = l1; shownOf = s1; lErr = le1; totals = m && m.statusTotals || null; });
   }
   function activate(el) { root = el; render(); G.every('lm', 300000, function () { load().then(render); }); return load().then(render); }
-  function deactivate() { G.stop('lm'); }
+  function deactivate() { G.stop('lm'); root = null; }
   function pc(a, b) { return b > 0 ? Math.round(a / b * 100) + '%' : '—'; }
   function bars(rows, total, customFlag) {
     if (!rows.length) return U.empty('Nothing yet', 'No lead-magnet submissions in this window.');
@@ -47,7 +53,7 @@ GW.TABS.lm = (function (G) {
     return c;
   }
   function statusBadge(l) {
-    if (l.is_internal) return '<span class="badge b-neu">internal</span>';
+    if (l.is_internal) return '<span class="badge b-neu">ours</span>';
     return l.status === 'sent' ? '<span class="badge b-good">Sent</span>' : l.status === 'awaiting' ? '<span class="badge b-warn">Awaiting</span>' : '<span class="badge b-bad">Abandoned</span>';
   }
   function detail(l) {
@@ -65,21 +71,26 @@ GW.TABS.lm = (function (G) {
       ['Delivered at', t(l.delivered_at)], ['Session ID', l.session_id]]);
   }
   function render() {
-    if (!root) return;
+    if (!root || (G.current && G.current() !== 'lm')) return;
     var f = (m && m.funnel) || {};
     var v = +f.views || 0, o = +f.modal_opens || 0, e = +f.emails || 0, sb = +f.submitted || 0;
     var opt = function (x, l) { return '<option value="' + x + '"' + (x === days ? ' selected' : '') + '>' + l + '</option>'; };
-    var head = '<section class="ph"><div class="ph-top"><h1 class="title">Lead magnet</h1><span class="readat">' + (m ? 'Sessions are visits · people are distinct emails. ' + fmt(+f.people || 0) + ' people entered an email — ' + fmt(+f.people_submitted || 0) + ' completed, ' + fmt(+f.people_abandoned || 0) + ' did not.' : '') + '</span></div>' +
+    var head = '<section class="ph"><div class="ph-top"><h1 class="title" tabindex="-1">Lead magnet</h1><span class="readat">' + (m ? 'Sessions are visits · people are distinct emails. ' + fmt(+f.people || 0) + ' people entered an email — ' + fmt(+f.people_submitted || 0) + ' completed, ' + fmt(+f.people_abandoned || 0) + ' did not.' : '') + '</span></div>' +
       '<div class="controls"><div class="fieldset"><select class="field" data-lm-days aria-label="Window">' + opt('7', 'Last 7 days') + opt('30', 'Last 30 days') + opt('90', 'Last 90 days') + opt('365', 'Last year') + '</select></div></div></section>';
     var body = '';
     if (!m && mErr) body += '<section class="card panel">' + U.unavailable('The lead-magnet funnel', mErr) + '</section>';
     else if (!m) body += U.loading(3);
     else {
-      body += '<section class="sumgrid" style="grid-template-columns:repeat(4,minmax(0,1fr))">' +
-        U.metricCard({ id: 'lm-views', label: 'Page views', value: v, sub: 'people who loaded the page' }) +
-        U.metricCard({ id: 'lm-opens', label: 'Form opened', value: o, sub: pc(o, v) + ' of views' }) +
-        U.metricCard({ id: 'lm-emails', label: 'Email entered', value: e, sub: pc(e, o) + ' of opens' }) +
-        U.metricCard({ id: 'lm-submitted', label: 'Submitted', value: sb, sub: pc(sb, e) + ' of emails' }) + '</section>';
+      /* A CLASS, not an inline style: the inline four columns beat the phone
+         rule, and four 73px cards broke every label one word per line. And
+         "visits", never "people": these are sessions, and a visitor who only
+         loaded the page has no email to be a person by. */
+      body += '<section class="sumgrid four">' +
+        U.metricCard({ id: 'lm-views', label: 'Page views', value: v, sub: 'visits to the page' }) +
+        /* a rate with nothing under it says so in words, not "— of opens" */
+        U.metricCard({ id: 'lm-opens', label: 'Form opened', value: o, sub: v ? pc(o, v) + ' of views' : 'no views to count from' }) +
+        U.metricCard({ id: 'lm-emails', label: 'Email entered', value: e, sub: o ? pc(e, o) + ' of opens' : 'no form opens yet' }) +
+        U.metricCard({ id: 'lm-submitted', label: 'Submitted', value: sb, sub: e ? pc(sb, e) + ' of emails' : 'no emails entered yet' }) + '</section>';
       body += '<div class="grid2">' +
         U.panel({ title: 'Where people drop off', body: drop('Left without opening the form', +f.bounced_before_open || 0, v, 'Saw the page, never clicked a call to action') +
           drop('Opened the form, no email', +f.opened_no_email || 0, o, 'The form opened, no valid email was entered') +
@@ -92,7 +103,7 @@ GW.TABS.lm = (function (G) {
           : U.empty('No opens recorded yet', 'The page needs the v4.4 embed to record which call to action opened the form.') }) +
         U.panel({ cls: 'span-all', title: 'Custom categories entered', qual: 'what people typed when the list did not fit', body: (m.custom_categories || []).length ? bars(m.custom_categories, null) : U.empty('None yet', 'The dropdown is covering everyone so far.') }) +
         U.panel({ cls: 'span-all', title: 'Daily volume', qual: 'views, emails and submissions', body: (m.daily || []).length ? '<div class="tbl" tabindex="0" role="region" aria-label="Daily volume"><table><tr><th>Day</th><th>Views</th><th>Email entered</th><th>Submitted</th></tr>' +
-            m.daily.slice().reverse().map(function (x) { return '<tr><td>' + esc(x.day) + '</td><td>' + fmt(x.views) + '</td><td>' + fmt(x.emails) + '</td><td>' + fmt(x.submitted) + '</td></tr>'; }).join('') + '</table></div>' : U.empty('No days yet') }) +
+            m.daily.slice().reverse().map(function (x) { return '<tr><td class="day">' + esc(G.dayD(x.day)) + '</td><td>' + fmt(x.views) + '</td><td>' + fmt(x.emails) + '</td><td>' + fmt(x.submitted) + '</td></tr>'; }).join('') + '</table></div>' : U.empty('No days yet') }) +
         '</div>';
     }
     /* Leads */
@@ -100,9 +111,9 @@ GW.TABS.lm = (function (G) {
     var cap = (shownOf !== null && shownOf > leads.length) ? ' · the table shows the most recent ' + fmt(leads.length) + ' of ' + fmt(shownOf) + '; the counts above are full totals' : '';
     body += U.panel({ title: 'Leads', qual: rows.length + ' shown' + (!totals ? ' · counts are for the loaded rows only' : '') + cap,
       right: '<button class="btn sm" data-lm-csv>' + G.ic('download-simple') + 'Export CSV</button>',
-      body: '<div class="fieldset"><input class="field" type="search" data-lm-q placeholder="Search email, industry, product, website…" aria-label="Search lead-magnet leads" value="' + esc(q) + '" style="flex:1;min-width:0"></div>' +
-        U.pills(PILLS, filter, c, 'data-lm-pill') +
-        (lErr && !leads.length ? U.unavailable('Lead-magnet leads', lErr) : U.rtable({ ns: 'lm', rows: rows, emptyTitle: 'Nothing matches', emptyBody: 'Try another filter or clear the search.',
+      body: '<div class="fieldset"><input class="field search" type="search" data-lm-q placeholder="Search email, industry, website…" aria-label="Search lead-magnet leads by email, industry, product, website or campaign" value="' + esc(q) + '"></div>' +
+        U.pills(PILLS, filter, c, 'data-lm-pill', 'Which leads') +
+        (lErr && !leads.length ? U.unavailable('Lead-magnet leads', lErr) : U.rtable({ ns: 'lm', rows: rows, key: function (l) { return l.id; }, rowName: function (l) { return l.email || 'a lead'; }, emptyTitle: 'Nothing matches', emptyBody: 'Try another filter or clear the search.',
           cols: [
             { label: 'Email', html: function (l) { return esc(l.email) + (l.is_free_email ? ' <span class="badge b-neu" title="Free mailbox">free</span>' : '') + (l.attempts > 1 ? ' <span class="meta">×' + l.attempts + '</span>' : ''); } },
             { label: 'Industry', html: function (l) { return esc(l.industry_category || '—') + (l.industry_is_custom ? ' <span class="meta">(custom)</span>' : ''); } },
@@ -113,12 +124,15 @@ GW.TABS.lm = (function (G) {
             { label: 'Status', html: statusBadge },
             { label: 'When (ET)', cls: 'm', get: function (l) { return G.et(l.submitted_at || l.created_at); } },
           ], detail: detail })) });
-    root.innerHTML = head + body;
+    G.paint(root, head + body);
   }
   function csv() {
     var rows0 = searched(); if (!rows0.length) return;
     var cols = ['email', 'status', 'industry_category', 'industry_is_custom', 'product_or_service', 'sell_to', 'website', 'website_source', 'is_free_email', 'elv_status', 'entry_point', 'attempts', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'referrer', 'landing_page', 'previous_page', 'page_url', 'submitted_at', 'delivered', 'delivered_at', 'session_id'];
-    var Q = '"', qq = function (v) { return Q + String(v === null || v === undefined ? '' : v).split(Q).join(Q + Q) + Q; };
+    /* A cell a VISITOR typed that starts with = + - @ tab or CR would run as
+       a formula when an SDR opens this in Excel or Sheets: prefixed with an
+       apostrophe, which both read as text. The classic export does the same. */
+    var Q = '"', qq = function (v) { var t = String(v === null || v === undefined ? '' : v); if (t.length && '=+-@\t\r'.indexOf(t.charAt(0)) >= 0) t = "'" + t; return Q + t.split(Q).join(Q + Q) + Q; };
     var out = [cols.join(',')].concat(rows0.map(function (l) { return cols.map(function (k) { return qq(l[k]); }).join(','); }));
     var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([out.join('\n')], { type: 'text/csv' }));
     a.download = 'lead-magnet-' + G.etDay(new Date()) + '.csv'; a.click();
@@ -142,7 +156,8 @@ GW.TABS.lm = (function (G) {
       var rt = t.closest('[data-lm-retry]'); if (rt) { retry(rt.getAttribute('data-lm-retry')); return; }
     });
     document.addEventListener('change', function (e) { if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-lm-days')) { days = e.target.value; m = null; load().then(render); } });
-    document.addEventListener('input', function (e) { if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-lm-q')) { q = e.target.value; var pos = e.target.selectionStart; render(); var el = document.querySelector('[data-lm-q]'); if (el) { el.focus(); try { el.setSelectionRange(pos, pos); } catch (x) {} } } });
+    /* focus and the caret survive the repaint through G.paint */
+    document.addEventListener('input', function (e) { if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-lm-q')) { q = e.target.value; render(); } });
   }
   return { title: 'Lead magnet', activate: activate, deactivate: deactivate, render: render, _set: function (a, b) { m = a; leads = b || []; totals = a && a.statusTotals || null; } };
 })(GW);

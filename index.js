@@ -3507,44 +3507,56 @@ app.get('/monitor/funnel', async (req, res) => {
   }
 });
 
+/* The Duplicates report: addresses with more than one lead row. A FUNCTION
+   taking its database, like overviewReport, so tools/preview-monitor.js can
+   run THIS BRANCH's query read-only -- until 26 Sept the preview proxied this
+   route to production, so the new is_internal marker had never run against
+   live data from a branch. A read, nothing else. */
+async function duplicatesReport(db) {
+  /* is_internal: ours by address OR by the staging page, the one definition
+     every outbound guard asks. Marked, never excluded -- our own tests are
+     the top of this list, and the new Duplicates tab says so on the row. */
+  const params = [];
+  const internalSql = internalLeadSqlClause('l.email', 'l.page_url', params);
+  /* GROUPED BY lower(email) ALONE -- the dedup key, always (CLAUDE.md). It
+     grouped by the raw address as well, so "Ann@x" and "ann@x" would have
+     been two rows. Measured 26 Sept: no address has two spellings, 338
+     groups either way, so this moves nothing today; it stops the drift. */
+  const result = await db.query(`
+    SELECT
+      MIN(l.email) AS email,
+      COUNT(*) AS session_count,
+      bool_or(${internalSql}) AS is_internal,
+      MAX(CASE WHEN l.booking_uid IS NOT NULL THEN 1 ELSE 0 END) AS has_booking,
+      MAX(CASE WHEN l.completed = true THEN 1 ELSE 0 END) AS has_completed,
+      MIN(l.created_at) AS first_seen,
+      MAX(l.created_at) AS last_seen,
+      json_agg(json_build_object(
+        'session_id', l.session_id,
+        'created_at', l.created_at,
+        'completed',  l.completed,
+        'booking_uid', l.booking_uid,
+        'booked_at',  l.booked_at,
+        'sell_to',    l.sell_to,
+        'step_reached', l.step_reached,
+        'disqualified', l.disqualified,
+        'page_url',   l.page_url
+      ) ORDER BY l.created_at DESC) AS sessions
+    FROM leads l
+    WHERE l.email IS NOT NULL
+    GROUP BY LOWER(l.email)
+    HAVING COUNT(*) > 1
+    ORDER BY COUNT(*) DESC, MAX(l.created_at) DESC
+  `, params);
+  return { total: result.rows.length, leads: result.rows };
+}
+
 app.get('/monitor/duplicates', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
 
   try {
-    /* is_internal: ours by address OR by the staging page, the one definition
-       every outbound guard asks. Marked, never excluded -- our own tests are
-       the top of this list, and the new Duplicates tab says so on the row. */
-    const params = [];
-    const internalSql = internalLeadSqlClause('l.email', 'l.page_url', params);
-    const result = await pool.query(`
-      SELECT
-        l.email,
-        COUNT(*) AS session_count,
-        bool_or(${internalSql}) AS is_internal,
-        MAX(CASE WHEN l.booking_uid IS NOT NULL THEN 1 ELSE 0 END) AS has_booking,
-        MAX(CASE WHEN l.completed = true THEN 1 ELSE 0 END) AS has_completed,
-        MIN(l.created_at) AS first_seen,
-        MAX(l.created_at) AS last_seen,
-        json_agg(json_build_object(
-          'session_id', l.session_id,
-          'created_at', l.created_at,
-          'completed',  l.completed,
-          'booking_uid', l.booking_uid,
-          'booked_at',  l.booked_at,
-          'sell_to',    l.sell_to,
-          'step_reached', l.step_reached,
-          'disqualified', l.disqualified,
-          'page_url',   l.page_url
-        ) ORDER BY l.created_at DESC) AS sessions
-      FROM leads l
-      WHERE l.email IS NOT NULL
-      GROUP BY LOWER(l.email), l.email
-      HAVING COUNT(*) > 1
-      ORDER BY COUNT(*) DESC, MAX(l.created_at) DESC
-    `, params);
-
-    res.json({ total: result.rows.length, leads: result.rows });
+    res.json(await duplicatesReport(pool));
   } catch (err) {
     console.error('[/monitor/duplicates]', err.message);
     res.status(500).json({ error: 'Duplicates query failed', detail: err.message });
@@ -4202,7 +4214,7 @@ app.get('/monitor', (req, res) => {
   '<div class="mc" title="People = distinct email addresses ever captured. Sessions = individual form visits; one person can have several."><div class="ml">Total people</div><div class="mv" id="m-total">&#8212;</div><div class="ms" id="m-totals">&#8212;</div></div>' +
   '<div class="mc" title="People whose form reached Step 2 (completed) on at least one of their sessions."><div class="ml">People completed</div><div class="mv" id="m-comp">&#8212;</div><div class="ms" id="m-cpct">&#8212;</div></div>' +
   '<div class="mc" title="People with a booking on at least one of their sessions."><div class="ml">People booked</div><div class="mv" id="m-book">&#8212;</div><div class="ms" id="m-bpct">&#8212;</div></div>' +
-  '<div class="mc" title="People marked disqualified on at least one session: they answered B2C or mixed, or asked for the waitlist."><div class="ml">Disqualified</div><div class="mv" id="m-disq">&#8212;</div><div class="ms" id="m-dsq">B2C / Mixed</div></div>' +
+  '<div class="mc" title="People marked disqualified on at least one session: they answered B2C or mixed, or asked for the waitlist."><div class="ml">Disqualified</div><div class="mv" id="m-disq">&#8212;</div><div class="ms" id="m-dsq">B2C, mixed or waitlist</div></div>' +
   '<div class="mc" title="ALL TIME. The Model tab counts the same leads inside a chosen window, so its figure is smaller and neither is wrong. LEADS stopped before the calendar by the non-ICP check &#8212; the brand-domain list OR the model &#8212; with the number of distinct PEOPLE underneath. One person who submitted five times is five leads and one person, so those two are not comparable &#8212; and neither is comparable to the Blocked tab&#39;s &quot;excluding our own tests&quot;, which is leads again. These are NOT removed from any other number on this page. Click through to the Blocked tab." style="cursor:pointer" onclick="showTab(\'blocked\')"><div class="ml">Blocked &#8212; Non-ICP</div><div class="mv" id="m-nonicp">&#8212;</div><div class="ms" id="m-nonicp-sub">still counted in every total</div></div>' +
   /* THE 4.2% NOBODY COULD SEE. A flagged lead is NOT blocked -- it books,
      it reaches Salesforce, it gets dialled -- and the only thing that
@@ -5985,7 +5997,12 @@ app.get('/monitor', (req, res) => {
   'function lmCsv(){var rows0=lmSearched();if(!rows0.length)return;' +
   'var cols=["email","status","industry_category","industry_is_custom","product_or_service","sell_to","website","website_source","is_free_email","elv_status","entry_point","attempts","utm_source","utm_medium","utm_campaign","utm_content","utm_term","referrer","landing_page","previous_page","page_url","submitted_at","delivered","delivered_at","session_id"];' +
   'var Q=String.fromCharCode(34);' +
-  'var q=function(v){return Q+String(v==null?"":v).split(Q).join(Q+Q)+Q;};' +
+  /* A cell a VISITOR typed that starts with = + - @ tab or CR runs as a
+     formula when an SDR opens the export in Excel or Sheets. Prefixed with
+     an apostrophe, which both read as "this is text". Same rule as the new
+     dashboard's export (monitor/js/lm.js), so the two files never differ. */
+  'var AP=String.fromCharCode(39);' +
+  'var q=function(v){var s=String(v==null?"":v);if(s.length&&"=+-@\\t\\r".indexOf(s.charAt(0))>=0)s=AP+s;return Q+s.split(Q).join(Q+Q)+Q;};' +
   'var out=[cols.join(",")].concat(rows0.map(function(l){return cols.map(function(c){return q(l[c]);}).join(",");}));' +
   'var a=document.createElement("a");' +
   'a.href=URL.createObjectURL(new Blob([out.join(String.fromCharCode(10))],{type:"text/csv"}));' +
@@ -12921,7 +12938,7 @@ const DROPOFF_STAGES = [
   { key: '2_dq_b2c',        label: 'Sells to consumers',      desc: 'Answered B2C or mixed at step 1',            tone: 'warn' },
   { key: '3_dq_waitlist',   label: 'Asked for the waitlist',  desc: 'Chose the waitlist instead of a demo',       tone: 'warn' },
   { key: '4_dq_other',      label: 'Disqualified, other',     desc: 'Disqualified with no reason recorded',       tone: 'warn' },
-  { key: '5_blocked',       label: 'Blocked — not our market', desc: 'Real-estate brand or insurance carrier', tone: 'bad' },
+  { key: '5_blocked',       label: 'Blocked — not our market', desc: 'Real-estate or insurance business',    tone: 'bad' },
   { key: '6_drop_calendar', label: 'Left at the calendar',    desc: 'Completed step 2, never picked a time',      tone: 'neu' },
   /* NOT "left at step 1". The leads row is written by savePartial(1) at
      the END of handleStep1Next, so a row exists only once the visitor
@@ -13268,8 +13285,14 @@ app.get('/monitor/dropoff', async (req, res) => {
        would flatter last week against this one.
      - disqualified (sells to consumers + asked for the waitlist) and
        blocked: the DROPOFF LADDER, the same
-       expression the Dropoff tab uses, so the two can never disagree.
-       People resolve to their best outcome exactly as Dropoff does.
+       expression the Dropoff tab uses. In LEADS mode the two agree
+       exactly for the same week. In PEOPLE mode they agree only when
+       Dropoff's window is that week: Dropoff places a person in the
+       period they FIRST arrived within its whole window, so a person who
+       first came in an earlier week of a 12-week window is not in this
+       week's column there. Measured 25 Sept: 271 people here, 263 in
+       Dropoff's Sep 21 column over 12 weeks, 272 with Dropoff narrowed to
+       the week. Both are right; the Dropoff tab says so under the table.
        Measured before choosing: the week of 21 Sept, every blocked flag
        read 20 while the ladder's blocked row read 18 -- two realtors who
        answered B2C first. Two tabs showing both numbers would be the
@@ -13278,11 +13301,15 @@ app.get('/monitor/dropoff', async (req, res) => {
        when 378 of them had asked for the WAITLIST -- the larger half.
      - meta withheld: the model flag on a lead that was NOT blocked, the
        same population as the old Overview card, counted not filtered.
-     - page loads: form_sessions minus BOT_RE, the same bot rule the
-       funnel uses. The first mockup counted bots and read 708 for a day.
+     - sessions: form_sessions minus BOT_RE, the same bot rule the
+       funnel uses. A SESSION, not a page load: a landing page then /demo
+       in one tab is one row with hits incremented (CLAUDE.md, the four
+       nouns). This was labelled "page loads" until the 26 Sept review,
+       and measured 6-13% short of the page loads it named. The first
+       mockup counted bots and read 708 for a day.
      - the funnel excludes webhook-origin leads, like /monitor/funnel:
        they never loaded a form page, so they inflate both ends of a
-       page-load conversion rate.
+       session conversion rate.
    Internal test submissions are INCLUDED, as everywhere on this
    dashboard -- a known distortion, not a decision.
 
@@ -13417,7 +13444,7 @@ async function overviewReport(db, { view, asof } = {}) {
   const pp = [BOT_RE];
   const pageSql = `
     WITH w(k, s, e) AS (${overviewWindowsSql(allKpiWins, pp)})
-    SELECT w.k, COUNT(fs.created_at) FILTER (WHERE fs.user_agent IS NULL OR fs.user_agent !~* $1)::int AS page_loads
+    SELECT w.k, COUNT(fs.created_at) FILTER (WHERE fs.user_agent IS NULL OR fs.user_agent !~* $1)::int AS sessions
       FROM w LEFT JOIN form_sessions fs ON fs.created_at >= w.s AND fs.created_at < w.e
      GROUP BY w.k`;
 
@@ -13469,7 +13496,7 @@ async function overviewReport(db, { view, asof } = {}) {
   const kpi = {};
   for (const r of out[0].rows) kpi[r.k] = r;
   const pages = {};
-  for (const r of out[1].rows) pages[r.k] = r.page_loads;
+  for (const r of out[1].rows) pages[r.k] = r.sessions;
   const zero = { people: 0, leads: 0, people_done: 0, leads_done: 0, people_booked: 0, leads_booked: 0,
                  people_dq: 0, leads_dq: 0, people_b2c: 0, leads_b2c: 0, people_waitlist: 0, leads_waitlist: 0, people_blocked: 0, leads_blocked: 0, people_withheld: 0, leads_withheld: 0,
                  f_people: 0, f_leads: 0, f_people_done: 0, f_leads_done: 0, f_people_booked: 0, f_leads_booked: 0 };
@@ -13509,9 +13536,9 @@ async function overviewReport(db, { view, asof } = {}) {
       completed: pair('_done'), booked: pair('_booked'), dq: pair('_dq'), b2c: pair('_b2c'), waitlist: pair('_waitlist'),
       blocked: pair('_blocked'), withheld: pair('_withheld'),
     },
-    page_loads: [pages.cur ?? null, pages.cmp ?? null],
+    sessions: [pages.cur ?? null, pages.cmp ?? null],
     funnel: F ? {
-      since: funWin.s, page_loads: pages.fun ?? null,
+      since: funWin.s, sessions: pages.fun ?? null,
       people: { step1: F.f_people, completed: F.f_people_done, booked: F.f_people_booked },
       leads:  { step1: F.f_leads,  completed: F.f_leads_done,  booked: F.f_leads_booked },
     } : null,
@@ -13521,8 +13548,8 @@ async function overviewReport(db, { view, asof } = {}) {
     res.month = { people: [K('month').people, K('cmp').people], leads: [K('month').leads, K('cmp').leads],
                   booked: { people: [K('month').people_booked, K('cmp').people_booked], leads: [K('month').leads_booked, K('cmp').leads_booked] } };
     res.recovered = parseInt(out[recIdx].rows[0].recovered) || 0;
-    /* page loads have no all-time value: tracking began at go_live */
-    res.page_loads = [null, null];
+    /* sessions have no all-time value: tracking began at go_live */
+    res.sessions = [null, null];
   } else {
     const ch = { people: [], leads: [] };
     for (const r of out[chanIdx].rows) ch[r.unit].push({ name: r.source, n: r.n });
