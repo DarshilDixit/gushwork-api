@@ -143,6 +143,48 @@ De-duplicated, that is about 60 fixes. The ones that mattered:
   keeps the reference. M9 is a source assertion only: the stubbed browser
   has no clock to hang a fetch on, so the timeout itself has not been driven.
 
+## Follow-up: six fixes from Darshil's review of the preview (26 Sept)
+
+Commit `ae458f0`, on this PR before the merge.
+
+1. **More breathing room**, one step up the design system's own spacing
+   scale: sections 20 → 24, rows of cards 12 → 16, card padding 16/20 →
+   20/24. Phones move one step up from their own tighter base.
+2. **The sidebar runs the full page height.** The sidebar box itself was the
+   one-screen sticky element, so a full-page capture, or the bounce at the
+   foot of a long page, showed the page background under it. Now the
+   background spans the page and only its contents stick. Measured
+   read-only, scrolled to the bottom at 1440×900: the rail is 1,316px, ending
+   exactly where the page ends.
+3. **The current hour reads "3 so far"**, and shows no label while it is 0.
+4. **The Overview's Apollo line drops Apollo's own error text.** The health
+   check carries a new `summary` (refused count, last enrichment) that the
+   Overview reads. System health keeps the full text. **Not visible in the
+   preview until deployed:** the preview sends `/monitor/health` to
+   production. Proved in the suite instead: the vendor text is absent from
+   the Overview and present on System health.
+5. **The Today chart grows into its row** (208px floor, 420px ceiling), so
+   neither it nor the Funnel card has an empty band.
+6. **Disqualified shows "N at this time yesterday"** like every card, then
+   its breakdown.
+
+Also found while checking these: **the preview built the page markup once at
+start**, so for one run it served new CSS around the old sidebar markup, and
+that layout run tested a combination that could never ship. The preview now
+rebuilds the page from a fresh `monitor-next.js` on every load. The run was
+repeated on the real markup.
+
+Verified: full bar bare, **4,711 assertions, 0 failing** (baseline saved and
+its output read). Layout check **135 of 135 clean**. Screenshots read by eye
+at 1440 light, 360 light and 1280 dark. **Seven mutations, all CAUGHT**:
+- a zero current hour labelled;
+- "so far" dropped;
+- fill ignored;
+- vendor text back on the strip;
+- no server summary;
+- the Disqualified comparison dropped;
+- the rail's inner box no longer sticky.
+
 ## Deliberately not fixed, and why
 
 - **The non-ICP health row shows timings** ("Warm: 3509ms avg… Cache hits

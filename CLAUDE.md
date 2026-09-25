@@ -7,6 +7,15 @@ system.
 Explain things in plain language — no jargon, no making things sound more complex
 than they are.
 
+**Working on the monitor dashboard (`/monitor`, `/monitor/next`)? Read
+`docs/monitor-plan.md` FIRST.** It holds:
+- the plan (PRs A–D) and where it stands;
+- the decisions waiting on Darshil;
+- his rulings;
+- the rules learned the hard way.
+
+It is kept current, so a new session can resume from it.
+
 ---
 
 ## The one rule everything else follows
@@ -193,6 +202,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `README.md` | Repo landing blurb, not living documentation. This file is |
 | `tests/` | The test files described under Deploying, plus `crash-reporter.js` (required first by every suite), `measure.js` (the test bar and the mutation-testing rule) and the committed `.baseline.json` |
 | `docs/partnerstack.md` | PartnerStack handover: the two-step model, every ps_ column, env vars, test procedure, known gaps |
+| `docs/monitor-plan.md` | The dashboard rebuild's handoff: PRs A–D, current status, decisions waiting on Darshil, his rulings, learnings, and exactly where the next PR starts. **Read first for any dashboard work** |
 | `docs/OPEN-ITEMS.md` | What is still open or deliberately decided in THIS repo, as of 9 Sept 2026. The meta-capi repo has its own; neither is complete alone |
 | `docs/tickets/non-icp-v1-block.md` | The non-ICP block: what the Non-ICP doc says, the two positions this reverses, the domain list with per-domain evidence, and the `sdr-calling` dependency |
 | `docs/tickets/non-icp-verdict-arrives-after-submit.md` | Why a correct model verdict can land after the lead has already booked, the four options considered, and the measurement that reframed it — booking→demo median is 35 hours, so there is no 2.6-second race to win. Records that the calendar HOLD was built and the sweep was not, and that the sweep landed on 23 Sept |
