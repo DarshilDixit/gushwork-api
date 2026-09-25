@@ -1,4 +1,4 @@
-# PR B — the new dashboard at `/monitor/next`, side by side with `/monitor`
+# PR 123 — the new dashboard at `/monitor/next`, side by side with `/monitor`
 
 Branch `feat/monitor-next`. Written 26 Sept 2026. PR B of the monitor plan.
 Three commits: `f212508` (the build), `e2f600b` (everything the review
