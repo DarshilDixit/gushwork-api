@@ -42,11 +42,12 @@ evaluates the dashboard JS and reads what was painted.
 
 ## Never executed
 
-- **The Slack digest has never posted for real.** The repo's rule is that
-  every alert path is fired once on purpose before launch. This one has been
-  executed with the sender stubbed, which is one level short. It fires
-  Mondays 09:00 ET; `DROPOFF_DIGEST_ENABLED=false` stops it. **Worth firing
-  by hand before the first Monday**, the way `tools/fire-alert.js` does.
+- ~~The Slack digest has never posted for real.~~ **Fired on purpose on 25
+  Sept**: `node tools/fire-non-icp-slack.js dropoff-digest`, Slack returned
+  200, real numbers over the real leads table (191 of 295 booked, 64.7%,
+  week of Sep 14). Added to the fire tool in the same change, so the path is
+  repeatable rather than a one-off. It fires Mondays 09:00 ET;
+  `DROPOFF_DIGEST_ENABLED=false` stops it.
 - **The tab has not been opened in a real browser.** The loader is evaluated
   in the suite's stubbed DOM and every painted number is read back, which is
   what caught the Model tab's "0 companies classified" class of bug — but a
