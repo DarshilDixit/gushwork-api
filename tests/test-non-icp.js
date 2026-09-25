@@ -717,6 +717,11 @@ let results8;
      'the Overview card "Meta withheld — model". Counts leads whose Meta events were withheld and who were NOT blocked. Observational: it reaches no lead, and without it the population has no surface at all.'],
     ['/monitor/metrics people: people_meta_only',
      'the same card deduped to people, matching the people-by-default rule for headline numbers.'],
+    /* Added 26 Sept 2026 with the new Overview at /monitor/next. */
+    ['overviewReport: people_withheld',
+     'the new Overview "Meta withheld" card, people. The same population as the /monitor/metrics card -- flagged and NOT blocked -- counted per window. A GET dashboard read; it reaches no lead.'],
+    ['overviewReport: leads_withheld',
+     'the same card in Leads mode, rows rather than people. Counted, never filtered; overviewReport has no write and no caller on the lead path.'],
   ];
 
   const allFlagPredicates = [...src.matchAll(/non_icp_llm_flagged\s+IS\s+(NOT\s+)?TRUE/g)]
@@ -803,9 +808,23 @@ let results8;
      out of /monitor/metrics into a route that acts on leads would keep
      the count above correct while being a completely different thing. */
   const metricsBody = between("app.get('/monitor/metrics'", "app.get('/monitor/funnel'");
-  eq('10f: both deliberate counters live in /monitor/metrics',
-     (metricsBody.match(/non_icp_llm_flagged\s+IS\s+TRUE/g) || []).length,
-     FLAG_COUNTERS_DELIBERATE.length);
+  const overviewBody = between('async function overviewReport', "app.get('/monitor/overview'");
+  const inMetrics  = FLAG_COUNTERS_DELIBERATE.filter(([n]) => n.startsWith('/monitor/metrics')).length;
+  const inOverview = FLAG_COUNTERS_DELIBERATE.filter(([n]) => n.startsWith('overviewReport')).length;
+  eq('10f: the deliberate counters in /monitor/metrics are exactly the ones listed',
+     (metricsBody.match(/non_icp_llm_flagged\s+IS\s+TRUE/g) || []).length, inMetrics);
+  eq('10f: the deliberate counters in overviewReport are exactly the ones listed',
+     (overviewBody.match(/non_icp_llm_flagged\s+IS\s+TRUE/g) || []).length, inOverview);
+  eq('10f: every deliberate counter is in one of those two reads', inMetrics + inOverview, FLAG_COUNTERS_DELIBERATE.length);
+  /* AND overviewReport REACHES NO LEAD: it is called from its own GET route
+     only, and it writes nothing. The exemption holds only while both are true. */
+  const ovCallers = [...src.matchAll(/(?<!function\s)\boverviewReport\s*\(/g)].map((c) => {
+    const before = src.slice(0, c.index);
+    const enc = [...before.matchAll(/(?:^app\.(?:get|post)\('([^']+)'|^(?:async )?function (\w+))/gm)].pop();
+    return enc ? (enc[1] || enc[2]) : '(top level)'; });
+  ok('10f: overviewReport is called only from GET /monitor/overview',
+     ovCallers.length > 0 && ovCallers.every((x) => x === '/monitor/overview'), ovCallers.join(','));
+  ok('10f: overviewReport writes nothing', !/\b(INSERT|UPDATE|DELETE)\b/.test(overviewBody));
   for (const [name, why] of FLAG_COUNTERS_DELIBERATE) {
     ok(`10f: deliberate counter has a written reason — ${name}`, why.length > 40, name);
   }

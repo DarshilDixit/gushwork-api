@@ -917,7 +917,7 @@ const META_WITHHELD_LABELS = {
   blocked:      'Blocked — non-ICP',
   model:        'Model flagged the industry',
   website:      'Website not verified',
-  disqualified: 'Disqualified (B2C / Mixed)',
+  disqualified: 'Disqualified (B2C, mixed or waitlist)',   /* 378 of the 683 disqualified people asked for the waitlist */
 };
 
 /* The verified-reason list as a SQL literal. Extracted so the website arm
@@ -2475,8 +2475,12 @@ async function checkApolloHealth(db) {
       const reason = apolloReplyError(200, { error: w.error || 'refused' });
       const since  = ms(w.since);
       const what   = isCreditsExhausted(reason) ? 'Out of credits' : 'Apollo is refusing lookups';
-      return hc('apollo', 'red', what + (since ? ' for ' + fmtAge(Date.now() - since) : ''),
-        reason + ' · ' + refused + ' refused in the last ' + win + ' · ' + lastNote);
+      /* summary: the same line WITHOUT Apollo's own words ("You have
+         insufficient credits! Upgrade your plan..."), for the Overview's
+         strip, which an SDR reads. System health keeps the full detail. */
+      return Object.assign(hc('apollo', 'red', what + (since ? ' for ' + fmtAge(Date.now() - since) : ''),
+        reason + ' · ' + refused + ' refused in the last ' + win + ' · ' + lastNote),
+        { summary: refused + ' refused in the last ' + win + ' · ' + lastNote });
     }
 
     if (eligible < HEALTH_MIN_SAMPLE) {
@@ -3046,22 +3050,8 @@ app.get('/monitor/metrics', async (req, res) => {
          GROUP BY 1
          ORDER BY people DESC
       `),
-      recovered: pool.query(`
-        SELECT COUNT(*) AS recovered FROM (
-          SELECT LOWER(l.email) AS em
-          FROM leads l
-          WHERE l.email IS NOT NULL
-            AND l.completed = true
-            AND l.booking_uid IS NULL
-            AND EXISTS (
-              SELECT 1 FROM leads b
-              WHERE LOWER(b.email) = LOWER(l.email)
-                AND b.booking_uid IS NOT NULL
-                AND COALESCE(b.booked_at, b.created_at) >= l.created_at
-            )
-          GROUP BY LOWER(l.email)
-        ) x
-      `),
+      /* ONE definition, shared with /monitor/overview: RECOVERED_BOOKINGS_SQL. */
+      recovered: pool.query(RECOVERED_BOOKINGS_SQL),
       byDay: pool.query(`
         /* "Form entries per day" — a deliberate ROW count over the leads table,
            people count and not a session count. Daily inbound volume is the
@@ -3521,38 +3511,56 @@ app.get('/monitor/funnel', async (req, res) => {
   }
 });
 
+/* The Duplicates report: addresses with more than one lead row. A FUNCTION
+   taking its database, like overviewReport, so tools/preview-monitor.js can
+   run THIS BRANCH's query read-only -- until 26 Sept the preview proxied this
+   route to production, so the new is_internal marker had never run against
+   live data from a branch. A read, nothing else. */
+async function duplicatesReport(db) {
+  /* is_internal: ours by address OR by the staging page, the one definition
+     every outbound guard asks. Marked, never excluded -- our own tests are
+     the top of this list, and the new Duplicates tab says so on the row. */
+  const params = [];
+  const internalSql = internalLeadSqlClause('l.email', 'l.page_url', params);
+  /* GROUPED BY lower(email) ALONE -- the dedup key, always (CLAUDE.md). It
+     grouped by the raw address as well, so "Ann@x" and "ann@x" would have
+     been two rows. Measured 26 Sept: no address has two spellings, 338
+     groups either way, so this moves nothing today; it stops the drift. */
+  const result = await db.query(`
+    SELECT
+      MIN(l.email) AS email,
+      COUNT(*) AS session_count,
+      bool_or(${internalSql}) AS is_internal,
+      MAX(CASE WHEN l.booking_uid IS NOT NULL THEN 1 ELSE 0 END) AS has_booking,
+      MAX(CASE WHEN l.completed = true THEN 1 ELSE 0 END) AS has_completed,
+      MIN(l.created_at) AS first_seen,
+      MAX(l.created_at) AS last_seen,
+      json_agg(json_build_object(
+        'session_id', l.session_id,
+        'created_at', l.created_at,
+        'completed',  l.completed,
+        'booking_uid', l.booking_uid,
+        'booked_at',  l.booked_at,
+        'sell_to',    l.sell_to,
+        'step_reached', l.step_reached,
+        'disqualified', l.disqualified,
+        'page_url',   l.page_url
+      ) ORDER BY l.created_at DESC) AS sessions
+    FROM leads l
+    WHERE l.email IS NOT NULL
+    GROUP BY LOWER(l.email)
+    HAVING COUNT(*) > 1
+    ORDER BY COUNT(*) DESC, MAX(l.created_at) DESC
+  `, params);
+  return { total: result.rows.length, leads: result.rows };
+}
+
 app.get('/monitor/duplicates', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
 
   try {
-    const result = await pool.query(`
-      SELECT
-        l.email,
-        COUNT(*) AS session_count,
-        MAX(CASE WHEN l.booking_uid IS NOT NULL THEN 1 ELSE 0 END) AS has_booking,
-        MAX(CASE WHEN l.completed = true THEN 1 ELSE 0 END) AS has_completed,
-        MIN(l.created_at) AS first_seen,
-        MAX(l.created_at) AS last_seen,
-        json_agg(json_build_object(
-          'session_id', l.session_id,
-          'created_at', l.created_at,
-          'completed',  l.completed,
-          'booking_uid', l.booking_uid,
-          'booked_at',  l.booked_at,
-          'sell_to',    l.sell_to,
-          'step_reached', l.step_reached,
-          'disqualified', l.disqualified,
-          'page_url',   l.page_url
-        ) ORDER BY l.created_at DESC) AS sessions
-      FROM leads l
-      WHERE l.email IS NOT NULL
-      GROUP BY LOWER(l.email), l.email
-      HAVING COUNT(*) > 1
-      ORDER BY COUNT(*) DESC, MAX(l.created_at) DESC
-    `);
-
-    res.json({ total: result.rows.length, leads: result.rows });
+    res.json(await duplicatesReport(pool));
   } catch (err) {
     console.error('[/monitor/duplicates]', err.message);
     res.status(500).json({ error: 'Duplicates query failed', detail: err.message });
@@ -4069,6 +4077,11 @@ app.get('/monitor/sdr', async (req, res) => {
   }
 });
 
+/* THE NEW DASHBOARD, side by side at /monitor/next until it is switched in.
+   Front end in monitor/, assembled by monitor-next.js; this line is all it
+   needs from here. */
+require('./monitor-next').mount(app, { tz: DASH_TZ });
+
 app.get('/monitor', (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) {
@@ -4174,7 +4187,7 @@ app.get('/monitor', (req, res) => {
   '<div class="topbar"><div style="display:flex;align-items:center;gap:12px"><span class="logo">Gushwork &#8212; Form Monitor</span>' +
   '<div class="apill"><span class="dot" id="apidot"></span><span id="apist">Checking...</span></div>' +
   '<div class="apill" title="Every timestamp and every day boundary on this dashboard is US Eastern, and follows daylight saving automatically.">&#128340; All times ET</div></div>' +
-  '<div style="display:flex;align-items:center;gap:10px"><span class="lu" id="lupd">&#8212;</span>' +
+  '<div style="display:flex;align-items:center;gap:10px"><a class="btn" style="text-decoration:none" href="/monitor/next' + tp + '" title="The rebuilt dashboard, running side by side until it replaces this one">New dashboard &#8594;</a><span class="lu" id="lupd">&#8212;</span>' +
   '<button class="btn" onclick="loadAll()">&#8635; Refresh</button></div></div>' +
   '<div class="page">' +
   '<div class="tabs">' +
@@ -4205,7 +4218,7 @@ app.get('/monitor', (req, res) => {
   '<div class="mc" title="People = distinct email addresses ever captured. Sessions = individual form visits; one person can have several."><div class="ml">Total people</div><div class="mv" id="m-total">&#8212;</div><div class="ms" id="m-totals">&#8212;</div></div>' +
   '<div class="mc" title="People whose form reached Step 2 (completed) on at least one of their sessions."><div class="ml">People completed</div><div class="mv" id="m-comp">&#8212;</div><div class="ms" id="m-cpct">&#8212;</div></div>' +
   '<div class="mc" title="People with a booking on at least one of their sessions."><div class="ml">People booked</div><div class="mv" id="m-book">&#8212;</div><div class="ms" id="m-bpct">&#8212;</div></div>' +
-  '<div class="mc" title="People marked disqualified (B2C / Mixed) on at least one session."><div class="ml">Disqualified</div><div class="mv" id="m-disq">&#8212;</div><div class="ms" id="m-dsq">B2C / Mixed</div></div>' +
+  '<div class="mc" title="People marked disqualified on at least one session: they answered B2C or mixed, or asked for the waitlist."><div class="ml">Disqualified</div><div class="mv" id="m-disq">&#8212;</div><div class="ms" id="m-dsq">B2C, mixed or waitlist</div></div>' +
   '<div class="mc" title="ALL TIME. The Model tab counts the same leads inside a chosen window, so its figure is smaller and neither is wrong. LEADS stopped before the calendar by the non-ICP check &#8212; the brand-domain list OR the model &#8212; with the number of distinct PEOPLE underneath. One person who submitted five times is five leads and one person, so those two are not comparable &#8212; and neither is comparable to the Blocked tab&#39;s &quot;excluding our own tests&quot;, which is leads again. These are NOT removed from any other number on this page. Click through to the Blocked tab." style="cursor:pointer" onclick="showTab(\'blocked\')"><div class="ml">Blocked &#8212; Non-ICP</div><div class="mv" id="m-nonicp">&#8212;</div><div class="ms" id="m-nonicp-sub">still counted in every total</div></div>' +
   /* THE 4.2% NOBODY COULD SEE. A flagged lead is NOT blocked -- it books,
      it reaches Salesforce, it gets dialled -- and the only thing that
@@ -4262,7 +4275,7 @@ app.get('/monitor', (req, res) => {
       + '<option value="model">&#8212; Model flagged the industry</option>'
       + '<option value="internal">&#8212; Internal or staging</option>'
       + '<option value="website">&#8212; Website not verified</option>'
-      + '<option value="disqualified">&#8212; Disqualified (B2C / Mixed)</option>'
+      + '<option value="disqualified">&#8212; Disqualified (B2C, mixed or waitlist)</option>'
     + '</optgroup>'
     + '<option value="sent">Not withheld</option>'
   + '</select>' +
@@ -5770,7 +5783,7 @@ app.get('/monitor', (req, res) => {
     + 'if(r==="blocked")return "Blocked \\u2014 non-ICP";'
     + 'if(r==="model")return "Model flagged the industry";'
     + 'if(r==="website")return "Website not verified";'
-    + 'if(r==="disqualified")return "Disqualified (B2C / Mixed)";'
+    + 'if(r==="disqualified")return "Disqualified (B2C, mixed or waitlist)";'
     + 'return "";}' +
   /* THE SHORT FORM, for the chip. The long one stays on the tooltip.
      Two lengths because the chip sits in a table cell next to an email
@@ -5988,7 +6001,12 @@ app.get('/monitor', (req, res) => {
   'function lmCsv(){var rows0=lmSearched();if(!rows0.length)return;' +
   'var cols=["email","status","industry_category","industry_is_custom","product_or_service","sell_to","website","website_source","is_free_email","elv_status","entry_point","attempts","utm_source","utm_medium","utm_campaign","utm_content","utm_term","referrer","landing_page","previous_page","page_url","submitted_at","delivered","delivered_at","session_id"];' +
   'var Q=String.fromCharCode(34);' +
-  'var q=function(v){return Q+String(v==null?"":v).split(Q).join(Q+Q)+Q;};' +
+  /* A cell a VISITOR typed that starts with = + - @ tab or CR runs as a
+     formula when an SDR opens the export in Excel or Sheets. Prefixed with
+     an apostrophe, which both read as "this is text". Same rule as the new
+     dashboard's export (monitor/js/lm.js), so the two files never differ. */
+  'var AP=String.fromCharCode(39);' +
+  'var q=function(v){var s=String(v==null?"":v);if(s.length&&"=+-@\\t\\r".indexOf(s.charAt(0))>=0)s=AP+s;return Q+s.split(Q).join(Q+Q)+Q;};' +
   'var out=[cols.join(",")].concat(rows0.map(function(l){return cols.map(function(c){return q(l[c]);}).join(",");}));' +
   'var a=document.createElement("a");' +
   'a.href=URL.createObjectURL(new Blob([out.join(String.fromCharCode(10))],{type:"text/csv"}));' +
@@ -5998,7 +6016,7 @@ app.get('/monitor', (req, res) => {
   'set("m-total",d.peopleTotal);set("m-totals",d.total+" sessions \\u00B7 "+d.todayCount+" in last 24h");' +
   'set("m-comp",d.peopleCompleted);set("m-cpct",pct(d.peopleCompleted,d.peopleTotal)+" of people \\u00B7 "+d.completed+" sessions");' +
   'set("m-book",d.peopleBooked);set("m-bpct",pct(d.peopleBooked,d.peopleCompleted)+" of completed \\u00B7 "+d.booked+" sessions");' +
-  'set("m-disq",d.peopleDisqualified);set("m-dsq","B2C / Mixed \\u00B7 "+d.disqualified+" sessions");' +
+  'set("m-disq",d.peopleDisqualified);set("m-dsq","B2C, mixed or waitlist \\u00B7 "+d.disqualified+" sessions");' +
   /* THE UNIT IS IN THE TEXT, on both halves. The big number is LEADS
      and the sub-line is PEOPLE, and until 15 Sept 2026 neither said so.
      Next to the Blocked tab's "5 excluding our own tests" -- which is
@@ -6104,6 +6122,8 @@ app.get('/monitor', (req, res) => {
   '}catch(e){document.getElementById("dupes-tbody").innerHTML="<tr><td colspan=\\"7\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function toggleDupeRow(i){var row=document.getElementById("dupe-er-"+i);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=document.getElementById("dupe-xbtn-"+i);if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";}' +
   'renderSortArrows();loadAll();setInterval(loadAll,60000);' +
+  /* Opened from /monitor/next at a tab it has not rebuilt yet: land on it. */
+  '(function(){var m=String((window.location&&window.location.hash)||"").match(/tab=([a-z]+)/);if(m&&document.getElementById("tp-"+m[1]))showTab(m[1]);})();' +
   'checkHealth();setInterval(checkHealth,300000);' +
   'loadPartnerGaps();setInterval(loadPartnerGaps,600000);' +
   '<\/script></body></html>';
@@ -12922,7 +12942,7 @@ const DROPOFF_STAGES = [
   { key: '2_dq_b2c',        label: 'Sells to consumers',      desc: 'Answered B2C or mixed at step 1',            tone: 'warn' },
   { key: '3_dq_waitlist',   label: 'Asked for the waitlist',  desc: 'Chose the waitlist instead of a demo',       tone: 'warn' },
   { key: '4_dq_other',      label: 'Disqualified, other',     desc: 'Disqualified with no reason recorded',       tone: 'warn' },
-  { key: '5_blocked',       label: 'Blocked — not our market', desc: 'Real-estate brand or insurance carrier', tone: 'bad' },
+  { key: '5_blocked',       label: 'Blocked — not our market', desc: 'Real-estate or insurance business',    tone: 'bad' },
   { key: '6_drop_calendar', label: 'Left at the calendar',    desc: 'Completed step 2, never picked a time',      tone: 'neu' },
   /* NOT "left at step 1". The leads row is written by savePartial(1) at
      the END of handleStep1Next, so a row exists only once the visitor
@@ -13244,6 +13264,319 @@ app.get('/monitor/dropoff', async (req, res) => {
   } catch (err) {
     console.error('[/monitor/dropoff]', err.message);
     res.status(500).json({ error: 'Dropoff report failed', detail: err.message });
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════
+   THE NEW OVERVIEW -- /monitor/overview, feeding /monitor/next.
+
+   Three views, one definition set. Today (live) against yesterday at
+   the same time; this week against last week at the same point; all
+   time, with this month against last month at the same point. Every
+   window is cut in EASTERN wall-clock terms inside SQL, so "the same
+   point last week" is the same local time across a DST change, not the
+   same number of hours.
+
+   WHAT EACH NUMBER IS, and why, because a card that reads one thing and
+   counts another is the failure this dashboard exists to prevent:
+     - people / leads: COUNT(DISTINCT lower(email)) / rows, the four
+       nouns in CLAUDE.md.
+     - completed: submitted_at, NEVER the completed flag -- "did this
+       person fill the form in" is submitted_at, and the flag is also set
+       by three booking routes for people who never submitted.
+     - booked: booking_uid, AS OF the window's end. Last week's cohort
+       has had seven more days to book; counting those later bookings
+       would flatter last week against this one.
+     - disqualified (sells to consumers + asked for the waitlist) and
+       blocked: the DROPOFF LADDER, the same
+       expression the Dropoff tab uses. In LEADS mode the two agree
+       exactly for the same week. In PEOPLE mode they agree only when
+       Dropoff's window is that week: Dropoff places a person in the
+       period they FIRST arrived within its whole window, so a person who
+       first came in an earlier week of a 12-week window is not in this
+       week's column there. Measured 25 Sept: 271 people here, 263 in
+       Dropoff's Sep 21 column over 12 weeks, 272 with Dropoff narrowed to
+       the week. Both are right; the Dropoff tab says so under the table.
+       Measured before choosing: the week of 21 Sept, every blocked flag
+       read 20 while the ladder's blocked row read 18 -- two realtors who
+       answered B2C first. Two tabs showing both numbers would be the
+       disqualified/non_icp_blocked lesson arriving a fourth time.
+       And the old card called 683 disqualified people "B2C / Mixed"
+       when 378 of them had asked for the WAITLIST -- the larger half.
+     - meta withheld: the model flag on a lead that was NOT blocked, the
+       same population as the old Overview card, counted not filtered.
+     - sessions: form_sessions minus BOT_RE, the same bot rule the
+       funnel uses. A SESSION, not a page load: a landing page then /demo
+       in one tab is one row with hits incremented (CLAUDE.md, the four
+       nouns). This was labelled "page loads" until the 26 Sept review,
+       and measured 6-13% short of the page loads it named. The first
+       mockup counted bots and read 708 for a day.
+     - the funnel excludes webhook-origin leads, like /monitor/funnel:
+       they never loaded a form page, so they inflate both ends of a
+       session conversion rate.
+   Internal test submissions are INCLUDED, as everywhere on this
+   dashboard -- a known distortion, not a decision.
+
+   A READ, and nothing but: no write, no network, and it takes its
+   database as an argument so tools/preview-monitor.js can lift it and
+   run it inside a read-only transaction. */
+const OVERVIEW_VIEWS = ['today', 'week', 'all'];
+const OVERVIEW_WEBHOOK_SOURCES = `('rh_webhook','cal_webhook')`;
+
+/* RECOVERED BOOKINGS, one definition shared with /monitor/metrics: a
+   completed session with no booking, followed LATER by one for the same
+   address. COALESCE because this reads history from before booked_at
+   existed (CLAUDE.md, "Bookings: two different questions"). */
+const RECOVERED_BOOKINGS_SQL = `
+  SELECT COUNT(*) AS recovered FROM (
+    SELECT LOWER(l.email) AS em
+    FROM leads l
+    WHERE l.email IS NOT NULL
+      AND l.completed = true
+      AND l.booking_uid IS NULL
+      AND EXISTS (
+        SELECT 1 FROM leads b
+        WHERE LOWER(b.email) = LOWER(l.email)
+          AND b.booking_uid IS NOT NULL
+          AND COALESCE(b.booked_at, b.created_at) >= l.created_at
+      )
+    GROUP BY LOWER(l.email)
+  ) x`;
+
+/* VALUES rows for a list of windows, bound -- never interpolated. */
+function overviewWindowsSql(wins, params) {
+  return 'VALUES ' + wins.map((w) => {
+    params.push(w.k, w.s, w.e);
+    const n = params.length;
+    return `($${n - 2}::text, $${n - 1}::timestamptz, $${n}::timestamptz)`;
+  }).join(', ');
+}
+
+async function overviewReport(db, { view, asof } = {}) {
+  const v = OVERVIEW_VIEWS.includes(String(view)) ? String(view) : 'week';
+  /* asof lets a reader -- and the verification -- ask "as it stood at".
+     Never in the future: a future asof would label unfinished periods as
+     finished ones. */
+  let at = new Date();
+  if (asof != null && String(asof) !== '') {
+    const t = new Date(String(asof));
+    if (isNaN(t.getTime())) { const e = new Error('asof must be an ISO timestamp'); e.status = 400; throw e; }
+    if (t < at) at = t;
+  }
+  const B = (await db.query(`
+    SELECT $1::timestamptz AS asof,
+           (date_trunc('day',   $1::timestamptz AT TIME ZONE '${DASH_TZ}') AT TIME ZONE '${DASH_TZ}')                        AS d0,
+           ((date_trunc('day',  $1::timestamptz AT TIME ZONE '${DASH_TZ}') - interval '1 day') AT TIME ZONE '${DASH_TZ}')    AS d1,
+           (($1::timestamptz AT TIME ZONE '${DASH_TZ}' - interval '1 day') AT TIME ZONE '${DASH_TZ}')                         AS d1_same,
+           (date_trunc('week',  $1::timestamptz AT TIME ZONE '${DASH_TZ}') AT TIME ZONE '${DASH_TZ}')                        AS w0,
+           ((date_trunc('week', $1::timestamptz AT TIME ZONE '${DASH_TZ}') - interval '7 days') AT TIME ZONE '${DASH_TZ}')   AS w1,
+           (($1::timestamptz AT TIME ZONE '${DASH_TZ}' - interval '7 days') AT TIME ZONE '${DASH_TZ}')                        AS w1_same,
+           (date_trunc('month', $1::timestamptz AT TIME ZONE '${DASH_TZ}') AT TIME ZONE '${DASH_TZ}')                        AS m0,
+           ((date_trunc('month', $1::timestamptz AT TIME ZONE '${DASH_TZ}') - interval '1 month') AT TIME ZONE '${DASH_TZ}') AS m1,
+           (($1::timestamptz AT TIME ZONE '${DASH_TZ}' - interval '1 month') AT TIME ZONE '${DASH_TZ}')                       AS m1_same,
+           (SELECT MIN(created_at) FROM form_sessions)                                                              AS go_live,
+           (SELECT MIN(created_at) FROM leads WHERE email IS NOT NULL)                                              AS first_lead
+  `, [at.toISOString()])).rows[0];
+  const iso = (x) => (x ? new Date(x).toISOString() : null);
+  const asofIso = iso(B.asof);
+
+  /* KPI windows, the series windows and the grain, per view. */
+  let kpiWins, seriesWins, grain, fmt;
+  if (v === 'today') {
+    kpiWins    = [{ k: 'cur', s: iso(B.d0), e: asofIso }, { k: 'cmp', s: iso(B.d1), e: iso(B.d1_same) }];
+    seriesWins = [{ k: 'cur', s: iso(B.d0), e: asofIso }, { k: 'prev', s: iso(B.d1), e: iso(B.d0) }];
+    grain = 'hour'; fmt = 'HH24';
+  } else if (v === 'week') {
+    kpiWins    = [{ k: 'cur', s: iso(B.w0), e: asofIso }, { k: 'cmp', s: iso(B.w1), e: iso(B.w1_same) }];
+    seriesWins = [{ k: 'cur', s: iso(B.w0), e: asofIso }, { k: 'prev', s: iso(B.w1), e: iso(B.w0) }];
+    grain = 'day'; fmt = 'YYYY-MM-DD';
+  } else {
+    const epoch = '1970-01-01T00:00:00.000Z';
+    kpiWins    = [{ k: 'cur', s: epoch, e: asofIso }, { k: 'month', s: iso(B.m0), e: asofIso }, { k: 'cmp', s: iso(B.m1), e: iso(B.m1_same) }];
+    seriesWins = [{ k: 'cur', s: epoch, e: asofIso }];
+    grain = 'month'; fmt = 'YYYY-MM';
+  }
+  /* The funnel starts at the first page load we ever recorded: before
+     that there is no denominator, and a rate over nothing is not zero. */
+  const funWin = v === 'all'
+    ? (B.go_live ? { k: 'fun', s: iso(B.go_live), e: asofIso } : null)
+    : { k: 'fun', s: kpiWins[0].s, e: asofIso };
+  const allKpiWins = funWin ? kpiWins.concat([funWin]) : kpiWins;
+
+  const kp = [];
+  const kpiSql = `
+    WITH w(k, s, e) AS (${overviewWindowsSql(allKpiWins, kp)}),
+    b AS (
+      SELECT w.k, lower(l.email) AS person,
+             ${DROPOFF_STAGE_SQL} AS stage,
+             (l.submitted_at IS NOT NULL AND l.submitted_at < w.e)                     AS done,
+             (l.booking_uid IS NOT NULL AND COALESCE(l.booked_at, l.created_at) < w.e) AS bk,
+             (l.prefill_source IS NULL OR l.prefill_source NOT IN ${OVERVIEW_WEBHOOK_SOURCES}) AS via_form,
+             l.non_icp_llm_flagged, l.non_icp_blocked
+        FROM w JOIN leads l ON l.created_at >= w.s AND l.created_at < w.e
+       WHERE l.email IS NOT NULL),
+    best AS (SELECT k, person, MIN(stage) AS stage FROM b GROUP BY k, person),
+    bp AS (SELECT k,
+                  COUNT(*) FILTER (WHERE stage IN ('2_dq_b2c','3_dq_waitlist','4_dq_other'))::int AS people_dq,
+                  COUNT(*) FILTER (WHERE stage = '2_dq_b2c')::int      AS people_b2c,
+                  COUNT(*) FILTER (WHERE stage = '3_dq_waitlist')::int AS people_waitlist,
+                  COUNT(*) FILTER (WHERE stage = '5_blocked')::int     AS people_blocked
+             FROM best GROUP BY k)
+    SELECT a.*, bp.people_dq, bp.people_b2c, bp.people_waitlist, bp.people_blocked FROM (
+      SELECT k,
+             COUNT(DISTINCT person)::int                                   AS people,
+             COUNT(*)::int                                                 AS leads,
+             COUNT(DISTINCT person) FILTER (WHERE done)::int               AS people_done,
+             COUNT(*) FILTER (WHERE done)::int                             AS leads_done,
+             COUNT(DISTINCT person) FILTER (WHERE bk)::int                 AS people_booked,
+             COUNT(*) FILTER (WHERE bk)::int                               AS leads_booked,
+             COUNT(*) FILTER (WHERE stage IN ('2_dq_b2c','3_dq_waitlist','4_dq_other'))::int AS leads_dq,
+             COUNT(*) FILTER (WHERE stage = '2_dq_b2c')::int               AS leads_b2c,
+             COUNT(*) FILTER (WHERE stage = '3_dq_waitlist')::int          AS leads_waitlist,
+             COUNT(*) FILTER (WHERE stage = '5_blocked')::int              AS leads_blocked,
+             COUNT(DISTINCT person) FILTER (WHERE non_icp_llm_flagged IS TRUE AND non_icp_blocked IS NOT TRUE)::int AS people_withheld,
+             COUNT(*) FILTER (WHERE non_icp_llm_flagged IS TRUE AND non_icp_blocked IS NOT TRUE)::int AS leads_withheld,
+             COUNT(DISTINCT person) FILTER (WHERE via_form)::int           AS f_people,
+             COUNT(*) FILTER (WHERE via_form)::int                         AS f_leads,
+             COUNT(DISTINCT person) FILTER (WHERE via_form AND done)::int  AS f_people_done,
+             COUNT(*) FILTER (WHERE via_form AND done)::int                AS f_leads_done,
+             COUNT(DISTINCT person) FILTER (WHERE via_form AND bk)::int    AS f_people_booked,
+             COUNT(*) FILTER (WHERE via_form AND bk)::int                  AS f_leads_booked
+        FROM b GROUP BY k) a
+    LEFT JOIN bp USING (k)`;
+
+  const pp = [BOT_RE];
+  const pageSql = `
+    WITH w(k, s, e) AS (${overviewWindowsSql(allKpiWins, pp)})
+    SELECT w.k, COUNT(fs.created_at) FILTER (WHERE fs.user_agent IS NULL OR fs.user_agent !~* $1)::int AS sessions
+      FROM w LEFT JOIN form_sessions fs ON fs.created_at >= w.s AND fs.created_at < w.e
+     GROUP BY w.k`;
+
+  /* date_trunc and to_char take the grain and the format as text that is
+     WHITELISTED above, never read from the request. */
+  const sp = [];
+  const seriesSql = `
+    WITH w(k, s, e) AS (${overviewWindowsSql(seriesWins, sp)}),
+    b AS (
+      SELECT w.k, lower(l.email) AS person,
+             to_char(date_trunc('${grain}', l.created_at AT TIME ZONE '${DASH_TZ}'), '${fmt}') AS bucket,
+             (l.booking_uid IS NOT NULL AND COALESCE(l.booked_at, l.created_at) < w.e) AS bk
+        FROM w JOIN leads l ON l.created_at >= w.s AND l.created_at < w.e
+       WHERE l.email IS NOT NULL),
+    per AS (SELECT k, person, COUNT(DISTINCT bucket) AS nb FROM b GROUP BY k, person)
+    SELECT 'bucket' AS kind, k, bucket, COUNT(DISTINCT person)::int AS people, COUNT(*)::int AS leads,
+           COUNT(DISTINCT person) FILTER (WHERE bk)::int AS people_booked, COUNT(*) FILTER (WHERE bk)::int AS leads_booked
+      FROM b GROUP BY k, bucket
+    UNION ALL
+    SELECT 'repeats', k, NULL, COUNT(*) FILTER (WHERE nb > 1)::int, (SUM(nb) - COUNT(*))::int, NULL, NULL
+      FROM per GROUP BY k`;
+
+  const jobs = [db.query(kpiSql, kp), db.query(pageSql, pp), db.query(seriesSql, sp)];
+  let chanIdx = -1, lastIdx = -1, recIdx = -1;
+  if (v !== 'all') {
+    /* FIRST TOUCH per person, so the shares add up to the people total;
+       the source expression is the Dropoff one, unchanged. */
+    const cp = [];
+    chanIdx = jobs.push(db.query(`
+      WITH w(k, s, e) AS (${overviewWindowsSql([kpiWins[0]], cp)}),
+      first AS (
+        SELECT DISTINCT ON (lower(l.email)) lower(l.email) AS person, ${DROPOFF_SOURCE_SQL} AS source
+          FROM w JOIN leads l ON l.created_at >= w.s AND l.created_at < w.e
+         WHERE l.email IS NOT NULL
+         ORDER BY lower(l.email), l.created_at ASC),
+      rows_ AS (
+        SELECT ${DROPOFF_SOURCE_SQL} AS source
+          FROM w JOIN leads l ON l.created_at >= w.s AND l.created_at < w.e
+         WHERE l.email IS NOT NULL)
+      SELECT 'people' AS unit, source, COUNT(*)::int AS n FROM first GROUP BY source
+      UNION ALL
+      SELECT 'leads', source, COUNT(*)::int FROM rows_ GROUP BY source`, cp)) - 1;
+    lastIdx = jobs.push(db.query(`SELECT MAX(created_at) AS last_lead_at FROM leads WHERE created_at < $1`, [asofIso])) - 1;
+  } else {
+    recIdx = jobs.push(db.query(RECOVERED_BOOKINGS_SQL)) - 1;
+  }
+  const out = await Promise.all(jobs);
+
+  const kpi = {};
+  for (const r of out[0].rows) kpi[r.k] = r;
+  const pages = {};
+  for (const r of out[1].rows) pages[r.k] = r.sessions;
+  const zero = { people: 0, leads: 0, people_done: 0, leads_done: 0, people_booked: 0, leads_booked: 0,
+                 people_dq: 0, leads_dq: 0, people_b2c: 0, leads_b2c: 0, people_waitlist: 0, leads_waitlist: 0, people_blocked: 0, leads_blocked: 0, people_withheld: 0, leads_withheld: 0,
+                 f_people: 0, f_leads: 0, f_people_done: 0, f_leads_done: 0, f_people_booked: 0, f_leads_booked: 0 };
+  const K = (k) => Object.assign({}, zero, kpi[k] || {});
+  const pair = (field) => ({ people: [K('cur')['people' + field], K('cmp')['people' + field]], leads: [K('cur')['leads' + field], K('cmp')['leads' + field]] });
+
+  /* THE SLOTS ARE GENERATED, not read back from the rows, so an empty
+     hour or day is a zero in its place rather than a gap that joins the
+     bars either side. */
+  const slots = [];
+  if (grain === 'hour') for (let h = 0; h < 24; h++) slots.push(String(h).padStart(2, '0'));
+  else if (grain === 'day') {
+    const w0 = dropoffTodayEtOf(B.w0);
+    for (let i = 0; i < 7; i++) slots.push(dropoffAddDays(w0, i));
+  } else {
+    const first = B.first_lead ? dropoffTodayEtOf(B.first_lead).slice(0, 7) : dropoffTodayEtOf(B.asof).slice(0, 7);
+    const last = dropoffTodayEtOf(B.asof).slice(0, 7);
+    for (let m = first; m <= last && slots.length < 120; m = dropoffStep(m + '-01', 'month', 1).slice(0, 7)) slots.push(m);
+  }
+  const series = { grain, slots, cur: { people: {}, leads: {}, people_booked: {}, leads_booked: {} }, prev: null, repeats: null };
+  if (seriesWins.some((w) => w.k === 'prev')) series.prev = { people: {}, leads: {}, people_booked: {}, leads_booked: {} };
+  for (const r of out[2].rows) {
+    if (r.kind === 'repeats') { if (r.k === 'cur') series.repeats = { repeaters: r.people, extra: r.leads }; continue; }
+    const tgt = series[r.k]; if (!tgt) continue;
+    tgt.people[r.bucket] = r.people; tgt.leads[r.bucket] = r.leads;
+    tgt.people_booked[r.bucket] = r.people_booked; tgt.leads_booked[r.bucket] = r.leads_booked;
+  }
+  if (!series.repeats) series.repeats = { repeaters: 0, extra: 0 };
+
+  const F = funWin ? K('fun') : null;
+  const res = {
+    view: v, asof: asofIso, generated_at: new Date().toISOString(),
+    windows: Object.fromEntries(allKpiWins.map((w) => [w.k, { from: w.s, to: w.e }])),
+    go_live: iso(B.go_live), first_lead: iso(B.first_lead),
+    kpi: {
+      people: { people: [K('cur').people, K('cmp').people], leads: [K('cur').leads, K('cmp').leads] },
+      completed: pair('_done'), booked: pair('_booked'), dq: pair('_dq'), b2c: pair('_b2c'), waitlist: pair('_waitlist'),
+      blocked: pair('_blocked'), withheld: pair('_withheld'),
+    },
+    sessions: [pages.cur ?? null, pages.cmp ?? null],
+    funnel: F ? {
+      since: funWin.s, sessions: pages.fun ?? null,
+      people: { step1: F.f_people, completed: F.f_people_done, booked: F.f_people_booked },
+      leads:  { step1: F.f_leads,  completed: F.f_leads_done,  booked: F.f_leads_booked },
+    } : null,
+    series,
+  };
+  if (v === 'all') {
+    res.month = { people: [K('month').people, K('cmp').people], leads: [K('month').leads, K('cmp').leads],
+                  booked: { people: [K('month').people_booked, K('cmp').people_booked], leads: [K('month').leads_booked, K('cmp').leads_booked] } };
+    res.recovered = parseInt(out[recIdx].rows[0].recovered) || 0;
+    /* sessions have no all-time value: tracking began at go_live */
+    res.sessions = [null, null];
+  } else {
+    const ch = { people: [], leads: [] };
+    for (const r of out[chanIdx].rows) ch[r.unit].push({ name: r.source, n: r.n });
+    ch.people.sort((a, b) => b.n - a.n); ch.leads.sort((a, b) => b.n - a.n);
+    res.channels = ch;
+    res.last_lead_at = iso(out[lastIdx].rows[0].last_lead_at);
+  }
+  return res;
+}
+/* An ET calendar date (YYYY-MM-DD) for an instant. */
+function dropoffTodayEtOf(x) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: DASH_TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(x));
+}
+
+app.get('/monitor/overview', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    res.json(await overviewReport(pool, { view: req.query.view, asof: req.query.asof }));
+  } catch (err) {
+    if (err.status === 400) return res.status(400).json({ error: err.message });
+    console.error('[/monitor/overview]', err.message);
+    res.status(500).json({ error: 'Overview report failed', detail: err.message });
   }
 });
 

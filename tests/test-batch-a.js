@@ -512,6 +512,9 @@ function liftClientJs(startMarker, endMarker) {
     ok('health/apollo: ...with Apollo’s own reason, HTML stripped',
        /insufficient credits/.test(out.detail) && !/<a/.test(out.detail), out.detail);
     ok('health/apollo: ...and how many were refused', /41 refused in the last 24h/.test(out.detail), out.detail);
+    /* the Overview strip reads summary: the same facts, WITHOUT Apollo's words */
+    ok('health/apollo: a summary for the Overview, with no vendor text in it',
+       /^41 refused in the last 24h · Last enrichment 2d ago$/.test(out.summary || '') && !/insufficient|Upgrade/i.test(out.summary || ''), out.summary);
     ok('health/apollo: the run start is read from AFTER the last answer',
        outPool.calls[1] && +new Date(outPool.calls[1].params[0]) === now - 49 * HOUR);
 
@@ -982,9 +985,15 @@ function liftClientJs(startMarker, endMarker) {
          COALESCE: it is definitionally about ordering, and it reads the full
          history including rows that predate the booked_at column, where
          comparing a null yields null and the row quietly counts as un-booked. */
+      /* ONE definition since 26 Sept: RECOVERED_BOOKINGS_SQL, read by both
+         /monitor/metrics and /monitor/overview, so the two cannot drift. */
+      const recSql = between(src, 'const RECOVERED_BOOKINGS_SQL', '`;');
       ok('booking: recovered bookings still COALESCEs booked_at with created_at',
-         /COALESCE\(booked\.booked_at, booked\.created_at\)|COALESCE\(b\.booked_at, b\.created_at\)/.test(metrics),
-         (metrics.match(/COALESCE\([^)]*booked_at[^)]*\)/g) || []).join(' | '));
+         /COALESCE\(b\.booked_at, b\.created_at\) >= l\.created_at/.test(recSql), recSql.slice(0, 300));
+      ok('booking: /monitor/metrics reads the one recovered definition, not a copy',
+         /recovered: pool\.query\(RECOVERED_BOOKINGS_SQL\)/.test(metrics) && !/AS recovered FROM \(/.test(metrics));
+      ok('booking: /monitor/overview reads the same definition',
+         /db\.query\(RECOVERED_BOOKINGS_SQL\)/.test(between(src, 'async function overviewReport', "app.get('/monitor/overview'")));
 
       /* The Pending recovery card asks question 2 and now says so. The old
          tooltip claimed "no booking on any other session of that email", which
