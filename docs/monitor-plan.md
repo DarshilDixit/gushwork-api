@@ -225,11 +225,69 @@ Never print the token; the ready file holds it for the tools.
 - **Then** the full bar bare, the card, push, open the PR, and **stop for
   review. Do not merge C.**
 
+### PR C: calls made while building (each easy to reverse; all go on the card)
+
+**No server change in PR C.** Every tab reads its existing route, and the
+preview proxies them all unchanged. These things would need one and were NOT
+done; they are listed for Darshil instead:
+
+- **Formula escaping on the All leads and SDR CSV exports.** A leading "+"
+  would get an apostrophe, which corrupts phone numbers for any dialer that
+  imports the file.
+- **An "ours" marker** on SDR, Visitors and Partners.
+- **Partners' row-level quirks:** Needs attention counts failing rows only,
+  and Check A ignores acknowledgements.
+- **Model's Decisions rows** borrow an industry from a non-deciding domain.
+- **Unbounded totals** behind the Visitors lists.
+
+**Display-only calls:**
+
+- **"Step 1" reads "Left on step 2"**, on All leads, Blocked and SDR,
+  following CLAUDE.md's LEFT ON STEP 2 rule. The ladder itself is
+  unchanged.
+- **Wording that was false for some rows is corrected:**
+  - the Meta chip's "still reaches Salesforce", which is false for blocked
+    and internal leads;
+  - "B2C" meaning every disqualified lead;
+  - Blocked's "turned away before the calendar", which is false for
+    late-verdict (llm_late) leads;
+  - the SDR count saying "leads" when it counts people;
+  - Visitors' "Person location = company", when the parser reads Apollo's
+    PERSON record (CLAUDE.md is corrected too).
+- **Raw slugs get plain labels,** with the slug kept in a tooltip: partner
+  failure reasons, scrape statuses and block sources. The labels live in
+  ONE new-dashboard file, pinned by tests against the server and classic
+  copies.
+- **Partner revenue gaps moves to the Partners tab.** Classic hid it inside
+  the All Leads table header. It stays a work queue: never System health,
+  never the attention strip.
+- **The Partners ack no longer uses a browser prompt.** It is an inline
+  note and Acknowledge / Cancel; Cancel now does nothing, where classic
+  acknowledged anyway. The POST is unchanged: a JSON body with the boolean,
+  the token in the query.
+- **"ticked, will fire next poll" is shown only when the conversion is
+  VERIFIED;** otherwise it says the $50 cannot fire yet.
+- **Filters live in the URL hash:** All leads filters, Model days and
+  product, Visitors window and map. So a link says what it shows, and
+  Partners' drill-down opens All leads filtered on that partner.
+- **Refresh:** every 5 minutes on every tab, paused while hidden, keeping
+  open rows and loaded change logs. The partner-gaps list keeps its own
+  10-minute cadence.
+- **Visitors loads Leaflet only when the map is first opened,** pinned
+  1.9.4 with an SRI hash; the tables are the fallback. The map survives
+  repaints (one container, re-attached). The zoom control is 44px on
+  touch. One-finger drags scroll the page on phones.
+- **All leads gains the "our own tests" filter** the route already
+  supports. The 🧪 tooltip used to point at a filter that did not exist.
+
 ### PR C progress
 
 _(kept current as the work moves)_
 
-- [ ] Understand pass, per tab
+- [x] Understand pass, per tab. Five read-only agents wrote a build spec
+  each. They live in this session's scratchpad (`specs/*.md`); if lost,
+  re-run the same read (routes, writes, UI, rules, traps, crosscheck and
+  tests per tab) before building.
 - [ ] Build: All leads + Blocked, SDR list, Partners, Model, Visitors
 - [ ] Number-for-number checks against the classic, live, read-only
 - [ ] Layout check, screenshots by eye
