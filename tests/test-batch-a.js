@@ -278,7 +278,12 @@ function liftClientJs(startMarker, endMarker) {
   const sink = {};
   const doc = { getElementById: (id) => ({ set innerHTML(v) { sink[id] = v; }, get innerHTML() { return sink[id]; } }) };
   const C = (new Function('document', 'et',
-    clientSrc + '\n return { fRow, renderFunnel, setFunnelMode };'))(doc, () => '21/08/2026, 10:32');
+    clientSrc + '\n return { fRow, fStep, renderFunnel, setFunnelMode };'))(doc, () => '21/08/2026, 10:32');
+
+  /* Step to step: of those who reached the stage above, how many made this
+     one. A missing or zero base prints nothing, never a rate nobody measured. */
+  ok('funnel: step-to-step rate reads as a share of the stage above', C.fStep(1091, 1438, 'step 1') === '&#183; 76% of step 1', C.fStep(1091, 1438, 'step 1'));
+  ok('funnel: no base, no rate', C.fStep(5, 0, 'step 1') === '' && C.fStep(null, 10, 'step 1') === '' && C.fStep(5, null, 'x') === '');
 
   // A null stage must never render as 0 — that reads as "nobody", which is a
   // claim about demand rather than about our instrumentation.
@@ -420,6 +425,13 @@ function liftClientJs(startMarker, endMarker) {
 {
   const healthSrc = between(src, '/* ══ SYSTEM HEALTH', "app.get('/monitor/health'");
 
+  /* The Apollo check reads three names from OUTSIDE this block. Lifted from
+     index.js, never copied, so the check runs against the real parser. */
+  const APOLLO_LIFT = (new Function(
+    between(src, 'const FREE_EMAIL_DOMAINS', '\n') + '\n'
+    + between(src, 'const CREDITS_EXHAUSTED_PATTERNS', 'const CREDITS_GUIDANCE')
+    + between(src, 'function apolloReplyError', '/* Everything one Apollo answer yields')
+    + '\nreturn { FREE_EMAIL_DOMAINS, apolloReplyError, isCreditsExhausted };'))();
   // Everything the block reaches for that lives elsewhere in the file.
   const sentAlerts = [];
   const sentSlack  = [];
@@ -427,6 +439,7 @@ function liftClientJs(startMarker, endMarker) {
     'pool', 'awsPool', 'BOT_RE', 'CRON_STALE_MS',
     '_lastCronRunAt', '_cronRanThisProcess', '_processStartedAt',
     'alertOps', 'sendOpsSlack', 'bHeader', 'bDivider', 'bFields', 'bContext', 'etStamp',
+    'FREE_EMAIL_DOMAINS', 'apolloReplyError', 'isCreditsExhausted',
     healthSrc + `
     return { checkPartialHealth, checkSubmitHealth, checkApolloHealth, checkBookingHealth,
              checkCronHealth, checkAwsHealth, checkRecoveryHealth,
@@ -438,7 +451,8 @@ function liftClientJs(startMarker, endMarker) {
     Date.now(), false, Date.now(),
     (sev, source, title, details) => { sentAlerts.push({ sev, source, title, details }); return true; },
     (blocks, text) => { sentSlack.push(text); },
-    (t) => ({ t }), () => ({ d: 1 }), (f) => ({ f }), (c) => ({ c }), () => '25/08/2026, 12:00 ET'
+    (t) => ({ t }), () => ({ d: 1 }), (f) => ({ f }), (c) => ({ c }), () => '25/08/2026, 12:00 ET',
+    APOLLO_LIFT.FREE_EMAIL_DOMAINS, APOLLO_LIFT.apolloReplyError, APOLLO_LIFT.isCreditsExhausted
   );
 
   const rowsPool  = (row) => ({ query: async () => ({ rows: [row] }) });
@@ -475,17 +489,69 @@ function liftClientJs(startMarker, endMarker) {
        (submitFn.match(/INTERVAL '\$\{HEALTH_SUBMIT_WINDOW_H\} hours'/g) || []).length === 2
        && /submitted_at >= NOW\(\)/.test(submitFn), submitFn.slice(0, 300));
 
-    /* ── Apollo ── */
-    eq('health/apollo: zero enrichments against a real sample is RED',
-       await st(H.checkApolloHealth(rowsPool({ leads: 100, enriched: 0, last_enriched: null }))), 'red');
-    eq('health/apollo: a healthy rate is green',
-       await st(H.checkApolloHealth(rowsPool({ leads: 100, enriched: 80, last_enriched: new Date() }))), 'green');
+    /* ── Apollo ──
+       Two queries: the counts, and -- only when the latest reply was a
+       refusal -- Apollo's words and when the run began. apolloPool serves
+       them in that order and records what was bound. */
+    const apolloPool = (row, why) => { const calls = [];
+      return { calls, query: async (sql, params) => { calls.push({ sql: String(sql), params });
+        return { rows: [calls.length === 1 ? row : (why || {})] }; } }; };
+    const HOUR = 3600e3, now = Date.now();
+    const healthy = { eligible: 40, matched: 34, refused: 0, last_matched: new Date(now - HOUR),
+                      last_answered: new Date(now - HOUR), last_refused: null };
+
+    /* THE 23 SEPT SHAPE. 86 rows written, Apollo found 0, every one a
+       refusal. The old check counted the rows and read 80%. */
+    const outPool = apolloPool(
+      { eligible: 40, matched: 0, refused: 41, last_matched: new Date(now - 50 * HOUR),
+        last_answered: new Date(now - 49 * HOUR), last_refused: new Date(now - 60e3) },
+      { error: "You have insufficient credits! <a href='x'>Upgrade your plan</a>", since: new Date(now - 49 * HOUR) });
+    const out = await H.checkApolloHealth(outPool);
+    eq('health/apollo: OUT OF CREDITS is red', out.state, 'red');
+    ok('health/apollo: ...and says so in words', /^Out of credits for 2d$/.test(out.text), out.text);
+    ok('health/apollo: ...with Apollo’s own reason, HTML stripped',
+       /insufficient credits/.test(out.detail) && !/<a/.test(out.detail), out.detail);
+    ok('health/apollo: ...and how many were refused', /41 refused in the last 24h/.test(out.detail), out.detail);
+    ok('health/apollo: the run start is read from AFTER the last answer',
+       outPool.calls[1] && +new Date(outPool.calls[1].params[0]) === now - 49 * HOUR);
+
+    const other = await H.checkApolloHealth(apolloPool(
+      { eligible: 40, matched: 0, refused: 3, last_answered: new Date(now - 2 * HOUR), last_refused: new Date(now - 60e3) },
+      { error: 'Invalid access credentials.', since: new Date(now - HOUR) }));
+    ok('health/apollo: any other refusal is red and not called credits',
+       other.state === 'red' && /^Apollo is refusing lookups/.test(other.text), other.text);
+
+    const g = await H.checkApolloHealth(apolloPool(healthy));
+    eq('health/apollo: a healthy rate is green', g.state, 'green');
+    ok('health/apollo: the rate is of BUSINESS-email leads', /^85% enriched/.test(g.text) && /34 of 40 business-email leads/.test(g.detail), g.text + ' / ' + g.detail);
+    const gPool = apolloPool(healthy); await H.checkApolloHealth(gPool);
+    ok('health/apollo: free mailboxes are excluded from the denominator',
+       Array.isArray(gPool.calls[0].params[0]) && gPool.calls[0].params[0].includes('gmail.com')
+       && /<> ALL\(\$1::text\[\]\)/.test(gPool.calls[0].sql));
+    /* STRUCTURAL, and that is the ceiling here: the bar has no database, so
+       the SQL cannot run. The first version of this assertion matched the
+       found-column DEFINITION, which survives the matched FILTER dropping
+       its AND e.found -- exactly the 23 Sept bug. So pin the filter itself. */
+    ok('health/apollo: the numerator is what Apollo FOUND, not rows written',
+       /enriched_title IS NOT NULL OR enriched_company IS NOT NULL/.test(gPool.calls[0].sql)
+       && /FILTER \(WHERE e\.enriched_at >= NOW\(\)[^,]*? AND e\.found\)\s+AS matched/.test(gPool.calls[0].sql),
+       gPool.calls[0].sql.slice(0, 400));
+    ok('health/apollo: refusals are counted apart, never as matches',
+       /FILTER \(WHERE e\.enriched_at >= NOW\(\)[^,]*? AND e\.refused\)\s+AS refused/.test(gPool.calls[0].sql));
+    eq('health/apollo: a healthy check never reads the reply bodies twice', gPool.calls.length, 1);
+
+    const rec = await H.checkApolloHealth(apolloPool({ ...healthy, matched: 30, refused: 5,
+      last_refused: new Date(now - 3 * HOUR) }));
+    ok('health/apollo: answering again after refusals is AMBER, not green',
+       rec.state === 'amber' && /recovered, but 5 refused/.test(rec.detail), rec.state + ' / ' + rec.detail);
     eq('health/apollo: a middling rate is amber',
-       await st(H.checkApolloHealth(rowsPool({ leads: 100, enriched: 40, last_enriched: new Date() }))), 'amber');
+       (await H.checkApolloHealth(apolloPool({ ...healthy, matched: 16 }))).state, 'amber');
     eq('health/apollo: a bad rate is red',
-       await st(H.checkApolloHealth(rowsPool({ leads: 100, enriched: 10, last_enriched: new Date() }))), 'red');
-    eq('health/apollo: below the lead floor is grey',
-       await st(H.checkApolloHealth(rowsPool({ leads: 3, enriched: 0, last_enriched: null }))), 'insufficient_data');
+       (await H.checkApolloHealth(apolloPool({ ...healthy, matched: 4 }))).state, 'red');
+    eq('health/apollo: zero found against a real sample is RED',
+       (await H.checkApolloHealth(apolloPool({ ...healthy, matched: 0, last_matched: null }))).state, 'red');
+    eq('health/apollo: below the business-email floor is grey',
+       (await H.checkApolloHealth(apolloPool({ ...healthy, eligible: 3, matched: 0 }))).state, 'insufficient_data');
     eq('health/apollo: a failed query is RED',
        await st(H.checkApolloHealth(deadPool('relation does not exist'))), 'red');
 

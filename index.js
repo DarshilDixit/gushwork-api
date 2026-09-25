@@ -1273,6 +1273,27 @@ const AUTH_FAILURE_GUIDANCE = {
   'Non-ICP model': 'Anthropic rejected the API key. Check ANTHROPIC_API_KEY and the account credit balance. The brand-domain list is unaffected and still blocking.',
 };
 
+/* OUT OF CREDITS is its own alert, not "Authentication failed". It is
+   just as terminal -- nothing recovers until somebody tops up or the
+   allowance resets -- so it pages the same way, but the key is fine and
+   telling someone at 11pm to rotate it sends them the wrong way.
+
+   Apollo's wording, measured on 413 refused lookups: "You have
+   insufficient credits!". Checked before the auth patterns, which also
+   hold /credits exhausted/i for ELV; ELV has no FAILURE_MONITORS entry,
+   so no alert that fires today changes title. */
+const CREDITS_EXHAUSTED_PATTERNS = [
+  /insufficient credits/i,         // Apollo
+  /credits exhausted/i,            // ELV wording, kept beside it
+];
+function isCreditsExhausted(error) {
+  const msg = String(error || '');
+  return !!msg && CREDITS_EXHAUSTED_PATTERNS.some((re) => re.test(msg));
+}
+const CREDITS_GUIDANCE = {
+  'Apollo': 'Apollo has no credits left, so it refuses every lookup. Leads still arrive, book and reach Salesforce as normal -- they just arrive without title, company size or industry. It comes back on its own when credits are topped up or the monthly allowance resets. Afterwards, node tools/re-enrich-apollo.js lists the leads it missed and what re-enriching them would cost (dry run unless given --apply).',
+};
+
 // Consecutive-failure streak per service. A run of failures is an outage at
 // ANY volume — the count threshold needs traffic to trip, and quiet hours
 // are exactly when nobody is watching the logs.
@@ -1421,6 +1442,18 @@ function recordFailure(source, id, error) {
     if (!cfg) return;
     const now = Date.now();
     const errStr = String(error || '').substring(0, 200);
+
+    // ── Out of credits: page NOW, like a dead credential, but say so ──
+    if (isCreditsExhausted(errStr)) {
+      alertOps('critical', source, 'Out of credits', {
+        'Affected': id || 'unknown',
+        'Error': errStr,
+        'What this means': CREDITS_GUIDANCE[source] || 'This service has run out of credits. It stays broken until they are topped up or the allowance resets.',
+        'Impact': cfg.impact,
+      });
+      _failStreaks.set(source, 0);
+      return;
+    }
 
     // ── Credential failure: page NOW, skip every threshold ──
     if (isAuthFailure(errStr, source)) {
@@ -2386,32 +2419,79 @@ async function checkSubmitHealth(db) {
 /* ── Apollo enrichment ──────────────────────────────────────────────
    Was a lifetime ratio of enrichment_data rows to leads rows: if Apollo
    died today, a year of good history kept it green indefinitely. Now
-   scoped to a window, so yesterday cannot vouch for today. */
+   scoped to a window, so yesterday cannot vouch for today.
+
+   AND IT COUNTED THE WRONG THING UNTIL 25 SEPT 2026. It counted ROWS
+   WRITTEN, and /enrich wrote a row for every reply -- including Apollo
+   refusing the lookup for want of credits. From 23 Sept it read "80%
+   enriched in the last 24h" while Apollo had found 0 of 86. Now:
+     - the LATEST reply decides first. If Apollo's most recent answer was
+       a refusal it is failing now, and no rate can make that green
+     - the numerator is lookups where Apollo actually FOUND someone
+     - the denominator is BUSINESS-email leads, the only ones /enrich
+       sends: free mailboxes are skipped by design, so counting them made
+       a perfect Apollo read about 60%
+   Measured on the clean days 11-22 Sept: 69-95% of business-email leads
+   matched, so green at 60% still sits clear of the worst normal day. */
 async function checkApolloHealth(db) {
   try {
     const r = await db.query(`
       SELECT
         (SELECT COUNT(*) FROM leads
            WHERE created_at >= NOW() - INTERVAL '${HEALTH_APOLLO_WINDOW_H} hours'
-             AND email IS NOT NULL)                                                   AS leads,
-        (SELECT COUNT(*) FROM enrichment_data
-           WHERE enriched_at >= NOW() - INTERVAL '${HEALTH_APOLLO_WINDOW_H} hours')   AS enriched,
-        (SELECT MAX(enriched_at) FROM enrichment_data)                                AS last_enriched
-    `);
-    const leads    = parseInt(r.rows[0].leads)    || 0;
-    const enriched = parseInt(r.rows[0].enriched) || 0;
-    const last     = r.rows[0].last_enriched ? new Date(r.rows[0].last_enriched).getTime() : null;
+             AND email IS NOT NULL
+             AND split_part(lower(email), '@', 2) <> ALL($1::text[]))                         AS eligible,
+        COUNT(*) FILTER (WHERE e.enriched_at >= NOW() - INTERVAL '${HEALTH_APOLLO_WINDOW_H} hours' AND e.found)   AS matched,
+        COUNT(*) FILTER (WHERE e.enriched_at >= NOW() - INTERVAL '${HEALTH_APOLLO_WINDOW_H} hours' AND e.refused) AS refused,
+        MAX(e.enriched_at) FILTER (WHERE e.found)                                              AS last_matched,
+        MAX(e.enriched_at) FILTER (WHERE NOT e.refused)                                        AS last_answered,
+        MAX(e.enriched_at) FILTER (WHERE e.refused)                                            AS last_refused
+      FROM (SELECT enriched_at,
+                   COALESCE(raw_response ? 'error', false) AS refused,
+                   (enriched_title IS NOT NULL OR enriched_company IS NOT NULL
+                    OR enriched_company_size IS NOT NULL)  AS found
+              FROM enrichment_data) e
+    `, [FREE_EMAIL_DOMAINS]);
+    const row      = r.rows[0] || {};
+    const eligible = parseInt(row.eligible) || 0;
+    const matched  = parseInt(row.matched)  || 0;
+    const refused  = parseInt(row.refused)  || 0;
+    const ms       = (v) => (v ? new Date(v).getTime() : null);
+    const lastMatched = ms(row.last_matched), lastAnswered = ms(row.last_answered), lastRefused = ms(row.last_refused);
     const win      = HEALTH_APOLLO_WINDOW_H + 'h';
-    const lastNote = last ? 'Last enrichment ' + fmtAge(Date.now() - last) + ' ago' : 'Nothing has ever been enriched';
+    const lastNote = lastMatched ? 'Last enrichment ' + fmtAge(Date.now() - lastMatched) + ' ago' : 'Nothing has ever been enriched';
 
-    if (leads < HEALTH_MIN_SAMPLE) {
-      return hc('apollo', 'insufficient_data', 'Quiet — ' + leads + ' leads in the last ' + win, lastNote);
+    /* Failing NOW. A second, small query fetches the words Apollo used and
+       when this run of refusals began -- only on this branch, so a healthy
+       check never reads the reply bodies. */
+    if (lastRefused && (!lastAnswered || lastRefused > lastAnswered)) {
+      const w = (await db.query(`
+        SELECT raw_response->>'error' AS error,
+               (SELECT MIN(enriched_at) FROM enrichment_data
+                 WHERE raw_response ? 'error' AND enriched_at > $1) AS since
+          FROM enrichment_data WHERE raw_response ? 'error'
+         ORDER BY enriched_at DESC LIMIT 1
+      `, [row.last_answered || new Date(0)])).rows[0] || {};
+      const reason = apolloReplyError(200, { error: w.error || 'refused' });
+      const since  = ms(w.since);
+      const what   = isCreditsExhausted(reason) ? 'Out of credits' : 'Apollo is refusing lookups';
+      return hc('apollo', 'red', what + (since ? ' for ' + fmtAge(Date.now() - since) : ''),
+        reason + ' · ' + refused + ' refused in the last ' + win + ' · ' + lastNote);
     }
-    const rate = Math.round(enriched / leads * 100);
-    if (enriched === 0)  return hc('apollo', 'red',   '0 of ' + leads + ' enriched in the last ' + win, lastNote);
-    if (rate >= 60)      return hc('apollo', 'green', rate + '% enriched in the last ' + win, enriched + ' of ' + leads + ' · ' + lastNote);
-    if (rate >= 30)      return hc('apollo', 'amber', rate + '% enriched in the last ' + win, enriched + ' of ' + leads + ' · ' + lastNote);
-    return hc('apollo', 'red', rate + '% enriched in the last ' + win, enriched + ' of ' + leads + ' · ' + lastNote);
+
+    if (eligible < HEALTH_MIN_SAMPLE) {
+      return hc('apollo', 'insufficient_data', 'Quiet — ' + eligible + ' business-email leads in the last ' + win, lastNote);
+    }
+    const rate      = Math.round(matched / eligible * 100);
+    const counts    = matched + ' of ' + eligible + ' business-email leads';
+    /* Answering again, but refusals inside the window mean leads were
+       missed -- worth amber even when the rate recovered, because those
+       leads stay unenriched until somebody re-runs them. */
+    const recovered = refused > 0 ? ' · recovered, but ' + refused + ' refused earlier in the window' : '';
+    if (matched === 0)              return hc('apollo', 'red',   '0 of ' + eligible + ' enriched in the last ' + win, lastNote + recovered);
+    if (rate >= 60 && refused === 0) return hc('apollo', 'green', rate + '% enriched in the last ' + win, counts + ' · ' + lastNote);
+    if (rate >= 30)                 return hc('apollo', 'amber', rate + '% enriched in the last ' + win, counts + recovered + ' · ' + lastNote);
+    return hc('apollo', 'red', rate + '% enriched in the last ' + win, counts + recovered + ' · ' + lastNote);
   } catch (err) {
     return hc('apollo', 'red', 'Could not check', err && err.message);
   }
@@ -4144,7 +4224,7 @@ app.get('/monitor', (req, res) => {
   '<table style="width:100%;font-size:13px"><tbody id="m-prodrows"><tr><td class="nd">&#8212;</td></tr></tbody></table>' +
   '</div>' +
   '<div class="g4">' +
-  '<div class="mc" title="Distinct qualified B2B people who COMPLETED the form and have no booking on any of their sessions. The SDR List is deliberately wider &#8212; it has no completed filter, so it also carries people who entered an email and never finished. Expect the SDR List to be the larger number."><div class="ml">No booking yet (SDR)</div><div class="mv" id="m-nb">&#8212;</div><div class="ms" id="m-nbs">&#8212;</div></div>' +
+  '<div class="mc" title="Distinct qualified B2B people who COMPLETED the form and have no booking on any of their sessions. The SDR List is deliberately wider &#8212; it has no completed filter, so it also carries people who entered an email and never finished. Expect the SDR List to be the larger number."><div class="ml">Completed, no booking yet</div><div class="mv" id="m-nb">&#8212;</div><div class="ms" id="m-nbs">&#8212;</div></div>' +
   '<div class="mc" title="People who completed the form without booking, and later booked on another session &#8212; your follow-up emails / prefill links / SDR nudges working."><div class="ml">Recovered bookings</div><div class="mv" id="m-rec">&#8212;</div><div class="ms">booked on a later session</div></div>' +
   '<div class="mc" title="Partner-referred leads that will never pay the affiliate unless someone acts. Two separate failures: no conversion was ever sent for that domain, or the demo happened and no Opportunity exists for an AE to mark qualified. Leads simply waiting on an AE are NOT counted &#8212; that is normal latency, not a gap."><div class="ml">Partner gaps</div><div class="mv" id="m-psgap">&#8212;</div><div class="ms" id="m-psgap-sub">unpaid partner referrals</div></div>' +
   '<div class="mc" title="Sessions older than 2 hours, not yet emailed, where nobody has booked with that address SINCE the session started. A booking made before the session does not count as resolving it &#8212; the person came back, started again and dropped again. That is why this number and the SDR List can disagree about the same address."><div class="ml">Pending recovery</div><div class="mv" id="m-pend">&#8212;</div><div class="ms">&gt;2h, no booking since the session</div></div>' +
@@ -4159,7 +4239,7 @@ app.get('/monitor', (req, res) => {
      who reached step 1. It was labelled "sessions" while querying leads, which
      is a different table with a deliberately different meaning. */
   '<div class="sl">Form entries per day &#8212; last 14 days (ET)</div>' +
-  '<div class="ms" style="margin:-6px 0 8px">One bar per person who reached step 1 that day. Not deduplicated &#8212; a repeat attempt counts again.</div>' +
+  '<div class="ms" style="margin:-6px 0 8px">Each bar counts form entries that day &#8212; every time someone got through step 1, so a repeat attempt counts again.</div>' +
   '<div class="card" style="margin-bottom:24px"><div class="cw"><canvas id="lchart"></canvas></div></div>' +
   '</div>' +
   '<div class="tp" id="tp-leads">' +
@@ -4278,7 +4358,7 @@ app.get('/monitor', (req, res) => {
   '<div class="tp" id="tp-blocked">' +
   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
   '<div><div class="sl" style="margin-bottom:2px">Blocked &#8212; Non-ICP</div>' +
-  '<div style="font-size:12px;color:#888">Leads stopped before the calendar by the real-estate / insurance brand-domain list. ' +
+  '<div style="font-size:12px;color:#888">Leads turned away before the calendar as real estate or insurance &#8212; by the brand-domain list or by the website check. The badge on each row says which. ' +
   'INDEPENDENT of the stage and sell_to filters &#8212; a blocked lead keeps whatever stage it reached, and most cleared the B2C step by clicking &quot;actually we&#39;re B2B&quot;.</div></div>' +
   '<div><select id="blk-internal" onchange="loadBlocked(1)"><option value="">Everything (counted as normal)</option><option value="exclude">Hide our own test submissions</option><option value="only">Only our own test submissions</option></select> ' +
   '<span id="blk-count" style="font-size:12px;color:#888"></span></div>' +
@@ -4446,7 +4526,7 @@ app.get('/monitor', (req, res) => {
   '<div class="sr"><div><div class="sn">Step 1 &#8212; /partial</div><div class="sd">Leads written in the last 2 hours, against form sessions</div></div><span class="badge bx" id="s-partial">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">Step 2 &#8212; /submit</div><div class="sd">Completions in the last 24 hours</div></div><span class="badge bx" id="s-submit">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">ELV email verification</div><div class="sd">Inconclusive rate, rolling 90-minute window</div></div><span class="badge bx" id="s-elv">Checking...</span></div>' +
-  '<div class="sr"><div><div class="sn">Apollo enrichment</div><div class="sd">Leads enriched in the last 24 hours</div></div><span class="badge bx" id="s-enrich">Checking...</span></div>' +
+  '<div class="sr"><div><div class="sn">Apollo enrichment</div><div class="sd">Business-email leads Apollo found, last 24 hours &#8212; red whenever Apollo is refusing lookups</div></div><span class="badge bx" id="s-enrich">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">Booking &#8212; RevenueHero</div><div class="sd">People booked / people completed, last 7 days</div></div><span class="badge bx" id="s-cal">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">Cron &#8212; drop-off recovery</div><div class="sd">Time since the scheduler last called us</div></div><span class="badge bx" id="s-cron">Checking...</span></div>' +
   '<div class="sr"><div><div class="sn">AWS sync</div><div class="sd">gw_form_leads mirror, queried live against Railway</div></div><span class="badge bx" id="s-aws">Checking...</span></div>' +
@@ -5155,6 +5235,12 @@ app.get('/monitor', (req, res) => {
      other two as a share of it, straight off the same payload fields. No new
      query, nothing re-derived, so the existing numbers still reconcile.
      Deliberately not "improved" while it was open. */
+  /* STEP TO STEP. The bars are % of the TOP, which from sessions makes
+     step 2 and booked read 3% and 3% -- true, and useless for seeing where
+     people go. This is the rate that answers that: of those who reached
+     the stage above, how many made this one. A missing or zero base
+     prints nothing rather than a rate nobody measured. */
+  'function fStep(val,prev,name){if(val==null||!prev)return"";return"&#183; "+Math.round(val/prev*100)+"% of "+name;}' +
   'var funnelMode="tracked",lastMetrics=null;' +
   'function setFunnelMode(m){funnelMode=m;if(lastMetrics)renderFunnel(lastMetrics);}' +
   'function renderFunnelToggle(){var el=document.getElementById("fnl-toggle");if(!el)return;' +
@@ -5166,17 +5252,17 @@ app.get('/monitor', (req, res) => {
   'html=fRow("Sessions","visits",null,null,"#a5b4fc","","not tracked before 21 Aug 2026")' +
   '+fRow("Entered step 1","people",t,t,"#818cf8","")' +
   '+fRow("Completed step 2","people",d.peopleCompleted,t,"#38bdf8","")' +
-  '+fRow("Booked","people",d.peopleBooked,t,"#34d399","");' +
+  '+fRow("Booked","people",d.peopleBooked,t,"#34d399",fStep(d.peopleBooked,d.peopleCompleted,"step 2"));' +
   'sub="All leads, full history (the form predates session tracking by about five months). <b>Percentages are % of step 1</b> \\u2014 not comparable with the Since-21-Aug view, which divides by sessions.";' +
   '}else{' +
   'var top=f.sessions;' +
   'html=fRow("Sessions","visits",f.sessions,top,"#a5b4fc",(f.botSessions?"&#183; "+f.botSessions+" bots excluded":""))' +
   '+fRow("Entered step 1","people",f.step1,top,"#818cf8","&#183; visits &rarr; people")' +
-  '+fRow("Completed step 2","people",f.completed,top,"#38bdf8","")' +
-  '+fRow("Booked","people",f.booked,top,"#34d399","");' +
+  '+fRow("Completed step 2","people",f.completed,top,"#38bdf8",fStep(f.completed,f.step1,"step 1"))' +
+  '+fRow("Booked","people",f.booked,top,"#34d399",fStep(f.booked,f.completed,"step 2"));' +
   'sub=(f.coverage==="none")' +
   '?"Session tracking was not running for this period \\u2014 the top of the funnel cannot be measured. Switch to All time for the full history."' +
-  ':"Since session tracking began, "+et(f.since)+". <b>Percentages are % of sessions</b> \\u2014 not comparable with the All-time view. Sessions are visits; the three stages below are distinct people, so the first rate compares visits to people.";' +
+  ':"Since session tracking began, "+et(f.since)+". <b>Percentages are % of sessions</b> \\u2014 not comparable with the All-time view. Sessions are visits; the three stages below are distinct people, so the first rate compares visits to people. The grey rate beside a stage is step to step \u2014 of those who reached the stage above, how many made this one.";' +
   '}' +
   'renderFunnelToggle();' +
   'document.getElementById("funnel").innerHTML=html+"<div class=\\"ms\\" style=\\"margin-top:10px\\">"+sub+"</div>";}' +
@@ -13737,38 +13823,109 @@ app.post('/session', async (req, res) => {
   }
 });
 
+/* ── Apollo's reply, read honestly ─────────────────────────────────
+   Apollo refuses a lookup with a JSON BODY, not an exception, so fetch
+   resolves, .json() parses and nothing throws. Until 25 Sept 2026 this
+   route read {"error":"You have insufficient credits!"} as a person Apollo
+   could not find: it wrote an empty enrichment row, the health check
+   counted that row as enriched, and recordFailure -- reachable only from
+   the catch -- never ran. Credits ran out three times like that (24 Jun,
+   3-10 Sept, 23 Sept onward), 413 lookups refused in all, and System
+   Health read "80% enriched" through the third while Apollo had found 0
+   of 86.
+
+   Returns why Apollo refused, or null when it answered. "No match" IS an
+   answer -- person is null, there is no error key -- and costs no credit. */
+function apolloReplyError(status, data) {
+  const clean = (v) => String(v).replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  const failed = !(status >= 200 && status < 300);
+  if (data && typeof data === 'object') {
+    const said = data.error || (failed ? data.message : null);
+    if (said) return clean(typeof said === 'object' ? JSON.stringify(said) : said) || ('HTTP ' + status);
+    return failed ? 'HTTP ' + status : null;
+  }
+  return 'Apollo sent a reply that is not JSON (HTTP ' + status + ')';
+}
+
+/* Everything one Apollo answer yields, named. Shared with
+   tools/re-enrich-apollo.js, so a re-enrichment writes exactly what this
+   route would have written at the time -- one parser, not two. */
+function apolloEnrichmentFields(apolloData) {
+  const person = (apolloData && apolloData.person) || {}; const org = person.organization || {};
+  const deptRaw = person.departments || person.person_departments || null;
+  return {
+    person, org,
+    first_name: person.first_name || null, last_name: person.last_name || null,
+    title: person.title || null, company: org.name || null,
+    company_size: org.estimated_num_employees?.toString() || null,
+    industry: org.industry || null, linkedin: person.linkedin_url || null,
+    city: person.city || null, state: person.state || null, country: person.country || null,
+    seniority: person.seniority || null,
+    departments: Array.isArray(deptRaw) && deptRaw.length > 0 ? deptRaw.join(', ') : null,
+    emailStatus: person.email_status || null,
+    foundedYear: org.founded_year?.toString() || null,
+    annualRevenue: org.annual_revenue_printed ? `$${org.annual_revenue_printed} USD` : (org.annual_revenue ? formatRevenue(org.annual_revenue) : null),
+    fundingEvents: Array.isArray(org.funding_events) && org.funding_events.length > 0 ? org.funding_events.map(f => [f.date ? f.date.substring(0, 10) : '', f.type || f.series || '', f.amount ? `${f.currency || '$'}${f.amount}` : ''].filter(Boolean).join(' ')).join(' | ') : null,
+    alexaRanking: org.alexa_ranking?.toString() || null,
+    keywords: Array.isArray(org.keywords) ? org.keywords.slice(0, 8).join(', ') : (org.keywords || null),
+    orgHQ: [org.city, org.state, org.country].filter(Boolean).join(', ') || null,
+    totalFunding: org.total_funding_printed ? `$${org.total_funding_printed}` : null,
+    fundingStage: org.latest_funding_stage || null,
+  };
+}
+const ENRICHMENT_UPSERT_SQL = `
+      INSERT INTO enrichment_data (session_id,email,enriched_first_name,enriched_last_name,enriched_title,enriched_company,enriched_company_size,enriched_industry,enriched_linkedin,enriched_city,enriched_state,enriched_country,enriched_seniority,enriched_departments,enriched_email_status,enriched_founded_year,enriched_annual_revenue,enriched_funding_events,enriched_alexa_ranking,enriched_keywords,enriched_org_hq,enriched_total_funding,enriched_funding_stage,raw_response)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+      ON CONFLICT (session_id) DO UPDATE SET email=EXCLUDED.email,enriched_first_name=EXCLUDED.enriched_first_name,enriched_last_name=EXCLUDED.enriched_last_name,enriched_title=EXCLUDED.enriched_title,enriched_company=EXCLUDED.enriched_company,enriched_company_size=EXCLUDED.enriched_company_size,enriched_industry=EXCLUDED.enriched_industry,enriched_linkedin=EXCLUDED.enriched_linkedin,enriched_city=EXCLUDED.enriched_city,enriched_state=EXCLUDED.enriched_state,enriched_country=EXCLUDED.enriched_country,enriched_seniority=EXCLUDED.enriched_seniority,enriched_departments=EXCLUDED.enriched_departments,enriched_email_status=EXCLUDED.enriched_email_status,enriched_founded_year=EXCLUDED.enriched_founded_year,enriched_annual_revenue=EXCLUDED.enriched_annual_revenue,enriched_funding_events=EXCLUDED.enriched_funding_events,enriched_alexa_ranking=EXCLUDED.enriched_alexa_ranking,enriched_keywords=EXCLUDED.enriched_keywords,enriched_org_hq=EXCLUDED.enriched_org_hq,enriched_total_funding=EXCLUDED.enriched_total_funding,enriched_funding_stage=EXCLUDED.enriched_funding_stage,raw_response=EXCLUDED.raw_response,enriched_at=NOW()
+`;
+function enrichmentUpsertParams(session_id, email, f, apolloData) {
+  return [session_id, email, f.first_name, f.last_name, f.title, f.company, f.company_size, f.industry, f.linkedin,
+          f.city, f.state, f.country, f.seniority, f.departments, f.emailStatus, f.foundedYear, f.annualRevenue,
+          f.fundingEvents, f.alexaRanking, f.keywords, f.orgHQ, f.totalFunding, f.fundingStage, apolloData];
+}
+const ENRICHMENT_LEAD_UPDATE_SQL = `UPDATE leads SET enriched_city=$2,enriched_state=$3,enriched_country=$4,enriched_seniority=$5,enriched_departments=$6,enriched_email_status=$7,enriched_founded_year=$8,enriched_annual_revenue=$9,enriched_funding_events=$10,enriched_alexa_ranking=$11,enriched_keywords=$12,enriched_org_hq=$13,enriched_total_funding=$14,enriched_funding_stage=$15,updated_at=NOW() WHERE session_id=$1`;
+function enrichmentLeadParams(session_id, f) {
+  return [session_id, f.city, f.state, f.country, f.seniority, f.departments, f.emailStatus, f.foundedYear,
+          f.annualRevenue, f.fundingEvents, f.alexaRanking, f.keywords, f.orgHQ, f.totalFunding, f.fundingStage];
+}
+/* A REFUSAL IS RECORDED, AND NEVER OVERWRITES. The record is how all three
+   outages were found, so it stays. But the form can call /enrich again for
+   the same session, and the old upsert wrote a refusal straight over a
+   real enrichment -- and then its UPDATE blanked the lead row's city,
+   seniority and revenue to match. So a refusal inserts only where nothing
+   is stored yet, and leaves the lead row alone. */
+const ENRICHMENT_REFUSAL_SQL = `INSERT INTO enrichment_data (session_id, email, raw_response) VALUES ($1, $2, $3) ON CONFLICT (session_id) DO NOTHING`;
+function emptyEnrichment() {
+  return { first_name: '', last_name: '', title: '', company: '', company_size: '', industry: '', linkedin_url: '', website: '' };
+}
+
 app.post('/enrich', async (req, res) => {
   const email      = (req.body.email      || '').toString().trim().slice(0, 254).toLowerCase();
   const session_id = (req.body.session_id || '').toString().trim().slice(0, 100);
   if (!email || !session_id) return res.status(400).json({ error: 'email and session_id required' });
   const personalDomains = FREE_EMAIL_DOMAINS;
   const domain = email.split('@')[1]?.toLowerCase() || '';
-  if (personalDomains.includes(domain)) { console.log(`[/enrich] Skipping Apollo for personal email: ${email}`); return res.json({ first_name:'',last_name:'',title:'',company:'',company_size:'',industry:'',linkedin_url:'',website:'' }); }
+  if (personalDomains.includes(domain)) { console.log(`[/enrich] Skipping Apollo for personal email: ${email}`); return res.json(emptyEnrichment()); }
   try {
     const apolloRes  = await fetch('https://api.apollo.io/api/v1/people/match', { method:'POST', headers:{'Content-Type':'application/json','Cache-Control':'no-cache','X-Api-Key':process.env.APOLLO_API_KEY}, body:JSON.stringify({email,reveal_personal_emails:false,reveal_phone_number:false}) });
-    const apolloData = await apolloRes.json();
-    const person = apolloData.person || {}; const org = person.organization || {};
-    const city=person.city||null, state=person.state||null, country=person.country||null;
-    const orgHQ = [org.city,org.state,org.country].filter(Boolean).join(', ') || null;
-    const seniority=person.seniority||null;
-    const deptRaw=person.departments||person.person_departments||null;
-    const departments = Array.isArray(deptRaw)&&deptRaw.length>0 ? deptRaw.join(', ') : null;
-    const emailStatus=person.email_status||null, foundedYear=org.founded_year?.toString()||null;
-    const annualRevenue = org.annual_revenue_printed ? `$${org.annual_revenue_printed} USD` : (org.annual_revenue ? formatRevenue(org.annual_revenue) : null);
-    const totalFunding  = org.total_funding_printed ? `$${org.total_funding_printed}` : null;
-    const fundingStage  = org.latest_funding_stage || null;
-    const fundingEvents = Array.isArray(org.funding_events)&&org.funding_events.length>0 ? org.funding_events.map(f=>[f.date?f.date.substring(0,10):'',f.type||f.series||'',f.amount?`${f.currency||'$'}${f.amount}`:''].filter(Boolean).join(' ')).join(' | ') : null;
-    const alexaRanking  = org.alexa_ranking?.toString() || null;
-    const keywords      = Array.isArray(org.keywords) ? org.keywords.slice(0,8).join(', ') : (org.keywords||null);
-    console.log(`[/enrich] Apollo — seniority: ${seniority} | dept: ${departments} | revenue: ${annualRevenue} | funding: ${totalFunding} (${fundingStage}) | location: ${city||country||'n/a'} | org HQ: ${orgHQ}`);
-    await pool.query(`
-      INSERT INTO enrichment_data (session_id,email,enriched_first_name,enriched_last_name,enriched_title,enriched_company,enriched_company_size,enriched_industry,enriched_linkedin,enriched_city,enriched_state,enriched_country,enriched_seniority,enriched_departments,enriched_email_status,enriched_founded_year,enriched_annual_revenue,enriched_funding_events,enriched_alexa_ranking,enriched_keywords,enriched_org_hq,enriched_total_funding,enriched_funding_stage,raw_response)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
-      ON CONFLICT (session_id) DO UPDATE SET email=EXCLUDED.email,enriched_first_name=EXCLUDED.enriched_first_name,enriched_last_name=EXCLUDED.enriched_last_name,enriched_title=EXCLUDED.enriched_title,enriched_company=EXCLUDED.enriched_company,enriched_company_size=EXCLUDED.enriched_company_size,enriched_industry=EXCLUDED.enriched_industry,enriched_linkedin=EXCLUDED.enriched_linkedin,enriched_city=EXCLUDED.enriched_city,enriched_state=EXCLUDED.enriched_state,enriched_country=EXCLUDED.enriched_country,enriched_seniority=EXCLUDED.enriched_seniority,enriched_departments=EXCLUDED.enriched_departments,enriched_email_status=EXCLUDED.enriched_email_status,enriched_founded_year=EXCLUDED.enriched_founded_year,enriched_annual_revenue=EXCLUDED.enriched_annual_revenue,enriched_funding_events=EXCLUDED.enriched_funding_events,enriched_alexa_ranking=EXCLUDED.enriched_alexa_ranking,enriched_keywords=EXCLUDED.enriched_keywords,enriched_org_hq=EXCLUDED.enriched_org_hq,enriched_total_funding=EXCLUDED.enriched_total_funding,enriched_funding_stage=EXCLUDED.enriched_funding_stage,raw_response=EXCLUDED.raw_response,enriched_at=NOW()
-    `, [session_id,email,person.first_name||null,person.last_name||null,person.title||null,org.name||null,org.estimated_num_employees?.toString()||null,org.industry||null,person.linkedin_url||null,city,state,country,seniority,departments,emailStatus,foundedYear,annualRevenue,fundingEvents,alexaRanking,keywords,orgHQ,totalFunding,fundingStage,apolloData]);
-    await pool.query(`UPDATE leads SET enriched_city=$2,enriched_state=$3,enriched_country=$4,enriched_seniority=$5,enriched_departments=$6,enriched_email_status=$7,enriched_founded_year=$8,enriched_annual_revenue=$9,enriched_funding_events=$10,enriched_alexa_ranking=$11,enriched_keywords=$12,enriched_org_hq=$13,enriched_total_funding=$14,enriched_funding_stage=$15,updated_at=NOW() WHERE session_id=$1`, [session_id,city,state,country,seniority,departments,emailStatus,foundedYear,annualRevenue,fundingEvents,alexaRanking,keywords,orgHQ,totalFunding,fundingStage]);
-    res.json({ first_name:person.first_name||'',last_name:person.last_name||'',title:person.title||'',company:org.name||'',company_size:org.estimated_num_employees?.toString()||'',industry:org.industry||'',linkedin_url:person.linkedin_url||'',website:org.website_url||'' });
-  } catch (err) { console.error('[/enrich] Error:', err.message, err.detail||''); recordFailure('Apollo', email || 'unknown', err.message); res.json({ first_name:'',last_name:'',title:'',company:'',company_size:'',industry:'',linkedin_url:'',website:'' }); }
+    const apolloData = await apolloRes.json().catch(() => null);
+    const refused    = apolloReplyError(apolloRes.status, apolloData);
+    if (refused) {
+      /* Fail open, and loudly: the lead gets empty fields exactly as it
+         did before, and recordFailure pages -- at once for credits. */
+      console.error(`[/enrich] Apollo refused the lookup for ${email} (HTTP ${apolloRes.status}): ${refused}`);
+      recordFailure('Apollo', email, refused);
+      await pool.query(ENRICHMENT_REFUSAL_SQL, [session_id, email, (apolloData && typeof apolloData === 'object') ? apolloData : { error: refused }])
+        .catch(err => console.warn('[/enrich] Refusal not recorded (ignored):', err.message));
+      return res.json(emptyEnrichment());
+    }
+    recordSuccess('Apollo');
+    const f = apolloEnrichmentFields(apolloData);
+    console.log(`[/enrich] Apollo — seniority: ${f.seniority} | dept: ${f.departments} | revenue: ${f.annualRevenue} | funding: ${f.totalFunding} (${f.fundingStage}) | location: ${f.city||f.country||'n/a'} | org HQ: ${f.orgHQ}`);
+    await pool.query(ENRICHMENT_UPSERT_SQL, enrichmentUpsertParams(session_id, email, f, apolloData));
+    await pool.query(ENRICHMENT_LEAD_UPDATE_SQL, enrichmentLeadParams(session_id, f));
+    res.json({ first_name:f.person.first_name||'',last_name:f.person.last_name||'',title:f.person.title||'',company:f.org.name||'',company_size:f.org.estimated_num_employees?.toString()||'',industry:f.org.industry||'',linkedin_url:f.person.linkedin_url||'',website:f.org.website_url||'' });
+  } catch (err) { console.error('[/enrich] Error:', err.message, err.detail||''); recordFailure('Apollo', email || 'unknown', err.message); res.json(emptyEnrichment()); }
 });
 
 /* ── Identity-field change log ───────────────────────────────────

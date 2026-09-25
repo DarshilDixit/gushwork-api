@@ -3564,7 +3564,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        correct, and the streak still never fell. */
     {
       const alerts = [];
-      const H = (new Function('alertOps', 'isAuthFailure', 'AUTH_FAILURE_GUIDANCE', 'console',
+      const H = (new Function('alertOps', 'isAuthFailure', 'AUTH_FAILURE_GUIDANCE', 'isCreditsExhausted', 'CREDITS_GUIDANCE', 'console',
         liftLine(src, 'const FAILURE_BUFFER_TTL_MS') + '\n' +
         liftLine(src, 'const _failBuffers') + '\n' +
         liftLine(src, 'const _failStreaks') + '\n' +
@@ -3574,7 +3574,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
         lift(src, 'function recordFailure(') + '\n' +
         'return { recordFailure, recordSuccess, streaks: _failStreaks, buffers: _failBuffers };'))(
           (sev, source, title, d) => { alerts.push({ sev, source, title, d }); return true; },
-          () => false, {}, { warn() {}, log() {} });
+          () => false, {}, () => false, {}, { warn() {}, log() {} });
 
       /* A success must clear the streak. This is the whole defect. */
       H.recordFailure('PartnerStack SF read', 'qualified-demo read', 'http_503');
