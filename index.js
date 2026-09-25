@@ -4110,6 +4110,7 @@ app.get('/monitor', (req, res) => {
      that, and folding the two tabs together would make the one surface
      whose meaning is unambiguous mean two things. */
   '<div class="tab" id="t-model" onclick="showTab(\'model\')">Model</div>' +
+  '<div class="tab" id="t-dropoff" onclick="showTab(\'dropoff\')">Dropoff</div>' +
   /* SEPARATE FROM ALL LEADS, and the reason is the repeat-address panel.
      Three of the questions here are about the SET rather than a row --
      which address appears more than once, which networks our leads sit
@@ -4303,6 +4304,47 @@ app.get('/monitor', (req, res) => {
      it do, to whom, on what evidence, and what could it not see. The
      last one is the blind spot and it goes last on purpose -- it is the
      panel you read when one of the first three looks wrong. */
+  /* ── THE DROPOFF TAB ────────────────────────────────────────────────
+     Built because the same question kept being asked by hand: of the
+     people who start the form, how many book, and where do the rest go.
+     Answering it in a message produces a number that is wrong the next
+     morning; this is the version anybody can re-run for their own dates.
+
+     SEPARATE FROM Overview, which reports today. This one is about
+     shape over time, and the only way to tell "we have a problem" from
+     "this is what our funnel has always done" is to put twelve periods
+     next to each other. */
+  '<div class="tp" id="tp-dropoff">' +
+  '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px">' +
+  '<div><div class="sl" style="margin-bottom:2px">Dropoff</div>' +
+  '<div style="font-size:12px;color:#888">What happened to everyone who got through step 1 of the demo form, period by period. ' +
+  'Rows are mutually exclusive, so they always add up to the period total.</div></div>' +
+  '<div>' +
+  '<select id="dp-preset" onchange="dpPreset()" title="Sets the dates below. Pick Custom to choose your own.">' +
+  '<option value="12w" selected>Last 12 weeks</option><option value="26w">Last 26 weeks</option>' +
+  '<option value="12m">Last 12 months</option><option value="ytd">This year</option>' +
+  '<option value="custom">Custom</option></select> ' +
+  '<select id="dp-grain" onchange="loadDropoff()"><option value="week" selected>By week</option><option value="month">By month</option></select> ' +
+  /* LEADS OR PEOPLE. Both are true and they answer different questions,
+     so this is a toggle rather than a correction. Measured 25 Sept over
+     12 weeks: 3,309 leads against 3,096 people, booking 65.8% against
+     69.1% -- a repeat attempt is usually somebody who got there in the
+     end, so per-person always reads better and neither number is the
+     honest one on its own. */
+  '<select id="dp-mode" onchange="loadDropoff()" title="Leads counts form sessions, so one person trying twice counts twice. People counts each address once, placed in the period they first arrived and carrying the best outcome any of their attempts reached."><option value="leads" selected>Count leads</option><option value="people">Count people</option></select> ' +
+  '<select id="dp-source" onchange="loadDropoff()" title="Read from the ad click, then from the referrer where the click lost its tags."><option value="__all">All sources</option></select> ' +
+  '<select id="dp-unit" onchange="dpRender()"><option value="n" selected>Show numbers</option><option value="pct">Show % of period</option></select> ' +
+  '<button class="btn" onclick="loadDropoff()">&#8635; Refresh</button>' +
+  '</div></div>' +
+  '<div style="display:flex;gap:8px;align-items:center;margin-bottom:16px;font-size:12px;color:#888" id="dp-dates">' +
+  'From <input type="date" id="dp-from" onchange="dpCustom()"> to <input type="date" id="dp-to" onchange="dpCustom()">' +
+  '<span id="dp-gen" style="margin-left:auto;font-size:11px;color:#aaa"></span></div>' +
+  '<div class="card" style="padding:14px;margin-bottom:16px" id="dp-sum"><div class="nd">Loading...</div></div>' +
+  '<div style="overflow-x:auto"><table id="dp-table"><thead id="dp-head"></thead><tbody id="dp-body">' +
+  '<tr><td class="nd">Loading...</td></tr></tbody></table></div>' +
+  '<div style="font-size:11px;color:#888;margin-top:10px" id="dp-note"></div>' +
+  '</div>' +
+
   '<div class="tp" id="tp-visitors">' +
   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px">' +
   '<div><div class="sl" style="margin-bottom:2px">Visitors</div>' +
@@ -4508,6 +4550,103 @@ app.get('/monitor', (req, res) => {
      down with it. */
   'function visLocalTime(visitorTz){try{return new Intl.DateTimeFormat("en-US",{timeZone:visitorTz,hour:"numeric",minute:"2-digit",hour12:true}).format(new Date());}catch(e){return "";}}' +
   'function visNum(n){return (n===null||n===undefined)?"\\u2014":String(n);}' +
+  /* ── THE DROPOFF LOADER ─────────────────────────────────────────────
+     EVERY HELPER AT TOP LEVEL, like the Model tab's, and for the same
+     reason: leadRowsHtml was declared inside loadLeads on 12 Sept 2026,
+     so All Leads could see it and Blocked could not, and the failure
+     arrived as a tidy "Could not load:" line rather than a crash. The
+     route test asserts each of these is defined at top level, then calls
+     the loader and reads what the table actually painted. */
+  'var dpData=null;' +
+  'function dpNum(n){return (n==null?"\\u2014":Number(n).toLocaleString());}' +
+  /* A rate we could not compute is a dash, never a zero -- a period with
+     no leads has no booking rate, and printing 0% claims we measured one. */
+  'function dpPct(p){return p==null?"\\u2014":p+"%";}' +
+  'function dpTone(t){return t==="good"?"bg":t==="bad"?"br":t==="warn"?"ba":"bx";}' +
+  'function dpIso(d){return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");}' +
+  /* Presets write the two date inputs rather than being a second way of
+     saying the same thing to the server. One source of truth on screen,
+     so what you see in the boxes is always what was asked for. */
+  'function dpPreset(){' +
+  'var p=document.getElementById("dp-preset").value;if(p==="custom")return;' +
+  'var now=new Date(),from=new Date(now),g="week";' +
+  'if(p==="12w"){from.setDate(from.getDate()-7*11);}' +
+  'else if(p==="26w"){from.setDate(from.getDate()-7*25);}' +
+  'else if(p==="12m"){from.setMonth(from.getMonth()-11);from.setDate(1);g="month";}' +
+  'else if(p==="ytd"){from=new Date(now.getFullYear(),0,1);g="month";}' +
+  'document.getElementById("dp-from").value=dpIso(from);' +
+  'document.getElementById("dp-to").value=dpIso(now);' +
+  'document.getElementById("dp-grain").value=g;' +
+  'loadDropoff();}' +
+  'function dpCustom(){document.getElementById("dp-preset").value="custom";loadDropoff();}' +
+  'async function loadDropoff(){' +
+  'var q="grain="+encodeURIComponent(document.getElementById("dp-grain").value)' +
+  '+"&mode="+encodeURIComponent(document.getElementById("dp-mode").value)' +
+  '+"&source="+encodeURIComponent(document.getElementById("dp-source").value)' +
+  '+"&from="+encodeURIComponent(document.getElementById("dp-from").value||"")' +
+  '+"&to="+encodeURIComponent(document.getElementById("dp-to").value||"");' +
+  'document.getElementById("dp-sum").innerHTML="<div class=\\"nd\\">Loading...</div>";' +
+  'try{' +
+  'var r=await fetch(API+"/monitor/dropoff"+(TP||"?")+(TP?"&":"")+q,{signal:AbortSignal.timeout(20000)});' +
+  'if(!r.ok)throw new Error("HTTP "+r.status);' +
+  'dpData=await r.json();' +
+  'dpSources(dpData);dpRender();' +
+  '}catch(e){document.getElementById("dp-sum").innerHTML="<span style=\\"color:#b91c1c\\">Could not load: "+esc(e.message)+"</span>";' +
+  'document.getElementById("dp-body").innerHTML="<tr><td class=\\"nd\\">Could not load</td></tr>";}}' +
+  /* The source list comes back UNFILTERED, so picking one channel never
+     removes the others from the menu you picked it with. */
+  'function dpSources(d){' +
+  'var s=document.getElementById("dp-source"),cur=s.value;' +
+  'var h="<option value=\\"__all\\">All sources \\u2014 "+dpNum(d.sources.reduce(function(a,b){return a+b.n;},0))+"</option>";' +
+  'for(var i=0;i<d.sources.length;i++){h+="<option value=\\""+esc(d.sources[i].name)+"\\">"+esc(d.sources[i].name)+" \\u2014 "+dpNum(d.sources[i].n)+"</option>";}' +
+  's.innerHTML=h;s.value=cur;if(!s.value)s.value="__all";}' +
+  'function dpRender(){' +
+  'var d=dpData;if(!d)return;' +
+  'var pct=document.getElementById("dp-unit").value==="pct";' +
+  'var U=d.unit;' +
+  /* THE SUMMARY IS THE ANSWER TO "should we be worried". The weekly
+     range is the number that settles it, so it sits beside the headline
+     rather than being something you work out from the table. */
+  'var rates=d.periods.map(function(p){return d.booked_rate[p.key];}).filter(function(x){return x!=null;});' +
+  'var lo=rates.length?Math.min.apply(null,rates):null,hi=rates.length?Math.max.apply(null,rates):null;' +
+  'var leak=null;for(var i=0;i<d.rows.length;i++){if(d.rows[i].key==="7_drop_step1")leak=d.rows[i];}' +
+  'document.getElementById("dp-sum").innerHTML="<div class=\\"egrid\\">"' +
+  '+"<div class=\\"ef\\"><div class=\\"efl\\">In this window</div><div class=\\"efv\\">"+dpNum(d.grand)+" "+U+"</div><div style=\\"font-size:10px;color:#aaa;margin-top:2px\\">got through step 1</div></div>"' +
+  '+"<div class=\\"ef\\"><div class=\\"efl\\">Booked</div><div class=\\"efv\\">"+dpNum(d.booked)+"</div><div style=\\"font-size:10px;color:#aaa;margin-top:2px\\">"+dpPct(d.grand_booked_rate)+" of "+U+"</div></div>"' +
+  '+"<div class=\\"ef\\"><div class=\\"efl\\">Did not book</div><div class=\\"efv\\">"+dpNum(d.not_booked)+"</div><div style=\\"font-size:10px;color:#aaa;margin-top:2px\\">everything below the top row</div></div>"' +
+  '+"<div class=\\"ef\\"><div class=\\"efl\\">Weekly range</div><div class=\\"efv\\">"+(lo==null?"\\u2014":Math.round(lo)+"\\u2013"+Math.round(hi)+"%")+"</div><div style=\\"font-size:10px;color:#aaa;margin-top:2px\\">booked, best to worst period</div></div>"' +
+  '+"<div class=\\"ef\\"><div class=\\"efl\\">Biggest leak</div><div class=\\"efv\\">"+dpNum(leak?leak.total:null)+"</div><div style=\\"font-size:10px;color:#aaa;margin-top:2px\\">left on step 2</div></div>"' +
+  '+"</div>";' +
+  'var hh="<tr><th style=\\"text-align:left;min-width:210px\\">Outcome</th>";' +
+  'for(var j=0;j<d.periods.length;j++){var p=d.periods[j];' +
+  'hh+="<th style=\\"text-align:right\\"'+'"+(p.partial?" title=\\"This period is not fully covered by the window, so its numbers are lower than a full one\\"":"")+">"+esc(p.label)+(p.partial?" <span class=\\"badge bx\\">part</span>":"")+"</th>";}' +
+  'hh+="<th style=\\"text-align:right\\">Total</th></tr>";' +
+  'document.getElementById("dp-head").innerHTML=hh;' +
+  'var b="";' +
+  'for(var k=0;k<d.rows.length;k++){var row=d.rows[k];' +
+  'if(row.total===0&&row.key==="4_dq_other")continue;' +
+  'b+="<tr><td style=\\"text-align:left\\"><span class=\\"badge "+dpTone(row.tone)+"\\">"+esc(row.label)+"</span>"' +
+  '+"<div style=\\"font-size:10px;color:#aaa;margin-top:3px\\">"+esc(row.desc)+"</div></td>";' +
+  'for(var m=0;m<d.periods.length;m++){var pk=d.periods[m].key,v=row.counts[pk],t=d.totals[pk];' +
+  'b+="<td style=\\"text-align:right"+(v===0?";color:#ccc":"")+"\\">"+(pct?(t?(100*v/t).toFixed(1)+"%":"\\u2014"):dpNum(v))+"</td>";}' +
+  'b+="<td style=\\"text-align:right;font-weight:600\\">"+(pct?(d.grand?(100*row.total/d.grand).toFixed(1)+"%":"\\u2014"):dpNum(row.total))+"</td></tr>";}' +
+  /* The total row is what makes the ladder checkable on screen: if the
+     rows above it do not add up to it, the report is wrong and you can
+     see that without opening a query. */
+  'b+="<tr style=\\"border-top:2px solid #e5e7eb;font-weight:600\\"><td style=\\"text-align:left\\">All "+U+"</td>";' +
+  'for(var n2=0;n2<d.periods.length;n2++){b+="<td style=\\"text-align:right\\">"+(pct?"100%":dpNum(d.totals[d.periods[n2].key]))+"</td>";}' +
+  'b+="<td style=\\"text-align:right\\">"+(pct?"100%":dpNum(d.grand))+"</td></tr>";' +
+  'b+="<tr style=\\"color:#888\\"><td style=\\"text-align:left\\">Booked</td>";' +
+  'for(var n3=0;n3<d.periods.length;n3++){b+="<td style=\\"text-align:right\\">"+dpPct(d.booked_rate[d.periods[n3].key])+"</td>";}' +
+  'b+="<td style=\\"text-align:right\\">"+dpPct(d.grand_booked_rate)+"</td></tr>";' +
+  'document.getElementById("dp-body").innerHTML=b;' +
+  'document.getElementById("dp-gen").textContent="Read just now \\u00b7 "+d.from+" to "+d.to;' +
+  'document.getElementById("dp-note").innerHTML=' +
+  '"Counted as <b>"+U+"</b>. A period marked <span class=\\"badge bx\\">part</span> is not fully covered by the window \\u2014 usually the current one, still filling. "' +
+  '+"Source is read from the ad click first, then from the referrer where the click lost its tags: that recovers <b>"+dpNum(d.recovered)+"</b> "+U+" that would otherwise read as direct. "' +
+  '+"Our own test submissions are included, as everywhere else on this dashboard \\u2014 <b>"+dpNum(d.internal)+"</b> of these.";' +
+  '}' +
+
   'async function loadVisitors(){' +
   'var d=document.getElementById("vis-days").value;' +
   'document.getElementById("vis-cov").textContent="Loading...";' +
@@ -4674,7 +4813,7 @@ app.get('/monitor', (req, res) => {
   '+(miss?" &#8212; <b>"+miss+"</b> more resolved to a city but were stored before coordinates were kept, so they cannot be placed. They are all in the tables.":"")' +
   '+". Circles are sized by lead count.";' +
   'if(pts.length){var g=L.featureGroup(pts.map(function(p){return L.marker([p.lat,p.lon]);}));visMap.fitBounds(g.getBounds().pad(0.2));}}' +
-  'function showTab(n){["overview","leads","sdr","dupes","health","lm","partners","blocked","model","visitors"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="partners"&&document.getElementById("ptbody").textContent.indexOf("Loading")>=0)loadPartners();if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();if(n==="blocked"&&document.getElementById("blk-tbody").textContent.indexOf("Loading")>=0)loadBlocked();if(n==="model"&&document.getElementById("mdl-ladder").textContent.indexOf("Loading")>=0)loadModel();if(n==="visitors"&&document.getElementById("vis-cov").textContent.indexOf("Loading")>=0)loadVisitors();if(n==="health")checkHealth();}' +
+  'function showTab(n){["overview","leads","sdr","dupes","health","lm","partners","blocked","model","dropoff","visitors"].forEach(function(x){document.getElementById("t-"+x).classList.toggle("act",x===n);document.getElementById("tp-"+x).classList.toggle("act",x===n);});if(n==="leads"){loadFilterOptions();if(document.getElementById("ltbody").textContent.indexOf("Loading")>=0)loadLeads(1);}if(n==="partners"&&document.getElementById("ptbody").textContent.indexOf("Loading")>=0)loadPartners();if(n==="sdr"&&document.getElementById("sdr-tbody").textContent.indexOf("Loading")>=0)loadSDR();if(n==="dupes"&&document.getElementById("dupes-tbody").textContent.indexOf("Loading")>=0)loadDupes();if(n==="lm"&&document.getElementById("lm-tbody").textContent.indexOf("Loading")>=0)loadLM();if(n==="blocked"&&document.getElementById("blk-tbody").textContent.indexOf("Loading")>=0)loadBlocked();if(n==="model"&&document.getElementById("mdl-ladder").textContent.indexOf("Loading")>=0)loadModel();if(n==="dropoff"&&document.getElementById("dp-sum").textContent.indexOf("Loading")>=0)dpPreset();if(n==="visitors"&&document.getElementById("vis-cov").textContent.indexOf("Loading")>=0)loadVisitors();if(n==="health")checkHealth();}' +
   /* Hits /monitor/leads with nonicp=only rather than a route of its own, so
      the row shape, the panel and the change log are the same objects All
      Leads uses. One query, one contract, nothing to drift. */
@@ -12603,6 +12742,265 @@ async function nonIcpModelReport({ days, product } = {}) {
    governs all of them. */
 const VISITORS_WINDOW_MAX_D = 365;
 
+/* ══════════════════════════════════════════════════════════════════
+   THE DROPOFF REPORT — what happens to a lead after step 1, by period.
+
+   Built 25 Sept 2026 because Swapnil asked the same question twice in
+   one thread: 85 form fills, 51 booked, "what happened to the other
+   34 -- DQ or dropoff?" Answering it by hand produces a snapshot that
+   is wrong the next morning, so it lives here instead.
+
+   THE LADDER IS ONE EXPRESSION AND IT IS EXHAUSTIVE. Seven outcomes,
+   mutually exclusive, resolved top-down, exactly like the stage ladder
+   in CLAUDE.md. Every lead lands in exactly one, so the rows always sum
+   to the period total -- and a test asserts that sum rather than
+   trusting it. A second copy of this CASE anywhere is how the two
+   start disagreeing, which is the disqualified/non_icp_blocked lesson
+   arriving in a third place. */
+const DROPOFF_STAGE_SQL = `
+  CASE
+    WHEN booking_uid IS NOT NULL                                     THEN '1_booked'
+    WHEN disqualified IS TRUE AND disqualified_reason = 'b2c_or_mixed' THEN '2_dq_b2c'
+    WHEN disqualified IS TRUE AND disqualified_reason = 'waitlist'   THEN '3_dq_waitlist'
+    WHEN disqualified IS TRUE                                        THEN '4_dq_other'
+    WHEN non_icp_blocked IS TRUE                                     THEN '5_blocked'
+    WHEN submitted_at IS NOT NULL                                    THEN '6_drop_calendar'
+    ELSE '7_drop_step1'
+  END`;
+
+/* SOURCE IS TWO FIELDS, NOT ONE, AND READING ONLY THE FIRST UNDERSTATES
+   META BY ABOUT A QUARTER.
+
+   utm_source is the ad click. Where it is absent, gushwork-form.js has
+   already written what it could work out into hear_about_us -- it
+   prefills that field from the utm AND from the REFERRER, then hides
+   it. So when the UTMs are lost in the Facebook or Instagram in-app
+   browser (measured at 31.2% in-app against 1.6% on a normal mobile
+   browser) the referrer still names the platform.
+
+   Measured 25 Sept 2026 over 12 weeks: 469 leads carried no utm_source
+   at all and were recorded by the form as paid -- 459 Facebook, 9
+   Instagram, 1 Google. Reading utm_source alone gives Meta 2,051 and
+   Direct/organic 991; reading both gives 2,519 and 486.
+
+   HUMAN FREE TEXT IS DELIBERATELY NOT BUCKETED. The rest of that column
+   is what people typed -- dozens of spellings plus junk like
+   "asadeasda" and a phone number. Keying a channel off free text is
+   precisely the substring trap Source_Bucket__c already fell into, where
+   CONTAINS(...,"li") sent "client" and the name "Jolian" to LinkedIn.
+   It stays in Direct / organic, which therefore means "no trackable
+   click" rather than "arrived directly". */
+const DROPOFF_SOURCE_SQL = `
+  CASE
+    WHEN lower(COALESCE(utm_source,'')) IN ('facebook','ig','fb','instagram') THEN 'Meta'
+    WHEN lower(COALESCE(utm_source,'')) = 'google'                            THEN 'Google'
+    WHEN lower(COALESCE(utm_source,'')) IN ('cold_email','email','email-signature') THEN 'Cold email'
+    WHEN lower(COALESCE(utm_source,'')) = 'linkedin'                          THEN 'LinkedIn'
+    WHEN COALESCE(utm_source,'') <> ''                                        THEN 'Other'
+    WHEN hear_about_us ILIKE 'Facebook (%' OR hear_about_us ILIKE 'Instagram (%' THEN 'Meta'
+    WHEN hear_about_us ILIKE 'Google Ads%'                                    THEN 'Google'
+    WHEN hear_about_us ILIKE 'Partner -%' OR hear_about_us ILIKE 'Referral -%' THEN 'Partner / referral'
+    WHEN lower(COALESCE(hear_about_us,'')) = 'linkedin'                       THEN 'LinkedIn'
+    WHEN lower(COALESCE(hear_about_us,'')) = 'email'                          THEN 'Cold email'
+    ELSE 'Direct / organic'
+  END`;
+
+/* Recovered = layer two did the work. Reported so the source split can
+   be audited rather than believed. */
+const DROPOFF_RECOVERED_SQL = `
+  (COALESCE(utm_source,'') = ''
+   AND (hear_about_us ILIKE 'Facebook (%' OR hear_about_us ILIKE 'Instagram (%'
+        OR hear_about_us ILIKE 'Google Ads%'))`;
+
+const DROPOFF_STAGES = [
+  { key: '1_booked',        label: 'Booked',                  desc: 'Picked a time on the calendar',              tone: 'good' },
+  { key: '2_dq_b2c',        label: 'Sells to consumers',      desc: 'Answered B2C or mixed at step 1',            tone: 'warn' },
+  { key: '3_dq_waitlist',   label: 'Asked for the waitlist',  desc: 'Chose the waitlist instead of a demo',       tone: 'warn' },
+  { key: '4_dq_other',      label: 'Disqualified, other',     desc: 'Disqualified with no reason recorded',       tone: 'warn' },
+  { key: '5_blocked',       label: 'Blocked — not our market', desc: 'Real-estate brand or insurance carrier', tone: 'bad' },
+  { key: '6_drop_calendar', label: 'Left at the calendar',    desc: 'Completed step 2, never picked a time',      tone: 'neu' },
+  /* NOT "left at step 1". The leads row is written by savePartial(1) at
+     the END of handleStep1Next, so a row exists only once the visitor
+     has completed step 1 and pressed Next -- everyone counted here saw
+     step 2. Confirmed in data: all 578 such leads in the 12 weeks to
+     25 Sept carry sell_to (a step-1 field) and none carries a phone (a
+     step-2 field). Labelling it "step 1" tells an SDR to fix the wrong
+     screen. */
+  { key: '7_drop_step1',    label: 'Left on step 2',          desc: 'Finished step 1, never completed step 2',    tone: 'neu' },
+];
+
+const DROPOFF_GRAINS = ['week', 'month'];
+const DROPOFF_MODES  = ['leads', 'people'];
+const DROPOFF_MAX_PERIODS = 53;
+
+/* Today in ET as YYYY-MM-DD. The dashboard is Eastern and the Postgres
+   session is UTC, so every boundary here is stated explicitly rather
+   than inherited. */
+function dropoffTodayEt() {
+  const f = new Intl.DateTimeFormat('en-CA', { timeZone: DASH_TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
+  return f.format(new Date());
+}
+function dropoffAddDays(iso, n) {
+  const d = new Date(iso + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+/* Monday-start, matching date_trunc('week'). */
+function dropoffFloor(iso, grain) {
+  if (grain === 'month') return iso.slice(0, 8) + '01';
+  const d = new Date(iso + 'T00:00:00Z');
+  const dow = (d.getUTCDay() + 6) % 7;
+  return dropoffAddDays(iso, -dow);
+}
+function dropoffStep(iso, grain, n) {
+  if (grain === 'week') return dropoffAddDays(iso, 7 * n);
+  const d = new Date(iso + 'T00:00:00Z');
+  d.setUTCMonth(d.getUTCMonth() + n);
+  return d.toISOString().slice(0, 10);
+}
+/* Last day the period covers. */
+function dropoffPeriodEnd(iso, grain) {
+  return dropoffAddDays(dropoffStep(iso, grain, 1), -1);
+}
+function dropoffLabel(iso, grain) {
+  const M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const [y, m, d] = iso.split('-');
+  return grain === 'month' ? `${M[+m - 1]} ${y}` : `${M[+m - 1]} ${+d}`;
+}
+
+async function dropoffReport({ from, to, grain, source, mode } = {}) {
+  const g  = DROPOFF_GRAINS.includes(String(grain)) ? String(grain) : 'week';
+  const md = DROPOFF_MODES.includes(String(mode))   ? String(mode)  : 'leads';
+  const today = dropoffTodayEt();
+
+  const iso = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : null);
+  let toD   = iso(to)   || today;
+  let fromD = iso(from) || dropoffStep(dropoffFloor(toD, g), g, -11);
+  if (fromD > toD) { const t = fromD; fromD = toD; toD = t; }
+
+  /* Bucketing starts at the period the window opens in, so a from-date
+     mid-week does not invent a stub bucket the query would then leave
+     empty. The partial flag below is what says the edges are cut. */
+  const firstBucket = dropoffFloor(fromD, g);
+  const periods = [];
+  for (let b = firstBucket; b <= toD && periods.length < DROPOFF_MAX_PERIODS; b = dropoffStep(b, g, 1)) {
+    const end = dropoffPeriodEnd(b, g);
+    periods.push({
+      key: b,
+      label: dropoffLabel(b, g),
+      /* PARTIAL MEANS THE BUCKET IS NOT FULLY COVERED, at either edge:
+         the current period is still filling, and a window that starts or
+         ends mid-period clips its first or last bucket. Drawn plainly, a
+         half-finished week reads as a collapse -- which is exactly how a
+         reader concludes something broke when nothing did. */
+      partial: b < fromD || end > toD || end >= today,
+    });
+  }
+
+  const params = [fromD, toD];
+  let srcFilter = '';
+  if (source && String(source) !== '__all') {
+    params.push(String(source));
+    srcFilter = `AND ${DROPOFF_SOURCE_SQL} = $3`;
+  }
+
+  /* date_trunc takes the grain as an identifier, so it cannot be bound as
+     a parameter -- it is whitelisted against DROPOFF_GRAINS above and
+     interpolated, never taken from the query string raw. */
+  const base = `
+    SELECT lower(email) AS person,
+           created_at,
+           to_char(date_trunc('${g}', created_at AT TIME ZONE '${DASH_TZ}'), 'YYYY-MM-DD') AS bucket,
+           ${DROPOFF_SOURCE_SQL} AS source,
+           ${DROPOFF_RECOVERED_SQL} AS recovered,
+           ${DROPOFF_STAGE_SQL} AS stage,
+           ${internalLeadSqlClause('email', 'page_url', params)} AS internal
+      FROM leads
+     WHERE (created_at AT TIME ZONE '${DASH_TZ}') >= $1::timestamp
+       AND (created_at AT TIME ZONE '${DASH_TZ}') <  ($2::date + 1)::timestamp
+       ${srcFilter}`;
+
+  /* PEOPLE MODE resolves the ladder PER ADDRESS, not per row: a person is
+     placed in the period they FIRST arrived in and carries the best
+     outcome any of their sessions reached. MIN over the same prefixed
+     keys the ladder already sorts by, so the ordering cannot drift away
+     from the row-level one.
+
+     It genuinely moves the headline -- 3,308 leads and 3,095 people over
+     the same 12 weeks, booking 65.8% against 69.0% -- because a repeat
+     attempt is usually somebody who got there in the end. Both readings
+     are true; they answer different questions, which is why this is a
+     toggle and not a correction. */
+  const sql = md === 'people'
+    ? `WITH base AS (${base}),
+            ppl AS (
+              SELECT DISTINCT ON (person)
+                     person, bucket, source, recovered,
+                     MIN(stage)      OVER (PARTITION BY person) AS stage,
+                     bool_or(internal) OVER (PARTITION BY person) AS internal
+                FROM base
+               ORDER BY person, created_at ASC)
+       SELECT bucket, source, stage, COUNT(*)::int AS n,
+              COUNT(*) FILTER (WHERE internal)::int  AS internal_n,
+              COUNT(*) FILTER (WHERE recovered)::int AS recovered_n
+         FROM ppl GROUP BY 1,2,3`
+    : `WITH base AS (${base})
+       SELECT bucket, source, stage, COUNT(*)::int AS n,
+              COUNT(*) FILTER (WHERE internal)::int  AS internal_n,
+              COUNT(*) FILTER (WHERE recovered)::int AS recovered_n
+         FROM base GROUP BY 1,2,3`;
+
+  const { rows: raw } = await pool.query(sql, params);
+
+  /* THE SOURCE LIST IS ALWAYS UNFILTERED, so choosing one channel never
+     removes the others from the picker you chose it with. */
+  const srcSql = `
+    WITH base AS (
+      SELECT lower(email) AS person, created_at,
+             ${DROPOFF_SOURCE_SQL} AS source
+        FROM leads
+       WHERE (created_at AT TIME ZONE '${DASH_TZ}') >= $1::timestamp
+         AND (created_at AT TIME ZONE '${DASH_TZ}') <  ($2::date + 1)::timestamp)
+    SELECT source, ${md === 'people' ? 'COUNT(DISTINCT person)' : 'COUNT(*)'}::int AS n
+      FROM base GROUP BY 1 ORDER BY 2 DESC`;
+  const { rows: srcRows } = await pool.query(srcSql, [fromD, toD]);
+
+  const keyOf = new Set(periods.map((p) => p.key));
+  const totals = {}; periods.forEach((p) => { totals[p.key] = 0; });
+  const counts = {}; DROPOFF_STAGES.forEach((s) => { counts[s.key] = {}; periods.forEach((p) => { counts[s.key][p.key] = 0; }); });
+  let grand = 0, internal = 0, recovered = 0;
+
+  for (const r of raw) {
+    const k = String(r.bucket);
+    if (!keyOf.has(k) || !counts[r.stage]) continue;
+    counts[r.stage][k] += r.n;
+    totals[k] += r.n; grand += r.n;
+    internal += r.internal_n; recovered += r.recovered_n;
+  }
+
+  const rows = DROPOFF_STAGES.map((s) => {
+    const total = periods.reduce((a, p) => a + counts[s.key][p.key], 0);
+    return { ...s, counts: counts[s.key], total };
+  });
+  const booked = periods.reduce((a, p) => a + counts['1_booked'][p.key], 0);
+  const bookedRate = {};
+  periods.forEach((p) => { bookedRate[p.key] = totals[p.key] ? +(100 * counts['1_booked'][p.key] / totals[p.key]).toFixed(1) : null; });
+
+  return {
+    from: fromD, to: toD, grain: g, mode: md, source: source || '__all',
+    unit: md === 'people' ? 'people' : 'leads',
+    periods, rows, totals, grand,
+    booked, not_booked: grand - booked,
+    booked_rate: bookedRate,
+    grand_booked_rate: grand ? +(100 * booked / grand).toFixed(1) : null,
+    sources: srcRows.map((r) => ({ name: r.source, n: r.n })),
+    internal, recovered,
+    /* "We could not check" is never dressed as a measurement, so a
+       period with no leads reports null rather than a 0% booking rate. */
+    generated_at: new Date().toISOString(),
+  };
+}
+
 async function visitorsReport({ days } = {}) {
   const win = Math.min(Math.max(Number(days) || 30, 1), VISITORS_WINDOW_MAX_D);
 
@@ -12727,6 +13125,20 @@ app.get('/monitor/visitors', async (req, res) => {
   } catch (err) {
     console.error('[/monitor/visitors]', err.message);
     res.status(500).json({ error: 'Visitors report failed', detail: err.message });
+  }
+});
+
+app.get('/monitor/dropoff', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    res.json(await dropoffReport({
+      from: req.query.from, to: req.query.to, grain: req.query.grain,
+      source: req.query.source, mode: req.query.mode,
+    }));
+  } catch (err) {
+    console.error('[/monitor/dropoff]', err.message);
+    res.status(500).json({ error: 'Dropoff report failed', detail: err.message });
   }
 });
 
@@ -14647,6 +15059,84 @@ function startNearMissDigest() {
   console.log(`[near-digest] Started — Mondays at ${NEAR_DIGEST_HOUR_ET}:00 ET, to the alerts channel`);
 }
 
+/* ── THE WEEKLY DROPOFF DIGEST ───────────────────────────────────────
+   Same shape as the near-miss digest: an hourly tick that decides for
+   itself whether this is the hour, which survives a restart better than
+   a weekly timer. The in-memory week guard has the same known, bounded
+   gap -- a deploy inside the Monday hour can send twice, and a duplicate
+   is milder than a miss.
+
+   IT REPORTS THE COMPLETED WEEK, NOT THE CURRENT ONE. Monday's post
+   covers Monday-to-Sunday just ended. Sending a partial week to a
+   channel is how a reader concludes the funnel collapsed on a Monday
+   morning, and there is no way to caveat that out of a Slack message
+   somebody reads on a phone. */
+const DROPOFF_DIGEST_HOUR_ET = Number(process.env.DROPOFF_DIGEST_HOUR_ET || 9);
+const DROPOFF_DIGEST_ENABLED = process.env.DROPOFF_DIGEST_ENABLED !== 'false';
+let _dropoffDigestSentWeek = null;
+
+async function runDropoffDigest(force = false) {
+  if (!DROPOFF_DIGEST_ENABLED) return;
+  const { weekday, hour, stamp } = etParts();
+  if (!force) {
+    if (weekday !== 'Mon' || hour !== DROPOFF_DIGEST_HOUR_ET) return;
+    if (_dropoffDigestSentWeek === stamp) return;
+  }
+  _dropoffDigestSentWeek = stamp;
+  try {
+    const today = dropoffTodayEt();
+    const thisWeek = dropoffFloor(today, 'week');
+    const lastWeek = dropoffStep(thisWeek, 'week', -1);
+    /* Twelve completed weeks ending with the one just finished, so the
+       comparison never includes the week the reader is standing in. */
+    const from = dropoffStep(lastWeek, 'week', -11);
+    const r = await dropoffReport({ from, to: dropoffPeriodEnd(lastWeek, 'week'), grain: 'week', mode: 'leads' });
+    const cur = r.booked_rate[lastWeek];
+    const prior = r.periods.filter((p) => p.key !== lastWeek).map((p) => r.booked_rate[p.key]).filter((x) => x != null);
+    const avg = prior.length ? prior.reduce((a, b) => a + b, 0) / prior.length : null;
+    const lo = prior.length ? Math.min(...prior) : null;
+    const hi = prior.length ? Math.max(...prior) : null;
+    const total = r.totals[lastWeek] || 0;
+    const bkd = r.rows.find((x) => x.key === '1_booked').counts[lastWeek] || 0;
+
+    /* NORMAL IS THE HEADLINE, because the question this answers is
+       "should we be worried" and the answer is usually no. A digest that
+       always reads like an alarm gets muted, and then the week that
+       matters is muted too. */
+    const inBand = cur != null && lo != null && cur >= lo && cur <= hi;
+    const blocks = [];
+    blocks.push(bHeader(`${inBand ? '✅' : '⚠️'} Inbound form: ${bkd} of ${total} booked last week (${cur == null ? '—' : cur + '%'})`));
+    blocks.push(bDivider());
+    let body = `*Week of ${dropoffLabel(lastWeek, 'week')}.* ${total} people got through step 1 of the demo form and `
+      + `*${bkd}* picked a time.`;
+    if (avg != null) {
+      body += `\nThe 11 weeks before it ran *${lo}%\u2013${hi}%*, averaging *${avg.toFixed(1)}%*. `
+        + (inBand ? '_This week sits inside that range._' : '_This week sits outside that range._');
+    }
+    blocks.push(bSection(body));
+    const lines = r.rows
+      .filter((x) => x.key !== '1_booked' && (x.counts[lastWeek] || 0) > 0)
+      .sort((a, b) => b.counts[lastWeek] - a.counts[lastWeek])
+      .map((x) => `• *${x.counts[lastWeek]}* — ${x.label.replace(/—/g, '–')} _(${x.desc})_`);
+    if (lines.length) {
+      blocks.push(bSection(`*Where the other ${total - bkd} went:*\n${lines.join('\n')}`));
+    }
+    blocks.push(bSection(
+      '_Counts form sessions, not people, so somebody who tried twice counts twice. ' +
+      'Full breakdown by week, month, source or person on the dashboard, Dropoff tab._'));
+    sendOpsSlack(blocks, `Inbound form: ${bkd} of ${total} booked last week`);
+    console.log(`[dropoff-digest] sent — ${bkd}/${total} booked, ${cur}%`);
+  } catch (err) {
+    console.warn('[dropoff-digest] failed (non-blocking):', err && err.message);
+  }
+}
+
+function startDropoffDigest() {
+  const t = setInterval(() => runDropoffDigest().catch(() => {}), 60 * 60 * 1000);
+  if (t.unref) t.unref();
+  console.log(`[dropoff-digest] Started — Mondays at ${DROPOFF_DIGEST_HOUR_ET}:00 ET, to the alerts channel`);
+}
+
 function startNonIcpBookedRecheck() {
   const run = (why) => runNonIcpBookedRecheck()
     .catch((err) => console.warn(`[non-ICP recheck] Sweep failed (${why}, non-blocking):`, err && err.message));
@@ -15378,6 +15868,7 @@ async function start() {
       startPartnerStackSfStateRefresh();
       startNonIcpBookedRecheck();
       startNearMissDigest();
+      startDropoffDigest();
     });
   } catch (err) { console.error('[GW API] Failed to start:', err); process.exit(1); }
 }
