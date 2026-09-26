@@ -68,8 +68,9 @@ const allowedOrigins = (process.env.ALLOWED_ORIGIN || '')
 
 /* THE API'S OWN ADDRESS, AND NOTHING BROADER. Added 27 Sept 2026.
 
-   A browser puts an Origin header on every font request and every POST,
-   even to the site the page came from. The dashboard is served BY this API,
+   Chrome puts an Origin header on every font request, and every browser on
+   every POST, even to the site the page came from. The dashboard is served
+   BY this API,
    so its own requests carried Origin: https://<this host> -- which was on
    no list, so they were rejected with a 500 before any route ran. Measured
    on production after the switch: both dashboard fonts answered 500 in
@@ -84,7 +85,13 @@ const allowedOrigins = (process.env.ALLOWED_ORIGIN || '')
    that name, compared as a whole string -- no wildcard, no other
    subdomain, no http, no port. Unset (a laptop, a test) admits nothing
    extra. A foreign page cannot make a browser send this Origin, so this
-   admits only pages this API serves itself. */
+   admits only pages this API serves itself.
+
+   NOT CSRF PROTECTION FOR GETs, before or after: a link or an image sends
+   no Origin, and no-Origin was always admitted. It stops foreign POSTs.
+   And RAILWAY_PUBLIC_DOMAIN can name a CUSTOM domain once one is attached;
+   then the railway.app address is refused again -- the safe direction --
+   and this needs the other name, never a pattern. */
 function selfOriginFrom(host) {
   const h = String(host || '').trim().toLowerCase();
   if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(h)) return null;

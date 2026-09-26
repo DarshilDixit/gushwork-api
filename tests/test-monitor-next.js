@@ -352,7 +352,8 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
       if (body) headers['Content-Type'] = 'application/json';
       const r = await realFetch(BASE + pth, { method, headers, body: body ? JSON.stringify(body) : undefined });
       const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch (e) {}
-      return { status: r.status, json: j, text: t, type: r.headers.get('content-type') || '', wrote: S.queries.some((q) => /^\s*UPDATE /i.test(q.sql)) };
+      /* the table the button writes, so an unrelated background UPDATE landing in this window cannot turn a pass red */
+      return { status: r.status, json: j, text: t, type: r.headers.get('content-type') || '', wrote: S.queries.some((q) => /^\s*UPDATE lead_magnet_leads\b/i.test(q.sql)) };
     };
     const fontPath = '/monitor/next/asset/Inter-VariableFont_opsz_wght.ttf' + tq;
     let r = await req('GET', fontPath, SELF);
