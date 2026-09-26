@@ -1990,6 +1990,21 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
        /Meta events withheld/.test(txt) && /restaurant \/ food service is one of the four industries that suppress Meta but never block/.test(txt), txt.slice(0, 600));
     ok('NAME SLACK: ...and says it judged the name alone', /Judged from the domain name alone/.test(txt), txt.slice(0, 300));
     ok('NAME SLACK: it never calls a BLOCKING industry "one of the four"', !/insurance is one of the four|real estate is one of the four/i.test(txt));
+
+    /* THE WORDING FOLLOWS THE EVIDENCE SHOWN. The lead row keeps its FIRST
+       decision (sticky); the quote comes from the fresh verdict. A lead
+       recorded name-only earlier and blocked from its WEBSITE at submit must
+       not read "judged the domain name alone" above a quote from the page. */
+    reset();
+    S.verdict = VROW({ domain: 'brokerage.test', business_type: 'real_estate', evidence_quote: 'homes for sale in Austin' });
+    S.leadRow = { email: 'm@diner.test', company: 'D', website: 'brokerage.test', phone: null, non_icp_blocked: true,
+                  non_icp_reason: 'diner.test', non_icp_source: 'llm_name_only' };
+    await post('/submit', { session_id: '00000000-0000-4000-8000-0000000000b9', email: 'm@diner.test', website: 'brokerage.test',
+      first_name: 'M', last_name: 'D', company: 'D', phone: '+15551230001', sell_to: 'B2B', page_url: 'https://www.gushwork.ai/demo' });
+    await sleep(700);
+    txt = JSON.stringify(S.slackPayloads);
+    ok('NAME SLACK: a page quote shown under a lead first recorded name-only still says the WEBSITE was read',
+       /Read their website and judged/.test(txt) && /homes for sale in Austin/.test(txt) && !/judged the domain name alone/.test(txt), txt.slice(0, 400));
   }
 
   /* ========================================================

@@ -1761,7 +1761,12 @@ function slackNonIcpBlocked(d) {
   /* nonIcpSourceIsModel, never === 'llm': since 26 Sept a name-only block
      arrives as 'llm_name_only', and the literal would have filed it under
      the brand list -- "Matched" a domain that is on no list. */
-  const nameOnly = d.source === 'llm_name_only';
+  /* The WORDING follows the evidence shown, which /submit takes from the
+     fresh verdict; d.source is the lead row's, which keeps the FIRST
+     decision. A lead flagged name-only at step 1 and blocked from its
+     website at submit would otherwise read "judged the domain name alone"
+     above a quote from the page. */
+  const nameOnly = (d.evidence_source || d.source) === 'llm_name_only';
   if (nonIcpSourceIsModel(d.source)) {
     blocks.push(bSection(
       (nameOnly
@@ -9673,7 +9678,19 @@ async function nonIcpLlmCachedVerdict({ email, website } = {}) {
        a lead whose email is a restaurant and whose website is a brokerage
        would be Meta-suppressed and not blocked, which is the weaker of the
        two actions winning by accident of iteration order. */
-    if (row.blocking === true) return { row, action: 'block' };
+    /* BLOCKING IS ALSO READ FROM THE TYPE AND ITS FLOOR, as Meta is below,
+       as well as from the stored column. The column is fixed when a domain
+       is classified; without this, a name-only verdict stored under the old
+       0.9 floor at 0.85-0.9 would WITHHOLD META AND NOT BLOCK until its six
+       hours ran out -- the weaker action, on evidence the new floor says is
+       enough to block. Measured on 26 Sept: every page verdict reads the
+       same either way (no page row of a blocking type at or over 0.75 is
+       stored non-blocking), so this only ever adds a block the floor
+       already decided. */
+    if (row.blocking === true
+        || (nonIcpTypeBlocks(row.business_type) && Number(row.confidence) >= nonIcpFloorFor(row.source))) {
+      return { row, action: 'block' };
+    }
     /* Meta suppression is decided from the TYPE at read time, not from the
        stored `blocking` column, so the six-industry scope can change
        without re-classifying anything. The confidence floor is the same
@@ -15318,6 +15335,7 @@ app.post('/submit', async (req, res) => {
            step these are absent, and the post degrades to naming the domain
            -- which is still falsifiable, just thinner. */
         source: nonIcpSource,
+        evidence_source: nonIcp.business_type ? (nonIcp.source || null) : null,
         business_type: nonIcp.business_type || null,
         business_type_label: nonIcp.label || null,
         confidence: nonIcp.confidence != null ? nonIcp.confidence : null,
@@ -15628,11 +15646,19 @@ function slackNonIcpLateBlock(d) {
   blocks.push(bSection(
     `*They already have a slot.* The verdict arrived after they submitted, so nothing ` +
     `could stop the booking. Nothing here has been cancelled.`));
+  /* d is the lead plus the VERDICT ROW, so d.source is 'llm' or
+     'llm_name_only'. Name-only verdicts are the slow ones -- they only run
+     after a scrape fails -- so they are exactly what this sweep catches, and
+     "quoted from their site" about the letters "ins" would send a human to
+     decide on a meeting from a quote nobody wrote. */
+  const nameOnly = d.source === 'llm_name_only';
   blocks.push(bSection(
-    `*Read their website and judged:* ${d.business_type_label || d.business_type || 'unknown'}` +
+    (nameOnly ? `*Their website did not load, so we judged the domain name alone:* ` : `*Read their website and judged:* `) +
+    `${d.business_type_label || d.business_type || 'unknown'}` +
     (d.confidence != null ? `  _(confidence ${Math.round(Number(d.confidence) * 100)}%)_` : '') +
     (d.domain ? `\n*Matched on:* \`${d.domain}\`` : '')));
-  if (d.evidence_quote) blocks.push(bSection(`*Evidence, quoted from their site:*\n> ${slackTruncate(d.evidence_quote)}`));
+  if (d.evidence_quote) blocks.push(bSection((nameOnly ? `*The part of the name it read:*` : `*Evidence, quoted from their site:*`) +
+    `\n> ${slackTruncate(d.evidence_quote)}`));
   const lf = bFields([
     { label: '👤 Name',     value: name },
     { label: '📧 Email',    value: d.email },

@@ -84,12 +84,15 @@ Three things follow from that, and they are not negotiable:
    floor, and the lead row records `llm_name_only` (it said `llm`, "read
    their website", for every model verdict).
 
-   **A name-only verdict is cached for SIX HOURS, not 180 days.** The TTL in
-   `nonIcpReadVerdictRow` keys on `source === 'llm'`, so every other source
-   gets the failure TTL and is re-judged on the next warm. Whether that is
-   right for a real name-only verdict is an open question, raised 26 Sept;
-   it is also why a floor change reaches every name-only domain within six
-   hours without touching the stored `blocking` column.
+   **A name-only verdict is cached for SIX HOURS, not 180 days, on purpose**
+   (the comment above the TTL in `nonIcpReadVerdictRow` says why: it exists
+   only because the site would not load, so the site should be tried again
+   soon). This file used to imply 180 days.
+
+   **Blocking is read at decision time from the type and its floor, as well
+   as from the stored `blocking` column** — so a floor change applies to the
+   cache at once. Measured 26 Sept: every page verdict reads the same either
+   way; only name-only rows between the old and new floor gain a block.
 
    **The domain, never the company field the visitor typed.** The cache is
    keyed by domain; a per-lead input would make the stored verdict depend

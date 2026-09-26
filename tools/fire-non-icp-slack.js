@@ -91,6 +91,10 @@ const lifted = new Function('require', [
   liftDecl('function slackNonIcpLlmFlagged'),
   liftDecl('function slackNonIcpLateBlock'),
   liftDecl('const NON_ICP_BUSINESS_TYPES'),
+  /* slackNonIcpBlocked asks nonIcpSourceIsModel since 26 Sept; without these
+     two the blocked and llm-blocked fires died with "not defined". */
+  liftDecl('const NON_ICP_MODEL_SOURCES'),
+  liftDecl('function nonIcpSourceIsModel'),
   'return { alertOps, slackNonIcpBlocked, slackNonIcpLlmFlagged, slackNonIcpLateBlock, sendOpsSlack, bHeader, bDivider, bSection };',
 ].join('\n'))(require);
 

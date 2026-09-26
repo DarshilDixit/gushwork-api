@@ -1605,14 +1605,14 @@ results13 = (async () => {
     const mk = (rowsByDomain) => (new Function('process', 'pool', 'partnerStackCustomerKey',
       'isPartnerStackTestEmail', 'nonIcpTypeSuppressesMeta', 'NON_ICP_LLM_CONFIDENCE_FLOOR',
       'NON_ICP_LLM_ENABLED', 'nonIcpClassifyDomain', 'console',
-      'NON_ICP_VERDICT_TTL_D', 'NON_ICP_NAME_CONFIDENCE_FLOOR',
+      'NON_ICP_VERDICT_TTL_D', 'NON_ICP_NAME_CONFIDENCE_FLOOR', 'nonIcpTypeBlocks',
       lift + '\nreturn { nonIcpLlmCachedVerdict, nonIcpCandidateDomains, nonIcpFloorFor };'))(
       { env: {} },
       { query: async (q, p) => ({ rows: rowsByDomain[p[0]] ? [rowsByDomain[p[0]]] : [] }) },
       (raw) => { const s = String(raw || '').toLowerCase(); const at = s.lastIndexOf('@');
                  return (at >= 0 ? s.slice(at + 1) : s).replace(/^www\./, '') || null; },
       () => false, V2M.nonIcpTypeSuppressesMeta, V2M.NON_ICP_LLM_CONFIDENCE_FLOOR, true, async () => ({}),
-      { log() {}, warn() {} }, 180, V2M.NON_ICP_NAME_CONFIDENCE_FLOOR);
+      { log() {}, warn() {} }, 180, V2M.NON_ICP_NAME_CONFIDENCE_FLOOR, V2M.nonIcpTypeBlocks);
     const row = (o) => ({ checked_at: new Date().toISOString(), source: 'llm', confidence: 0.9, ...o });
 
     const both = mk({
@@ -1642,6 +1642,25 @@ results13 = (async () => {
     out.push(['V2: a stale verdict is a miss',
               (await stale.nonIcpLlmCachedVerdict({ email: 'x@brokerage.test', website: '' })) === null]);
 
+    /* THE LATE-BLOCK POST, EXECUTED. The sweep hands it the lead plus the
+       verdict ROW, and name-only verdicts are the slow ones it exists for.
+       It said "Read their website" and "quoted from their site" for every
+       source -- about the letters "ins", to a human deciding on a meeting. */
+    {
+      const sent = [];
+      const lateFn = new Function('bHeader', 'bDivider', 'bSection', 'bFields', 'sendSlack', 'slackTruncate',
+        between('function slackNonIcpLateBlock(d)', '\n}\n') + '\n}\nreturn slackNonIcpLateBlock;')(
+        (t) => ({ t }), () => ({ t: '' }), (t) => ({ t }), () => null, (b) => sent.push(b.map((x) => (x && x.t) || '').join('\n')), (x) => x);
+      lateFn({ email: 'm@hernandezins.test', source: 'llm_name_only', business_type: 'insurance', business_type_label: 'Insurance',
+               confidence: 0.88, domain: 'hernandezins.test', evidence_quote: 'ins' });
+      lateFn({ email: 'g@agency.test', source: 'llm', business_type: 'insurance', business_type_label: 'Insurance',
+               confidence: 0.95, domain: 'agency.test', evidence_quote: 'independent insurance agency' });
+      out.push(['V2 late post: a name-only verdict says the NAME was judged, and labels the quote as part of the name',
+                /judged the domain name alone/.test(sent[0] || '') && /The part of the name it read/.test(sent[0] || '') && !/quoted from their site|Read their website/.test(sent[0] || ''), (sent[0] || '').slice(0, 300)]);
+      out.push(['V2 late post: a page verdict still says it read their website',
+                /Read their website and judged/.test(sent[1] || '') && /quoted from their site/.test(sent[1] || ''), (sent[1] || '').slice(0, 300)]);
+    }
+
     /* A NAME-ONLY VERDICT ANSWERS TO ITS OWN FLOOR, FOR META TOO (26 Sept
        2026). hernandezins.com: insurance from the letters "ins" at 0.82,
        under the name floor -- and it still withheld Meta, because this read
@@ -1664,6 +1683,20 @@ results13 = (async () => {
     out.push(['V2 floorFor: a name-only verdict needs the name floor (0.85)', F('llm_name_only') === 0.85, String(F('llm_name_only'))]);
     out.push(['V2 floorFor: a page verdict needs the page floor (0.75)', F('llm') === 0.75, String(F('llm'))]);
     out.push(['V2 floorFor: anything else falls to the page floor, never the lower of none', F(undefined) === 0.75 && F('llm_error') === 0.75]);
+
+    /* READ-TIME BLOCKING (26 Sept). A name-only row stored under the old 0.9
+       floor at 0.88 says blocking:false. Read against today's 0.85 it must
+       BLOCK -- not fall through to withholding Meta, the weaker action, until
+       its six hours run out. And a page row keeps reading exactly as stored. */
+    const oldStore = mk({ 'homes.test': nm({ domain: 'homes.test', business_type: 'real_estate', confidence: 0.88, blocking: false }) });
+    const ro = await oldStore.nonIcpLlmCachedVerdict({ email: 'x@homes.test', website: '' });
+    out.push(['V2 read-time block: an 0.88 name-only real-estate row stored non-blocking now BLOCKS', ro && ro.action === 'block', JSON.stringify(ro && ro.action)]);
+    const under = mk({ 'homes.test': nm({ domain: 'homes.test', business_type: 'real_estate', confidence: 0.84, blocking: false }) });
+    out.push(['V2 read-time block: ...and 0.84 still does nothing',
+              (await under.nonIcpLlmCachedVerdict({ email: 'x@homes.test', website: '' })) === null]);
+    const pgWeak = mk({ 'b.test': row({ domain: 'b.test', business_type: 'insurance', confidence: 0.7, blocking: false }) });
+    out.push(['V2 read-time block: a page verdict under 0.75 still does nothing',
+              (await pgWeak.nonIcpLlmCachedVerdict({ email: 'x@b.test', website: '' })) === null]);
   }
 
   /* ── 13g3. THE HEALTH ROW, EXECUTED ──────────────────────────────
