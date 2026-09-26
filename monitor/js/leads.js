@@ -165,7 +165,7 @@
     if (l.non_icp_blocked) {
       /* On Blocked every row is blocked, so the chip says WHICH CHECK did it */
       b.push(ns === 'blk' ? '<span class="badge b-bad" title="' + esc(L.sourceWhy(l.non_icp_source)) + '">' + esc(L.sourceShort(l.non_icp_source)) + '</span>'
-        : '<span class="badge b-bad" title="Blocked — not our market (' + esc(l.non_icp_reason || '') + '). Blocked by: ' + esc(L.sourceShort(l.non_icp_source)) + '. Still counted in every total.">blocked</span>');
+        : '<span class="badge b-bad" title="Blocked — not our market (' + esc(l.non_icp_reason || '') + '). Blocked by: ' + esc(L.sourceShort(l.non_icp_source)) + '. Still counted as a lead.">blocked</span>');
     }
     if (l.website_check_failed) b.push('<span class="badge b-bad" title="' + esc(L.website(l.website_check_reason) || 'Website check failed') + '">website failed</span>');
     else if (l.website_check_reason === 'social_profile_url') b.push('<span class="badge b-neu" title="Gave a social profile instead of a company website">social profile</span>');
@@ -392,7 +392,7 @@
         /* TRUE FOR EVERY ROW: a late model verdict marks a lead AFTER it has
            booked and never cancels the meeting, so "turned away before the
            calendar" was false for those. */
-        '<p class="lede">Leads we stopped as real estate or insurance — by the brand-domain list or by the AI check. Most were stopped before the calendar; a few were marked only after they had booked, when the AI check answered late, and those kept their meeting. Every one is still in All leads and in every total: marked, never removed.</p>' +
+        '<p class="lede">Leads we stopped as real estate or insurance — by the brand-domain list or by the AI check. Most were stopped before the calendar; a few were marked only after they had booked, when the AI check answered late, and those kept their meeting. Every one is still in All leads and counted as a lead: marked, never removed. (The Overview and Dropoff leave out our own test submissions, blocked or not.)</p>' +
         '<div class="controls"><label class="lfl inline"><span>Our own tests</span><select class="field" data-blk aria-label="Our own tests">' +
         [['', 'Included, and marked'], ['exclude', 'Hide our own tests'], ['only', 'Only our own tests']].map(function (o) { return '<option value="' + o[0] + '"' + (o[0] === m ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
         '</select></label></div></section>';

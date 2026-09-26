@@ -752,7 +752,7 @@ Unless a label says otherwise:
 | Deduped by email, or by session? | **Headline numbers are people** — `COUNT(DISTINCT lower(email))`. Session counts are legitimate but must be labelled "sessions" every time they appear |
 | Named exception | **"Form entries per day"** on Overview is a deliberate ROW count — see below |
 | Dedup key | `lower(email)`, always. Never raw `email` |
-| Internal / test addresses | **Left out of the Overview, Dropoff and the Monday digest, and counted in words there; included and marked everywhere rows are listed.** See below |
+| Internal / test addresses | **Left out of the Overview, Dropoff and the Monday digest, and counted in words there; included wherever rows are listed.** See below |
 | Webhook-origin leads | **Included**, except `/monitor/funnel` |
 
 **OUR OWN TEST SUBMISSIONS ARE LEFT OUT OF THE OVERVIEW, DROPOFF AND THE MONDAY
@@ -773,10 +773,14 @@ rule is `internalLeadSqlClause` (the one behind the "ours" marker:
   it NULL, and `NOT NULL` drops the row.
 - **Sessions cannot be separated** (a session has no email), so they still
   include ours, and the Overview says so.
-- **Still INCLUDED, and marked:** All leads, Blocked, Duplicates, the SDR list,
-  Lead magnet's own totals and the classic `/monitor/metrics`. Those are where
-  a person reconciles a row. `ELV_EXCLUDED_DOMAINS` and `b@g.ai` are also out
-  of ELV health and alerting, as before.
+- **Still INCLUDED:** All leads, Blocked, Duplicates, the SDR list, Visitors,
+  Partners and the classic `/monitor/metrics`. Those are where a person
+  reconciles a row. **Marked** on All leads, Blocked and Duplicates; the SDR
+  list, Visitors and Partners have no marker yet (in `docs/monitor-plan.md`).
+- **Lead magnet's own totals already left them out** (`is_internal IS NOT
+  TRUE`, "All real leads") before this, and still do.
+- `ELV_EXCLUDED_DOMAINS` and `b@g.ai` are also out of ELV health and
+  alerting, as before.
 
 Measured before deciding, read-only, by running the real `overviewReport`
 twice: ours are 107 rows and 32 addresses, 1.8% of all rows. Rates moved by
@@ -1643,18 +1647,19 @@ that failed.
 **Our own test submissions are MARKED, never silently excluded.**
 `INTERNAL_TEST_EMAILS` (extensible from the Railway env) plus
 `ELV_EXCLUDED_DOMAINS`, behind `isInternalLead`. Five of the first ten
-non-ICP blocks were ours. Nothing is subtracted from any total — the rule
-above about internal addresses still holds — so rows carry a marker, the
-Blocked tab and the ladder print the excluding-ours figure **beside** the
-count, and the filter is opt-in. **Never inferred from a person's name**: a
+non-ICP blocks were ours. They are subtracted only where the Definitions
+section says — the Overview, Dropoff and the digest, each saying how many,
+since 26 Sept — and nowhere else: rows carry a marker, the Blocked tab and
+the ladder print the excluding-ours figure **beside** the count, and the
+filter is opt-in. **Never inferred from a person's name**: a
 real prospect may be called Darshil, and `allstate.com` is a real brokerage
 domain that is on the block list for that reason.
 
 **"MARKED, NEVER EXCLUDED" IS ABOUT OUR OWN NUMBERS, AND AS OF 19 SEPT
-2026 IT STOPS AT OUR OWN NUMBERS.** Internal submissions are still
-counted in every `leads` figure, still on the dashboard, still booking —
-that rule is unchanged and is about reconciling a number against the
-database. But they no longer leave the building. Three outbound systems
+2026 IT STOPS AT OUR OWN NUMBERS.** Internal submissions are still on
+the dashboard, still booking, and still counted wherever rows are listed
+(the Overview, Dropoff and the digest leave them out and say so, since 26
+Sept) — that is about reconciling a number against the database. But they no longer leave the building. Three outbound systems
 now refuse them:
 
 | System | Guard | Why |

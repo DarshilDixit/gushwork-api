@@ -4122,7 +4122,11 @@ app.get('/monitor/classic', (req, res) => {
     return res.status(401).send('<h2 style="font-family:sans-serif;padding:2rem">401 — Unauthorized. Add ?token=YOUR_TOKEN to the URL.</h2>');
   }
 
-  const tp = req.query.token ? '?token=' + req.query.token : '';
+  /* ENCODED ONCE, HERE. It lands in two hrefs and in var TP="..." inside a
+     script; raw, a token carrying a quote or a closing tag breaks out of
+     both (reachable only while MONITOR_TOKEN is unset, when any token is
+     accepted). The server decodes it back to the same value. */
+  const tp = req.query.token ? '?token=' + encodeURIComponent(req.query.token) : '';
 
   const html = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Gushwork Monitor</title>' +
   '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"><\/script>' +
@@ -4226,7 +4230,7 @@ app.get('/monitor/classic', (req, res) => {
   '<div class="page">' +
   /* THE FALLBACK, said on the page itself: a reader who lands here from an
      old bookmark should know this is not where the dashboard lives now. */
-  '<div style="margin:0 0 12px;padding:10px 14px;border-radius:8px;background:#fff7ed;color:#9a3412;font-size:13px">This is the <b>classic</b> dashboard, kept for one week as a fallback. The dashboard is now at <a href="/monitor' + tp + '" style="color:#9a3412;font-weight:600">/monitor</a>.</div>' +
+  '<div style="margin:0 0 12px;padding:10px 14px;border-radius:8px;background:#fff7ed;color:#9a3412;font-size:13px">This is the <b>classic</b> dashboard, kept for one week as a fallback. The dashboard is now at <a href="/monitor' + tp + '" style="color:#9a3412;font-weight:600">/monitor</a>. Its Overview leaves out our own test submissions; this one still counts them, so the two differ by exactly that.</div>' +
   '<div class="tabs">' +
   '<div class="tab act" id="t-overview" onclick="showTab(\'overview\')">Overview</div>' +
   '<div class="tab" id="t-leads" onclick="showTab(\'leads\')">All Leads</div>' +
@@ -4796,7 +4800,7 @@ app.get('/monitor/classic', (req, res) => {
   /* The route LEAVES OUT our own test submissions since 26 Sept 2026 (the
      new Overview and the Monday digest do too); this classic tab's Overview
      still counts them, so the sentence says which is which. */
-  '+"Our own test submissions are left out of this tab \\u2014 <b>"+dpNum(d.internal)+"</b> in this window, not counted above. (This dashboard\\u2019s Overview still counts them; the new one does not.)";' +
+  '+"Our own test submissions are left out of this tab \\u2014 <b>"+dpNum(d.internal)+"</b> submissions in this window, not counted above. (This dashboard\\u2019s Overview still counts them; the new one does not.)";' +
   '}' +
 
   'async function loadVisitors(){' +
@@ -5883,7 +5887,7 @@ app.get('/monitor/classic', (req, res) => {
      Leads and Blocked, so anything it calls has to be visible to both -- the
      scope bug that made Blocked rows silently unexpandable. */
   'function leadRowsHtml(leads,ns){return leads.map(function(l){var sid=esc(l.session_id),key=esc(ns||"x")+"-"+sid,name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\\u2014",src=l.utm_source?esc(l.utm_source)+(l.utm_medium?" / "+esc(l.utm_medium):""):(l.referrer?"referral":"\\u2014");' +
-  'return"<tr"+(l.non_icp_blocked?" style=\\"background:#fff7ed\\"":"")+"><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+key+"\',\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.is_internal?"<span title=\\"One of our own test submissions. Counted in this dashboard\\u2019s Overview and on this tab \\u2014 use the filter to take them out of a number you are about to quote. The Dropoff tab and the new dashboard leave them out.\\" style=\\"color:#6b7280\\">&#129514; </span>":"")+(l.non_icp_blocked?"<span title=\\"Blocked \\u2014 non-ICP ("+esc(l.non_icp_reason||"")+"). Blocked by: "+esc(nonIcpSourceShort(l.non_icp_source))+". "+esc(nonIcpSourceWhy(l.non_icp_source))+" Still counted in every total.\\" style=\\"color:#c2410c\\">&#128683; </span>":"")+((l.non_icp_blocked&&ns==="b")?"<span class=\\"pschip\\" title=\\""+esc(nonIcpSourceWhy(l.non_icp_source))+"\\">"+esc(nonIcpSourceShort(l.non_icp_source))+"</span> ":"")+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+metaMark(l,ns)+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+esc(l.product||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
+  'return"<tr"+(l.non_icp_blocked?" style=\\"background:#fff7ed\\"":"")+"><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+key+"\',\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.is_internal?"<span title=\\"One of our own test submissions. Counted in this dashboard\\u2019s Overview and on this tab \\u2014 use the filter to take them out of a number you are about to quote. The Dropoff tab and the new dashboard\\u2019s Overview leave them out.\\" style=\\"color:#6b7280\\">&#129514; </span>":"")+(l.non_icp_blocked?"<span title=\\"Blocked \\u2014 non-ICP ("+esc(l.non_icp_reason||"")+"). Blocked by: "+esc(nonIcpSourceShort(l.non_icp_source))+". "+esc(nonIcpSourceWhy(l.non_icp_source))+" Still counted in every total.\\" style=\\"color:#c2410c\\">&#128683; </span>":"")+((l.non_icp_blocked&&ns==="b")?"<span class=\\"pschip\\" title=\\""+esc(nonIcpSourceWhy(l.non_icp_source))+"\\">"+esc(nonIcpSourceShort(l.non_icp_source))+"</span> ":"")+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+metaMark(l,ns)+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+esc(l.product||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
   '"<tr class=\\"erow\\" id=\\"er-"+key+"\\" style=\\"display:none\\"><td></td><td colspan=\\"10\\">"+enrichPanel(l)+"<div id=\\"lc-"+key+"\\"></div></td></tr>";}).join("");}' +
   'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,product=document.getElementById("fproduct").value,interest=document.getElementById("finterest").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
   'var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"page="+curPage+"&stage="+stage+"&sort="+curSort+"&dir="+curDir;' +
@@ -13146,8 +13150,9 @@ async function dropoffReport({ from, to, grain, source, mode } = {}) {
        WHERE email IS NOT NULL
          AND (created_at AT TIME ZONE '${DASH_TZ}') >= $1::timestamp
          AND (created_at AT TIME ZONE '${DASH_TZ}') <  ($2::date + 1)::timestamp
-         /* IS NOT TRUE, never NOT: a row with no page_url makes the clause
-            NULL, and NOT NULL is NULL -- the row would vanish from the list */
+         /* IS NOT TRUE, never NOT -- the house rule for this clause. It can
+            only be NULL for a row with no email (it COALESCEs the page), and
+            every read here requires an email, so this is belt and braces. */
          AND ${internalLeadSqlClause('email', 'page_url', sp)} IS NOT TRUE)
     SELECT source, ${md === 'people' ? 'COUNT(DISTINCT person)' : 'COUNT(*)'}::int AS n
       FROM base GROUP BY 1 ORDER BY 2 DESC`;

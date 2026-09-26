@@ -31,7 +31,7 @@ GW.TABS.dupes = (function (G) {
     /* WHAT THE LIST IS: addresses with more than one LEAD ROW -- most never
        submitted twice. "Filled the form in more than once" said otherwise. */
     var head = '<section class="ph"><div class="ph-top"><h1 class="title" tabindex="-1">Duplicates</h1><span class="readat">' + (data ? fmt(data.total) + ' ' + G.plural(data.total, 'address', 'addresses') + ' with more than one attempt' : '') + '</span></div>' +
-      '<p class="lede">Addresses that got through step 1 in more than one session, most attempts first. Our own test addresses are marked on the row and counted like everything else.</p>' +
+      '<p class="lede">Addresses that got through step 1 in more than one session, most attempts first. Our own test addresses are marked on the row and counted here like everything else.</p>' +
       (data ? '<div class="controls">' + U.pills([['all', 'Everything'], ['real', 'Hide our own tests'], ['ours', 'Only our own tests']], filter, counts, 'data-dupes', 'Which addresses') +
         '<input class="field search" type="search" data-dupes-q placeholder="Search an address" aria-label="Search duplicate addresses" value="' + esc(q) + '"></div>' : '') + '</section>';
     var body;

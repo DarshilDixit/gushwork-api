@@ -219,6 +219,14 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
      hostile on purpose -- so read the link without depending on it */
   ok('classic: links back to the dashboard at /monitor, never to /monitor/next', /href="\/monitor\?token=/.test(old) && old.includes('&#8592; Back to the dashboard</a>') && !/href="\/monitor\/next/.test(old));
   ok('classic: says on the page that it is the one-week fallback', old.includes('This is the <b>classic</b> dashboard, kept for one week as a fallback.'));
+  ok('classic: its Dropoff note gives the number a unit -- submissions, in People mode too', old.includes('</b> submissions in this window, not counted above.'));
+  ok('classic: ...and that its Overview counts our own tests where the new one does not', old.includes('Its Overview leaves out our own test submissions; this one still counts them'));
+  /* THE TOKEN IS ENCODED where the classic builds it. It lands in two hrefs
+     and in var TP="..." inside a script, and this suite's token carries a
+     quote and a closing tag on purpose. Raw, it broke out of both. */
+  ok('classic: the hostile token appears only ENCODED -- in the script and in both links',
+     old.includes('var TP="?token=' + encodeURIComponent(TOKEN) + '"') && old.includes('href="/monitor?token=' + encodeURIComponent(TOKEN) + '"')
+     && !old.includes(TOKEN), (old.match(/var TP="[^;]{0,80}/) || [''])[0]);
   ok('classic: its Dropoff note says our own tests are left out there, and still counted on its own Overview', old.includes('Our own test submissions are left out of this tab') && old.includes('This dashboard\\u2019s Overview still counts them; the new one does not.') && !old.includes('are included, as everywhere else on this dashboard'));
   ok('classic: opens at #tab= when sent from the new one', /match\(\/tab=\(\[a-z\]\+\)\/\)/.test(old) && /showTab\(m\[1\]\)/.test(old));
   ok('classic: the disqualified card no longer says only "B2C / Mixed"', !/"B2C \/ Mixed \\u00B7 "/.test(old) && /B2C, mixed or waitlist/.test(old));
@@ -734,7 +742,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
      oursTip.includes('The Overview, the Dropoff tab and the Monday digest already leave them out') && !/every total/.test(oursTip), oursTip);
   { const isrc = fs.readFileSync(path.join(ROOT, 'index.js'), 'utf8');
     ok('classic: its ours marker no longer says "counted in every total" either, and names what leaves them out',
-       !isrc.includes('One of our own test submissions. Counted in every total') && isrc.includes('The Dropoff tab and the new dashboard leave them out.')); }
+       !isrc.includes('One of our own test submissions. Counted in every total') && isrc.includes('The Dropoff tab and the new dashboard\\\\u2019s Overview leave them out.')); }
   ok('leads: the Meta chip is not repeated beside "blocked"', !/>Meta: blocked</.test(v) && />Meta: ours</.test(v) && />Meta: model</.test(v));
   ok('leads: a clarified B2B reads as B2B, the stored text kept', /B2B <span class="badge b-neu" title="B2B \(clarified from B2C\)">clarified<\/span>/.test(v));
   ok('leads: source is the ad click, else where they came from', v.includes('facebook / paid') && v.includes('from google.com') && !/>referral</.test(v));
