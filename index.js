@@ -2432,30 +2432,48 @@ async function checkSubmitHealth(db) {
        sends: free mailboxes are skipped by design, so counting them made
        a perfect Apollo read about 60%
    Measured on the clean days 11-22 Sept: 69-95% of business-email leads
-   matched, so green at 60% still sits clear of the worst normal day. */
+   matched, so green at 60% still sits clear of the worst normal day.
+
+   NUMERATOR AND DENOMINATOR ARE THE SAME LEADS since 26 Sept. Both used to
+   share only a clock: the denominator was leads that ARRIVED in the window,
+   the numerator lookups that HAPPENED in it. The Apollo backfill that day
+   made 350 lookups in an hour for leads from months back, and the row read
+   "761% enriched -- 350 of 46 business-email leads". Now found and refused
+   count only the window's own leads, joined by session, and since a
+   session has one enrichment row the rate cannot pass 100%. */
 async function checkApolloHealth(db) {
   try {
     const r = await db.query(`
+      WITH win AS (
+        SELECT session_id FROM leads
+         WHERE created_at >= NOW() - INTERVAL '${HEALTH_APOLLO_WINDOW_H} hours'
+           AND email IS NOT NULL
+           AND split_part(lower(email), '@', 2) <> ALL($1::text[]))
       SELECT
-        (SELECT COUNT(*) FROM leads
-           WHERE created_at >= NOW() - INTERVAL '${HEALTH_APOLLO_WINDOW_H} hours'
-             AND email IS NOT NULL
-             AND split_part(lower(email), '@', 2) <> ALL($1::text[]))                         AS eligible,
-        COUNT(*) FILTER (WHERE e.enriched_at >= NOW() - INTERVAL '${HEALTH_APOLLO_WINDOW_H} hours' AND e.found)   AS matched,
-        COUNT(*) FILTER (WHERE e.enriched_at >= NOW() - INTERVAL '${HEALTH_APOLLO_WINDOW_H} hours' AND e.refused) AS refused,
+        (SELECT COUNT(*) FROM win)                                                             AS eligible,
+        COUNT(*) FILTER (WHERE e.in_win AND e.found)                                           AS matched,
+        COUNT(*) FILTER (WHERE e.in_win AND e.refused)                                         AS refused,
+        /* The RED line's count is "refused in the last 24h", a count of
+           lookups, not a rate -- so it stays keyed on when they happened.
+           Keyed on the window's leads it would read 0 while Apollo refuses
+           visitors who never press Next (the lookup runs on blur, before
+           the lead row exists). */
+        COUNT(*) FILTER (WHERE e.refused AND e.enriched_at >= NOW() - INTERVAL '${HEALTH_APOLLO_WINDOW_H} hours') AS refused_recent,
         MAX(e.enriched_at) FILTER (WHERE e.found)                                              AS last_matched,
         MAX(e.enriched_at) FILTER (WHERE NOT e.refused)                                        AS last_answered,
         MAX(e.enriched_at) FILTER (WHERE e.refused)                                            AS last_refused
       FROM (SELECT enriched_at,
                    COALESCE(raw_response ? 'error', false) AS refused,
                    (enriched_title IS NOT NULL OR enriched_company IS NOT NULL
-                    OR enriched_company_size IS NOT NULL)  AS found
+                    OR enriched_company_size IS NOT NULL)  AS found,
+                   session_id IN (SELECT session_id FROM win) AS in_win
               FROM enrichment_data) e
     `, [FREE_EMAIL_DOMAINS]);
     const row      = r.rows[0] || {};
     const eligible = parseInt(row.eligible) || 0;
     const matched  = parseInt(row.matched)  || 0;
     const refused  = parseInt(row.refused)  || 0;
+    const refusedRecent = parseInt(row.refused_recent) || 0;
     const ms       = (v) => (v ? new Date(v).getTime() : null);
     const lastMatched = ms(row.last_matched), lastAnswered = ms(row.last_answered), lastRefused = ms(row.last_refused);
     const win      = HEALTH_APOLLO_WINDOW_H + 'h';
@@ -2479,8 +2497,8 @@ async function checkApolloHealth(db) {
          insufficient credits! Upgrade your plan..."), for the Overview's
          strip, which an SDR reads. System health keeps the full detail. */
       return Object.assign(hc('apollo', 'red', what + (since ? ' for ' + fmtAge(Date.now() - since) : ''),
-        reason + ' · ' + refused + ' refused in the last ' + win + ' · ' + lastNote),
-        { summary: refused + ' refused in the last ' + win + ' · ' + lastNote });
+        reason + ' · ' + refusedRecent + ' refused in the last ' + win + ' · ' + lastNote),
+        { summary: refusedRecent + ' refused in the last ' + win + ' · ' + lastNote });
     }
 
     if (eligible < HEALTH_MIN_SAMPLE) {

@@ -503,7 +503,7 @@ function liftClientJs(startMarker, endMarker) {
     /* THE 23 SEPT SHAPE. 86 rows written, Apollo found 0, every one a
        refusal. The old check counted the rows and read 80%. */
     const outPool = apolloPool(
-      { eligible: 40, matched: 0, refused: 41, last_matched: new Date(now - 50 * HOUR),
+      { eligible: 40, matched: 0, refused: 12, refused_recent: 41, last_matched: new Date(now - 50 * HOUR),
         last_answered: new Date(now - 49 * HOUR), last_refused: new Date(now - 60e3) },
       { error: "You have insufficient credits! <a href='x'>Upgrade your plan</a>", since: new Date(now - 49 * HOUR) });
     const out = await H.checkApolloHealth(outPool);
@@ -537,10 +537,28 @@ function liftClientJs(startMarker, endMarker) {
        its AND e.found -- exactly the 23 Sept bug. So pin the filter itself. */
     ok('health/apollo: the numerator is what Apollo FOUND, not rows written',
        /enriched_title IS NOT NULL OR enriched_company IS NOT NULL/.test(gPool.calls[0].sql)
-       && /FILTER \(WHERE e\.enriched_at >= NOW\(\)[^,]*? AND e\.found\)\s+AS matched/.test(gPool.calls[0].sql),
+       && /FILTER \(WHERE e\.in_win AND e\.found\)\s+AS matched/.test(gPool.calls[0].sql),
        gPool.calls[0].sql.slice(0, 400));
     ok('health/apollo: refusals are counted apart, never as matches',
-       /FILTER \(WHERE e\.enriched_at >= NOW\(\)[^,]*? AND e\.refused\)\s+AS refused/.test(gPool.calls[0].sql));
+       /FILTER \(WHERE e\.in_win AND e\.refused\)\s+AS refused/.test(gPool.calls[0].sql));
+    /* THE 26 SEPT SHAPE. A backfill made 350 lookups in an hour for leads
+       from months back, and the row read "761% enriched -- 350 of 46". The
+       numerator counted lookups that HAPPENED in the window, the denominator
+       leads that ARRIVED in it. Both now come from ONE set of sessions. */
+    const q0 = gPool.calls[0].sql;
+    ok('health/apollo: ONE window of leads, defined once, feeds both sides of the rate',
+       /WITH win AS \(\s*SELECT session_id FROM leads\s+WHERE created_at >= NOW\(\) - INTERVAL/.test(q0)
+       && /\(SELECT COUNT\(\*\) FROM win\)\s+AS eligible/.test(q0)
+       && /session_id IN \(SELECT session_id FROM win\) AS in_win/.test(q0), q0.slice(0, 500));
+    ok('health/apollo: no RATE is keyed on when a lookup happened any more',
+       !/FILTER \(WHERE e\.enriched_at >= NOW\(\)/.test(q0), q0.slice(0, 500));
+    /* ...but the red line's "N refused in the last 24h" is a COUNT of
+       lookups, and keyed on the window's leads it read 0 while Apollo was
+       refusing visitors who never pressed Next. The fixture above gives the
+       two counts different values (12 in the window, 41 recent), so the
+       "41 refused" assertions prove which one the red line reads. */
+    ok('health/apollo: the red line counts refusals by WHEN they happened',
+       /COUNT\(\*\) FILTER \(WHERE e\.refused AND e\.enriched_at >= NOW\(\) - INTERVAL '\$\{HEALTH_APOLLO_WINDOW_H\} hours'\) AS refused_recent|COUNT\(\*\) FILTER \(WHERE e\.refused AND e\.enriched_at >= NOW\(\) - INTERVAL '24 hours'\) AS refused_recent/.test(q0), q0.slice(0, 700));
     eq('health/apollo: a healthy check never reads the reply bodies twice', gPool.calls.length, 1);
 
     const rec = await H.checkApolloHealth(apolloPool({ ...healthy, matched: 30, refused: 5,
