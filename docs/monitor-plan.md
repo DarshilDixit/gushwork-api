@@ -373,18 +373,19 @@ _(kept current as the work moves)_
   removed. Writing it found a flaw in the first pager fix (Next lost focus
   on every page move); fixed in `2467ac2`. **Crosscheck after the review
   fixes: 45 of 45** on live data (5,847 leads, every partition adding up).
-  Preview stopped. Next: mutations R06-R37.
+  Preview stopped.
 - [x] **Review sweep** (five lenses, each finding adversarially verified;
   workflow run `wf_c2ad4b99-d16`). 45 confirmed, about 30 distinct fixes,
   commit `5bd3659`; the two first-round mutation survivors pinned in
   `7afa68d`. Headline: a session_id of "constructor" blanked All leads;
   every tab painted before loading, so stale rows sat under new filters;
   Custom dates were unreachable; the ack note was wiped by refreshes.
-- [ ] Mutation tests: round 1 (26, on the build) 24 caught, 2 survived and
-  now pinned (`7afa68d`). Round 2 (37, on the review fixes, list in the
-  session scratchpad as `muts2.json`): R01-R05 run, all CAUGHT after one
-  fix -- R02 was first UNMEASURED because the draw-guard test left a broken
-  row behind that crashed the suite later (`db7851e`). **R06-R37 not run**:
-  the run was stopped for memory. Run them in a git worktree so the
-  preview keeps serving the real tree.
+- [x] **Mutation tests.** Round 1 (26, on the build): 24 caught, 2
+  survived and are now pinned (`7afa68d`). Round 2 (37, on the review
+  fixes): 36 caught. R02 was first UNMEASURED -- the draw-guard test left a
+  broken row behind that crashed the suite later (`db7851e`); R12 survived
+  as an EQUIVALENT mutation (a failed save re-opened a form that was already
+  open), so the redundant line was removed. Plus, in real Chrome, the pager
+  and Clear focus checks each failed with their fix removed. Ran in a
+  scratch git worktree (removed after) with a memory check before each.
 - [ ] Card, PR, stop for review

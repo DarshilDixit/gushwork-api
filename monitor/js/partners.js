@@ -267,7 +267,10 @@ GW.TABS.partners = (function (G) {
     /* the boolean is JSON, never a string: "false" in a query ACKNOWLEDGES */
     return G.api('/monitor/partner-ack', {}, { method: 'POST', body: on ? { customer_key: key, note: note || '', acknowledged: true } : { customer_key: key, acknowledged: false }, timeout: 15000 })
       .then(function () { ackBusy = null; ackOpen = null; delete ackDraft[key]; return load().then(function () { render(); focusOn(sel('data-ack', key)); G.announce((on ? 'Acknowledged ' : 'Un-acknowledged ') + key); }); },
-        function (e) { ackBusy = null; ackErr[key] = 'Could not update: ' + e.message; if (on) ackOpen = key; render(); focusOn(on ? sel('data-ack-note', key) : sel('data-ack', key)); G.announce(ackErr[key]); });
+        /* a failure leaves the form OPEN with the note in it: only the success
+           branch above closes it (a line re-opening it here was a no-op, and
+           mutation testing showed nothing could tell it was there) */
+        function (e) { ackBusy = null; ackErr[key] = 'Could not update: ' + e.message; render(); focusOn(on ? sel('data-ack-note', key) : sel('data-ack', key)); G.announce(ackErr[key]); });
   }
   if (typeof document !== 'undefined' && document.addEventListener) document.addEventListener('click', function (e) {
     var t = e.target && e.target.closest ? e.target : null; if (!t || G.current() !== 'partners') return;
