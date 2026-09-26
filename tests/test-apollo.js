@@ -332,7 +332,8 @@ const LEADUP = /^UPDATE leads SET enriched_city=\$2/;
   ok('I scope: a session with nothing to carry is counted, not carried', scoped.empty === 1);
   const SC = { all: ['enriched_city', 'enriched_company_size', 'enriched_founded_year', 'enriched_title'], rows: [
     { session_id: 's1', email: 'a@x.test', enriched_title: 'Chief Executive Officer', enriched_city: 'Woburn', enriched_company_size: '11-50', enriched_founded_year: '2015', enriched_seniority: 'c_suite' },
-    { session_id: 's2', email: 'b@x.test', enriched_title: 'New title' } ] };
+    { session_id: 's2', email: 'b@x.test', enriched_title: 'New title' },
+    { session_id: 's3', email: 'c@x.test', enriched_seniority: 'c_suite' } ] };
   const mirrorDb = (rows) => { const log = []; return { log, query: async (sql, params) => { log.push({ sql: String(sql), params });
     if (/information_schema/.test(sql)) return { rows: ['enriched_title', 'enriched_city', 'enriched_company_size', 'enriched_other'].map((c) => ({ column_name: c })) };
     if (/^SELECT session_id/.test(String(sql).trim())) return { rows };
@@ -343,7 +344,7 @@ const LEADUP = /^UPDATE leads SET enriched_city=\$2/;
   ok('I mirror: a dry run writes nothing', !md.log.some((q) => /UPDATE|INSERT/i.test(q.sql)));
   ok('I mirror: blanks only -- title and size to fill, the city it already has is left alone',
      dry.rows_to_fill === 1 && dry.fields_to_fill === 2 && dry.by_field.enriched_title === 1 && dry.by_field.enriched_company_size === 1 && !dry.by_field.enriched_city, JSON.stringify(dry));
-  ok('I mirror: a session with no mirror row is counted, never created', dry.not_on_mirror === 1);
+  ok('I mirror: a session with no mirror row is counted, never created (s2 and s3 have none)', dry.not_on_mirror === 2, String(dry.not_on_mirror));
   md = mirrorDb(MROWS);
   await sync.syncMirror(md, SC, { apply: true, log: () => {} });
   const mUps = md.log.filter((q) => /^UPDATE/.test(q.sql.trim()));
@@ -372,7 +373,9 @@ const LEADUP = /^UPDATE leads SET enriched_city=\$2/;
   const RECS = [
     { Id: 'L1', Email: 'A@x.test', IsConverted: false, enriched_title__c: null, enriched_founded_year__c: null, enriched_city__c: 'Boston' },
     { Id: 'L2', Email: 'a@x.test', IsConverted: true },
-    { Id: 'L3', Email: 'b@x.test', IsConverted: false, enriched_title__c: 'Existing' } ];
+    { Id: 'L3', Email: 'b@x.test', IsConverted: false, enriched_title__c: 'Existing' },
+    /* Salesforce answers with ITS spelling of a field; this Lead already has a value */
+    { Id: 'L4', Email: 'c@x.test', IsConverted: false, enriched_Seniority__c: 'owner' } ];
   let r = await sfRun(RECS, { apply: false });
   ok('I SF: a dry run writes nothing', r.updates.length === 0 && r.out, r.err && r.err.message);
   ok('I SF: a converted Lead is counted and skipped', r.out && r.out.converted_skipped === 1);
@@ -382,6 +385,8 @@ const LEADUP = /^UPDATE leads SET enriched_city=\$2/;
   ok('I SF: exactly one Lead written, the unconverted one, matched on the email whatever its case', r.updates.length === 1 && r.updates[0][0] === 'L1', JSON.stringify(r.updates));
   ok('I SF: blanks only, the length Salesforce declares, and a number sent as a number',
      r.updates[0] && r.updates[0][1].enriched_title__c === 'Chief Exec' && r.updates[0][1].enriched_founded_year__c === 2015 && !('enriched_city__c' in r.updates[0][1]), JSON.stringify(r.updates[0]));
+  ok('I SF: a value Salesforce returns under ITS spelling is SEEN, so it is never overwritten (27 Sept)',
+     !r.updates.some(([id]) => id === 'L4'), JSON.stringify(r.updates));
   ok('I SF: a field Salesforce spells in a different CASE is still matched and written (enriched_linkedIn__c, 26 Sept)',
      r.updates[0] && r.updates[0][1].enriched_seniority__c === 'c_suite', JSON.stringify(r.updates[0]));
   r = await sfRun(RECS, { apply: true, totalSize: 9 });

@@ -177,8 +177,16 @@ async function syncSalesforce(sc, { apply, log, SF = require(path.join(ROOT, 'sa
     if (x.IsConverted) { out.converted_skipped++; continue; }
     const ours = byEmail.get(String(x.Email || '').toLowerCase());
     if (!ours) continue;
+    /* THE RECORD'S KEYS IN LOWER CASE TOO. Salesforce answers with the
+       field's own spelling (enriched_linkedIn__c), so reading x[sf] with our
+       spelling saw every LinkedIn as blank -- and the 27 Sept LinkedIn run
+       wrote 98 Leads without being able to see what was there. Checked
+       afterwards: no LinkedIn in our records differed from the one written,
+       and the one person who ever had two is on a converted Lead, which was
+       skipped. Fill-only depends on this read. */
+    const rec = Object.fromEntries(Object.entries(x).map(([k, v]) => [k.toLowerCase(), v]));
     const patch = {};
-    for (const [col, sf] of fields) if (blank(x[sf]) && !blank(ours[col])) { const v = coerce(sf, ours[col]); if (v !== null) patch[sf] = v; }
+    for (const [col, sf] of fields) if (blank(rec[sf.toLowerCase()]) && !blank(ours[col])) { const v = coerce(sf, ours[col]); if (v !== null) patch[sf] = v; }
     const n = Object.keys(patch).length;
     if (!n) continue;
     out.leads_to_fill++; out.fields_to_fill += n;
