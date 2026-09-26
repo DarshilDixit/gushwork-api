@@ -53,6 +53,7 @@
   --data: var(--gw-color-primary-500);    --data-wash: var(--gw-color-primary-alpha-10);
   --ref: var(--gw-color-neutral-600);     --prev: var(--gw-color-neutral-200);
   --grid: var(--gw-color-neutral-50);     --track: var(--gw-color-neutral-100);
+  --map-sea: var(--gw-color-neutral-200);   /* the light basemap's ocean, sampled: rgb(208,207,212) */
   --tip-bg: var(--gw-color-neutral-900);  --tip-ink: var(--gw-color-white);
   --attn-line: var(--gw-color-red-100);   --link: var(--gw-color-primary-600);
   --shadow-drawer: var(--gw-shadow-s4);
@@ -80,6 +81,7 @@
   --data: var(--gw-color-primary-400);    --data-wash: var(--gw-color-primary-alpha-20);
   --ref: var(--gw-color-neutral-500);     --prev: var(--gw-color-neutral-700);
   --grid: var(--gw-color-neutral-800);    --track: var(--gw-color-neutral-800);
+  --map-sea: var(--gw-color-neutral-900);   /* the dark basemap's ocean, sampled: rgb(35,34,39) */
   --tip-bg: var(--gw-color-neutral-50);   --tip-ink: var(--gw-color-neutral-900);
   --attn-line: var(--gw-color-red-alpha-20); --link: var(--gw-color-primary-300);
   --shadow-drawer: var(--gw-shadow-s4);
@@ -294,6 +296,7 @@ input.field { min-width: 0; }
 .tbl th:first-child, .tbl td:first-child { text-align: left; color: var(--ink-label); }
 .tbl .pd { color: var(--ink-muted); margin-left: var(--gw-space-4); }
 .tbl td.day { white-space: nowrap; }
+.tbl td.wrap { overflow-wrap: anywhere; }
 
 /* ── Funnel, channels ──────────────────────────────────────────────────── */
 .funnel { display: flex; flex-direction: column; gap: var(--gw-space-12); }
@@ -317,6 +320,7 @@ input.field { min-width: 0; }
 .ch .v span { color: var(--ink-muted); font-weight: 400; margin-left: 6px; }
 .lbar { display: grid; grid-template-columns: minmax(0, 1fr) minmax(80px, 160px) 96px; align-items: center; gap: var(--gw-space-12); padding: var(--gw-space-8) 0; border-bottom: 1px solid var(--row-line); font: var(--gw-text-body-12-med); color: var(--ink-label); }
 .lbar:last-child { border-bottom: 0; }
+.lbar.wide { grid-template-columns: minmax(0, 1fr) minmax(80px, 200px) 190px; }   /* count, share and "· N ours" */
 .lbar .t { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .lbar .t small { font: var(--gw-text-body-12-reg); color: var(--ink-muted); }
 .lbar .v { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
@@ -325,13 +329,14 @@ input.field { min-width: 0; }
 /* ── Data tables: a real table from 768 up, stacked label/value cards below ── */
 .rt-wrap { overflow-x: auto; border-radius: var(--gw-radius-16); }
 .rt { width: 100%; border-collapse: collapse; font: var(--gw-text-body-12-reg); }
-.rt th { text-align: left; padding: var(--gw-space-12) var(--gw-space-12); font: var(--gw-text-body-12-med); color: var(--ink-label); border-bottom: 1px solid var(--card-line); white-space: nowrap; background: var(--card); }
-.rt td { padding: var(--gw-space-12); border-bottom: 1px solid var(--row-line); color: var(--ink); vertical-align: middle; }
-.rt tr:last-child td { border-bottom: 0; }
-.rt td.r, .rt th.r { text-align: right; font-variant-numeric: tabular-nums; }
-.rt td.m { color: var(--ink-muted); white-space: nowrap; }
-.rt td.w { word-break: break-word; }
-.rt tbody tr.main:hover td { background: var(--row-hover); }
+.rt > thead > tr > th { text-align: left; padding: var(--gw-space-12) var(--gw-space-12); font: var(--gw-text-body-12-med); color: var(--ink-label); border-bottom: 1px solid var(--card-line); white-space: nowrap; background: var(--card); }
+.rt > tbody > tr > td { padding: var(--gw-space-12); border-bottom: 1px solid var(--row-line); color: var(--ink); vertical-align: middle; }
+.rt > tbody > tr:last-child > td, .rt > tbody > tr.main:has(+ tr.detail:last-child) > td { border-bottom: 0; }   /* a closed detail row is the LAST row, so its main row drew a second line above the footer */
+.rt > tbody > tr > td.r, .rt > thead > tr > th.r { text-align: right; font-variant-numeric: tabular-nums; }
+.rt > tbody > tr > td.m { color: var(--ink-muted); white-space: nowrap; }
+.rt > tbody > tr > td.mw { color: var(--ink-muted); }   /* muted, but free to wrap -- a long source must not push the table past its card */
+.rt > tbody > tr > td.w { word-break: break-word; }
+.rt > tbody > tr.main:hover > td { background: var(--row-hover); }
 .rt .xb { width: 28px; height: 28px; display: inline-grid; place-items: center; border-radius: var(--gw-radius-8); color: var(--icon); }
 .rt .xb:hover { background: var(--btn-hover); }
 .rt .xb .ic { width: 12px; height: 12px; transition: transform var(--gw-motion-fast); }
@@ -339,8 +344,8 @@ input.field { min-width: 0; }
 /* The expanded row is a WELL inside the card, inset from its edges. It was
    a full-bleed canvas-coloured cell that painted over the card's border, so
    the session list looked as if it had fallen out of the table. */
-.rt tr.detail td { padding: 0 var(--gw-space-12) var(--gw-space-12); text-align: left; }
-.rt tr.detail:hover td { background: none; }
+.rt > tbody > tr.detail > td { padding: 0 var(--gw-space-12) var(--gw-space-12); text-align: left; }
+.rt > tbody > tr.detail:hover > td { background: none; }
 .well { background: var(--well); border-radius: var(--gw-radius-12); padding: var(--gw-space-12); }
 .more { display: flex; align-items: center; justify-content: space-between; gap: var(--gw-space-12); flex-wrap: wrap; padding: var(--gw-space-12) var(--gw-space-16); border-top: 1px solid var(--card-line); font: var(--gw-text-body-12-reg); color: var(--ink-muted); }
 .kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: var(--gw-space-8); }
@@ -352,6 +357,103 @@ input.field { min-width: 0; }
 .pills button span { color: var(--ink-muted); margin-left: 4px; }
 .pills button[aria-pressed="true"] { background: var(--tab-on); color: var(--tab-on-ink); box-shadow: none; }
 .pills button[aria-pressed="true"] span { color: inherit; opacity: .7; }
+
+/* ── PR C: All leads, Blocked (and the pieces the other tabs reuse) ─── */
+/* The filter bar: search, stage and the Filters button always; the rest in a
+   panel that opens beneath -- sixteen controls in one row was the classic's
+   bar, and on a phone it was a page of selects before the first lead. */
+.lf-top { display: flex; flex-wrap: wrap; align-items: center; gap: var(--gw-space-8); width: 100%; }
+.lf-top .search { flex: 1 1 280px; }
+.lf-panel { width: 100%; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--gw-space-12); padding: var(--gw-space-16); border-radius: var(--gw-radius-12); background: var(--card); box-shadow: inset 0 0 0 1px var(--card-line); }
+.lfl { display: flex; flex-direction: column; gap: var(--gw-space-4); min-width: 0; }
+.lfl > span { font: var(--gw-text-body-12-med); color: var(--ink-label); }
+.lfl .field { width: 100%; }
+.lfl.inline { flex-direction: row; align-items: center; gap: var(--gw-space-8); }
+.lfl.inline .field { width: auto; }
+.lfl.dates { flex-direction: row; gap: var(--gw-space-8); grid-column: 1 / -1; }   /* the explicit columns only: span 2 forced a second column on a phone and reflowed every filter */
+.lfl.dates label { display: flex; flex-direction: column; gap: var(--gw-space-4); flex: 1 1 0; font: var(--gw-text-body-12-med); color: var(--ink-label); }
+.controls.lf { flex-direction: column; align-items: stretch; }
+/* markers sit AFTER the email, as on Duplicates */
+.marks { display: inline-flex; flex-wrap: wrap; gap: var(--gw-space-4); margin-left: var(--gw-space-8); vertical-align: middle; }
+/* the email column gets the room: an address broken mid-word is unreadable */
+.rt > tbody > tr > td.ecell { min-width: 240px; }
+.em { overflow-wrap: anywhere; }
+/* a sortable header is a real button */
+.sortb { display: inline-flex; align-items: center; gap: var(--gw-space-4); font: inherit; color: inherit; padding: 0; border-radius: var(--gw-radius-4); }
+.sortb:hover { color: var(--ink); text-decoration: underline; }
+.sortb .ic { width: 12px; height: 12px; }
+.pager { display: flex; flex-wrap: wrap; align-items: center; gap: var(--gw-space-4); padding: var(--gw-space-12) var(--gw-space-16); border-top: 1px solid var(--card-line); }
+.pgb { min-width: 32px; height: 32px; padding: 0 var(--gw-space-8); display: inline-grid; place-items: center; border-radius: var(--gw-radius-8); box-shadow: inset 0 0 0 1px var(--btn-line); font: var(--gw-text-button-12); color: var(--ink); font-variant-numeric: tabular-nums; }
+.pgb:hover { background: var(--btn-hover); }
+.pgb.on { background: var(--tab-on); color: var(--tab-on-ink); box-shadow: none; }
+.pgb[disabled] { color: var(--ink-disabled); cursor: not-allowed; }
+.pgb .ic { width: 12px; height: 12px; }
+.pgg { color: var(--ink-muted); padding: 0 var(--gw-space-2); }
+.pgi { margin-left: auto; font: var(--gw-text-body-12-reg); color: var(--ink-muted); }
+/* the lead panel's groups */
+.pgrp { margin-top: var(--gw-space-16); }
+.pgrp:first-child { margin-top: 0; }
+.pgh { font: var(--gw-text-body-12-sem); color: var(--ink-label); margin-bottom: var(--gw-space-8); }
+.pgh.sub { margin-top: var(--gw-space-12); font: var(--gw-text-body-12-med); }
+.pbox { margin-top: var(--gw-space-16); padding: var(--gw-space-12); border-radius: var(--gw-radius-12); background: var(--card); box-shadow: inset 0 0 0 1px var(--card-line); }
+.pbox:first-child { margin-top: 0; }
+.lnote { font: var(--gw-text-body-12-reg); color: var(--ink-muted); }
+.lnote.warn { color: var(--warn-ink); }
+.bad-t { color: var(--bad-ink); }
+.na { color: var(--ink-muted); }
+.kv code, .tbl code { font-size: 11px; overflow-wrap: anywhere; }   /* the classic's 10-11px monospace for keys and ids -- no token (R15) */
+
+/* ── Model ── */
+.flags { font: var(--gw-text-body-12-reg); color: var(--ink-label); padding: var(--gw-space-12) var(--gw-space-16); border-radius: var(--gw-radius-12); background: var(--card); box-shadow: inset 0 0 0 1px var(--card-line); }
+.flags b { font-weight: 600; color: var(--ink); }
+/* three groups ALWAYS, side by side where they fit: an empty "Blocked by
+   the AI check" is the clearest statement on the tab */
+/* stacked, full width: side by side, the long "not categorised" label broke
+   into seven lines and the last column was clipped */
+.mgroups { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--gw-space-16); }
+.tbl tr.uncat td { color: var(--ink-muted); font-style: italic; }
+.rt > tbody > tr > td.quote { min-width: 180px; max-width: 360px; color: var(--ink-label); }
+.rt code, .rt > tbody > tr > td.wrap { overflow-wrap: anywhere; }
+.rt > tbody > tr > td.kcell code { white-space: nowrap; overflow-wrap: normal; }   /* a company key stays whole in a table column... */
+
+/* ── Visitors ── */
+.chips { display: flex; flex-wrap: wrap; gap: var(--gw-space-8); }
+.vbar { display: grid; grid-template-columns: 48px minmax(60px, 1fr); align-items: center; gap: var(--gw-space-8); font-variant-numeric: tabular-nums; }
+.vbar .tr { height: 6px; border-radius: var(--gw-radius-full); background: var(--track); overflow: hidden; }
+.vbar .fi { height: 100%; background: var(--data); border-radius: var(--gw-radius-full); }
+/* The map. The basemap is LIGHT grey in both themes (the one provider that
+   works embedded has no dark tiles), so the ring is white in both. Leaflet
+   sets presentation attributes on the SVG; a CSS rule beats them. */
+.vmap-slot, .vmap { height: 460px; }
+.vmap { border-radius: var(--gw-radius-12); overflow: hidden; }
+.vmap-slot { border-radius: var(--gw-radius-12); box-shadow: 0 0 0 1px var(--card-line); }   /* the map's edge, drawn OUTSIDE it so no tile can cover it -- on dark the sea is the card's own colour */
+.leaflet-interactive.vdot { fill: var(--data); fill-opacity: .75; stroke: var(--gw-color-white); stroke-opacity: .95; }
+.vmap .leaflet-popup-content { font: var(--gw-text-body-12-reg); }
+/* Leaflet paints its own chrome white; on the dark theme that is three bright
+   boxes on a dark map. Repainted from the theme aliases, so both themes follow.
+   .vmap.leaflet-container wins the attribution tie: leaflet.css is appended
+   AFTER this file, and an equal selector would lose to it. */
+.vmap.leaflet-container { background: var(--map-sea); }   /* what shows past the top and bottom of the world on a short, zoomed-out map -- the tiles' own ocean, so it reads as sea, not as a gap */
+.vmap .leaflet-bar { border-color: var(--card-line); }
+.vmap .leaflet-bar a { background: var(--card); color: var(--ink); border-bottom-color: var(--card-line); }
+.vmap .leaflet-bar a:hover { background: var(--btn-hover); }
+.vmap .leaflet-bar a.leaflet-disabled { background: var(--card); color: var(--ink-faint); }
+.vmap.leaflet-container .leaflet-control-attribution { background: var(--card); color: var(--ink-muted); }
+.vmap .leaflet-popup-content-wrapper, .vmap .leaflet-popup-tip { background: var(--card); color: var(--ink); }
+@container view (max-width: 559px) { .vmap-slot, .vmap { height: 340px; } }
+
+/* ── Partners ── */
+.sumgrid.six { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@container view (max-width: 559px) { .sumgrid.six { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.pfunnel { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--gw-space-12); }
+.pfs { display: flex; flex-direction: column; gap: var(--gw-space-4); padding: var(--gw-space-12); border-radius: var(--gw-radius-12); background: var(--well); }
+.pfs .num { font-size: 24px; }
+.pfk { font: var(--gw-text-body-12-med); color: var(--ink-label); }
+.pfr, .pfl { font: var(--gw-text-body-12-reg); color: var(--ink-muted); }
+.pfo { font: var(--gw-text-body-12-reg); color: var(--warn-ink); }
+.gaphead { display: flex; align-items: baseline; gap: var(--gw-space-12); flex-wrap: wrap; }
+.ackf { display: flex; flex-wrap: wrap; gap: var(--gw-space-8); align-items: center; }
+.ackf .field { flex: 1 1 180px; min-width: 0; }
 
 /* Dropoff's period table scrolls INSIDE its card, with the outcome column
    pinned, rather than squeezing twelve periods into a phone. */
@@ -431,7 +533,16 @@ input.field { min-width: 0; }
   .itg button { width: 44px; height: 44px; }
   .nav { min-height: 44px; }
   .pills button { min-height: 44px; }
+  .pgb { min-width: 44px; height: 44px; }
+  /* Leaflet's own controls, thumb-sized (its touch default is 30px) */
+  .vmap .leaflet-touch .leaflet-bar a, .vmap.leaflet-touch .leaflet-bar a { width: 44px; height: 44px; line-height: 44px; }
+  .vmap .leaflet-popup-close-button { width: 44px !important; height: 44px !important; line-height: 44px !important; }
+  .sortb { min-height: 44px; min-width: 44px; padding: 0 var(--gw-space-4); }   /* a header visible on a coarse-pointer laptop is still a target */
   .sfoot a, .drawer-tools a { display: inline-flex; align-items: center; min-height: 44px; }
+  /* a link that IS a detail value (website, LinkedIn, landing page) is a
+     target on its own, not a word in a sentence -- 15px tall until the
+     layout check opened the rows and measured it */
+  .kv .v a { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; }
 }
 @media (max-width: 767px) {
   .topbar { padding: 0 var(--gw-space-16); border-bottom-width: 1.5px; }
@@ -484,28 +595,60 @@ input.field { min-width: 0; }
    with Status and When off the edge. Each cell is "label ... value", the
    value ONE element so a badge stays beside its text. From 560 to 899 a
    card lays its cells out two across. */
+.cardsort { display: none; }
 @container view (max-width: 899px) {
-  .rt, .rt tbody, .rt tr, .rt td { display: block; width: 100%; }
-  .rt thead { display: none; }
-  .rt tr.main { border-bottom: 1px solid var(--card-line); padding: var(--gw-space-8) var(--gw-space-12); position: relative; }
-  .rt td { border: 0; padding: var(--gw-space-4) 0; display: flex; justify-content: space-between; align-items: baseline; gap: var(--gw-space-12); }
-  .rt td::before { content: attr(data-l); font: var(--gw-text-body-12-med); color: var(--ink-label); text-align: left; flex: 0 0 auto; }
-  .rt td .cv { min-width: 0; text-align: right; overflow-wrap: anywhere; }
-  .rt td.xcell { position: absolute; right: var(--gw-space-8); top: var(--gw-space-8); width: auto; padding: 0; }
-  .rt td.xcell::before { content: none; }
-  .rt td.lead-cell { font: var(--gw-text-body-14-med); padding-right: 52px; justify-content: flex-start; min-height: 44px; align-items: center; }
-  .rt td.lead-cell .cv { text-align: left; }
-  .rt td.lead-cell::before { content: none; }
-  .rt td.m { white-space: normal; }
-  .rt tr.detail td { display: block; padding: 0 var(--gw-space-12) var(--gw-space-12); }
-  .rt tr.detail td::before { content: none; }
+  .cardsort { display: block; }
+  .rt, .rt > tbody, .rt > tbody > tr, .rt > tbody > tr > td { display: block; width: 100%; }
+  .rt > thead { display: none; }
+  .rt > tbody > tr.main { border-bottom: 1px solid var(--card-line); padding: var(--gw-space-8) var(--gw-space-12); position: relative; }
+  .rt > tbody > tr.main:last-child, .rt > tbody > tr.main:has(+ tr.detail:last-child) { border-bottom: 0; }
+  .rt > tbody > tr > td { border: 0; padding: var(--gw-space-4) 0; display: flex; justify-content: space-between; align-items: baseline; gap: var(--gw-space-12); }
+  .rt > tbody > tr > td::before { content: attr(data-l); font: var(--gw-text-body-12-med); color: var(--ink-label); text-align: left; flex: 0 0 auto; }
+  .rt > tbody > tr > td > .cv { min-width: 0; text-align: right; overflow-wrap: anywhere; }
+  .rt > tbody > tr > td.kcell code { white-space: normal; overflow-wrap: anywhere; }   /* ...and wraps in a phone card */
+  .rt > tbody > tr > td.xcell { position: absolute; right: var(--gw-space-8); top: var(--gw-space-8); width: auto; padding: 0; }
+  .rt > tbody > tr > td.xcell::before { content: none; }
+  .rt > tbody > tr > td.lead-cell { font: var(--gw-text-body-14-med); padding-right: 52px; justify-content: flex-start; min-height: 44px; align-items: center; }
+  .rt > tbody > tr > td.lead-cell > .cv { text-align: left; }
+  .rt > tbody > tr > td.lead-cell::before { content: none; }
+  .rt > tbody > tr > td.m { white-space: normal; }
+  .rt > tbody > tr.detail > td { display: block; padding: 0 var(--gw-space-12) var(--gw-space-12); }
+  .rt > tbody > tr.detail > td::before { content: none; }
+}
+/* A table with more columns than a mid-width content column can hold drops
+   its OPTIONAL ones (marked opt) in the band where it is still a table; every
+   dropped value is in the row's detail, and below 900 each row is a card that
+   shows everything. */
+@container view (min-width: 900px) and (max-width: 1099px) {
+  .rt > thead > tr > th.opt, .rt > tbody > tr > td.opt { display: none; }
 }
 @container view (min-width: 560px) and (max-width: 899px) {
-  .rt tr.main { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--gw-space-24); }
-  .rt tr.main td.lead-cell { grid-column: 1 / -1; }
+  .rt > tbody > tr.main { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--gw-space-24); }
+  .rt > tbody > tr.main > td.lead-cell { grid-column: 1 / -1; }
 }
 @container view (max-width: 559px) {
   .kv { grid-template-columns: minmax(0, 1fr); }
+}
+/* A PLAIN TABLE ON A PHONE (U.grid) stacks each row into "label ... value"
+   lines -- the rtable card shape, first cell as the row's title. Only below
+   560: wider than that every plain table fits, and a stacked grid of small
+   numbers reads worse than a table. The box grows from 260 to 480 tall here,
+   because a stacked row is five or six lines and 260 would show barely one
+   (480 is a judgement call, not a design-system figure). */
+@container view (max-width: 559px) {
+  .tbl.stack { max-height: 480px; }
+  .tbl.stack table, .tbl.stack tbody, .tbl.stack tr, .tbl.stack td { display: block; width: 100%; }
+  .tbl.stack thead { display: none; }
+  .tbl.stack tr { padding: var(--gw-space-8) var(--gw-space-12); border-bottom: 1px solid var(--row-line); }
+  .tbl.stack tr:last-child { border-bottom: 0; }
+  .tbl.stack td { border: 0; padding: var(--gw-space-4) 0; display: flex; justify-content: space-between; align-items: baseline; gap: var(--gw-space-12); }
+  .tbl.stack td::before { content: attr(data-l); font: var(--gw-text-body-12-med); color: var(--ink-label); text-align: left; flex: 0 0 auto; }
+  .tbl.stack td > .cv { min-width: 0; text-align: right; overflow-wrap: anywhere; }
+  .tbl.stack td:first-child { font: var(--gw-text-body-14-med); color: var(--ink); }
+  .tbl.stack td:first-child::before { content: none; }
+  .tbl.stack td:first-child > .cv { text-align: left; }
+  .tbl.stack tr.uncat td { color: var(--ink-muted); }
+  .tbl.stack .vbar { min-width: 160px; }   /* the bar keeps a readable track beside its number (judgement call) */
 }
 @media (max-width: 479px) {
   .lead .num { font-size: 40px; }

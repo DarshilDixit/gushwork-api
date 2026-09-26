@@ -20,7 +20,7 @@ const path = require('path');
 const DIR = path.join(__dirname, 'monitor');
 /* ORDER MATTERS: core defines GW, ui and chart build on it, health defines the
    check names the Overview's attention strip reads, app boots last. */
-const JS_ORDER = ['core.js', 'ui.js', 'chart.js', 'health.js', 'overview.js', 'dropoff.js', 'dupes.js', 'lm.js', 'app.js'];
+const JS_ORDER = ['core.js', 'ui.js', 'chart.js', 'labels.js', 'health.js', 'overview.js', 'dropoff.js', 'dupes.js', 'lm.js', 'leads.js', 'sdr.js', 'model.js', 'visitors.js', 'partners.js', 'app.js'];
 /* The only files the asset route will ever send. An allowlist, never a path. */
 const ASSETS = {
   'Inter-VariableFont_opsz_wght.ttf': 'font/ttf',
@@ -55,7 +55,7 @@ function configScript(cfg) {
   return '<script>window.__GW__=' + JSON.stringify(cfg).replace(/</g, '\\u003c') + ';</script>';
 }
 
-function page({ token, tz }) {
+function page({ token, tz, labels }) {
   const tq = token ? '?token=' + encodeURIComponent(token) : '';
   const css = PARTS.css.split('{{ASSET}}').join('/monitor/next/asset/').split('{{TOKENQ}}').join(tq);
   const themeBtns = '<button data-theme-set="light" aria-label="Light theme" title="Light"><svg class="ic" aria-hidden="true"><use href="#i-sun"/></svg></button>' +
@@ -85,7 +85,7 @@ function page({ token, tz }) {
     '<div class="drawer-catch" id="drawer-catch"></div>' +
     '<aside class="drawer" id="drawer" aria-label="Menu"><div class="drawer-tools"><span>Theme</span><div class="itg" role="group" aria-label="Theme">' + themeBtns + '</div></div>' +
     '<nav class="groups" id="nav-drawer" aria-label="Dashboard"></nav>' + foot + '</aside>' +
-    configScript({ token: token || '', tz, classic: '/monitor' }) +
+    configScript({ token: token || '', tz, classic: '/monitor', labels: labels || {} }) +
     '<script>' + PARTS.js + '</script></body></html>';
 }
 
@@ -94,11 +94,11 @@ function authorised(req) {
   return !token || req.query.token === token;
 }
 
-function mount(app, { tz }) {
+function mount(app, { tz, labels }) {
   app.get('/monitor/next', (req, res) => {
     if (!authorised(req)) return res.status(401).send('<h2 style="font-family:sans-serif;padding:2rem">401 — Unauthorized. Add ?token=YOUR_TOKEN to the URL.</h2>');
     res.set('Cache-Control', 'no-store');
-    res.type('html').send(page({ token: req.query.token || '', tz }));
+    res.type('html').send(page({ token: req.query.token || '', tz, labels }));
   });
   app.get('/monitor/next/asset/:name', (req, res) => {
     if (!authorised(req)) return res.status(401).end();

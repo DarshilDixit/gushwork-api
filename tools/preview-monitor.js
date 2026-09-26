@@ -70,7 +70,8 @@ const L = new Function([
   liftDecl('function dropoffAddDays'), liftDecl('function dropoffStep'),
   liftDecl('const ELV_EXCLUDED_DOMAINS'), liftDecl('const INTERNAL_TEST_EMAILS'), liftDecl('const INTERNAL_STAGING_HOSTS'),
   liftDecl('function internalLeadSqlClause'), liftDecl('async function duplicatesReport'),
-  'return { overviewReport, duplicatesReport, DASH_TZ };',
+  liftDecl('const WEBSITE_REASON_LABELS'), liftDecl('const META_WITHHELD_LABELS'),
+  'return { overviewReport, duplicatesReport, DASH_TZ, LABELS: { website: WEBSITE_REASON_LABELS, meta: META_WITHHELD_LABELS } };',
 ].join('\n'))();
 
 function start() {
@@ -96,9 +97,9 @@ function start() {
     if (req.query.token !== TOKEN) return res.status(401).send('401 — Unauthorized.');
     delete require.cache[require.resolve(MN)];
     res.set('Cache-Control', 'no-store');
-    res.type('html').send(require(MN).page({ token: req.query.token, tz: L.DASH_TZ }));
+    res.type('html').send(require(MN).page({ token: req.query.token, tz: L.DASH_TZ, labels: L.LABELS }));
   });
-  monitorNext.mount(app, { tz: L.DASH_TZ });   /* the font route; /monitor/next above wins */
+  monitorNext.mount(app, { tz: L.DASH_TZ, labels: L.LABELS });   /* the font route; /monitor/next above wins */
   app.get('/monitor/overview', async (req, res) => {
     if (req.query.token !== TOKEN) return res.status(401).json({ error: 'Unauthorized' });
     try { res.json(await L.overviewReport(db, { view: req.query.view, asof: req.query.asof })); }

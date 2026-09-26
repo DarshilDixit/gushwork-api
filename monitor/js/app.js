@@ -8,9 +8,9 @@
 (function (G) {
   var NAV = [
     { items: [['overview', 'Overview', 'house']] },
-    { label: 'Leads', items: [['leads', 'All leads', 'users', 1], ['sdr', 'SDR list', 'phone-call', 1], ['dropoff', 'Dropoff', 'funnel'], ['dupes', 'Duplicates', 'copy'], ['visitors', 'Visitors', 'globe-hemisphere-west', 1]] },
-    { label: 'Lead quality', items: [['blocked', 'Blocked', 'prohibit', 1], ['model', 'Model', 'robot', 1]] },
-    { label: 'Revenue', items: [['partners', 'Partners', 'handshake', 1], ['lm', 'Lead magnet', 'magnet']] },
+    { label: 'Leads', items: [['leads', 'All leads', 'users'], ['sdr', 'SDR list', 'phone-call'], ['dropoff', 'Dropoff', 'funnel'], ['dupes', 'Duplicates', 'copy'], ['visitors', 'Visitors', 'globe-hemisphere-west']] },
+    { label: 'Lead quality', items: [['blocked', 'Blocked', 'prohibit'], ['model', 'Model', 'robot']] },
+    { label: 'Revenue', items: [['partners', 'Partners', 'handshake'], ['lm', 'Lead magnet', 'magnet']] },
     { label: 'System', items: [['health', 'System health', 'heartbeat']] },
   ];
   var current = null, badges = {}, lastW = 0;
@@ -44,9 +44,14 @@
   /* A tab change the READER asked for moves focus to the new tab's heading,
      so a keyboard or screen-reader user lands on what they opened instead of
      on the page body. Boot does not move focus. */
-  function show(tab, asked) {
-    if (!G.TABS[tab]) tab = 'overview';
+  /* q: the new tab's own filters. A tab you MOVE to starts clean unless the
+     caller hands it some (Partners opening "All leads, partner = X"); at boot
+     the filters came from the link and are kept. */
+  function show(tab, asked, q) {
+    /* own names only: "toString" from a link found Object's method and threw */
+    if (!Object.prototype.hasOwnProperty.call(G.TABS, tab)) tab = 'overview';
     if (current && current !== tab && G.TABS[current] && G.TABS[current].deactivate) G.TABS[current].deactivate();
+    if (q) G.S.q = q; else if (current && current !== tab) G.S.q = {};
     current = tab; G.S.tab = tab; G.writeHash();
     document.title = G.TABS[tab].title + ' · Gushwork Monitor';
     var fromDrawer = isOpen();
@@ -87,7 +92,16 @@
      fires resize with the same width, and redrawing then would thrash. */
   var rt = null;
   window.addEventListener('resize', function () { clearTimeout(rt); rt = setTimeout(function () { var w = window.innerWidth; if (w === lastW) return; lastW = w; if (current && G.TABS[current].render) G.TABS[current].render(); }, 150); });
-  window.addEventListener('hashchange', function () { var was = G.S.tab; if (!G.readHash()) return; if (G.S.tab !== was) show(G.S.tab, true); else if (current && G.TABS[current].render) G.TABS[current].render(); });
+  /* The hash now carries a tab's SERVER filters too (partner, days, page...),
+     so a new hash on the same tab has to fetch, not only repaint -- or the
+     controls show one filter over data read for another. */
+  window.addEventListener('hashchange', function () {
+    var was = G.S.tab, before = JSON.stringify(G.S.q); if (!G.readHash()) return;
+    if (G.S.tab !== was) { show(G.S.tab, true, G.S.q); return; }
+    var T = current && G.TABS[current]; if (!T) return;
+    if (T.load && JSON.stringify(G.S.q) !== before) { var p = T.load(); if (T.render) T.render(); p.then(function () { if (current === G.S.tab && T.render) T.render(); }); }
+    else if (T.render) T.render();
+  });
 
   G.readHash(); G.applyTheme(); lastW = window.innerWidth; show(G.S.tab);
 })(GW);

@@ -97,18 +97,33 @@ GW.ui = (function (G) {
   function keyOf(o, r, i) { return o.ns + '-' + (o.key ? String(o.key(r)).replace(/[^A-Za-z0-9]/g, function (c) { return '_' + c.charCodeAt(0).toString(16); }) : i); }
   function rtable(o) {
     var cols = o.cols;
-    var head = '<tr>' + (o.detail ? '<th class="xcell"><span class="sr-only">Details</span></th>' : '') + cols.map(function (c) { return '<th' + (c.r ? ' class="r"' : '') + '>' + esc(c.label) + '</th>'; }).join('') + '</tr>';
+    /* A SORTABLE column is a real button in its header, and the header says
+       which way it sorts (aria-sort) -- the arrow alone is invisible to a
+       screen reader. o.sort = { key, dir, attr }. */
+    var srt = o.sort || null;
+    var th = function (c) {
+      var on = srt && c.sort && srt.key === c.sort, aria = on ? ' aria-sort="' + (srt.dir === 'asc' ? 'ascending' : 'descending') + '"' : '';
+      var inner = c.sort && srt ? '<button class="sortb" ' + srt.attr + '="' + esc(c.sort) + '">' + esc(c.label) + (on ? (srt.dir === 'asc' ? ic('arrow-up') : ic('arrow-down')) : '') + '</button>' : esc(c.label);
+      var thc = [c.r ? 'r' : '', c.opt ? 'opt' : ''].filter(Boolean).join(' ');
+      return '<th' + (thc ? ' class="' + thc + '"' : '') + aria + '>' + inner + '</th>';
+    };
+    var head = '<tr>' + (o.detail ? '<th class="xcell"><span class="sr-only">Details</span></th>' : '') + cols.map(th).join('') + '</tr>';
     var body = o.rows.map(function (r, i) {
       var key = keyOf(o, r, i);
       var cells = cols.map(function (c, ci) {
         var v = c.html ? c.html(r) : esc(c.get ? c.get(r) : r[c.k]);
-        var cls = [c.r ? 'r' : '', c.cls || '', ci === 0 ? 'lead-cell' : ''].filter(Boolean).join(' ');
+        var cls = [c.r ? 'r' : '', c.cls || '', c.opt ? 'opt' : '', ci === 0 ? 'lead-cell' : ''].filter(Boolean).join(' ');
         return '<td' + (cls ? ' class="' + cls + '"' : '') + ' data-l="' + esc(c.label) + '"><span class="cv">' + (v === '' ? '—' : v) + '</span></td>';
       }).join('');
       var nm = o.rowName ? o.rowName(r) : 'row ' + (i + 1);
-      var x = o.detail ? '<td class="xcell"><button class="xb" data-x="' + key + '" aria-expanded="false" aria-controls="' + key + '-d" aria-label="Details for ' + esc(nm) + '">' + ic('caret-right') + '</button></td>' : '';
+      /* o.xattr(r): extra attributes on the expander -- All leads puts the RAW
+         session_id there, because the row key is sanitised and must never be
+         sent to /monitor/lead-changes as if it were one (CLAUDE.md, ONE ROW
+         BUILDER, TWO TABLES). */
+      var xa = o.xattr ? ' ' + o.xattr(r) : '';
+      var x = o.detail ? '<td class="xcell"><button class="xb" data-x="' + key + '"' + xa + ' aria-expanded="false" aria-controls="' + key + '-d" aria-label="Details for ' + esc(nm) + '">' + ic('caret-right') + '</button></td>' : '';
       var d = o.detail ? '<tr class="detail" id="' + key + '-d" hidden><td colspan="' + (cols.length + 1) + '"><div class="well">' + o.detail(r) + '</div></td></tr>' : '';
-      return '<tr class="main">' + x + cells + '</tr>' + d;
+      return '<tr class="main' + (o.rowCls ? ' ' + o.rowCls(r) : '') + '">' + x + cells + '</tr>' + d;
     }).join('');
     return '<div class="rt-wrap"><table class="rt"><thead>' + head + '</thead><tbody>' + (body || '<tr><td colspan="' + (cols.length + 1) + '">' + empty(o.emptyTitle || 'Nothing here yet', o.emptyBody) + '</td></tr>') + '</tbody></table></div>';
   }
@@ -123,6 +138,58 @@ GW.ui = (function (G) {
       if (open) d.setAttribute('hidden', ''); else d.removeAttribute('hidden');
     });
   }
+  /* A PAGER that always says where you are: first, last, the pages either
+     side of this one, and "Page X of Y" in words. Hidden when there is one
+     page. Every button carries attr="N". */
+  /* A PLAIN TABLE -- a compact grid of numbers or short facts, no expander.
+     Every cell carries its column's name, so below 560px each row stacks into
+     "label ... value" lines, the same shape as an rtable card: a plain table
+     that scrolls sideways hides its last column on a phone. The Partners gaps
+     table cut its date off at 390 and the Visitors tables ran 230px past their
+     cards, and every check passed until the layout check measured .tbl too.
+     cols: [{ label, html(r) | get(r), cls, attr(r) }]. The first column is the
+     row's title. o.rowCls(r); o.region: a label, and the box becomes a
+     focusable scroll region (a long list held in a fixed height). */
+  function grid(cols, rows, o) {
+    o = o || {};
+    var head = '<thead><tr>' + cols.map(function (c) { return '<th>' + esc(c.label) + '</th>'; }).join('') + '</tr></thead>';
+    var body = rows.map(function (r) {
+      var rc = o.rowCls ? o.rowCls(r) : '';
+      return '<tr' + (rc ? ' class="' + rc + '"' : '') + '>' + cols.map(function (c) {
+        var v = c.html ? c.html(r) : esc(c.get ? c.get(r) : r[c.k]);
+        return '<td' + (c.cls ? ' class="' + c.cls + '"' : '') + (c.attr ? ' ' + c.attr(r) : '') + ' data-l="' + esc(c.label) + '"><span class="cv">' + (v === '' ? '—' : v) + '</span></td>';
+      }).join('') + '</tr>';
+    }).join('');
+    return '<div class="tbl stack"' + (o.region ? ' tabindex="0" role="region" aria-label="' + esc(o.region) + '"' : '') + '><table>' + head + '<tbody>' + body + '</tbody></table></div>';
+  }
+  /* Previous and Next are named by DIRECTION (attr-step="prev|next"), their
+     target page in data-to -- never in attr. G.paint refocuses by selector:
+     sharing attr="1" made the first [data-pg="1"] on page 1 the disabled
+     Previous, and carrying the target in the name made Next unfindable once
+     the page moved. By direction, Next is still Next after the move, and a
+     disabled one hands focus to the current page. */
+  function pager(page, pages, attr) {
+    if (!pages || pages <= 1) return '';
+    var b = function (n, dir, dis, cur) { var lbl = dir === 'prev' ? 'Previous page' : dir === 'next' ? 'Next page' : null;
+      return '<button class="pgb' + (cur ? ' on' : '') + '" ' + (dir ? attr + '-step="' + dir + '" data-to="' + n + '"' : attr + '="' + n + '"') + (dis ? ' disabled' : '') + (cur ? ' aria-current="page"' : '') + (lbl ? ' aria-label="' + lbl + '"' : '') + '>' + (dir === 'prev' ? ic('caret-left') : dir === 'next' ? ic('caret-right') : n) + '</button>'; };
+    var h = b(Math.max(1, page - 1), 'prev', page <= 1, false), last = 0;
+    for (var n = 1; n <= pages; n++) {
+      if (n === 1 || n === pages || Math.abs(n - page) <= 2) { if (last && n - last > 1) h += '<span class="pgg" aria-hidden="true">…</span>'; h += b(n, null, false, n === page); last = n; }
+    }
+    h += b(Math.min(pages, page + 1), 'next', page >= pages, false);
+    return '<nav class="pager" aria-label="Pages">' + h + '<span class="pgi">Page ' + fmt(page) + ' of ' + fmt(pages) + '</span></nav>';
+  }
+  /* ONE BAD ROW MUST NOT BLANK A TAB. A render that throws leaves the loading
+     skeleton up forever -- no count, no table, no error -- and every refresh
+     throws again. A session_id of "constructor" did exactly that. The body is
+     drawn through here, so a throw paints a plain error in its place and the
+     rest of the page still works. */
+  function drawn(title, fn) {
+    try { return fn(); } catch (e) {
+      if (typeof console !== 'undefined' && console.error) console.error('[monitor] ' + title + ' could not be drawn', e);
+      return '<section class="card panel">' + unavailable(title, 'this view could not be drawn (' + (e && e.message ? e.message : e) + ')') + '</section>';
+    }
+  }
   function pills(defs, current, counts, attr, label) {
     return '<div class="pills" role="group" aria-label="' + esc(label || 'Filter') + '">' + defs.map(function (p) {
       return '<button ' + attr + '="' + esc(p[0]) + '" aria-pressed="' + (p[0] === current) + '">' + esc(p[1]) + (counts ? '<span>' + fmt(counts[p[0]] || 0) + '</span>' : '') + '</button>'; }).join('') + '</div>';
@@ -132,5 +199,5 @@ GW.ui = (function (G) {
       return '<button ' + attr + '="' + esc(d[0]) + '" aria-pressed="' + (d[0] === current) + '">' + (d[2] || '') + esc(d[1]) + '</button>'; }).join('') + '</div>';
   }
   return { delta: delta, cmpBlock: cmpBlock, leadCard: leadCard, metricCard: metricCard, panel: panel, empty: empty,
-           unavailable: unavailable, loading: loading, funnel: funnel, kv: kv, rtable: rtable, keyOf: keyOf, pills: pills, tg: tg };
+           unavailable: unavailable, loading: loading, funnel: funnel, kv: kv, rtable: rtable, grid: grid, keyOf: keyOf, pager: pager, drawn: drawn, pills: pills, tg: tg };
 })(GW);

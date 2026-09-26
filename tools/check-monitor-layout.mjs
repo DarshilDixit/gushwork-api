@@ -16,6 +16,8 @@
      errors        a console error, an exception, or a failed request
      junk          "undefined", "NaN", "[object" or "Infinity" painted on screen
      fonts         a brand font that did not load
+     hscroll       a data table wider than its card, so its right-hand columns
+                   sit off the edge (Dropoff's period table scrolls on purpose)
      keys          real key presses: the skip link on the first Tab, focus
                    kept across a repaint, the drawer closing when focus leaves
 
@@ -24,24 +26,44 @@
 
    Run: node tools/check-monitor-layout.mjs   (preview running; reads its ready file)
         WIDTHS=390,1440 THEMES=dark node tools/check-monitor-layout.mjs
+        KEYS=0 skips the keyboard section; KEYS=only runs nothing else
    Exit 0 only when every combination is clean. Screenshots land in OUT.
    ============================================================================ */
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const READY = process.env.PREVIEW_READY_FILE;
 const cfg = READY && existsSync(READY) ? JSON.parse(readFileSync(READY, 'utf8')) : {};
 const BASE = process.env.BASE || `http://localhost:${cfg.port || 4411}`;
 const TOKEN = process.env.MONITOR_TOKEN || cfg.token || '';
-const OUT = process.env.OUT || './layout-shots';
-const WIDTHS = (process.env.WIDTHS || '360,390,414,768,1024,1440').split(',').map(Number);
+/* OUTSIDE THE REPO by default. The +open pages photograph real people's
+   emails, phones and addresses, and the repo is public (jsDelivr serves the
+   form files from it) -- a screenshot folder in the working tree is one
+   "git add ." from being published. */
+const OUT = process.env.OUT || join(tmpdir(), 'gw-layout-shots');
+/* 1280 is in the list on purpose: it lands inside the 900-1099px content band
+   where optional columns hide, which neither 1024 nor 1440 reaches */
+const WIDTHS = (process.env.WIDTHS || '360,390,414,768,1024,1280,1440').split(',').map(Number);
 const THEMES = (process.env.THEMES || 'light,dark').split(',');
-const PAGES = (process.env.PAGES || 'overview:today,overview:week,overview:all,overview:week:leads,overview:today:table,health,dropoff,dupes,lm').split(',');
+/* tab[:view[:mod]], or tab?key=value&... for a tab's own filters (the map);
+   a trailing +open expands the first eight rows, so the detail panels -- and
+   the tables inside them -- are measured too, not only the collapsed list. */
+const PAGES = (process.env.PAGES || 'overview:today,overview:week,overview:all,overview:week:leads,overview:today:table,health,dropoff,dupes,lm,leads,blocked,sdr,model,visitors,visitors?map=1,partners,leads+open,blocked+open,sdr+open,model+open,visitors+open,partners+open').split(',');
 const SHOTS = process.env.SHOTS !== '0';
+const KEYS = process.env.KEYS || '1';   /* '0' = layouts only, 'only' = keyboard only */
 mkdirSync(OUT, { recursive: true });
 
+/* its own throwaway profile, deleted on the way out: the history in it holds
+   the token-bearing URL */
+const PROFILE = mkdtempSync(join(tmpdir(), 'gw-layout-profile-'));
 const chrome = spawn('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', ['--headless=new', '--remote-debugging-port=9335',
-  '--user-data-dir=' + OUT + '/.profile', '--no-first-run', '--hide-scrollbars', '--force-color-profile=srgb', 'about:blank'], { stdio: 'ignore' });
+  '--user-data-dir=' + PROFILE, '--no-first-run', '--hide-scrollbars', '--force-color-profile=srgb', 'about:blank'], { stdio: 'ignore' });
+const cleanup = () => { try { chrome.kill(); } catch {} try { rmSync(PROFILE, { recursive: true, force: true }); } catch {} };
+process.on('exit', cleanup);
+process.on('uncaughtException', (e) => { console.error(e); cleanup(); process.exit(2); });
+process.on('unhandledRejection', (e) => { console.error(e); cleanup(); process.exit(2); });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let t; for (let i = 0; i < 60; i++) { try { t = await (await fetch('http://127.0.0.1:9335/json')).json(); if (t.length) break; } catch {} await sleep(250); }
 const ws = new WebSocket(t.find((x) => x.type === 'page').webSocketDebuggerUrl);
@@ -67,12 +89,16 @@ const AUDIT = `(() => {
   if (document.documentElement.scrollWidth > W + 1) out.push(['overflow', 'the page scrolls sideways: ' + document.documentElement.scrollWidth + 'px on a ' + W + 'px screen']);
   for (const el of document.querySelectorAll('#view *, .topbar *')) {
     if (el.closest('svg') && el.tagName !== 'svg') continue;
+    /* the map's tiles and vector layer are clipped BY the map, on purpose */
+    if (el.closest('.leaflet-container') && !el.classList.contains('leaflet-container')) continue;
     if (hiddenAncestor(el) || !vis(el)) continue;
     const r = el.getBoundingClientRect();
     if ((r.right > W + 1 || r.left < -1) && !inScroller(el)) { out.push(['overflow', el.tagName.toLowerCase() + '.' + (el.className.baseVal ?? el.className) + ' "' + name(el) + '" runs off-screen (' + Math.round(r.left) + '..' + Math.round(r.right) + ')']); }
     const cs = getComputedStyle(el);
-    /* .sr-only is clipped ON PURPOSE -- it is the screen-reader label, visually hidden by design. */
-    if ((cs.overflowX === 'hidden' || cs.overflowX === 'clip') && el.scrollWidth > el.clientWidth + 1 && el.textContent.trim() && !el.classList.contains('tr') && !el.closest('.tr') && !el.closest('.sr-only')) out.push(['clipped', '"' + name(el) + '" is cut off by its own box']);
+    /* .sr-only is clipped ON PURPOSE -- it is the screen-reader label, visually hidden by design.
+       So is the map container: its tile pane is wider than the map by design, and
+       the container is still held to the off-screen check above. */
+    if ((cs.overflowX === 'hidden' || cs.overflowX === 'clip') && el.scrollWidth > el.clientWidth + 1 && el.textContent.trim() && !el.classList.contains('tr') && !el.closest('.tr') && !el.closest('.sr-only') && !el.classList.contains('leaflet-container')) out.push(['clipped', '"' + name(el) + '" is cut off by its own box']);
   }
   /* VISUALLY HIDDEN ON PURPOSE -- .sr-only, and the skip link until it is
      focused -- is a 1px clipped box, not a target a thumb has to hit. Judged
@@ -84,6 +110,18 @@ const AUDIT = `(() => {
     if (el.closest('#drawer') && !document.getElementById('drawer').classList.contains('open')) continue;
     const r = el.getBoundingClientRect();
     if (r.width < 43.5 || r.height < 43.5) out.push(['tap', '"' + name(el) + '" is ' + Math.round(r.width) + 'x' + Math.round(r.height) + ' (needs 44x44)']);
+  }
+  /* A DATA TABLE WIDER THAN ITS CARD: the overflow audit above excuses
+     anything inside a scroller, which is exactly where a cut-off column
+     hides. The SDR list shipped its last column off the edge at 1440 and
+     passed every check. */
+  /* .tbl too -- the plain tables (gaps, places, networks, the change log).
+     A table that scrolls sideways inside its box hides its last column on a
+     phone just as surely; the Partners gaps table cut its date off at 390
+     and every other check passed. */
+  for (const w of document.querySelectorAll('#view .rt-wrap, #view .tbl')) {
+    if (!vis(w) || hiddenAncestor(w)) continue;
+    if (w.scrollWidth > w.clientWidth + 1) out.push(['hscroll', 'a table is ' + (w.scrollWidth - w.clientWidth) + 'px wider than its card (' + (w.querySelector('th') ? [...w.querySelectorAll('thead th')].map((t) => t.textContent.trim()).filter(Boolean).slice(-2).join(', ') : '') + ' cut off)']);
   }
   for (const svg of document.querySelectorAll('#view .chart svg')) {
     const ts = [...svg.querySelectorAll('text')].map((x) => ({ x, r: x.getBoundingClientRect() })).filter((o) => o.r.width > 0);
@@ -108,7 +146,7 @@ const AUDIT = `(() => {
 
 const results = [];
 let first = true;
-for (const width of WIDTHS) {
+for (const width of (KEYS === 'only' ? [] : WIDTHS)) {
   const height = width < 768 ? 800 : width < 1280 ? 1024 : 900;
   await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: width < 768 });
   await send('Emulation.setTouchEmulationEnabled', { enabled: width <= 1023, maxTouchPoints: width <= 1023 ? 5 : 1 });
@@ -116,21 +154,25 @@ for (const width of WIDTHS) {
     if (first) { await send('Page.navigate', { url: `${BASE}/monitor/next?token=${encodeURIComponent(TOKEN)}#tab=overview&view=week` }); await sleep(2500); first = false; }
     await ev(`GW.setTheme(${JSON.stringify(theme)})`);
     for (const pg of PAGES) {
-      const [tab, view, mod] = pg.split(':');
+      const openRows = /\+open$/.test(pg); const [spec, qs] = pg.replace(/\+open$/, '').split('?'); const [tab, view, mod] = spec.split(':');
+      const q = qs ? Object.fromEntries(new URLSearchParams(qs)) : null;
       events = [];
-      await ev(`(()=>{ GW.S.unit=${JSON.stringify(mod === 'leads' ? 'leads' : 'people')}; GW.S.table=${mod === 'table'}; if (GW.current() !== ${JSON.stringify(tab)}) GW.show(${JSON.stringify(tab)}); ${view ? `GW.TABS.overview.setView(${JSON.stringify(view)});` : ''} if (GW.TABS[${JSON.stringify(tab)}].render) GW.TABS[${JSON.stringify(tab)}].render(); })()`);
+      await ev(`(()=>{ GW.S.unit=${JSON.stringify(mod === 'leads' ? 'leads' : 'people')}; GW.S.table=${mod === 'table'}; if (GW.current() !== ${JSON.stringify(tab)} || ${q ? 'true' : 'false'}) GW.show(${JSON.stringify(tab)}, false, ${q ? JSON.stringify(q) : 'null'}); ${view ? `GW.TABS.overview.setView(${JSON.stringify(view)});` : ''} if (GW.TABS[${JSON.stringify(tab)}].render) GW.TABS[${JSON.stringify(tab)}].render(); })()`);
       /* Wait for the data: no skeleton left, or give up after 20s and say so. */
       let a; for (let k = 0; k < 40; k++) { await sleep(500); a = await ev(AUDIT); if (!a.loading) break; }
+      if (openRows) { await ev(`[...document.querySelectorAll('#view [data-x][aria-expanded="false"]')].slice(0, 8).forEach((b) => b.click())`); await sleep(2500); }
       await sleep(300); a = await ev(AUDIT);
       const issues = a.out.map(([kind, what]) => ({ kind, what }));
       if (a.loading) issues.push({ kind: 'errors', what: 'still loading after 20s' });
       for (const e of events) if (!/favicon/.test(e)) issues.push({ kind: 'errors', what: e });
       if (a.theme !== theme) issues.push({ kind: 'errors', what: 'theme is ' + a.theme + ', expected ' + theme });
-      const label = `${width}-${theme}-${pg.replace(/:/g, '-')}`;
+      const label = `${width}-${theme}-${pg.replace(/[:?=&+]/g, '-')}`;
       if (SHOTS) { await send('Emulation.setDeviceMetricsOverride', { width, height: Math.min(a.h, 6000), deviceScaleFactor: 1, mobile: width < 768 }); await sleep(250);
         const s = await send('Page.captureScreenshot', { format: 'png' }); writeFileSync(`${OUT}/${label}.png`, Buffer.from(s.result.data, 'base64'));
         await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: width < 768 }); }
       results.push({ label, issues });
+      /* close them again, or the next plain visit to this tab measures them open */
+      if (openRows) { await ev(`[...document.querySelectorAll('#view [data-x][aria-expanded="true"]')].forEach((b) => b.click())`); await sleep(300); }
       process.stdout.write((issues.length ? '✗ ' : '✓ ') + label + (issues.length ? '  ' + issues.length + ' issue(s)' : '') + '\n');
     }
     /* The drawer, at every width that uses it: opens, is thumb-sized, closes on Escape, and returns focus. */
@@ -160,6 +202,7 @@ for (const width of WIDTHS) {
    the hash alone; a repaint gives focus back to the control that had it; and
    Shift+Tab out of the open drawer closes it rather than walking focus onto
    what it covers. */
+if (KEYS !== '0') {
 const key = async (k, shift) => { const base = { key: k, code: k, windowsVirtualKeyCode: k === 'Tab' ? 9 : 13, modifiers: shift ? 8 : 0 };
   await send('Input.dispatchKeyEvent', Object.assign({ type: 'rawKeyDown' }, base)); if (k === 'Enter') await send('Input.dispatchKeyEvent', Object.assign({ type: 'char', text: '\r' }, base));
   await send('Input.dispatchKeyEvent', Object.assign({ type: 'keyUp' }, base)); await sleep(150); };
@@ -182,6 +225,24 @@ const key = async (k, shift) => { const base = { key: k, code: k, windowsVirtual
   if (!/tab=overview/.test(af.hash) || !/unit=leads/.test(af.hash)) issues.push({ kind: 'keys', what: 'the skip link changed the hash to ' + af.hash });
   const kept = await ev(`(()=>{ const b=document.querySelector('[data-unit="leads"]'); b.focus(); GW.TABS.overview.render(); const a=document.activeElement; return a && a.getAttribute('data-unit'); })()`);
   if (kept !== 'leads') issues.push({ kind: 'keys', what: 'a repaint dropped focus (it is on ' + kept + ')' });
+  /* PR C, with real keys: the pager keeps focus on the control pressed, a
+     Previous that goes dead on page 1 hands focus to the current page, and
+     Clear -- which removes itself -- sends focus to the search box. Each one
+     dropped focus to the page body in a review of the stubbed suite's blind spot. */
+  const on = (sel) => ev(`(()=>{ const a=document.activeElement; return !!(a && a.matches && a.matches(${JSON.stringify(sel)})); })()`);
+  const waitIdle = async () => { for (let k = 0; k < 40; k++) { await sleep(300); if (await ev(`!/updating…/.test((document.querySelector('.readat')||{}).textContent||'') && !document.querySelector('#view .skel')`)) break; } await sleep(300); };
+  await ev(`GW.show('leads', true, {})`); await waitIdle();
+  /* found by NAME, as a user finds them -- not by the attribute under test */
+  if (await ev(`!!document.querySelector('[aria-label="Next page"]')`)) {
+    await ev(`document.querySelector('[aria-label="Next page"]').focus()`); await key('Enter'); await waitIdle();
+    if (!(await on('[aria-label="Next page"]'))) issues.push({ kind: 'keys', what: 'after Next, focus was not on Next (it is on ' + (await ev(`document.activeElement && (document.activeElement.outerHTML||'').slice(0,60)`)) + ')' });
+    if (!/page=2/.test(await ev('location.hash'))) issues.push({ kind: 'keys', what: 'Next did not move to page 2' });
+    await ev(`document.querySelector('[aria-label="Previous page"]').focus()`); await key('Enter'); await waitIdle();
+    if (!(await on('[aria-current="page"]'))) issues.push({ kind: 'keys', what: 'Previous back to page 1 left focus on ' + (await ev(`document.activeElement && (document.activeElement.outerHTML||'').slice(0,60)`)) + ', not the current page' });
+  } else issues.push({ kind: 'keys', what: 'All leads has only one page, so the pager could not be checked' });
+  await ev(`GW.show('leads', true, { stage: 'booked' })`); await waitIdle();
+  await ev(`document.querySelector('[data-lclear]').focus()`); await key('Enter'); await waitIdle();
+  if (!(await on('[data-lf="search"]'))) issues.push({ kind: 'keys', what: 'after Clear, focus was not on the search box' });
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 800, deviceScaleFactor: 1, mobile: true });
   await sleep(400);
   await ev(`document.querySelector('.menu-trigger').click()`); await sleep(350);
@@ -194,10 +255,11 @@ const key = async (k, shift) => { const base = { key: k, code: k, windowsVirtual
   results.push({ label: 'keyboard', issues });
   process.stdout.write((issues.length ? '✗ ' : '✓ ') + 'keyboard' + (issues.length ? '  ' + issues.length + ' issue(s)' : '') + '\n');
 }
+}
 writeFileSync(`${OUT}/report.json`, JSON.stringify(results, null, 1));
 const bad = results.filter((r) => r.issues.length);
 const byKind = {}; bad.forEach((r) => r.issues.forEach((i) => { byKind[i.kind] = (byKind[i.kind] || 0) + 1; }));
 console.log(`\n${results.length} combinations, ${bad.length} with findings` + (bad.length ? ' — ' + Object.entries(byKind).map(([k, n]) => k + ' ' + n).join(', ') : ''));
 for (const r of bad.slice(0, 40)) { console.log(' ✗ ' + r.label); for (const i of r.issues.slice(0, 6)) console.log('     ' + i.kind + ': ' + i.what); }
-ws.close(); chrome.kill();
+ws.close(); cleanup();
 process.exit(bad.length ? 1 : 0);

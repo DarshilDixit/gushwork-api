@@ -4080,7 +4080,11 @@ app.get('/monitor/sdr', async (req, res) => {
 /* THE NEW DASHBOARD, side by side at /monitor/next until it is switched in.
    Front end in monitor/, assembled by monitor-next.js; this line is all it
    needs from here. */
-require('./monitor-next').mount(app, { tz: DASH_TZ });
+/* THE LABELS TRAVEL WITH THE PAGE. The new dashboard reads the server's own
+   WEBSITE_REASON_LABELS and META_WITHHELD_LABELS from its config instead of
+   carrying a third copy in the browser -- the classic already holds a second
+   (var WLBL=), and a copy is how the two drifted before. */
+require('./monitor-next').mount(app, { tz: DASH_TZ, labels: { website: WEBSITE_REASON_LABELS, meta: META_WITHHELD_LABELS } });
 
 app.get('/monitor', (req, res) => {
   const token = process.env.MONITOR_TOKEN;
