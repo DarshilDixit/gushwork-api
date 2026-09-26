@@ -190,9 +190,9 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `tools/re-enrich-apollo.js` | Re-runs the Apollo lookups that were REFUSED — the three out-of-credit windows (24 Jun, 3–10 Sept, 23 Sept on). Dry run by default: prices it (1 credit per person FOUND, 0 for no match), one lookup per address, copies from an earlier answer for the same address at zero cost, skips our own submissions. `--since`, `--limit`, `--apply`. **Stops at the first refusal.** Writes `enrichment_data` and the lead row exactly as `/enrich` does; never Salesforce, never the mirror. Lifts the parser out of `index.js`. Not mounted, not yet run |
 | `tools/backfill-ip-coords.js` | Fills `ip_latitude` / `ip_longitude` for leads resolved BEFORE those columns existed — they have a city and no point, so they are complete in every table and invisible on the map. Only touches rows that already resolved and have no coordinates. Lifts `resolveIpGeo` out of `index.js`. Dry run by default; `--apply` writes. Run once on 23 Sept (17 rows). Not mounted |
 | `tools/fire-alert.js` | Fires ONE real alert on purpose, to satisfy the fire-every-alert-path-once rule. Sends for real (Slack + email on a critical). Lifts `alertOps` out of `index.js` rather than reimplementing it, so what arrives is what production sends. Not mounted, not called by anything |
-| `monitor-next.js` | Builds and serves the NEW dashboard at `/monitor/next` (side by side with `/monitor` until it is switched). Reads `monitor/` once at boot and stitches one page behind the same token -- no build step. Also the token-gated font route, an allowlist, never a path |
+| `monitor-next.js` | Builds and serves THE dashboard at `/monitor` (since PR D, 26 Sept 2026). `/monitor/next`, where it was built side by side, redirects there keeping its query. Reads `monitor/` once at boot and stitches one page behind the same token -- no build step. Also the token-gated font route, an allowlist, never a path. The OLD dashboard is `/monitor/classic` in `index.js`, kept one week as the fallback |
 | `monitor/` | The new dashboard's front end, in real files: `tokens.css` (the design system's tokens, copied verbatim from gushwork-design v1.49.0), `app.css` (both themes, components, responsive), `js/*.js` (classic scripts on one `GW` namespace, loaded in `JS_ORDER`), `icons/` (the Phosphor icons it uses, MIT), `fonts/` (Inter, Vert Grotesk Display) |
-| `tools/preview-monitor.js` | Runs THIS BRANCH's `/monitor/next` against live data: its own `overviewReport` and `duplicatesReport` lifted out of `index.js` on connections that are read-only AT THE DATABASE, every other `/monitor/*` GET proxied to production, every non-GET refused. Never boots `index.js`. Not mounted |
+| `tools/preview-monitor.js` | Runs THIS BRANCH's `/monitor` against live data: its own `overviewReport`, `duplicatesReport` and `dropoffReport` lifted out of `index.js` on connections that are read-only AT THE DATABASE, `/monitor/classic` from production (from `/monitor` before the switch deployed), every other `/monitor/*` GET proxied to production, every non-GET refused. Never boots `index.js`. Not mounted |
 | `tools/check-monitor-layout.mjs` | Real Chrome over every rebuilt tab and view at 360, 390, 414, 768, 1024, 1280 and 1440px in both themes (1280 because it lands in the 900-1099px content band where optional columns hide); FAILS on sideways scroll, anything off-screen or clipped, a tap target under 44px, overlapping chart labels, a floating element, console errors, junk values or a missing font, a data table (rtable OR plain) wider than its card -- and, with REAL key presses, on the skip link, focus kept across a repaint and the drawer closing when focus leaves. `tab+open` also expands the first rows, so detail panels are measured too. **Screenshots go to the OS temp dir, never the repo** -- the opened rows photograph real people's details and the repo is public -- and its Chrome profile is thrown away on exit. Run against the preview. Not mounted |
 | `tools/crosscheck-monitor.mjs` | The new dashboard against the classic, number for number, on live data through the preview: every payload fetched once and served to both pages, then each page's painted numbers compared with the payload and each other, plus the partitions every `/monitor/leads` filter must keep. Prints numbers only, never lead data. Not mounted |
 | `gushwork-form.js` | The `/demo` form frontend. Lives here and is served live by jsDelivr — see below |
@@ -752,15 +752,36 @@ Unless a label says otherwise:
 | Deduped by email, or by session? | **Headline numbers are people** — `COUNT(DISTINCT lower(email))`. Session counts are legitimate but must be labelled "sessions" every time they appear |
 | Named exception | **"Form entries per day"** on Overview is a deliberate ROW count — see below |
 | Dedup key | `lower(email)`, always. Never raw `email` |
-| Internal / test addresses | **Included.** See below |
+| Internal / test addresses | **Left out of the Overview, Dropoff and the Monday digest, and counted in words there; included and marked everywhere rows are listed.** See below |
 | Webhook-origin leads | **Included**, except `/monitor/funnel` |
 
-**Internal and test addresses are currently INCLUDED in every `leads` number.**
-`ELV_EXCLUDED_DOMAINS` (`gushwork.ai`, `test.com`, `example.com`, `example.org`) and
-the `b@g.ai` test address are excluded from ELV health and from alerting, and from
-nothing else. So Overview, All Leads, SDR List and Duplicates all count our own
-testing. This is a known distortion, not a decision anyone made — flag it, don't
-quietly "fix" it, because excluding them moves every historical number at once.
+**OUR OWN TEST SUBMISSIONS ARE LEFT OUT OF THE OVERVIEW, DROPOFF AND THE MONDAY
+DIGEST — Darshil's decision, 26 Sept 2026.** Until then they were included in
+every `leads` number as "a known distortion, not a decision anyone made". The
+rule is `internalLeadSqlClause` (the one behind the "ours" marker:
+`INTERNAL_TEST_EMAILS`, `ELV_EXCLUDED_DOMAINS`, the staging host).
+
+- **The three move TOGETHER**, or "Overview and Dropoff agree exactly in Leads
+  mode" breaks. The digest reads `dropoffReport`, so it follows on its own.
+- **Left out ROW by row, before people are formed**, so a person with one
+  staging row and one real row still counts, from the real row.
+- **Every surface says how many it left out, in words**: `ours` on
+  `/monitor/overview`, `internal` / `internal_by_period` on `/monitor/dropoff`
+  (with `internal_excluded: true`), and a line in the digest. A subtraction
+  nobody can see is how a number stops reconciling.
+- **`IS NOT TRUE`, never `NOT`**, around the clause: a lead with no email makes
+  it NULL, and `NOT NULL` drops the row.
+- **Sessions cannot be separated** (a session has no email), so they still
+  include ours, and the Overview says so.
+- **Still INCLUDED, and marked:** All leads, Blocked, Duplicates, the SDR list,
+  Lead magnet's own totals and the classic `/monitor/metrics`. Those are where
+  a person reconciles a row. `ELV_EXCLUDED_DOMAINS` and `b@g.ai` are also out
+  of ELV health and alerting, as before.
+
+Measured before deciding, read-only, by running the real `overviewReport`
+twice: ours are 107 rows and 32 addresses, 1.8% of all rows. Rates moved by
+at most about 0.25 points. Blocked moved by 12%, and a testing day by up to 40%
+of its month (March).
 
 **853 session rows come from two pages that were never meant to have the
 form, and they are staying.** `/careers` (629 non-bot) and `/meeting-booked`
@@ -1745,15 +1766,23 @@ have fired. Nothing in the UI calls it; run it with
 feed it data. A reader who greps for a single `/monitor` handler expecting to find
 everything will miss most of it.
 
-**THE NEW DASHBOARD IS `/monitor/next`, SIDE BY SIDE WITH `/monitor`, and
-the old one is not edited to build it.** Every tab is rebuilt: five in PR B
-(Overview, System health, Dropoff, Duplicates, Lead magnet) and the other six
-in PR C (All leads, Blocked, SDR list, Model, Visitors, Partners). The
-classic stays one click away in the sidebar footer, opened at the same tab
-(`#tab=...`, which the old page honours). The switch is its own PR:
-`/monitor` becomes the new page and the old stays at `/monitor/classic` for
-a week. The running plan, decisions and progress are in
-`docs/monitor-plan.md`.
+**THE DASHBOARD IS `/monitor` SINCE PR D (26 Sept 2026), AND THE OLD ONE IS
+`/monitor/classic` FOR ONE WEEK.** It was built side by side at
+`/monitor/next`: five tabs in PR B (Overview, System health, Dropoff,
+Duplicates, Lead magnet) and six in PR C (All leads, Blocked, SDR list,
+Model, Visitors, Partners).
+
+- **`/monitor/next` now 302-redirects to `/monitor`, keeping its query.** The
+  browser keeps the `#tab=...` fragment across a redirect, so old bookmarks
+  still land on their tab.
+- **The classic is one click away** in the sidebar footer, and it says on the
+  page that it is the fallback. It still honours `#tab=`.
+- **Removing it is its own PR**, a week after the switch deploys. It is fed by
+  its own inline JS in `index.js`. Four suites still fetch it by name
+  (`test-non-icp-routes`, `test-lead-field-changes`, `test-apollo`,
+  `test-monitor-next`), and three regions use its route as a marker, so the
+  removal PR must move or retire those tests.
+- **The running plan, decisions and progress are in `docs/monitor-plan.md`.**
 
 - **Numbers come from the existing routes, plus ONE new read,
   `overviewReport` / `/monitor/overview`**, which applies one definition set
@@ -1898,6 +1927,11 @@ Found by executing the query, not by reading it.
 
 **The weekly digest was FIRED ON PURPOSE on 25 Sept** — `node tools/fire-non-icp-slack.js dropoff-digest`, Slack 200, real numbers over the real table. "We asserted it alerts" and "we watched it alert" are different claims, and the gap between them hid 21 dead call sites here.
 
+**The weekly digest leaves out our own test submissions, and says how many**
+("Leaves out N of our own test submissions from last week."), because it reads
+`dropoffReport`. `tests/test-batch2.js` §33 builds the real digest and reads
+that line.
+
 **The weekly digest reports the COMPLETED week, never the current one.**
 `runDropoffDigest`, Mondays in the **09:00 ET hour** (`DROPOFF_DIGEST_HOUR_ET`,
 `DROPOFF_DIGEST_ENABLED=false` to stop it). Pinned to Eastern, so the local
@@ -1923,6 +1957,30 @@ silently skipped**. A missed weekly digest is invisible where a duplicate is
 merely annoying, so the trade goes toward sending. The guard keys on the ET
 **day** stamp, so four ticks inside the 09:00 hour still send exactly once.
 **The near-miss digest had the identical gap and was fixed in the same change** — both now tick at 15 minutes, and they should stay in step. Its own week guard is unchanged, so the documented double-send on a deploy inside the hour still applies to both: that trade deliberately favours sending, because a duplicate is visible and a miss is not.
+
+**THE CSV EXPORTS NEUTRALISE FORMULAS BUT NEVER TOUCH A PHONE NUMBER, and
+the second half is the hard part.** `csvCell` in `index.js` builds every cell
+of the All leads and SDR exports (the routes both dashboards call). Decided
+26 Sept 2026.
+
+- **`=`, `@`, a tab or a carriage return at the start:** always gets a
+  leading apostrophe.
+- **`+` or `-` at the start:** gets one ONLY when the cell is not just a
+  number (`CSV_NUMBER_ONLY`: digits, spaces, `( ) . -`, and at least one
+  digit).
+- **Then quoted** on a comma, a quote, a CR or an LF.
+
+**Why the second rule:** measured read-only, **2,669 of 2,676 stored phone
+numbers start with "+"**. The Lead magnet export's blanket
+`= + - @` rule would have put an apostrophe on 99.7% of the column a dialer
+imports. A number-only cell cannot call a function or reach another cell, so
+it is safe to leave alone.
+
+**Excel and Sheets still read `+19495550123` as a number and drop the "+"**
+on open. That is theirs, not ours. Keeping the "+" there would need the
+apostrophe, which breaks the dialer, and one file cannot do both.
+`tests/test-batch2.js` §32 runs the real function over every stored phone
+shape and the hostile ones.
 
 **Booking arrives by three routes.** `/booking-confirmed` (browser-fired),
 `/booking-confirmed-webhook` (Cal), `/booking-confirmed-webhook-rh` (RevenueHero).

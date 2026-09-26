@@ -16,6 +16,9 @@
      /monitor/duplicates    this branch's duplicatesReport, lifted the same
                             way -- the branch changed it (is_internal), and a
                             proxy to production would show the OLD query
+     /monitor/dropoff       this branch's dropoffReport, lifted by REGION like
+                            tools/fire-dropoff-digest.js does, on the same
+                            read-only pool -- PR D leaves our own tests out
      every other GET        proxied to production, unchanged -- the routes the
        /monitor/*, /health  page reads already exist there
      anything not a GET     REFUSED with 405. The Lead magnet tab has two write
@@ -67,6 +70,19 @@ function liftDecl(decl) {
   }
   return src.slice(i + 1, j + 1);
 }
+function between(a, b) {
+  const i = src.indexOf(a); if (i === -1) throw new Error('not found in index.js: ' + a);
+  const j = src.indexOf(b, i); if (j === -1) throw new Error('end not found in index.js: ' + b);
+  return src.slice(i, j);
+}
+/* dropoffReport reads the global pool, so it is lifted into its own scope
+   with the read-only pool handed in -- never the proxied production route. */
+const dropoffLift = new Function('pool', [
+  liftDecl('const DASH_TZ'), liftDecl('const ELV_EXCLUDED_DOMAINS'), liftDecl('const INTERNAL_TEST_EMAILS'),
+  liftDecl('const INTERNAL_STAGING_HOSTS'), liftDecl('function internalLeadSqlClause'),
+  between('const DROPOFF_STAGE_SQL', 'async function visitorsReport'),
+  'return { dropoffReport };',
+].join('\n'));
 const L = new Function([
   liftDecl('const DASH_TZ'), liftDecl('const BOT_RE'), liftDecl('const DROPOFF_STAGE_SQL'), liftDecl('const DROPOFF_SOURCE_SQL'),
   liftDecl('const OVERVIEW_VIEWS'), liftDecl('const OVERVIEW_WEBHOOK_SOURCES'), liftDecl('function recoveredBookingsSql'), liftDecl('const RECOVERED_BOOKINGS_SQL'),
@@ -120,6 +136,12 @@ function start() {
     try { res.json(await L.overviewReport(db, { view: req.query.view, asof: req.query.asof })); }
     catch (err) { res.status(err.status || 500).json({ error: err.message }); }
   });
+  const dropoffReport = dropoffLift(db).dropoffReport;
+  app.get('/monitor/dropoff', async (req, res) => {
+    if (req.query.token !== TOKEN) return res.status(401).json({ error: 'Unauthorized' });
+    try { res.json(await dropoffReport({ from: req.query.from, to: req.query.to, grain: req.query.grain, source: req.query.source, mode: req.query.mode })); }
+    catch (err) { res.status(500).json({ error: err.message }); }
+  });
   app.get('/monitor/duplicates', async (req, res) => {
     if (req.query.token !== TOKEN) return res.status(401).json({ error: 'Unauthorized' });
     try { res.json(await L.duplicatesReport(db)); }
@@ -140,5 +162,5 @@ function start() {
   });
 }
 
-module.exports = { liftDecl, L };
+module.exports = { liftDecl, L, dropoffLift };
 if (require.main === module) start();
