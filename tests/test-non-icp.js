@@ -1605,14 +1605,14 @@ results13 = (async () => {
     const mk = (rowsByDomain) => (new Function('process', 'pool', 'partnerStackCustomerKey',
       'isPartnerStackTestEmail', 'nonIcpTypeSuppressesMeta', 'NON_ICP_LLM_CONFIDENCE_FLOOR',
       'NON_ICP_LLM_ENABLED', 'nonIcpClassifyDomain', 'console',
-      'NON_ICP_VERDICT_TTL_D',
-      lift + '\nreturn { nonIcpLlmCachedVerdict, nonIcpCandidateDomains };'))(
+      'NON_ICP_VERDICT_TTL_D', 'NON_ICP_NAME_CONFIDENCE_FLOOR',
+      lift + '\nreturn { nonIcpLlmCachedVerdict, nonIcpCandidateDomains, nonIcpFloorFor };'))(
       { env: {} },
       { query: async (q, p) => ({ rows: rowsByDomain[p[0]] ? [rowsByDomain[p[0]]] : [] }) },
       (raw) => { const s = String(raw || '').toLowerCase(); const at = s.lastIndexOf('@');
                  return (at >= 0 ? s.slice(at + 1) : s).replace(/^www\./, '') || null; },
       () => false, V2M.nonIcpTypeSuppressesMeta, V2M.NON_ICP_LLM_CONFIDENCE_FLOOR, true, async () => ({}),
-      { log() {}, warn() {} }, 180);
+      { log() {}, warn() {} }, 180, V2M.NON_ICP_NAME_CONFIDENCE_FLOOR);
     const row = (o) => ({ checked_at: new Date().toISOString(), source: 'llm', confidence: 0.9, ...o });
 
     const both = mk({
@@ -1641,6 +1641,29 @@ results13 = (async () => {
       checked_at: new Date(Date.now() - 400 * 86400000).toISOString() }) });
     out.push(['V2: a stale verdict is a miss',
               (await stale.nonIcpLlmCachedVerdict({ email: 'x@brokerage.test', website: '' })) === null]);
+
+    /* A NAME-ONLY VERDICT ANSWERS TO ITS OWN FLOOR, FOR META TOO (26 Sept
+       2026). hernandezins.com: insurance from the letters "ins" at 0.82,
+       under the name floor -- and it still withheld Meta, because this read
+       used the page floor for every row. Driven, not read. */
+    const nm = (o) => row({ source: 'llm_name_only', blocking: false, ...o });
+    const hern = mk({ 'hernandezins.test': nm({ domain: 'hernandezins.test', business_type: 'insurance', confidence: 0.82 }) });
+    out.push(['V2 name floor: an 0.82 name-only insurance guess does NOTHING -- Meta included',
+              (await hern.nonIcpLlmCachedVerdict({ email: 'm@hernandezins.test', website: '' })) === null]);
+    const nm82 = mk({ 'diner.test': nm({ domain: 'diner.test', business_type: 'restaurant_food', confidence: 0.82 }) });
+    out.push(['V2 name floor: a name-only 0.82 restaurant does nothing',
+              (await nm82.nonIcpLlmCachedVerdict({ email: 'x@diner.test', website: '' })) === null]);
+    const nm86 = mk({ 'diner.test': nm({ domain: 'diner.test', business_type: 'restaurant_food', confidence: 0.86 }) });
+    const r86 = await nm86.nonIcpLlmCachedVerdict({ email: 'x@diner.test', website: '' });
+    out.push(['V2 name floor: a name-only 0.86 restaurant clears 0.85 and is Meta-only', r86 && r86.action === 'meta', JSON.stringify(r86 && r86.action)]);
+    const pg82 = mk({ 'diner.test': row({ domain: 'diner.test', business_type: 'restaurant_food', blocking: false, confidence: 0.82 }) });
+    const rp = await pg82.nonIcpLlmCachedVerdict({ email: 'x@diner.test', website: '' });
+    out.push(['V2 name floor: the SAME 0.82 from a page is still Meta-only -- the page floor did not move', rp && rp.action === 'meta', JSON.stringify(rp && rp.action)]);
+    /* the one place a source picks its floor, executed */
+    const F = hern.nonIcpFloorFor;
+    out.push(['V2 floorFor: a name-only verdict needs the name floor (0.85)', F('llm_name_only') === 0.85, String(F('llm_name_only'))]);
+    out.push(['V2 floorFor: a page verdict needs the page floor (0.75)', F('llm') === 0.75, String(F('llm'))]);
+    out.push(['V2 floorFor: anything else falls to the page floor, never the lower of none', F(undefined) === 0.75 && F('llm_error') === 0.75]);
   }
 
   /* ── 13g3. THE HEALTH ROW, EXECUTED ──────────────────────────────
@@ -2141,6 +2164,10 @@ results13 = (async () => {
       const d = stubDeps({ ...failScrape, apiBody: answer({ business_type: 'real_estate', confidence: 0.8, evidence_quote: 'realty', reason: 'r' }) });
       const M = V2(NAME_ENV, d);
       const v = await M.nonIcpClassifyDomain('premierproperties.com');
+      out.push(['V2 name: the name floor defaults to 0.85 (26 Sept 2026, down from 0.9)',
+                M.NON_ICP_NAME_CONFIDENCE_FLOOR === 0.85, String(M.NON_ICP_NAME_CONFIDENCE_FLOOR)]);
+      out.push(['V2 name: ...and the Railway env still overrides it',
+                V2({ ...NAME_ENV, NON_ICP_NAME_CONFIDENCE_FLOOR: '0.9' }, d).NON_ICP_NAME_CONFIDENCE_FLOOR === 0.9]);
       out.push(['V2 name: the name floor is HIGHER than the page floor',
                 M.NON_ICP_NAME_CONFIDENCE_FLOOR > M.NON_ICP_LLM_CONFIDENCE_FLOOR,
                 `${M.NON_ICP_NAME_CONFIDENCE_FLOOR} vs ${M.NON_ICP_LLM_CONFIDENCE_FLOOR}`]);
@@ -2476,11 +2503,12 @@ results13 = (async () => {
     out.push(['V2 near: the type list is derived from the enum, not restated',
               /NON_ICP_BUSINESS_TYPE_KEYS\.filter\(nonIcpTypeBlocks\)/.test(fn)]);
     /* "NEAR" IS RELATIVE TO ITS OWN FLOOR. The two differ -- 0.75 from a
-       page, 0.9 from a hostname -- so a fixed number would mean
+       page, 0.85 from a hostname -- so a fixed number would mean
        "comfortably blocked" for one source and "just missed" for the
-       other. */
-    out.push(['V2 near: the floor is chosen per SOURCE, not fixed',
-              /source === 'llm_name_only'[\s\S]{0,120}NON_ICP_NAME_CONFIDENCE_FLOOR[\s\S]{0,60}NON_ICP_LLM_CONFIDENCE_FLOOR/.test(fn)]);
+       other. The choice is nonIcpFloorFor, EXECUTED in 13g2; here it is
+       only asserted that the near-miss list asks it. */
+    out.push(['V2 near: the floor is chosen per SOURCE, by nonIcpFloorFor',
+              /const floor = nonIcpFloorFor\(r\.source\);/.test(fn)]);
     out.push(['V2 near: and the band is relative to that floor',
               /confidence < r\.floor && r\.confidence >= r\.floor - NEAR_BAND/.test(fn)]);
     /* Whether a lead used it is the column that decides whether a row
