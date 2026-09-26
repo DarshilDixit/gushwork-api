@@ -311,6 +311,26 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     referrer: 'https://www.google.com/search?q=x', created_at: '2026-09-25T11:00:00Z' };
   const LEADS = { total: 4471, page: 2, pages: 179, leads: [LEAD_A, LEAD_B, LEAD_C] };
   const BLOCKED = { total: 51, page: 1, pages: 3, leads: [LEAD_A] };
+  /* THE MODEL PAYLOAD: cache is TOP-LEVEL and scrape.cache does not exist,
+     so reading the wrong one can only paint nothing, never the right number */
+  const MODEL = { windowDays: 30, product: 'crm', generatedAt: ASOF, truncated: true,
+    flags: { list_block: true, llm_enabled: true, llm_block: true, llm_meta: true, model: 'claude-x', confidence_floor: 0.75, prompt_version: 'v9' },
+    ladder: { total: 981, ours: 17, rows: [
+      { key: 'blocked_list', label: 'Blocked — brand list', n: 137, ours: 3, pct: 14 }, { key: 'blocked_model', label: 'Blocked — model', n: 29, ours: 0, pct: 3 },
+      { key: 'meta_only', label: 'Meta withheld only', n: 41, ours: 0, pct: 4.2 }, { key: 'checked_clear', label: 'Checked, no action', n: 563, ours: 14, pct: 57.4 },
+      { key: 'not_decided', label: 'Not decided', n: 211, ours: 0, pct: 21.5 }] },
+    industries: [
+      { key: 'blocked_list', label: 'Blocked by the brand-domain list', note: 'A string comparison.', leads: 137, rows: [{ business_type: 'insurance', label: 'Insurance', leads: 101, domains: 67, median_confidence: 0.99, uncategorised: false }, { business_type: '_uncategorised', label: 'Not categorised — no verdict for the domain that blocked them', leads: 36, domains: 0, median_confidence: null, uncategorised: true }] },
+      { key: 'blocked_model', label: 'Blocked by the model', note: 'The model read the site.', leads: 0, rows: [] },
+      { key: 'meta_only', label: 'Meta withheld by the model — not blocked', note: 'They booked.', leads: 41, rows: [{ business_type: 'home_services', label: 'Home services / trades', leads: 41, domains: 38, median_confidence: 0.84, uncategorised: false }] }],
+    cache: { domains: 2975, judged: 2965, unreadable: 10, byType: [{ business_type: 'real_estate', label: 'Real estate', action: 'block', domains: 141 }, { business_type: 'home_services', label: 'Home services / trades', action: 'meta', domains: 224 }] },
+    decisions: [
+      { session_id: 'md-1', created_at: '2026-09-24T14:00:00Z', email: 'agent@allstate.com', is_internal: true, action: 'blocked_list', booked: false, business_type_label: 'Insurance', confidence: 0.99, evidence_quote: '<img src=x onerror=alert(3)> We sell insurance', domain_judged: 'allstate.com', source: 'domain_list', reason: 'insurer' },
+      { session_id: 'md-2', created_at: '2026-09-23T14:00:00Z', email: 'jo@plumbco.com', is_internal: false, action: 'meta_only', booked: true, business_type_label: 'Home services / trades', confidence: 0.84, evidence_quote: 'We fix pipes', domain_judged: 'plumbco.com', source: 'llm' }],
+    scrape: { window: { ok: 9, unreachable: 1, thin: 2, other: 0, no_verdict: 7, total: 19, answered: 12, unreadable_pct: 25 },
+      unreadable: [{ domain: 'nosite.test', scrape_status: 'thin', error: null, checked_at: '2026-09-24T10:00:00Z', email: 'e@nosite.test', website: 'nosite.test', blocked: true, blocked_by: 'llm_name_only' }],
+      inProcess: { ok: 23, errored: 1, unreachable: 2, cacheHits: 8, cacheMisses: 2, cacheHitPct: 80 }, notes: ['Latest outcome per domain, not a historical rate.'] },
+    nearMisses: { band: 0.1, floors: { page: 0.75, name: 0.9 }, total: 13, withLeads: 2, rows: [{ domain: 'nearly.io', label: 'Real estate', confidence_pct: 71, floor_pct: 75, judged_from: 'their website', leads: 2 }] } };
   const SDR = { total: 37, leads: [
     { email: 'Ann@Acme.co', first_name: 'Ann', last_name: 'Lee', company: 'Acme Widgets', enriched_industry: 'Manufacturing', completed: true, created_at: '2026-09-24T12:00:00Z', ps_partner_name: 'Alpha Partners', hear_about_us_raw: 'a podcast', enriched_linkedin: 'javascript:alert(2)', phone: '+14155550134' },
     { email: 'bo@zeta.io', first_name: 'Bo', company: 'Zeta', completed: false, created_at: '2026-09-23T12:00:00Z' },
@@ -329,6 +349,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     if (p === '/monitor/enrichment-coverage') return COV;
     if (p === '/monitor/metrics') return METRICS;
     if (p === '/monitor/sdr') return SDR;
+    if (p === '/monitor/non-icp') return MODEL;
     if (p === '/monitor/leads') return q.nonicp === 'only' ? (q.internal === 'exclude' ? { total: 45, page: 1, pages: 2, leads: [] } : BLOCKED) : LEADS;
     if (p === '/monitor/filter-options') return { hearAbout: ['Podcast'], utmSource: ['facebook', 'google'], partners: [{ key: 'pk_77', name: null, email: 'p@partner.co' }] };
     if (p === '/monitor/lead-changes') return CHANGES[q.session_id] || { ok: true, changes: [] };
@@ -672,11 +693,36 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   const norm = (x) => x && JSON.stringify(eval(x).slice().sort());
   ok('sdr: the search fields are the SAME in the server, the classic and the new tab', srv && cls && nw && norm(srv) === norm(cls) && norm(cls) === norm(nw) && JSON.stringify(GW.TABS.sdr._fields.slice().sort()) === norm(nw), [srv, cls, nw].join(' | '));
 
+  /* ═══ PR C: Model ═══ */
+  const mc0 = b.calls.length;
+  GW.show('model', true, { days: '30', product: 'crm' }); await ticks(20); v = view();
+  const mcall = b.calls.slice(mc0).find((c) => c.path === '/monitor/non-icp');
+  ok('model: the window and product from the link reach the request', mcall && mcall.q.days === '30' && mcall.q.product === 'crm');
+  ok('model: the ladder paints every row\'s count from the payload', ['137', '29', '41', '563', '211'].every((x) => new RegExp('data-v="' + x + '"').test(v)) && /data-v="981"/.test(v));
+  ok('model: the server\'s one-decimal share, never re-rounded', v.includes('57.4%') && v.includes('4.2%'));
+  ok('model: ours is counted beside, never subtracted', v.includes('· 3 ours') && v.includes('<b>17</b> of them are our own test submissions'));
+  ok('model: the caption names the product that was APPLIED', v.includes('leads in the window — CRM only'));
+  ok('model: a capped window says the counts are a floor', v.includes('the counts are a floor, not a total'));
+  ok('model: all THREE groups render, the empty one included', v.includes('Blocked by the brand-domain list') && v.includes('Blocked by the model') && v.includes('Meta withheld by the model — not blocked') && /Blocked by the model[\s\S]*?None in this window\./.test(v));
+  ok('model: an uncategorised row says so, with no borrowed confidence', /class="uncat"><td>Not categorised[^<]*<\/td><td data-v="36">36<\/td><td>—<\/td><td>—<\/td>/.test(v));
+  ok('model: the ALL-TIME figures come from the TOP-LEVEL cache', /data-card="mdl-cache"[\s\S]*?data-v="2975"/.test(v) && v.includes('2,965 judged from their site · 10 currently unreadable') && !/data-card="mdl-cache"[\s\S]*?data-v="0"/.test(v));
+  ok('model: never-tried is its own number, outside the rate', /data-card="mdl-never"[\s\S]*?data-v="7"[\s\S]*?of 19 companies — not a failure/.test(v) && /data-card="mdl-unread"[\s\S]*?data-v="25"[\s\S]*?3 of 12 companies/.test(v));
+  ok('model: the "latest outcome, not a rate" note is ON SCREEN', v.includes('Latest outcome per domain, not a historical rate.'));
+  ok('model: the cache has no percentage anywhere', !/id="mdl-cachet"[\s\S]*?%<\/td>/.test(v) && /data-v="141"/.test(v) && v.includes('>Withholds Meta<'));
+  ok('model: every decision row is painted, ours marked', (v.match(/data-x="mdl-/g) || []).length === 2 && /agent@allstate\.com<\/span><span class="marks"><span class="badge b-neu">ours<\/span>/.test(v));
+  ok('model: the quote from a stranger\'s page is ESCAPED', v.includes('&lt;img src=x onerror=alert(3)&gt; We sell insurance') && !v.includes('<img src=x'));
+  ok('model: a name-only block reads as words on the unreadable list', v.includes('Yes — AI check (name only)') && v.includes('too little text to judge'));
+  ok('model: near misses -- both floors, the total, and who has a lead', v.includes('<b>75%</b> certainty') && v.includes('<b>90%</b> when') && /data-v="13"/.test(v) && v.includes('>has a lead<'));
+  /* flag-only mode: the same row is a flag, and Meta still fires */
+  GW.TABS.model._set(Object.assign({}, MODEL, { flags: Object.assign({}, MODEL.flags, { llm_meta: false }) })); GW.TABS.model.render(); v = view();
+  ok('model: with Meta NOT withheld, the row says Meta was still sent', v.includes('Flagged by the model (Meta still sent)') && !v.includes('>Meta withheld only<'));
+  GW.TABS.model._set(null); GW.TABS.model.render();
+
   /* Hash, tabs, nav */
-  ok('nav: every rebuilt tab is registered with activate and deactivate', ['overview', 'health', 'dropoff', 'dupes', 'lm', 'leads', 'blocked', 'sdr'].every((t) => GW.TABS[t] && GW.TABS[t].activate && GW.TABS[t].deactivate && GW.TABS[t].title));
-  ok('nav: switching tab writes the hash', /tab=sdr/.test(b.window.location.hash), b.window.location.hash);
+  ok('nav: every rebuilt tab is registered with activate and deactivate', ['overview', 'health', 'dropoff', 'dupes', 'lm', 'leads', 'blocked', 'sdr', 'model'].every((t) => GW.TABS[t] && GW.TABS[t].activate && GW.TABS[t].deactivate && GW.TABS[t].title));
+  ok('nav: switching tab writes the hash', /tab=model/.test(b.window.location.hash) && /days=30/.test(b.window.location.hash), b.window.location.hash);
   const navHtml = b.els['nav-side'] ? b.els['nav-side'].innerHTML : '';
-  ok('nav: the tabs not rebuilt link to the classic dashboard', /href="\/monitor\?token=[^"]*#tab=partners"/.test(navHtml) && /href="\/monitor\?token=[^"]*#tab=model"/.test(navHtml));
+  ok('nav: the tabs not rebuilt link to the classic dashboard', /href="\/monitor\?token=[^"]*#tab=partners"/.test(navHtml) && /href="\/monitor\?token=[^"]*#tab=visitors"/.test(navHtml));
   ok('nav: All leads and Blocked are rebuilt, no longer classic links', /data-tab="leads"/.test(navHtml) && /data-tab="blocked"/.test(navHtml) && !/href="\/monitor\?token=[^"]*#tab=leads"/.test(navHtml) && !/href="\/monitor\?token=[^"]*#tab=blocked"/.test(navHtml));
   ok('nav: a classic link says it leaves', /\(classic dashboard\)/.test(navHtml));
   /* the last health run could not reach /monitor/health: all nine server

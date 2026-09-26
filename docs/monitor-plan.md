@@ -306,7 +306,11 @@ _(kept current as the work moves)_
     card. It found the SDR list's cut-off last column at 1440. Columns
     marked `opt` hide in the 900–1099px content band, their values still in
     the row detail.
-  - [ ] Model
+  - [x] **Model** (`model.js`). Renders `/monitor/non-icp` without
+    recomputing it. The standing cache comes from the TOP-LEVEL `d.cache`;
+    all three groups always show. "Meta withheld" becomes "Meta still sent"
+    in flag-only mode. The decisions and unreadable lists page at 25. Live:
+    375 leads in 7 days, 47 decisions.
   - [ ] Visitors
   - [ ] Partners
 - [ ] Number-for-number checks against the classic, live, read-only
