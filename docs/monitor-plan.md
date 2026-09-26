@@ -5,7 +5,7 @@ current as the work moves, so a new session, or one resumed after a pause,
 can carry on without anyone re-explaining. The rules in `CLAUDE.md` still
 apply on top of everything here.
 
-Last updated: **26 Sept 2026 (IST)**. #123 merged and its deploy confirmed; PR C started.
+Last updated: **26 Sept 2026 (IST)**. #123 and #124 (PRs B and C) merged, deploys confirmed. Every tab is rebuilt. **PR D waits on Darshil's decisions 1 and 5.**
 
 ---
 
@@ -19,8 +19,8 @@ switches them.
 |---|---|---|---|
 | A | Apollo: page on out-of-credits, an honest System Health row, label fixes | **merged** 25 Sept | [#122](https://github.com/DarshilDixit/gushwork-api/pull/122), `cards/PR-122-apollo-honest-health.md` |
 | B | The new dashboard, five tabs: Overview, System health, Dropoff, Duplicates, Lead magnet | **merged** 25 Sept 22:53 UTC (`5bb0479`), deploy confirmed | [#123](https://github.com/DarshilDixit/gushwork-api/pull/123), `cards/PR-123-monitor-next.md` |
-| C | The other six tabs: All leads, Blocked, SDR list, Partners, Model, Visitors | **PR #124 open, waiting for Darshil's review. Do not merge without his word.** | branch `feat/monitor-next-c`, card `cards/PR-124-monitor-next-c.md` |
-| D | The switch: `/monitor` becomes the new page; the old one stays at `/monitor/classic` for a week, then goes | not started | — |
+| C | The other six tabs: All leads, Blocked, SDR list, Partners, Model, Visitors | **merged** (#124, 26 Sept 11:13 UTC, `c83683a`); deploy confirmed | card `cards/PR-124-monitor-next-c.md` |
+| D | The switch: `/monitor` becomes the new page; the old one stays at `/monitor/classic` for a week, then goes | not started; **waits on decisions 1 and 5** | — |
 
 Earlier, related: [#121](https://github.com/DarshilDixit/gushwork-api/pull/121)
 (the Dropoff presets fix, 25 Sept).
@@ -49,9 +49,19 @@ Earlier, related: [#121](https://github.com/DarshilDixit/gushwork-api/pull/121)
   - `/monitor/metrics` keeps the same 29 keys.
   - A before/after diff of the classic `/monitor` page shows exactly the
     8 intended fragments and nothing else.
-- **Unmerged**: PR C is **PR #124**, on `feat/monitor-next-c`. Every check is
-  done and recorded on its card (`cards/PR-124-monitor-next-c.md`). It waits
-  on Darshil's review; PR D (the switch) starts only after it merges.
+- **#124 (PR C) merged** 26 Sept 11:13 UTC as `c83683a`, on Darshil's word.
+  Deployed about 32 seconds later. Confirmed read-only:
+  - the classic `/monitor` is **byte-identical** to before the deploy (the
+    page, with the token masked, compared byte for byte), and
+    `/monitor/metrics` has the same 29 keys;
+  - **all 13 views** of `/monitor/next` (11 tabs, Overview in all three
+    periods) load on production with live data: no error, nothing left
+    loading, no failed or non-GET request;
+  - the crosscheck against the classic, pointed at production: **45 of 45**
+    (the first run failed 4 live-partition checks because a lead arrived
+    mid-run; see learnings).
+- **PR D (the switch) does not start until Darshil decides items 1 and 5
+  below.** He asked for both before PR D, and said to wait.
 
 ## Decisions waiting on Darshil
 
@@ -60,6 +70,42 @@ Earlier, related: [#121](https://github.com/DarshilDixit/gushwork-api/pull/121)
    addresses: Included"). They are marked on Duplicates and Lead magnet,
    never subtracted. Excluding them moves every historical number at once,
    so it is his call.
+
+   **Measured 26 Sept, read-only.** The real `overviewReport` was run
+   twice, the second time with every read of `leads` swapped for "leads
+   minus `internalLeadSqlClause`" (the rule behind the "ours" marker). The
+   plain run matched production's `/monitor/overview` exactly. Ours are
+   **107 lead rows, 32 addresses**, 1.8% of all rows.
+
+   | Overview | With ours | Without | Moves by |
+   |---|---|---|---|
+   | All time, leads | 5,848 | 5,741 | 107 (1.8%) |
+   | All time, people | 5,343 | 5,315 | 28 (0.5%) |
+   | All time, booked rate (people) | 68.20% | 68.33% | 0.13 points |
+   | All time, blocked leads | 50 | 44 | **6 (12%)** |
+   | This week, people | 308 | 307 | 1 |
+   | Last week, people (the comparison) | 223 | 219 | 4, so the week-on-week change reads +38.1% not +40.2% |
+   | Today | same | same | 0 |
+
+   Rates barely move (at most about 0.25 points). Small counts do:
+   Blocked, and testing days. The worst days were 23 Mar (9 of ours), and
+   18 and 30 Jun (7 each). March was 18 of 45 leads, 40%. Sessions cannot be
+   separated by address, because a session has no email.
+
+   **Recommendation: EXCLUDE from the Overview (and Dropoff), keep them
+   marked everywhere rows are listed.**
+   - The Overview describes real demand, and our tests are not demand.
+   - The outbound systems already refuse them (Meta, Salesforce and the
+     dialer, since 19 Sept), so the dashboard is the odd one out.
+   - Moving history costs little: no rate moves by more than about 0.25
+     points, and no trend changes.
+   - Dropoff must move with it, or the documented "Overview and Dropoff
+     agree exactly in Leads mode" breaks, and so must the Monday digest,
+     which reads Dropoff.
+   - The Overview should say it in words: "excludes N of our own test
+     submissions".
+   - All leads, Blocked and Duplicates keep them, marked, with the filter.
+     Those tabs are where a person reconciles a row.
 2. **Apollo top-up.** Apollo has been out of credits since 23 Sept. System
    Health is red and pages every 3 hours by design. He said on 25 Sept he
    was not topping up yet.
@@ -75,14 +121,64 @@ Earlier, related: [#121](https://github.com/DarshilDixit/gushwork-api/pull/121)
    match rate is 82%. 16 addresses can be copied from an earlier answer for
    free.
 4. **The notice to Utsav** (design system). The departures below need
-   declaring, as does every new component built for this. The #123 card
-   lists them.
+   declaring, as does every new component built for this. The #123 and
+   #124 cards list them. #124 adds: the stacking plain table (`U.grid`),
+   the card-view Sort select, the inline acknowledge form, the themed map
+   controls, and one new alias, `--map-sea` (neutral-200 in light,
+   neutral-900 in dark, the tokens nearest the basemaps' sampled ocean).
    - **Light muted text** is neutral-600, not the spec's neutral-500
      (3.41:1, under the 4.5 floor).
    - **The focus ring** is solid primary, not the 40%-alpha token (under 3:1
      on every surface).
    - **Badge labels** are at /600.
    - **The current nav row** is semibold as well as filled.
+
+5. **CSV formula escaping on the All leads and SDR exports.** Proposed 26
+   Sept; **not built.** Today those two server exports (the routes both
+   dashboards call) only quote commas, quotes and newlines. A cell starting
+   with `=` or `@` runs as a formula when the file is opened in Excel or
+   Sheets. The Lead magnet export's blanket rule (escape `= + - @`) cannot
+   be copied here: measured read-only, **2,669 of 2,676 stored phone
+   numbers start with "+"**, so it would put an apostrophe on 99.7% of the
+   phone column a dialer imports.
+
+   **The rule:** one `csvCell` shared by both exports.
+   - A cell starting with `=`, `@`, a tab or a carriage return ALWAYS gets
+     a leading apostrophe.
+   - A cell starting with `+` or `-` gets one UNLESS it is only a number:
+     digits, spaces, `( ) . -`, and at least one digit.
+   - Then quote on a comma, a quote, or `\r`/`\n` (`\r` is missing from
+     the quoting today).
+
+   **In real data:** every stored phone shape passes through untouched
+   (`+99999999999` x2,493, `+999999999999` x163, `+99 99999 99999`, and the
+   rest). Only 4 real values would get the apostrophe: 2 "heard about us"
+   answers starting with "-", 1 website and 1 company starting with "@".
+   Nothing stored starts with "=".
+
+   | Value | The CSV (what a dialer importing it reads) |
+   |---|---|
+   | `+19495550123` | `+19495550123` (unchanged) |
+   | `+44 20 7946 0958` | `+44 20 7946 0958` (unchanged) |
+   | `+1 (949) 555-0123` | `+1 (949) 555-0123` (unchanged) |
+   | `-5` | `-5` (unchanged) |
+   | `=HYPERLINK("http://evil.test","Click")` | `"'=HYPERLINK(""http://evil.test"",""Click"")"` |
+   | `@SUM(A1:A9)` | `'@SUM(A1:A9)` |
+   | `+cmd\|' /C calc'!A0` | `'+cmd\|' /C calc'!A0` |
+   | `- google search` | `'- google search` |
+   | `@acme studio` | `'@acme studio` |
+
+   **Two caveats to decide with:**
+   - An apostrophe is hidden by Excel and Sheets, but a plain importer
+     keeps it as a real character. That is fine for the 4 odd values
+     above, and it is why the rule leaves numbers alone.
+   - Excel and Sheets ALREADY turn `+19495550123` into the number
+     19495550123 and drop the "+". That is a spreadsheet habit, not ours,
+     and this proposal neither fixes nor worsens it. Keeping the "+" in a
+     spreadsheet would need the apostrophe, which breaks the dialer. One
+     file cannot do both, so this keeps the file right for the dialer.
+     The Lead magnet export has no phone column; bringing it onto the same
+     rule is a separate one-line choice.
 
 ## Rulings so far (Darshil's, and they stand)
 
@@ -110,6 +206,13 @@ Earlier, related: [#121](https://github.com/DarshilDixit/gushwork-api/pull/121)
 - **Quality over speed.** "Take the time C needs."
 
 ## Learnings
+
+- **The crosscheck's live-partition half can fail on a moving total.** It
+  reads the all-leads total first and the partitions after it. A lead that
+  arrives in between makes each partition sum one higher, and four checks
+  fail together (26 Sept, on production: 5,847 against 5,848). The
+  same-bytes half cannot be affected. A re-run passed 45 of 45. If it
+  recurs, re-read the total at the end and report "moved" rather than fail.
 
 ### Bugs the tests missed, and why
 
@@ -390,4 +493,4 @@ _(kept current as the work moves)_
   and Clear focus checks each failed with their fix removed. Ran in a
   scratch git worktree (removed after) with a memory check before each.
 - [x] Card (`cards/PR-124-monitor-next-c.md`), branch pushed, **PR #124**
-  opened. Stopped for review; not merged.
+  opened, then merged on Darshil's word (26 Sept 11:13 UTC, `c83683a`).
