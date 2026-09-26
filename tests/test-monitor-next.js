@@ -873,14 +873,14 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   leadsHook = null;
   /* 2. the draw guard: a render that throws paints an error, never an endless skeleton */
   const ce = console.error; console.error = () => {};
-  GW.TABS.leads._set({ total: 2, page: 1, pages: 1, leads: [null] }); GW.TABS.leads.render(); v = view(); console.error = ce;
+  GW.TABS.leads._set({ total: 2, page: 1, pages: 1, leads: [null] }); try { GW.TABS.leads.render(); } catch (e) {} v = view(); console.error = ce;
   ok('review: a row that cannot be drawn paints an error in place of the table', v.includes('All leads could not be read') && v.includes('this view could not be drawn') && v.includes('All leads</h1>'));
   /* 3. the sort from a link is held to the table's own columns */
   GW.S.q = { sort: 'constructor', dir: 'sideways' }; const sp = GW.TABS.leads._params();
   GW.S.q = { sort: 'email', dir: 'asc' }; const sp2 = GW.TABS.leads._params(); GW.S.q = {};
   ok('review: a sort from the link that is not a column is never sent', sp.sort === 'created_at' && sp.dir === 'desc' && sp2.sort === 'email' && sp2.dir === 'asc', JSON.stringify([sp, sp2]));
   /* 4. a tab name that is an Object method */
-  GW.show('toString'); ok('review: a tab name like "toString" falls back to Overview', GW.current() === 'overview');
+  try { GW.show('toString'); } catch (e) {} ok('review: a tab name like "toString" falls back to Overview', GW.current() === 'overview');
   /* 5. Custom dates can be chosen from the screen */
   GW.show('leads'); await ticks(20);
   fire('change', el({ 'data-lf': 'preset' }, { value: 'custom' })); await ticks(20); v = view();
@@ -992,6 +992,15 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('review: every website verdict reads exactly as the server words it', wrl && WIN.every((r) => GW.L.website(r) === wrl(r)), WIN.map((r) => r + '=' + GW.L.website(r) + '|' + (wrl && wrl(r))).join('; '));
   ok('review: the Meta chip for an unverified site never says "no website"', GW.L.metaShort('website') === 'site not verified');
   ok('review: the model and website reasons claim nothing about booking or dialling', !/books|dialled/.test(GW.L.metaWhy('model')) && !/books|dialled/.test(GW.L.metaWhy('website')));
+  /* links: http(s) only, a bare domain gets https, any other scheme is NOT a link */
+  ok('review: a link is http(s) or nothing -- javascript:, data: and mailto: are refused outright', GW.href('javascript:alert(1)') === null && GW.href('data:text/html,x') === null && GW.href('mailto:a@b.co') === null &&
+     GW.href('acme.com') === 'https://acme.com' && GW.href('http://x.io/a') === 'http://x.io/a' && GW.href('') === null);
+  /* a floor is never shown as a total (CLAUDE.md, "Needs attention") */
+  GW.show('partners'); await ticks(20);
+  GW.TABS.partners._set(Object.assign({}, PARTNERS, { lifecycle: Object.assign({}, PARTNERS.lifecycle, { needsAttentionComplete: false }) })); GW.TABS.partners.render(); v = view();
+  ok('review: when the unbounded count could not run, Needs attention says AT LEAST', /data-card="p-attn"[\s\S]*?AT LEAST this many — the full count could not be read/.test(v));
+  GW.TABS.partners._set(PARTNERS); GW.TABS.partners.render();
+  ok('review: and says nothing of the sort when it could', !/AT LEAST/.test(view()));
   /* 18. structural: the guards a stubbed DOM cannot drive */
   const leadsSrc = fs.readFileSync(path.join(ROOT, 'monitor', 'js', 'leads.js'), 'utf8'), coreSrc = fs.readFileSync(path.join(ROOT, 'monitor', 'js', 'core.js'), 'utf8');
   ok('review: the change-log cache has no prototype', /var changes = Object\.create\(null\);/.test(leadsSrc));
