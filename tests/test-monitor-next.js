@@ -875,6 +875,10 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   const ce = console.error; console.error = () => {};
   GW.TABS.leads._set({ total: 2, page: 1, pages: 1, leads: [null] }); try { GW.TABS.leads.render(); } catch (e) {} v = view(); console.error = ce;
   ok('review: a row that cannot be drawn paints an error in place of the table', v.includes('All leads could not be read') && v.includes('this view could not be drawn') && v.includes('All leads</h1>'));
+  /* put the real read back: left in place, the broken row throws on the tab's
+     NEXT open, and a mutation that removes the guard then CRASHES the suite
+     (unmeasured) instead of failing this one check (caught) */
+  GW.TABS.leads._set(LEADS);
   /* 3. the sort from a link is held to the table's own columns */
   GW.S.q = { sort: 'constructor', dir: 'sideways' }; const sp = GW.TABS.leads._params();
   GW.S.q = { sort: 'email', dir: 'asc' }; const sp2 = GW.TABS.leads._params(); GW.S.q = {};
