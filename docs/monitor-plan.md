@@ -19,7 +19,7 @@ switches them.
 |---|---|---|---|
 | A | Apollo: page on out-of-credits, an honest System Health row, label fixes | **merged** 25 Sept | [#122](https://github.com/DarshilDixit/gushwork-api/pull/122), `cards/PR-122-apollo-honest-health.md` |
 | B | The new dashboard, five tabs: Overview, System health, Dropoff, Duplicates, Lead magnet | **merged** 25 Sept 22:53 UTC (`5bb0479`), deploy confirmed | [#123](https://github.com/DarshilDixit/gushwork-api/pull/123), `cards/PR-123-monitor-next.md` |
-| C | The other six tabs: All leads, Blocked, SDR list, Partners, Model, Visitors | **in progress** | branch `feat/monitor-next-c` |
+| C | The other six tabs: All leads, Blocked, SDR list, Partners, Model, Visitors | **PR #124 open, waiting for Darshil's review. Do not merge without his word.** | branch `feat/monitor-next-c`, card `cards/PR-124-monitor-next-c.md` |
 | D | The switch: `/monitor` becomes the new page; the old one stays at `/monitor/classic` for a week, then goes | not started | — |
 
 Earlier, related: [#121](https://github.com/DarshilDixit/gushwork-api/pull/121)
@@ -49,8 +49,9 @@ Earlier, related: [#121](https://github.com/DarshilDixit/gushwork-api/pull/121)
   - `/monitor/metrics` keeps the same 29 keys.
   - A before/after diff of the classic `/monitor` page shows exactly the
     8 intended fragments and nothing else.
-- **Unmerged**: PR C, on `feat/monitor-next-c`. See "PR C" below for exactly
-  where it stands.
+- **Unmerged**: PR C is **PR #124**, on `feat/monitor-next-c`. Every check is
+  done and recorded on its card (`cards/PR-124-monitor-next-c.md`). It waits
+  on Darshil's review; PR D (the switch) starts only after it merges.
 
 ## Decisions waiting on Darshil
 
@@ -388,4 +389,5 @@ _(kept current as the work moves)_
   open), so the redundant line was removed. Plus, in real Chrome, the pager
   and Clear focus checks each failed with their fix removed. Ran in a
   scratch git worktree (removed after) with a memory check before each.
-- [ ] Card, PR, stop for review
+- [x] Card (`cards/PR-124-monitor-next-c.md`), branch pushed, **PR #124**
+  opened. Stopped for review; not merged.
