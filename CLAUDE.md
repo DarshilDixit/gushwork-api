@@ -193,7 +193,8 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `monitor-next.js` | Builds and serves the NEW dashboard at `/monitor/next` (side by side with `/monitor` until it is switched). Reads `monitor/` once at boot and stitches one page behind the same token -- no build step. Also the token-gated font route, an allowlist, never a path |
 | `monitor/` | The new dashboard's front end, in real files: `tokens.css` (the design system's tokens, copied verbatim from gushwork-design v1.49.0), `app.css` (both themes, components, responsive), `js/*.js` (classic scripts on one `GW` namespace, loaded in `JS_ORDER`), `icons/` (the Phosphor icons it uses, MIT), `fonts/` (Inter, Vert Grotesk Display) |
 | `tools/preview-monitor.js` | Runs THIS BRANCH's `/monitor/next` against live data: its own `overviewReport` and `duplicatesReport` lifted out of `index.js` on connections that are read-only AT THE DATABASE, every other `/monitor/*` GET proxied to production, every non-GET refused. Never boots `index.js`. Not mounted |
-| `tools/check-monitor-layout.mjs` | Real Chrome over every rebuilt tab and view at 360, 390, 414, 768, 1024 and 1440px in both themes; FAILS on sideways scroll, anything off-screen or clipped, a tap target under 44px, overlapping chart labels, a floating element, console errors, junk values or a missing font -- and, with REAL key presses, on the skip link, focus kept across a repaint and the drawer closing when focus leaves. Run against the preview. Not mounted |
+| `tools/check-monitor-layout.mjs` | Real Chrome over every rebuilt tab and view at 360, 390, 414, 768, 1024 and 1440px in both themes; FAILS on sideways scroll, anything off-screen or clipped, a tap target under 44px, overlapping chart labels, a floating element, console errors, junk values or a missing font, a data table (rtable OR plain) wider than its card -- and, with REAL key presses, on the skip link, focus kept across a repaint and the drawer closing when focus leaves. `tab+open` also expands the first rows, so detail panels are measured too. Run against the preview. Not mounted |
+| `tools/crosscheck-monitor.mjs` | The new dashboard against the classic, number for number, on live data through the preview: every payload fetched once and served to both pages, then each page's painted numbers compared with the payload and each other, plus the partitions every `/monitor/leads` filter must keep. Prints numbers only, never lead data. Not mounted |
 | `gushwork-form.js` | The `/demo` form frontend. Lives here and is served live by jsDelivr — see below |
 | `gushwork-form-popup.js` | The Google Ads popup/modal form frontend. Lives here and is served live by jsDelivr — see below |
 | `package.json` | Dependencies, scripts, Node engine constraint |
@@ -528,13 +529,18 @@ delete the file.
   bare literal appearing anywhere. Same shape as "a second column that
   means we rejected this lead is not additive" below — arriving as a
   second enum value instead.
-- **`leads.ip_address` and the nine `ip_*` columns** — where the visitor
-  actually was, from their IP. Added 23 Sept. **Different from
+- **`leads.ip_address` and the eleven `ip_*` columns** — where the visitor
+  actually was, from their IP. Added 23 Sept; this said "nine" until 26
+  Sept, written before `ip_latitude` / `ip_longitude` existed, so **count
+  the migration in `db.js`, not this sentence.** **Different from
   `enriched_city` / `enriched_state` / `enriched_country`**, which are
-  Apollo's record of where the COMPANY is and cover 44% of leads. On the 22
-  Sept lead those read Woburn and this read Boston — both correct, ten
-  miles apart. The lead panel puts them under separate headings for exactly
-  that reason.
+  Apollo's record of where the PERSON is based — `apolloEnrichmentFields`
+  reads `person.city`, not the organisation's — and cover 44% of leads.
+  **Corrected 26 Sept 2026: this used to say those were where the COMPANY
+  is.** The company's own address is a third thing, `enriched_org_hq`. On
+  the 22 Sept lead the person read Woburn and the IP read Boston — both
+  correct, ten miles apart. The lead panel keeps all three under separate
+  labels for exactly that reason.
 
   `ip_address` **is personal data**, unlike everything else on that table
   except the contact fields. **Kept indefinitely, decided 23 Sept** — the
@@ -1740,11 +1746,14 @@ feed it data. A reader who greps for a single `/monitor` handler expecting to fi
 everything will miss most of it.
 
 **THE NEW DASHBOARD IS `/monitor/next`, SIDE BY SIDE WITH `/monitor`, and
-the old one is not edited to build it.** Five tabs rebuilt in PR B --
-Overview, System health, Dropoff, Duplicates, Lead magnet; the rest are real
-links to the classic dashboard opened at their tab (`#tab=...`, which the old
-page now honours). The switch is its own PR: `/monitor` becomes the new page
-and the old stays at `/monitor/classic` for a week.
+the old one is not edited to build it.** Every tab is rebuilt: five in PR B
+(Overview, System health, Dropoff, Duplicates, Lead magnet) and the other six
+in PR C (All leads, Blocked, SDR list, Model, Visitors, Partners). The
+classic stays one click away in the sidebar footer, opened at the same tab
+(`#tab=...`, which the old page honours). The switch is its own PR:
+`/monitor` becomes the new page and the old stays at `/monitor/classic` for
+a week. The running plan, decisions and progress are in
+`docs/monitor-plan.md`.
 
 - **Numbers come from the existing routes, plus ONE new read,
   `overviewReport` / `/monitor/overview`**, which applies one definition set
@@ -1783,6 +1792,34 @@ and the old stays at `/monitor/classic` for a week.
   text field's caret and every open row back after the HTML is replaced. A
   tab that assigns `innerHTML` directly drops focus to the page body on
   every refresh -- every 60 seconds on Today.
+- **PR C adds no server route and changes none.** Its six tabs render
+  routes that already existed, unchanged; the server's label maps
+  (`WEBSITE_REASON_LABELS`, `META_WITHHELD_LABELS`) travel in the page
+  config, so there is no third copy to drift. Partner revenue gaps moved
+  from its own spot onto Partners.
+- **Plain tables go through `U.grid`, and the rtable card rules are
+  CHILD-scoped.** Both were found only when the layout check was made to
+  measure plain tables and to open rows. Visitors, the Partners gaps list
+  and Model ran up to 277px past their card on a phone, scrolling sideways
+  with the last column cut off; and the card rules, written as descendant
+  selectors, restyled every table nested in an expanded row, so the lead's
+  change log kept a header row above cells stacked with no labels.
+  `U.grid` names each cell's column so a plain table stacks, labelled,
+  below 560; the `.rt` rules are `.rt > tbody > tr > td`; a test forbids
+  the descendant form. **A new plain table goes through `U.grid`** -- a
+  test fails on a hand-built `class="tbl"` anywhere but the chart's own
+  table view.
+- **`tools/crosscheck-monitor.mjs` is the number-for-number check against
+  the classic.** Each payload is fetched ONCE and served to BOTH pages
+  through a fetch override, so a lead arriving between two reads cannot
+  make them differ; it also checks the partitions every filter must keep
+  against the live total. It prints numbers and pass/fail only. Run it
+  against the preview after any change to how a tab reads its payload.
+- **The map follows the theme.** Esri Canvas light and dark basemaps, both
+  checked by downloading tiles at three zooms. What shows past the edge of
+  the world on a short map is `--map-sea`, the tiles' own ocean colour,
+  sampled, so it reads as sea rather than a gap. Fractional zoom was tried
+  to remove that band and rejected: it draws seams between tiles.
 - **Touch targets are 44px** below 1024 wide or on any coarse pointer, and
   **nothing floats over content** -- the design system's phone dock was
   dropped for that rule, and theme and refresh live in the drawer instead.
