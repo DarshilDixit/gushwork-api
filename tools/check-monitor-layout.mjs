@@ -232,11 +232,12 @@ const key = async (k, shift) => { const base = { key: k, code: k, windowsVirtual
   const on = (sel) => ev(`(()=>{ const a=document.activeElement; return !!(a && a.matches && a.matches(${JSON.stringify(sel)})); })()`);
   const waitIdle = async () => { for (let k = 0; k < 40; k++) { await sleep(300); if (await ev(`!/updating…/.test((document.querySelector('.readat')||{}).textContent||'') && !document.querySelector('#view .skel')`)) break; } await sleep(300); };
   await ev(`GW.show('leads', true, {})`); await waitIdle();
-  if (await ev(`!!document.querySelector('[data-pg-step="next"]')`)) {
-    await ev(`document.querySelector('[data-pg-step="next"]').focus()`); await key('Enter'); await waitIdle();
-    if (!(await on('[data-pg-step="next"]'))) issues.push({ kind: 'keys', what: 'after Next, focus was not on Next (it is on ' + (await ev(`document.activeElement && (document.activeElement.outerHTML||'').slice(0,60)`)) + ')' });
+  /* found by NAME, as a user finds them -- not by the attribute under test */
+  if (await ev(`!!document.querySelector('[aria-label="Next page"]')`)) {
+    await ev(`document.querySelector('[aria-label="Next page"]').focus()`); await key('Enter'); await waitIdle();
+    if (!(await on('[aria-label="Next page"]'))) issues.push({ kind: 'keys', what: 'after Next, focus was not on Next (it is on ' + (await ev(`document.activeElement && (document.activeElement.outerHTML||'').slice(0,60)`)) + ')' });
     if (!/page=2/.test(await ev('location.hash'))) issues.push({ kind: 'keys', what: 'Next did not move to page 2' });
-    await ev(`document.querySelector('[data-pg-step="prev"]').focus()`); await key('Enter'); await waitIdle();
+    await ev(`document.querySelector('[aria-label="Previous page"]').focus()`); await key('Enter'); await waitIdle();
     if (!(await on('[aria-current="page"]'))) issues.push({ kind: 'keys', what: 'Previous back to page 1 left focus on ' + (await ev(`document.activeElement && (document.activeElement.outerHTML||'').slice(0,60)`)) + ', not the current page' });
   } else issues.push({ kind: 'keys', what: 'All leads has only one page, so the pager could not be checked' });
   await ev(`GW.show('leads', true, { stage: 'booked' })`); await waitIdle();
