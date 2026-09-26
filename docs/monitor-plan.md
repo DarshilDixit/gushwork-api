@@ -288,7 +288,7 @@ _(kept current as the work moves)_
   each. They live in this session's scratchpad (`specs/*.md`); if lost,
   re-run the same read (routes, writes, UI, rules, traps, crosscheck and
   tests per tab) before building.
-- [ ] Build:
+- [x] Build:
   - [x] **Foundation.** Tab filters in the hash (`G.S.q`); JSON bodies
     for writes; dates that never throw; http(s)-only links; the server's
     label maps carried in the page config; `labels.js`; sortable headers,
@@ -323,8 +323,24 @@ _(kept current as the work moves)_
     per partner. The ack is inline and Cancel sends nothing; the POST's JSON
     body is test-driven. The drill-down opens All leads filtered on that
     partner. Live: 8 partner companies, 5 conversions, 2 qualified.
-- [ ] Number-for-number checks against the classic, live, read-only
-- [ ] Layout check, screenshots by eye
+- [x] **Number-for-number checks against the classic, live, read-only**
+  (`tools/crosscheck-monitor.mjs`, commit `6181ddf`). Each payload is
+  fetched once and served to BOTH pages; 45 checks, all green -- counts,
+  row order, stages, the Model ladder and cache, coverage, merged
+  networks, every Partners card and funnel headline, plus the partitions
+  (stages, blocked, Meta, ours, website, enrichment, repeats) against the
+  live total. A deliberate mutation (networks merged by the wrong key) was
+  caught and reported. Run it against the preview; it prints numbers only.
+- [x] **Layout check, screenshots by eye.** The check now also measures
+  plain tables and opens rows (`tab+open`), and Partners is in its default
+  list (it was missing). Found and fixed: four plain tables scrolling
+  sideways on phones (now `U.grid`, stacking below 560); the rtable card
+  rules leaking into tables nested in a detail row; detail links 15px tall
+  on touch; the map light on the dark theme (dark Esri basemap, checked by
+  downloading tiles); a doubled line under the last row. Light, six widths:
+  137 combinations, 0 findings. Read by eye: Partners, Model, Visitors and
+  the map, the lead panel's change log, in both themes, phone and desktop.
+  **Still to do: one final full run, both themes, all seven widths.**
 - [ ] Mutation tests
 - [ ] Review sweep + fixes
 - [ ] Card, PR, stop for review
