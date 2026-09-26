@@ -108,11 +108,14 @@ Earlier, related: [#121](https://github.com/DarshilDixit/gushwork-api/pull/121)
      submissions".
    - All leads, Blocked and Duplicates keep them, marked, with the filter.
      Those tabs are where a person reconciles a row.
-2. **Apollo top-up.** Apollo has been out of credits since 23 Sept. System
-   Health is red and pages every 3 hours by design. He said on 25 Sept he
-   was not topping up yet.
-3. **Re-enrich scope, once credits exist** (`tools/re-enrich-apollo.js`,
-   dry run by default, not yet run). There are two options:
+2. **DONE 26 Sept: Apollo.** Darshil swapped `APOLLO_API_KEY` to a
+   workspace with credits (the key now ends …VvTQ). System Health is green
+   again.
+3. **DONE 26 Sept: the re-enrich, all three outages.** 325 people found,
+   88 no match, 17 copied free (about 326 credits). Carried out to the
+   mirror (342 rows) and Salesforce (140 Leads, then LinkedIn on 98) by
+   `tools/sync-enrichment-out.js` (#127). The options as they were
+   weighed:
 
    | Scope | Addresses | Credits |
    |---|---|---|
@@ -135,8 +138,10 @@ Earlier, related: [#121](https://github.com/DarshilDixit/gushwork-api/pull/121)
    - **Badge labels** are at /600.
    - **The current nav row** is semibold as well as filled.
 
-5. **CSV formula escaping on the All leads and SDR exports.** Proposed 26
-   Sept; **not built.** Today those two server exports (the routes both
+5. **DONE: CSV formula escaping** — built in PR D as proposed. **27 Sept,
+   Darshil: no extra guards** for a cell starting with a space or line
+   break, or containing `;` (0 stored values either way). The text below is
+   the proposal as written. Today those two server exports (the routes both
    dashboards call) only quote commas, quotes and newlines. A cell starting
    with `=` or `@` runs as a formula when the file is opened in Excel or
    Sheets. The Lead magnet export's blanket rule (escape `= + - @`) cannot
@@ -582,9 +587,63 @@ Darshil asked.
 - the mutation run over 38 guards, in a scratch worktree (results on the
   card).
 
-**Status (27 Sept):** **PR #125 is open**; the card is
-`cards/PR-125-monitor-next-d.md`. **STOP: merge only on Darshil's explicit
-word.**
+**Status (27 Sept): PR D is MERGED (#125) and verified on production.**
+The card is `cards/PR-125-monitor-next-d.md`.
+
+**What merged on 26–27 Sept, in order, each checked read-only after deploy:**
+1. **#125 (PR D).**
+   - `/monitor` is the new page (401 without the token).
+   - `/monitor/next` answers 302 keeping the token exactly. In real Chrome
+     the `#tab=…` part survives and opens the right tab, view and unit.
+     The page writes `view=` into its address only on the Overview, by
+     design.
+   - A classic-era `/monitor#tab=blocked` opens Blocked.
+   - `/monitor/classic` loads and paints its numbers.
+   - All 13 views load on live data.
+2. **#127 (Apollo carry-out, health rate).** Rebased, bar green at 4,999.
+   System Health reads green, 70%, 37 of 53, instead of 761%.
+3. **#126 (non-ICP name-only floor, 0.85).** Rebased, bar green at 5,029.
+   Merged on Darshil's word.
+   - **Predicted before merging:** the old and new code run over every
+     cached verdict decide identically today, because all five domains it
+     changes had expired from the six-hour cache.
+   - **After deploy:** the deployed code decided all 3,718 cached verdicts
+     exactly as predicted. No existing lead's stamp changed. The
+     booked-lead sweep ran and stamped nothing.
+   - The five domains change only when someone next types them.
+
+**Decided 27 Sept:**
+- no extra CSV guards;
+- the digest is not fired by hand; Monday's run sends its new line.
+
+**Found after the switch: the origin check rejected the API's own pages
+(fix: #128, not merged).** The server's origin check only admitted
+`www.gushwork.ai`, `gushwork.ai` and the Webflow staging site. A browser
+sends Origin on fonts and POSTs even to the site the page came from, so:
+- **the dashboard's fonts have never loaded on production.** Every
+  screenshot and layout check went through the local preview, which has no
+  origin check;
+- **the three write buttons on both dashboards** (Lead magnet delivered and
+  retry, Partners acknowledge) **cannot have worked since the check existed**
+  (March). The database agrees: 0 lead magnets ever marked delivered,
+  0 partner failures ever acknowledged. Railway keeps logs only for the
+  live and previous deploy, so the logs can't say whether anyone tried.
+
+**Until #128 lands, a lead magnet can be marked delivered** without a
+browser, since only browsers send Origin:
+- the delivery queue's own route, `POST /lm/queue/<id>/delivered` with the
+  queue token; or
+- the dashboard's route from a terminal,
+  `POST /monitor/lm-delivered/<id>?token=…&undo=0`.
+
+The lead's id is in `/monitor/lm-leads`.
+
+**After #128 deploys** (planned checks, told to Darshil first):
+- the fonts load in a fresh browser;
+- each write button is tried from the page with an id or key that doesn't
+  exist, so its route answers and writes nothing.
+
+**Next:** the classic's removal PR, a week after the switch (about 3 Oct).
 
 **Final checks:**
 - two review passes, with every finding fixed;
@@ -598,13 +657,10 @@ word.**
 - **#127:** the Apollo backfill carry-out tool and the health-rate fix.
   Its writes are already done.
 
-**All three touch `index.js`, `CLAUDE.md` and `tests/.baseline.json`.**
-Merge them one at a time and rebase the rest after each; the baseline file
-will conflict every time. Re-save it from a bare bar, never by hand.
-After the merge:
-- confirm read-only that `/monitor` serves the new page, `/monitor/next`
-  redirects, and `/monitor/classic` is the classic;
-- then the classic's removal PR, one week later.
+**Learned merging them:** all three touched `index.js`, `CLAUDE.md` and
+`tests/.baseline.json`. Merged one at a time, rebasing the rest after each.
+The baseline conflicted every time and was re-saved from a bare bar, never
+by hand.
 
 **Answered on the side, for the record:**
 - Production's Apollo key ends **…zEuA**. Its scope cannot name its owner
