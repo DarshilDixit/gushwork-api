@@ -243,6 +243,18 @@ const key = async (k, shift) => { const base = { key: k, code: k, windowsVirtual
   await ev(`GW.show('leads', true, { stage: 'booked' })`); await waitIdle();
   await ev(`document.querySelector('[data-lclear]').focus()`); await key('Enter'); await waitIdle();
   if (!(await on('[data-lf="search"]'))) issues.push({ kind: 'keys', what: 'after Clear, focus was not on the search box' });
+  /* OLD LINKS STILL LAND (PR D, the switch). /monitor/next answers a 302 to
+     /monitor keeping its query; the #fragment is the BROWSER's to keep across
+     a redirect, so only a real browser can prove it. And a classic-era
+     /monitor#tab= link now opens the new page, which must honour it. */
+  const land = async (url) => { await send('Page.navigate', { url: 'about:blank' }); await sleep(250); await send('Page.navigate', { url }); for (let k = 0; k < 40; k++) { await sleep(300); if (await ev('!!(window.GW && GW.current && GW.current())')) break; } await sleep(600);
+    return ev(`({ path: location.pathname, hash: location.hash, tab: GW.current(), view: GW.S.view, unit: GW.S.unit, token: new URLSearchParams(location.search).has('token') })`); };
+  const L1 = await land(`${BASE}/monitor/next?token=${encodeURIComponent(TOKEN)}#tab=leads&view=week&unit=leads`);
+  if (L1.path !== '/monitor' || !L1.token || L1.tab !== 'leads' || !/tab=leads/.test(L1.hash)) issues.push({ kind: 'links', what: 'an old /monitor/next#tab=leads link landed on ' + L1.path + L1.hash + ' (tab ' + L1.tab + ', token kept: ' + L1.token + ')' });
+  const L2 = await land(`${BASE}/monitor/next?token=${encodeURIComponent(TOKEN)}#tab=overview&view=all&unit=leads`);
+  if (L2.path !== '/monitor' || L2.tab !== 'overview' || L2.view !== 'all' || L2.unit !== 'leads') issues.push({ kind: 'links', what: 'an old /monitor/next#tab=overview&view=all&unit=leads link landed on ' + L2.tab + ' / ' + L2.view + ' / ' + L2.unit });
+  const L3 = await land(`${BASE}/monitor?token=${encodeURIComponent(TOKEN)}#tab=blocked`);
+  if (L3.path !== '/monitor' || L3.tab !== 'blocked') issues.push({ kind: 'links', what: 'an old classic-style /monitor#tab=blocked link opened ' + L3.tab });
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 800, deviceScaleFactor: 1, mobile: true });
   await sleep(400);
   await ev(`document.querySelector('.menu-trigger').click()`); await sleep(350);

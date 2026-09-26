@@ -1066,6 +1066,15 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   GW.show('partners'); await ticks(20); healthDown = true; await GW.TABS.health.run(); healthDown = false; await ticks(20);
 
   /* Hash, tabs, nav */
+  /* OLD LINKS STILL LAND: a classic-era /monitor#tab=<name> link now opens
+     THIS page, so every tab name the classic knew must be one this page
+     registers -- read from the classic's own showTab list, not restated. */
+  const classicTabs = JSON.parse(((old.match(/function showTab\(n\)\{(\[[^\]]+\])\.forEach/) || [])[1] || '[]'));
+  ok('links: every classic tab name is a tab here, so an old /monitor#tab= link lands on it', classicTabs.length >= 11 && classicTabs.every((t) => Object.prototype.hasOwnProperty.call(GW.TABS, t)), JSON.stringify(classicTabs.filter((t) => !GW.TABS[t])) + ' of ' + classicTabs.length);
+  GW.show('blocked'); await ticks(20);
+  b.window.location.hash = '#tab=leads&view=week&unit=leads'; (b.wlisteners.hashchange || []).forEach((f) => f()); await ticks(20);
+  ok('links: a #tab/view/unit fragment opens that tab with that unit', GW.current() === 'leads' && GW.S.unit === 'leads');
+  GW.show('partners'); await ticks(20);
   ok('nav: every rebuilt tab is registered with activate and deactivate', ['overview', 'health', 'dropoff', 'dupes', 'lm', 'leads', 'blocked', 'sdr', 'model', 'visitors', 'partners'].every((t) => GW.TABS[t] && GW.TABS[t].activate && GW.TABS[t].deactivate && GW.TABS[t].title));
   ok('nav: switching tab writes the hash', /tab=partners/.test(b.window.location.hash), b.window.location.hash);
   const navHtml = b.els['nav-side'] ? b.els['nav-side'].innerHTML : '';
