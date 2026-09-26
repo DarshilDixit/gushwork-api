@@ -440,7 +440,7 @@
       var cur = tab(); if (cur !== 'leads' && cur !== 'blocked') return;
       /* the row opened (ui.js toggled it first): fetch its change log */
       var x = t.closest('[data-sid]'); if (x) { if (x.getAttribute('aria-expanded') === 'true') ensureChanges(x.getAttribute('data-sid'), x.getAttribute('data-x')); return; }
-      var pg = t.closest('[data-pg]') || t.closest('[data-pg-step]'); if (pg) { G.S.q.page = pg.getAttribute('data-pg') || pg.getAttribute('data-pg-step'); if (G.S.q.page === '1') delete G.S.q.page; reload(true); return; }
+      var pg = t.closest('[data-pg]') || t.closest('[data-pg-step]'); if (pg) { G.S.q.page = pg.getAttribute('data-pg') || pg.getAttribute('data-to'); if (G.S.q.page === '1') delete G.S.q.page; reload(true); return; }
       if (cur !== 'leads') return;
       var s = t.closest('[data-lsort]'); if (s) { var k = s.getAttribute('data-lsort'), was = G.S.q.sort || 'created_at';
         G.S.q.dir = k === was ? ((G.S.q.dir || 'desc') === 'desc' ? 'asc' : 'desc') : (k === 'created_at' ? 'desc' : 'asc');

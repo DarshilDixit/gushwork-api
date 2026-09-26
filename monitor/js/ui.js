@@ -162,18 +162,21 @@ GW.ui = (function (G) {
     }).join('');
     return '<div class="tbl stack"' + (o.region ? ' tabindex="0" role="region" aria-label="' + esc(o.region) + '"' : '') + '><table>' + head + '<tbody>' + body + '</tbody></table></div>';
   }
-  /* Previous and Next carry their target in attr + '-step', NOT in attr: on
-     page 1 the disabled Previous also points at page 1, and G.paint refocuses
-     by selector -- the first [data-pg="1"] in the page was the dead button,
-     so focus fell to the body after every trip back to page 1. */
+  /* Previous and Next are named by DIRECTION (attr-step="prev|next"), their
+     target page in data-to -- never in attr. G.paint refocuses by selector:
+     sharing attr="1" made the first [data-pg="1"] on page 1 the disabled
+     Previous, and carrying the target in the name made Next unfindable once
+     the page moved. By direction, Next is still Next after the move, and a
+     disabled one hands focus to the current page. */
   function pager(page, pages, attr) {
     if (!pages || pages <= 1) return '';
-    var b = function (n, lbl, dis, cur) { return '<button class="pgb' + (cur ? ' on' : '') + '" ' + attr + (lbl ? '-step' : '') + '="' + n + '"' + (dis ? ' disabled' : '') + (cur ? ' aria-current="page"' : '') + (lbl ? ' aria-label="' + lbl + '"' : '') + '>' + (lbl ? ic(n < page ? 'caret-left' : 'caret-right') : n) + '</button>'; };
-    var h = b(Math.max(1, page - 1), 'Previous page', page <= 1, false), last = 0;
+    var b = function (n, dir, dis, cur) { var lbl = dir === 'prev' ? 'Previous page' : dir === 'next' ? 'Next page' : null;
+      return '<button class="pgb' + (cur ? ' on' : '') + '" ' + (dir ? attr + '-step="' + dir + '" data-to="' + n + '"' : attr + '="' + n + '"') + (dis ? ' disabled' : '') + (cur ? ' aria-current="page"' : '') + (lbl ? ' aria-label="' + lbl + '"' : '') + '>' + (dir === 'prev' ? ic('caret-left') : dir === 'next' ? ic('caret-right') : n) + '</button>'; };
+    var h = b(Math.max(1, page - 1), 'prev', page <= 1, false), last = 0;
     for (var n = 1; n <= pages; n++) {
       if (n === 1 || n === pages || Math.abs(n - page) <= 2) { if (last && n - last > 1) h += '<span class="pgg" aria-hidden="true">…</span>'; h += b(n, null, false, n === page); last = n; }
     }
-    h += b(Math.min(pages, page + 1), 'Next page', page >= pages, false);
+    h += b(Math.min(pages, page + 1), 'next', page >= pages, false);
     return '<nav class="pager" aria-label="Pages">' + h + '<span class="pgi">Page ' + fmt(page) + ' of ' + fmt(pages) + '</span></nav>';
   }
   /* ONE BAD ROW MUST NOT BLANK A TAB. A render that throws leaves the loading

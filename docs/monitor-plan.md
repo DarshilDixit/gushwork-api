@@ -364,8 +364,10 @@ _(kept current as the work moves)_
   **Final run after the review fixes (26 Sept): 288 combinations, 0
   findings** -- every width 360-1280 in both themes, and 16 of 22 views at
   1440 light. It was STOPPED there (Claude Code reclaimed memory; not a
-  failure). **Still to run: 1440 light's opened views, all of 1440 dark,
-  the keyboard section, and the crosscheck after the review fixes.**
+  failure). Resumed one step at a time with a memory check before each:
+  **1440 light and dark, 44 combinations, 0 findings** -- so 316 layout
+  combinations since the review fixes, all clean. Next: the keyboard
+  section (`KEYS=only`), then the crosscheck.
 - [x] **Review sweep** (five lenses, each finding adversarially verified;
   workflow run `wf_c2ad4b99-d16`). 45 confirmed, about 30 distinct fixes,
   commit `5bd3659`; the two first-round mutation survivors pinned in

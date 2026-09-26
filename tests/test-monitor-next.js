@@ -911,8 +911,8 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   leadsHook = null; GW.S.q = {};
   /* 8. the pager: Previous and Next never share a selector with a page button */
   GW.show('leads'); await ticks(20); v = view();
-  ok('review: Previous and Next carry their target apart from the page buttons', /data-pg-step="1"[^>]*aria-label="Previous page"/.test(v) && /data-pg-step="3"[^>]*aria-label="Next page"/.test(v) && !/data-pg="1"[^>]*aria-label/.test(v));
-  const pg0 = b.calls.length; fire('click', el({ 'data-pg-step': '3' })); await ticks(20);
+  ok('review: Previous and Next are named by direction, their target apart', /data-pg-step="prev" data-to="1"[^>]*aria-label="Previous page"/.test(v) && /data-pg-step="next" data-to="3"[^>]*aria-label="Next page"/.test(v) && !/data-pg="1"[^>]*aria-label/.test(v));
+  const pg0 = b.calls.length; fire('click', el({ 'data-pg-step': 'next', 'data-to': '3' })); await ticks(20);
   ok('review: Next still pages, and the page is announced', b.calls.slice(pg0).some((c) => c.path === '/monitor/leads' && c.q.page === '3') && /page 2 of 179/.test(live()));
   GW.S.q = {};
   /* 9. a new hash on the SAME tab fetches, not only repaints */

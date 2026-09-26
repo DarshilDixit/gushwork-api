@@ -26,6 +26,7 @@
 
    Run: node tools/check-monitor-layout.mjs   (preview running; reads its ready file)
         WIDTHS=390,1440 THEMES=dark node tools/check-monitor-layout.mjs
+        KEYS=0 skips the keyboard section; KEYS=only runs nothing else
    Exit 0 only when every combination is clean. Screenshots land in OUT.
    ============================================================================ */
 import { spawn } from 'node:child_process';
@@ -51,6 +52,7 @@ const THEMES = (process.env.THEMES || 'light,dark').split(',');
    the tables inside them -- are measured too, not only the collapsed list. */
 const PAGES = (process.env.PAGES || 'overview:today,overview:week,overview:all,overview:week:leads,overview:today:table,health,dropoff,dupes,lm,leads,blocked,sdr,model,visitors,visitors?map=1,partners,leads+open,blocked+open,sdr+open,model+open,visitors+open,partners+open').split(',');
 const SHOTS = process.env.SHOTS !== '0';
+const KEYS = process.env.KEYS || '1';   /* '0' = layouts only, 'only' = keyboard only */
 mkdirSync(OUT, { recursive: true });
 
 /* its own throwaway profile, deleted on the way out: the history in it holds
@@ -144,7 +146,7 @@ const AUDIT = `(() => {
 
 const results = [];
 let first = true;
-for (const width of WIDTHS) {
+for (const width of (KEYS === 'only' ? [] : WIDTHS)) {
   const height = width < 768 ? 800 : width < 1280 ? 1024 : 900;
   await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: width < 768 });
   await send('Emulation.setTouchEmulationEnabled', { enabled: width <= 1023, maxTouchPoints: width <= 1023 ? 5 : 1 });
@@ -200,6 +202,7 @@ for (const width of WIDTHS) {
    the hash alone; a repaint gives focus back to the control that had it; and
    Shift+Tab out of the open drawer closes it rather than walking focus onto
    what it covers. */
+if (KEYS !== '0') {
 const key = async (k, shift) => { const base = { key: k, code: k, windowsVirtualKeyCode: k === 'Tab' ? 9 : 13, modifiers: shift ? 8 : 0 };
   await send('Input.dispatchKeyEvent', Object.assign({ type: 'rawKeyDown' }, base)); if (k === 'Enter') await send('Input.dispatchKeyEvent', Object.assign({ type: 'char', text: '\r' }, base));
   await send('Input.dispatchKeyEvent', Object.assign({ type: 'keyUp' }, base)); await sleep(150); };
@@ -222,6 +225,23 @@ const key = async (k, shift) => { const base = { key: k, code: k, windowsVirtual
   if (!/tab=overview/.test(af.hash) || !/unit=leads/.test(af.hash)) issues.push({ kind: 'keys', what: 'the skip link changed the hash to ' + af.hash });
   const kept = await ev(`(()=>{ const b=document.querySelector('[data-unit="leads"]'); b.focus(); GW.TABS.overview.render(); const a=document.activeElement; return a && a.getAttribute('data-unit'); })()`);
   if (kept !== 'leads') issues.push({ kind: 'keys', what: 'a repaint dropped focus (it is on ' + kept + ')' });
+  /* PR C, with real keys: the pager keeps focus on the control pressed, a
+     Previous that goes dead on page 1 hands focus to the current page, and
+     Clear -- which removes itself -- sends focus to the search box. Each one
+     dropped focus to the page body in a review of the stubbed suite's blind spot. */
+  const on = (sel) => ev(`(()=>{ const a=document.activeElement; return !!(a && a.matches && a.matches(${JSON.stringify(sel)})); })()`);
+  const waitIdle = async () => { for (let k = 0; k < 40; k++) { await sleep(300); if (await ev(`!/updating…/.test((document.querySelector('.readat')||{}).textContent||'') && !document.querySelector('#view .skel')`)) break; } await sleep(300); };
+  await ev(`GW.show('leads', true, {})`); await waitIdle();
+  if (await ev(`!!document.querySelector('[data-pg-step="next"]')`)) {
+    await ev(`document.querySelector('[data-pg-step="next"]').focus()`); await key('Enter'); await waitIdle();
+    if (!(await on('[data-pg-step="next"]'))) issues.push({ kind: 'keys', what: 'after Next, focus was not on Next (it is on ' + (await ev(`document.activeElement && (document.activeElement.outerHTML||'').slice(0,60)`)) + ')' });
+    if (!/page=2/.test(await ev('location.hash'))) issues.push({ kind: 'keys', what: 'Next did not move to page 2' });
+    await ev(`document.querySelector('[data-pg-step="prev"]').focus()`); await key('Enter'); await waitIdle();
+    if (!(await on('[aria-current="page"]'))) issues.push({ kind: 'keys', what: 'Previous back to page 1 left focus on ' + (await ev(`document.activeElement && (document.activeElement.outerHTML||'').slice(0,60)`)) + ', not the current page' });
+  } else issues.push({ kind: 'keys', what: 'All leads has only one page, so the pager could not be checked' });
+  await ev(`GW.show('leads', true, { stage: 'booked' })`); await waitIdle();
+  await ev(`document.querySelector('[data-lclear]').focus()`); await key('Enter'); await waitIdle();
+  if (!(await on('[data-lf="search"]'))) issues.push({ kind: 'keys', what: 'after Clear, focus was not on the search box' });
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 800, deviceScaleFactor: 1, mobile: true });
   await sleep(400);
   await ev(`document.querySelector('.menu-trigger').click()`); await sleep(350);
@@ -233,6 +253,7 @@ const key = async (k, shift) => { const base = { key: k, code: k, windowsVirtual
   if (dr.open && dr.inside) issues.push({ kind: 'keys', what: 'Shift+Tab from the first drawer item stayed inside the drawer' });
   results.push({ label: 'keyboard', issues });
   process.stdout.write((issues.length ? '✗ ' : '✓ ') + 'keyboard' + (issues.length ? '  ' + issues.length + ' issue(s)' : '') + '\n');
+}
 }
 writeFileSync(`${OUT}/report.json`, JSON.stringify(results, null, 1));
 const bad = results.filter((r) => r.issues.length);
