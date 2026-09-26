@@ -3567,6 +3567,35 @@ app.get('/monitor/duplicates', async (req, res) => {
   }
 });
 
+/* ONE CSV CELL, for the All leads and SDR exports (both dashboards call
+   these routes). Decided 26 Sept 2026, Darshil.
+
+   A cell a visitor typed that starts with = or @ (or a tab or carriage
+   return) runs as a FORMULA when an SDR opens the file in Excel or Sheets:
+   =HYPERLINK(...) is a phishing link, and "+cmd|..." is the old DDE attack.
+   Those get a leading apostrophe, which both read as "this is text".
+
+   + AND - ARE THE HARD PART. Measured read-only: 2,669 of 2,676 stored
+   phone numbers start with "+", so the Lead magnet export's blanket rule
+   would put an apostrophe on 99.7% of the phone column a dialer imports.
+   So a + or - cell is left EXACTLY as stored when it is only a number --
+   digits, spaces, ( ) . and -, with at least one digit -- which can never
+   call a function or reach another cell, and gets the apostrophe
+   otherwise. Every real phone shape passes through untouched; four real
+   values ever got the apostrophe ("- google", two @ values).
+
+   Then quoted on a comma, a quote, or a CR/LF. CR used to be missing from
+   that test, so a stray carriage return split a row. */
+const CSV_NUMBER_ONLY = /^[+-][0-9 ().-]*[0-9][0-9 ().-]*$/;
+function csvCell(v) {
+  if (v === null || v === undefined) return '';
+  let s = String(v);
+  const c = s.charAt(0);
+  if (c === '=' || c === '@' || c === '\t' || c === '\r') s = "'" + s;
+  else if ((c === '+' || c === '-') && !CSV_NUMBER_ONLY.test(s)) s = "'" + s;
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
 app.get('/monitor/leads', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
@@ -3828,15 +3857,10 @@ app.get('/monitor/leads', async (req, res) => {
         'enriched_linkedin','enriched_city','enriched_state','enriched_country',
         'enriched_annual_revenue','enriched_total_funding','enriched_funding_stage'
       ];
-      const escape = v => {
-        if (v === null || v === undefined) return '';
-        const s = String(v);
-        return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g,'""')}"` : s;
-      };
       const csv = [
         cols.join(','),
         // Same derived flag as the JSON path, from the same function.
-        ...allRows.rows.map(r => cols.map(c => escape(
+        ...allRows.rows.map(r => cols.map(c => csvCell(
           c === 'unverifiable_pair' ? isUnverifiablePair(r)
           : c === 'is_internal'     ? isInternalSubmission(r.email, r.page_url)
           /* The export carries it because the screen does. These two drift
@@ -4056,14 +4080,9 @@ app.get('/monitor/sdr', async (req, res) => {
         'enriched_departments','enriched_linkedin','enriched_city','enriched_country',
         'enriched_annual_revenue','enriched_total_funding','enriched_funding_stage'
       ];
-      const escape = v => {
-        if (v === null || v === undefined) return '';
-        const s = String(v);
-        return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g,'""')}"` : s;
-      };
       const csv = [
         cols.join(','),
-        ...leads.map(r => cols.map(c => escape(r[c])).join(','))
+        ...leads.map(r => cols.map(c => csvCell(r[c])).join(','))
       ].join('\n');
       res.setHeader('Content-Type', 'text/csv');
       res.setHeader('Content-Disposition', `attachment; filename="sdr-list-${etDateOnly()}.csv"`);
@@ -4077,16 +4096,17 @@ app.get('/monitor/sdr', async (req, res) => {
   }
 });
 
-/* THE NEW DASHBOARD, side by side at /monitor/next until it is switched in.
-   Front end in monitor/, assembled by monitor-next.js; this line is all it
-   needs from here. */
+/* THE DASHBOARD. /monitor is the new one since PR D (26 Sept 2026), front
+   end in monitor/, assembled by monitor-next.js -- this line is all it
+   needs from here. The old one is the route below, at /monitor/classic, for
+   one week as the fallback; removing it is its own PR. */
 /* THE LABELS TRAVEL WITH THE PAGE. The new dashboard reads the server's own
    WEBSITE_REASON_LABELS and META_WITHHELD_LABELS from its config instead of
    carrying a third copy in the browser -- the classic already holds a second
    (var WLBL=), and a copy is how the two drifted before. */
 require('./monitor-next').mount(app, { tz: DASH_TZ, labels: { website: WEBSITE_REASON_LABELS, meta: META_WITHHELD_LABELS } });
 
-app.get('/monitor', (req, res) => {
+app.get('/monitor/classic', (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) {
     return res.status(401).send('<h2 style="font-family:sans-serif;padding:2rem">401 — Unauthorized. Add ?token=YOUR_TOKEN to the URL.</h2>');
@@ -4191,9 +4211,12 @@ app.get('/monitor', (req, res) => {
   '<div class="topbar"><div style="display:flex;align-items:center;gap:12px"><span class="logo">Gushwork &#8212; Form Monitor</span>' +
   '<div class="apill"><span class="dot" id="apidot"></span><span id="apist">Checking...</span></div>' +
   '<div class="apill" title="Every timestamp and every day boundary on this dashboard is US Eastern, and follows daylight saving automatically.">&#128340; All times ET</div></div>' +
-  '<div style="display:flex;align-items:center;gap:10px"><a class="btn" style="text-decoration:none" href="/monitor/next' + tp + '" title="The rebuilt dashboard, running side by side until it replaces this one">New dashboard &#8594;</a><span class="lu" id="lupd">&#8212;</span>' +
+  '<div style="display:flex;align-items:center;gap:10px"><a class="btn" style="text-decoration:none" href="/monitor' + tp + '" title="The dashboard now lives at /monitor. This classic page is kept for one week as a fallback.">&#8592; Back to the dashboard</a><span class="lu" id="lupd">&#8212;</span>' +
   '<button class="btn" onclick="loadAll()">&#8635; Refresh</button></div></div>' +
   '<div class="page">' +
+  /* THE FALLBACK, said on the page itself: a reader who lands here from an
+     old bookmark should know this is not where the dashboard lives now. */
+  '<div style="margin:0 0 12px;padding:10px 14px;border-radius:8px;background:#fff7ed;color:#9a3412;font-size:13px">This is the <b>classic</b> dashboard, kept for one week as a fallback. The dashboard is now at <a href="/monitor' + tp + '" style="color:#9a3412;font-weight:600">/monitor</a>.</div>' +
   '<div class="tabs">' +
   '<div class="tab act" id="t-overview" onclick="showTab(\'overview\')">Overview</div>' +
   '<div class="tab" id="t-leads" onclick="showTab(\'leads\')">All Leads</div>' +
@@ -4760,7 +4783,10 @@ app.get('/monitor', (req, res) => {
   'document.getElementById("dp-note").innerHTML=' +
   '"Counted as <b>"+U+"</b>. A period marked <span class=\\"badge bx\\">part</span> is not fully covered by the window \\u2014 usually the current one, still filling. "' +
   '+"Source is read from the ad click first, then from the referrer where the click lost its tags: that recovers <b>"+dpNum(d.recovered)+"</b> "+U+" that would otherwise read as direct. "' +
-  '+"Our own test submissions are included, as everywhere else on this dashboard \\u2014 <b>"+dpNum(d.internal)+"</b> of these.";' +
+  /* The route LEAVES OUT our own test submissions since 26 Sept 2026 (the
+     new Overview and the Monday digest do too); this classic tab's Overview
+     still counts them, so the sentence says which is which. */
+  '+"Our own test submissions are left out of this tab \\u2014 <b>"+dpNum(d.internal)+"</b> in this window, not counted above. (This dashboard\\u2019s Overview still counts them; the new one does not.)";' +
   '}' +
 
   'async function loadVisitors(){' +
@@ -6126,7 +6152,7 @@ app.get('/monitor', (req, res) => {
   '}catch(e){document.getElementById("dupes-tbody").innerHTML="<tr><td colspan=\\"7\\" class=\\"nd\\" style=\\"color:#b91c1c\\">Failed: "+esc(e.message)+"</td></tr>";}}' +
   'function toggleDupeRow(i){var row=document.getElementById("dupe-er-"+i);if(!row)return;var vis=row.style.display!=="none";row.style.display=vis?"none":"table-row";var btn=document.getElementById("dupe-xbtn-"+i);if(btn)btn.textContent=vis?"\\u25B6":"\\u25BC";}' +
   'renderSortArrows();loadAll();setInterval(loadAll,60000);' +
-  /* Opened from /monitor/next at a tab it has not rebuilt yet: land on it. */
+  /* Opened from the dashboard's "classic" link at a tab: land on it. */
   '(function(){var m=String((window.location&&window.location.hash)||"").match(/tab=([a-z]+)/);if(m&&document.getElementById("tp-"+m[1]))showTab(m[1]);})();' +
   'checkHealth();setInterval(checkHealth,300000);' +
   'loadPartnerGaps();setInterval(loadPartnerGaps,600000);' +
@@ -13060,51 +13086,74 @@ async function dropoffReport({ from, to, grain, source, mode } = {}) {
      attempt is usually somebody who got there in the end. Both readings
      are true; they answer different questions, which is why this is a
      toggle and not a correction. */
+  /* OUR OWN TEST SUBMISSIONS ARE LEFT OUT -- Darshil's decision, 26 Sept
+     2026, for the Overview, this tab and the Monday digest together, so
+     the three keep agreeing. They were INCLUDED before, as "a known
+     distortion, not a decision" (CLAUDE.md). Left out ROW by row, before
+     people are formed, exactly as the Overview does it: a person with one
+     staging-site row and one real row counts, from the real row. The rows
+     left out are COUNTED, not hidden -- internal and internal_by_period
+     below, which every surface prints in words. Measured before deciding:
+     1.8% of all rows, rates moved by at most ~0.25 points, but Blocked by
+     12% and a testing day by up to 40% of its month. */
   const sql = md === 'people'
     ? `WITH base AS (${base}),
+            kept AS (SELECT * FROM base WHERE internal IS NOT TRUE),
             ppl AS (
               SELECT DISTINCT ON (person)
                      person, bucket, source, recovered,
-                     MIN(stage)      OVER (PARTITION BY person) AS stage,
-                     bool_or(internal) OVER (PARTITION BY person) AS internal
-                FROM base
+                     MIN(stage)      OVER (PARTITION BY person) AS stage
+                FROM kept
                ORDER BY person, created_at ASC)
        SELECT bucket, source, stage, COUNT(*)::int AS n,
-              COUNT(*) FILTER (WHERE internal)::int  AS internal_n,
               COUNT(*) FILTER (WHERE recovered)::int AS recovered_n
          FROM ppl GROUP BY 1,2,3`
-    : `WITH base AS (${base})
+    : `WITH base AS (${base}),
+            kept AS (SELECT * FROM base WHERE internal IS NOT TRUE)
        SELECT bucket, source, stage, COUNT(*)::int AS n,
-              COUNT(*) FILTER (WHERE internal)::int  AS internal_n,
               COUNT(*) FILTER (WHERE recovered)::int AS recovered_n
-         FROM base GROUP BY 1,2,3`;
+         FROM kept GROUP BY 1,2,3`;
+  /* What was left out, in SUBMISSIONS (rows) in both modes -- the unit
+     the words on screen use -- per period, for the same window and source. */
+  const leftSql = `WITH base AS (${base})
+       SELECT bucket, COUNT(*)::int AS internal_n FROM base WHERE internal IS TRUE GROUP BY 1`;
 
-  const { rows: raw } = await pool.query(sql, params);
+  const [{ rows: raw }, { rows: leftRows }] = await Promise.all([pool.query(sql, params), pool.query(leftSql, params)]);
 
   /* THE SOURCE LIST IS ALWAYS UNFILTERED, so choosing one channel never
      removes the others from the picker you chose it with. */
+  const sp = [fromD, toD];
   const srcSql = `
     WITH base AS (
       SELECT lower(email) AS person, created_at,
              ${DROPOFF_SOURCE_SQL} AS source
         FROM leads
        WHERE (created_at AT TIME ZONE '${DASH_TZ}') >= $1::timestamp
-         AND (created_at AT TIME ZONE '${DASH_TZ}') <  ($2::date + 1)::timestamp)
+         AND (created_at AT TIME ZONE '${DASH_TZ}') <  ($2::date + 1)::timestamp
+         /* IS NOT TRUE, never NOT: a row with no email makes the clause
+            NULL, and NOT NULL is NULL -- the row would vanish from the list */
+         AND ${internalLeadSqlClause('email', 'page_url', sp)} IS NOT TRUE)
     SELECT source, ${md === 'people' ? 'COUNT(DISTINCT person)' : 'COUNT(*)'}::int AS n
       FROM base GROUP BY 1 ORDER BY 2 DESC`;
-  const { rows: srcRows } = await pool.query(srcSql, [fromD, toD]);
+  const { rows: srcRows } = await pool.query(srcSql, sp);
 
   const keyOf = new Set(periods.map((p) => p.key));
   const totals = {}; periods.forEach((p) => { totals[p.key] = 0; });
   const counts = {}; DROPOFF_STAGES.forEach((s) => { counts[s.key] = {}; periods.forEach((p) => { counts[s.key][p.key] = 0; }); });
   let grand = 0, internal = 0, recovered = 0;
+  const internalBy = {}; periods.forEach((p) => { internalBy[p.key] = 0; });
 
   for (const r of raw) {
     const k = String(r.bucket);
     if (!keyOf.has(k) || !counts[r.stage]) continue;
     counts[r.stage][k] += r.n;
     totals[k] += r.n; grand += r.n;
-    internal += r.internal_n; recovered += r.recovered_n;
+    recovered += r.recovered_n;
+  }
+  for (const r of leftRows) {
+    const k = String(r.bucket);
+    if (!keyOf.has(k)) continue;
+    internalBy[k] += r.internal_n; internal += r.internal_n;
   }
 
   const rows = DROPOFF_STAGES.map((s) => {
@@ -13123,7 +13172,9 @@ async function dropoffReport({ from, to, grain, source, mode } = {}) {
     booked_rate: bookedRate,
     grand_booked_rate: grand ? +(100 * booked / grand).toFixed(1) : null,
     sources: srcRows.map((r) => ({ name: r.source, n: r.n })),
-    internal, recovered,
+    /* LEFT OUT of every count above, never inside them */
+    internal, internal_by_period: internalBy, internal_excluded: true,
+    recovered,
     /* "We could not check" is never dressed as a measurement, so a
        period with no leads reports null rather than a 0% booking rate. */
     generated_at: new Date().toISOString(),
@@ -13318,8 +13369,16 @@ app.get('/monitor/dropoff', async (req, res) => {
      - the funnel excludes webhook-origin leads, like /monitor/funnel:
        they never loaded a form page, so they inflate both ends of a
        session conversion rate.
-   Internal test submissions are INCLUDED, as everywhere on this
-   dashboard -- a known distortion, not a decision.
+   OUR OWN TEST SUBMISSIONS ARE LEFT OUT, and counted. Darshil's decision,
+   26 Sept 2026, for the Overview, Dropoff and the Monday digest together.
+   They were INCLUDED until then, "a known distortion, not a decision".
+   Every read of leads below skips internalLeadSqlClause rows (the rule
+   behind the "ours" marker); ours, below, says how many were left out, so
+   the page can say it in words. IS NOT TRUE and never NOT: a NULL from the
+   clause must keep the row, not drop it. SESSIONS cannot be separated -- a
+   session has no email -- so they are unchanged, and the page says that too.
+   Measured before deciding: 1.8% of all rows, rates moved by at most ~0.25
+   points, Blocked by 12%, a testing day by up to 40% of its month.
 
    A READ, and nothing but: no write, no network, and it takes its
    database as an argument so tools/preview-monitor.js can lift it and
@@ -13331,21 +13390,27 @@ const OVERVIEW_WEBHOOK_SOURCES = `('rh_webhook','cal_webhook')`;
    completed session with no booking, followed LATER by one for the same
    address. COALESCE because this reads history from before booked_at
    existed (CLAUDE.md, "Bookings: two different questions"). */
-const RECOVERED_BOOKINGS_SQL = `
+/* A FUNCTION, so the Overview can read the SAME definition minus our own
+   test rows (keepL / keepB are extra predicates on the two aliases);
+   /monitor/metrics reads it bare, so its SQL is unchanged. */
+function recoveredBookingsSql(keepL = '', keepB = '') {
+  return `
   SELECT COUNT(*) AS recovered FROM (
     SELECT LOWER(l.email) AS em
     FROM leads l
     WHERE l.email IS NOT NULL
       AND l.completed = true
-      AND l.booking_uid IS NULL
+      AND l.booking_uid IS NULL${keepL}
       AND EXISTS (
         SELECT 1 FROM leads b
         WHERE LOWER(b.email) = LOWER(l.email)
-          AND b.booking_uid IS NOT NULL
+          AND b.booking_uid IS NOT NULL${keepB}
           AND COALESCE(b.booked_at, b.created_at) >= l.created_at
       )
     GROUP BY LOWER(l.email)
   ) x`;
+}
+const RECOVERED_BOOKINGS_SQL = recoveredBookingsSql();
 
 /* VALUES rows for a list of windows, bound -- never interpolated. */
 function overviewWindowsSql(wins, params) {
@@ -13367,6 +13432,7 @@ async function overviewReport(db, { view, asof } = {}) {
     if (isNaN(t.getTime())) { const e = new Error('asof must be an ISO timestamp'); e.status = 400; throw e; }
     if (t < at) at = t;
   }
+  const bp0 = [at.toISOString()];
   const B = (await db.query(`
     SELECT $1::timestamptz AS asof,
            (date_trunc('day',   $1::timestamptz AT TIME ZONE '${DASH_TZ}') AT TIME ZONE '${DASH_TZ}')                        AS d0,
@@ -13379,8 +13445,8 @@ async function overviewReport(db, { view, asof } = {}) {
            ((date_trunc('month', $1::timestamptz AT TIME ZONE '${DASH_TZ}') - interval '1 month') AT TIME ZONE '${DASH_TZ}') AS m1,
            (($1::timestamptz AT TIME ZONE '${DASH_TZ}' - interval '1 month') AT TIME ZONE '${DASH_TZ}')                       AS m1_same,
            (SELECT MIN(created_at) FROM form_sessions)                                                              AS go_live,
-           (SELECT MIN(created_at) FROM leads WHERE email IS NOT NULL)                                              AS first_lead
-  `, [at.toISOString()])).rows[0];
+           (SELECT MIN(created_at) FROM leads WHERE email IS NOT NULL AND ${internalLeadSqlClause('email', 'page_url', bp0)} IS NOT TRUE) AS first_lead
+  `, bp0)).rows[0];
   const iso = (x) => (x ? new Date(x).toISOString() : null);
   const asofIso = iso(B.asof);
 
@@ -13418,7 +13484,7 @@ async function overviewReport(db, { view, asof } = {}) {
              (l.prefill_source IS NULL OR l.prefill_source NOT IN ${OVERVIEW_WEBHOOK_SOURCES}) AS via_form,
              l.non_icp_llm_flagged, l.non_icp_blocked
         FROM w JOIN leads l ON l.created_at >= w.s AND l.created_at < w.e
-       WHERE l.email IS NOT NULL),
+       WHERE l.email IS NOT NULL AND ${internalLeadSqlClause('l.email', 'l.page_url', kp)} IS NOT TRUE),
     best AS (SELECT k, person, MIN(stage) AS stage FROM b GROUP BY k, person),
     bp AS (SELECT k,
                   COUNT(*) FILTER (WHERE stage IN ('2_dq_b2c','3_dq_waitlist','4_dq_other'))::int AS people_dq,
@@ -13466,7 +13532,7 @@ async function overviewReport(db, { view, asof } = {}) {
              to_char(date_trunc('${grain}', l.created_at AT TIME ZONE '${DASH_TZ}'), '${fmt}') AS bucket,
              (l.booking_uid IS NOT NULL AND COALESCE(l.booked_at, l.created_at) < w.e) AS bk
         FROM w JOIN leads l ON l.created_at >= w.s AND l.created_at < w.e
-       WHERE l.email IS NOT NULL),
+       WHERE l.email IS NOT NULL AND ${internalLeadSqlClause('l.email', 'l.page_url', sp)} IS NOT TRUE),
     per AS (SELECT k, person, COUNT(DISTINCT bucket) AS nb FROM b GROUP BY k, person)
     SELECT 'bucket' AS kind, k, bucket, COUNT(DISTINCT person)::int AS people, COUNT(*)::int AS leads,
            COUNT(DISTINCT person) FILTER (WHERE bk)::int AS people_booked, COUNT(*) FILTER (WHERE bk)::int AS leads_booked
@@ -13475,7 +13541,17 @@ async function overviewReport(db, { view, asof } = {}) {
     SELECT 'repeats', k, NULL, COUNT(*) FILTER (WHERE nb > 1)::int, (SUM(nb) - COUNT(*))::int, NULL, NULL
       FROM per GROUP BY k`;
 
-  const jobs = [db.query(kpiSql, kp), db.query(pageSql, pp), db.query(seriesSql, sp)];
+  /* WHAT WAS LEFT OUT, per KPI window, in submissions (rows) and in
+     addresses -- the numbers the page prints in words beside the cards. */
+  const op = [];
+  const oursSql = `
+    WITH w(k, s, e) AS (${overviewWindowsSql(allKpiWins, op)})
+    SELECT w.k, COUNT(l.created_at)::int AS leads, COUNT(DISTINCT lower(l.email))::int AS people
+      FROM w JOIN leads l ON l.created_at >= w.s AND l.created_at < w.e
+     WHERE l.email IS NOT NULL AND ${internalLeadSqlClause('l.email', 'l.page_url', op)} IS TRUE
+     GROUP BY w.k`;
+
+  const jobs = [db.query(kpiSql, kp), db.query(pageSql, pp), db.query(seriesSql, sp), db.query(oursSql, op)];
   let chanIdx = -1, lastIdx = -1, recIdx = -1;
   if (v !== 'all') {
     /* FIRST TOUCH per person, so the shares add up to the people total;
@@ -13486,23 +13562,31 @@ async function overviewReport(db, { view, asof } = {}) {
       first AS (
         SELECT DISTINCT ON (lower(l.email)) lower(l.email) AS person, ${DROPOFF_SOURCE_SQL} AS source
           FROM w JOIN leads l ON l.created_at >= w.s AND l.created_at < w.e
-         WHERE l.email IS NOT NULL
+         WHERE l.email IS NOT NULL AND ${internalLeadSqlClause('l.email', 'l.page_url', cp)} IS NOT TRUE
          ORDER BY lower(l.email), l.created_at ASC),
       rows_ AS (
         SELECT ${DROPOFF_SOURCE_SQL} AS source
           FROM w JOIN leads l ON l.created_at >= w.s AND l.created_at < w.e
-         WHERE l.email IS NOT NULL)
+         WHERE l.email IS NOT NULL AND ${internalLeadSqlClause('l.email', 'l.page_url', cp)} IS NOT TRUE)
       SELECT 'people' AS unit, source, COUNT(*)::int AS n FROM first GROUP BY source
       UNION ALL
       SELECT 'leads', source, COUNT(*)::int FROM rows_ GROUP BY source`, cp)) - 1;
-    lastIdx = jobs.push(db.query(`SELECT MAX(created_at) AS last_lead_at FROM leads WHERE created_at < $1`, [asofIso])) - 1;
+    const lp = [asofIso];
+    lastIdx = jobs.push(db.query(`SELECT MAX(created_at) AS last_lead_at FROM leads WHERE created_at < $1 AND ${internalLeadSqlClause('email', 'page_url', lp)} IS NOT TRUE`, lp)) - 1;
   } else {
-    recIdx = jobs.push(db.query(RECOVERED_BOOKINGS_SQL)) - 1;
+    /* the shared definition, minus our own rows on BOTH sides of it */
+    const rp = [];
+    const keepL = `\n      AND ${internalLeadSqlClause('l.email', 'l.page_url', rp)} IS NOT TRUE`;
+    const keepB = `\n          AND ${internalLeadSqlClause('b.email', 'b.page_url', rp)} IS NOT TRUE`;
+    recIdx = jobs.push(db.query(recoveredBookingsSql(keepL, keepB), rp)) - 1;
   }
   const out = await Promise.all(jobs);
 
   const kpi = {};
   for (const r of out[0].rows) kpi[r.k] = r;
+  const oursBy = {};
+  for (const r of out[3].rows) oursBy[r.k] = r;
+  const O = (k) => ({ leads: (oursBy[k] && oursBy[k].leads) || 0, people: (oursBy[k] && oursBy[k].people) || 0 });
   const pages = {};
   for (const r of out[1].rows) pages[r.k] = r.sessions;
   const zero = { people: 0, leads: 0, people_done: 0, leads_done: 0, people_booked: 0, leads_booked: 0,
@@ -13545,6 +13629,8 @@ async function overviewReport(db, { view, asof } = {}) {
       blocked: pair('_blocked'), withheld: pair('_withheld'),
     },
     sessions: [pages.cur ?? null, pages.cmp ?? null],
+    /* LEFT OUT of every number above: [this period, comparison] */
+    ours: { leads: [O('cur').leads, O('cmp').leads], people: [O('cur').people, O('cmp').people], fun: funWin ? O('fun') : null, excluded: true },
     funnel: F ? {
       since: funWin.s, sessions: pages.fun ?? null,
       people: { step1: F.f_people, completed: F.f_people_done, booked: F.f_people_booked },
@@ -13553,6 +13639,7 @@ async function overviewReport(db, { view, asof } = {}) {
     series,
   };
   if (v === 'all') {
+    res.ours.month = O('month');
     res.month = { people: [K('month').people, K('cmp').people], leads: [K('month').leads, K('cmp').leads],
                   booked: { people: [K('month').people_booked, K('cmp').people_booked], leads: [K('month').leads_booked, K('cmp').leads_booked] } };
     res.recovered = parseInt(out[recIdx].rows[0].recovered) || 0;
@@ -15659,8 +15746,12 @@ async function runDropoffDigest(force = false) {
     if (lines.length) {
       blocks.push(bSection(`*Where the other ${total - bkd} went:*\n${lines.join('\n')}`));
     }
+    /* OUR OWN TEST SUBMISSIONS ARE LEFT OUT (Darshil, 26 Sept 2026), and the
+       digest says how many, like every surface that leaves them out */
+    const ours = (r.internal_by_period && r.internal_by_period[lastWeek]) || 0;
     blocks.push(bSection(
       '_Counts attempts, not people \u2014 somebody who tried twice counts twice. ' +
+      `Leaves out ${ours} of our own test submissions from last week. ` +
       'Full breakdown by week, month, source or person on the dashboard, Dropoff tab._'));
     sendSlack(blocks, `Inbound form: ${bkd} of ${total} booked last week`);
     console.log(`[dropoff-digest] sent — ${bkd}/${total} booked, ${cur}%`);

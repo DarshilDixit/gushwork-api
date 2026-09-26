@@ -585,7 +585,7 @@ function finish() {
   // One copy of the rule. The label map already taught us what two copies
   // cost, and the dashboard's script is a JS string where a second copy
   // would be invisible to every normal search.
-  const dashStart = src.indexOf("app.get('/monitor', (req, res) => {");
+  const dashStart = src.indexOf("app.get('/monitor/classic', (req, res) => {");
   const dashboard = src.slice(dashStart, src.indexOf('\n});', dashStart));
   // Website verdict codes DO legitimately appear in there — the dashboard's
   // own copy of the label map needs them. The catch-all statuses are the
@@ -2147,7 +2147,12 @@ function finish() {
     const c = /pool\.query\(([A-Z][A-Z0-9_]+)\)/.exec(qText[k] || '');
     if (!c) continue;
     const at = src.indexOf('const ' + c[1] + ' = ');
-    if (at !== -1) qText[k] += src.slice(at, src.indexOf('`;', at) + 2);
+    if (at === -1) continue;
+    /* since 26 Sept the constant can be a CALL of the one definition
+       (RECOVERED_BOOKINGS_SQL = recoveredBookingsSql()): read the function */
+    const call = /^const [A-Z0-9_]+ = ([a-zA-Z]\w*)\(\);/.exec(src.slice(at, src.indexOf('\n', at)));
+    const from = call ? src.indexOf('function ' + call[1] + '(') : at;
+    qText[k] += src.slice(from, src.indexOf('`;', from) + 2);
   }
   const bodyStart = src.indexOf('    });', src.indexOf('await allNamed({'));
   const body = src.slice(bodyStart, src.indexOf('\napp.', bodyStart));
@@ -2885,7 +2890,7 @@ async function section12() {
      disqualified, so the two sell_to predicates would drop them
      silently -- present in every headline number, absent from the one
      surface anybody acts on. Both, and they move together. */
-  const sdr     = between("app.get('/monitor/sdr'", "app.get('/monitor'");
+  const sdr     = between("app.get('/monitor/sdr'", "app.get('/monitor/classic'");
   const metrics = between("app.get('/monitor/metrics'", "app.get('/monitor/funnel'");
   ok('21: the SDR list keeps CRM B2C leads',
      /\(l\.sell_to ILIKE 'B2B%' OR l\.product = 'crm'\)/.test(sdr));
@@ -3805,6 +3810,73 @@ async function section12() {
 }
 
 /* ============================================================
+   32. THE CSV EXPORTS: A FORMULA NEVER RUNS, A PHONE NUMBER NEVER CHANGES
+
+   Decided 26 Sept 2026 (Darshil). The All leads and SDR exports quoted
+   commas and nothing else, so a cell a visitor typed as =HYPERLINK(...)
+   ran in the SDR's spreadsheet. A blanket "escape + too" would have put
+   an apostrophe on 2,669 of 2,676 stored phone numbers -- the column a
+   dialer imports. The real csvCell is LIFTED and EXECUTED here, over
+   every phone SHAPE production holds (26 Sept, read-only scan; digits
+   made up) and the hostile shapes it exists for.
+   ============================================================ */
+{
+  const C = new Function(between('const CSV_NUMBER_ONLY', "app.get('/monitor/leads'") + '\nreturn csvCell;')();
+  const PHONES = ['+19495550123', '+449495550123', '+1949555012', '+1949555012345', '+44 20794 60958', '(949) 555-01234', '12', '949555012',
+    '19495550123456', '949-555', '19495550123', '+1 (949) 555-0123', '+1-949-555-0123', '+1.949.555.0123', '-5', '-12.50'];
+  for (const p of PHONES) eq('32: a phone number or a number is exported exactly as stored: ' + p, C(p), p);
+  const HOSTILE = [
+    ['=HYPERLINK("http://evil.test","Click")', `"'=HYPERLINK(""http://evil.test"",""Click"")"`],
+    ['=1+1', "'=1+1"], ['@SUM(A1:A9)', "'@SUM(A1:A9)"],
+    ["+cmd|' /C calc'!A0", "'+cmd|' /C calc'!A0"], ["-2+3+cmd|' /C calc'!A0", "'-2+3+cmd|' /C calc'!A0"],
+    ['+A1', "'+A1"], ['+1 x12', "'+1 x12"], ['+', "'+"], ['-', "'-"],
+    ['\tTAB', "'\tTAB"], ['\r=1', `"'\r=1"`],
+    ['- google search', "'- google search"], ['@acme studio', "'@acme studio"],
+  ];
+  for (const [v, want] of HOSTILE) eq('32: a formula is neutralised: ' + JSON.stringify(v), C(v), want);
+  eq('32: a comma is quoted, not prefixed', C('Acme, Inc.'), '"Acme, Inc."');
+  eq('32: a quote is doubled inside quotes', C('say "hi"'), '"say ""hi"""');
+  eq('32: a carriage return is quoted -- it used to split the row', C('a\rb'), '"a\rb"');
+  eq('32: a newline is quoted', C('a\nb'), '"a\nb"');
+  eq('32: null and undefined are empty cells', [C(null), C(undefined)], ['', '']);
+  eq('32: a non-string value (a count, a boolean) passes as text', [C(42), C(true)], ['42', 'true']);
+  eq('32: ordinary text is untouched', C('Knowledge As A Service'), 'Knowledge As A Service');
+  const leadsCsv = between("app.get('/monitor/leads'", "app.get('/monitor/lead-changes'");
+  const sdrCsv = between("app.get('/monitor/sdr'", "app.get('/monitor/classic'");
+  ok('32: both exports build every cell through the ONE csvCell', /cols\.map\(c => csvCell\(/.test(leadsCsv) && /cols\.map\(c => csvCell\(r\[c\]\)\)/.test(sdrCsv));
+  ok('32: no copy of the old comma-only escape is left anywhere', !/const escape = v =>/.test(src));
+}
+
+/* ============================================================
+   33. THE MONDAY DIGEST SAYS HOW MANY OF OUR OWN TESTS IT LEFT OUT
+
+   dropoffReport leaves them out since 26 Sept (with the Overview), and
+   the digest reads dropoffReport -- so its numbers follow on their own.
+   What does not follow on its own is SAYING so. The real runDropoffDigest
+   is lifted and run with its report stubbed, and the Slack text read.
+   Started here, collected by the tail like section 31.
+   ============================================================ */
+const results33 = (async () => {
+  const fnSrc = between('async function runDropoffDigest', 'function startDropoffDigest');
+  const sent = [];
+  const report = { periods: [{ key: '2026-09-14' }, { key: '2026-09-21' }], booked_rate: { '2026-09-14': 65.1, '2026-09-21': 66.2 },
+    totals: { '2026-09-21': 301 }, internal_by_period: { '2026-09-14': 9, '2026-09-21': 3 },
+    rows: [{ key: '1_booked', label: 'Booked', desc: 'picked a time', counts: { '2026-09-21': 199 } }, { key: '7_drop_step1', label: 'Left on step 2', desc: 'left', counts: { '2026-09-21': 102 } }] };
+  const run = new Function('DROPOFF_DIGEST_ENABLED', 'etParts', 'dropoffTodayEt', 'dropoffFloor', 'dropoffStep', 'dropoffPeriodEnd', 'dropoffLabel', 'dropoffReport',
+    'bHeader', 'bDivider', 'bSection', 'sendSlack', 'let _dropoffDigestSentWeek = null;\n' + fnSrc + '\nreturn runDropoffDigest;')(
+    true, () => ({ weekday: 'Mon', hour: 9, stamp: 's' }), () => '2026-09-28', () => '2026-09-28',
+    (iso, g, n) => (n === -1 ? '2026-09-21' : '2026-07-06'), () => '2026-09-27', () => 'Sep 21', async () => report,
+    (t) => ({ t }), () => ({ t: '' }), (t) => ({ t }), (blocks) => sent.push(blocks.map((b) => b.t).join('\n')));
+  await run(true);
+  const text = sent[0] || '';
+  return [
+    ['33: the digest was composed and sent', sent.length === 1, String(sent.length)],
+    ['33: it says how many of our own tests LAST WEEK it left out -- that week, not the whole window', text.includes('Leaves out 3 of our own test submissions from last week.'), text.slice(-260)],
+    ['33: the counts in it are the report\'s, which already exclude them', text.includes('199 of 301 booked last week'), text.slice(0, 120)],
+  ];
+})();
+
+/* ============================================================
    29. OUR OWN TEST SUBMISSIONS DO NOT REACH THE DIALER
 
    gw_form_leads is not a reporting surface -- it is the feed the
@@ -4453,6 +4525,9 @@ section12()
   .then(() => results31)
   .then((rows) => { for (const [n, c, x] of rows) ok(n, c, x); })
   .catch((err) => { ok('31: the IP geo section completed', false, err && err.message); })
+  .then(() => results33)
+  .then((rows) => { for (const [n, c, x] of rows) ok(n, c, x); })
+  .catch((err) => { ok('33: the Monday digest section completed', false, err && err.message); })
   .then(() => {
     console.log('');
     console.log(`  passed: ${pass}`);

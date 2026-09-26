@@ -1,11 +1,15 @@
 /* ============================================================================
-   preview-monitor.js -- run THIS BRANCH's /monitor/next against live data,
+   preview-monitor.js -- run THIS BRANCH's /monitor against live data,
    on a developer machine, without deploying and without writing anything.
 
    There is no staging here, so a dashboard change would otherwise be seen
    with real numbers for the first time in production. This closes that gap:
 
-     /monitor/next          this branch's page, built by monitor-next.js
+     /monitor               this branch's page, built by monitor-next.js
+                            (/monitor/next redirects to it, as in production)
+     /monitor/classic       production's classic page: /monitor/classic once
+                            PR D is deployed, /monitor before that (where the
+                            classic lived until the switch)
      /monitor/overview      this branch's overviewReport, LIFTED out of
                             index.js and run on connections that are READ ONLY
                             at the database (default_transaction_read_only)
@@ -21,7 +25,7 @@
 
    Run (needs the Postgres service's public URL AND gushwork-api's token):
      railway run -s Postgres bash -c 'PUB="$DATABASE_PUBLIC_URL" railway run --service gushwork-api bash -c "DATABASE_URL=\"\$PUB\" node tools/preview-monitor.js"'
-   then open http://localhost:4411/monitor/next?token=<MONITOR_TOKEN>
+   then open http://localhost:4411/monitor?token=<MONITOR_TOKEN>
    (the token is printed masked; tools/check-monitor-layout.mjs reads it itself).
 
    Not mounted anywhere and not called by anything.
@@ -65,7 +69,7 @@ function liftDecl(decl) {
 }
 const L = new Function([
   liftDecl('const DASH_TZ'), liftDecl('const BOT_RE'), liftDecl('const DROPOFF_STAGE_SQL'), liftDecl('const DROPOFF_SOURCE_SQL'),
-  liftDecl('const OVERVIEW_VIEWS'), liftDecl('const OVERVIEW_WEBHOOK_SOURCES'), liftDecl('const RECOVERED_BOOKINGS_SQL'),
+  liftDecl('const OVERVIEW_VIEWS'), liftDecl('const OVERVIEW_WEBHOOK_SOURCES'), liftDecl('function recoveredBookingsSql'), liftDecl('const RECOVERED_BOOKINGS_SQL'),
   liftDecl('function overviewWindowsSql'), liftDecl('async function overviewReport'), liftDecl('function dropoffTodayEtOf'),
   liftDecl('function dropoffAddDays'), liftDecl('function dropoffStep'),
   liftDecl('const ELV_EXCLUDED_DOMAINS'), liftDecl('const INTERNAL_TEST_EMAILS'), liftDecl('const INTERNAL_STAGING_HOSTS'),
@@ -93,13 +97,24 @@ function start() {
      new CSS around old sidebar markup, and a full layout run tested a mix
      that could never ship. Re-requiring the module re-reads both. */
   const MN = path.join(ROOT, 'monitor-next.js');
-  app.get('/monitor/next', (req, res) => {
+  app.get('/monitor', (req, res) => {
     if (req.query.token !== TOKEN) return res.status(401).send('401 — Unauthorized.');
     delete require.cache[require.resolve(MN)];
     res.set('Cache-Control', 'no-store');
     res.type('html').send(require(MN).page({ token: req.query.token, tz: L.DASH_TZ, labels: L.LABELS }));
   });
-  monitorNext.mount(app, { tz: L.DASH_TZ, labels: L.LABELS });   /* the font route; /monitor/next above wins */
+  monitorNext.mount(app, { tz: L.DASH_TZ, labels: L.LABELS });   /* the font route and the /monitor/next redirect; /monitor above wins */
+  /* THE CLASSIC, from production, wherever production keeps it: after the
+     switch that is /monitor/classic, before it the classic WAS /monitor. A
+     404 is the only thing that falls back -- never a 200 from the new page. */
+  app.get('/monitor/classic', async (req, res) => {
+    try {
+      const q = req.originalUrl.slice(req.originalUrl.indexOf('?') >= 0 ? req.originalUrl.indexOf('?') : req.originalUrl.length);
+      let r = await fetch(UPSTREAM + '/monitor/classic' + q);
+      if (r.status === 404) r = await fetch(UPSTREAM + '/monitor' + q);
+      res.status(r.status).type('html').send(await r.text());
+    } catch (err) { res.status(502).send('upstream: ' + err.message); }
+  });
   app.get('/monitor/overview', async (req, res) => {
     if (req.query.token !== TOKEN) return res.status(401).json({ error: 'Unauthorized' });
     try { res.json(await L.overviewReport(db, { view: req.query.view, asof: req.query.asof })); }
@@ -120,7 +135,7 @@ function start() {
     } catch (err) { res.status(502).json({ error: 'upstream: ' + err.message }); }
   });
   app.listen(PORT, () => {
-    console.log(`preview on http://localhost:${PORT}/monitor/next?token=${TOKEN.slice(0, 3)}… (reads ${UPSTREAM}, database read-only)`);
+    console.log(`preview on http://localhost:${PORT}/monitor?token=${TOKEN.slice(0, 3)}… (reads ${UPSTREAM}, database read-only)`);
     if (process.env.PREVIEW_READY_FILE) fs.writeFileSync(process.env.PREVIEW_READY_FILE, JSON.stringify({ port: PORT, token: TOKEN }));
   });
 }

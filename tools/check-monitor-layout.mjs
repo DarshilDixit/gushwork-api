@@ -151,7 +151,7 @@ for (const width of (KEYS === 'only' ? [] : WIDTHS)) {
   await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: width < 768 });
   await send('Emulation.setTouchEmulationEnabled', { enabled: width <= 1023, maxTouchPoints: width <= 1023 ? 5 : 1 });
   for (const theme of THEMES) {
-    if (first) { await send('Page.navigate', { url: `${BASE}/monitor/next?token=${encodeURIComponent(TOKEN)}#tab=overview&view=week` }); await sleep(2500); first = false; }
+    if (first) { await send('Page.navigate', { url: `${BASE}/monitor?token=${encodeURIComponent(TOKEN)}#tab=overview&view=week` }); await sleep(2500); first = false; }
     await ev(`GW.setTheme(${JSON.stringify(theme)})`);
     for (const pg of PAGES) {
       const openRows = /\+open$/.test(pg); const [spec, qs] = pg.replace(/\+open$/, '').split('?'); const [tab, view, mod] = spec.split(':');
@@ -214,7 +214,7 @@ const key = async (k, shift) => { const base = { key: k, code: k, windowsVirtual
      jump, not a load, so focus would stay wherever the checks above left it
      and the "first Tab" would not be the first. */
   await send('Page.navigate', { url: 'about:blank' }); await sleep(300);
-  await send('Page.navigate', { url: `${BASE}/monitor/next?token=${encodeURIComponent(TOKEN)}#tab=overview&view=week&unit=leads` }); await sleep(3000);
+  await send('Page.navigate', { url: `${BASE}/monitor?token=${encodeURIComponent(TOKEN)}#tab=overview&view=week&unit=leads` }); await sleep(3000);
   await key('Tab');
   const sk = await ev(`(()=>{ const a=document.activeElement, r=a.getBoundingClientRect(); return { cls: a.className, w: r.width, h: r.height, top: r.top }; })()`);
   if (sk.cls !== 'skip') issues.push({ kind: 'keys', what: 'the first Tab landed on "' + sk.cls + '", not the skip link' });

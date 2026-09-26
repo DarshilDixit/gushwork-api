@@ -225,7 +225,8 @@ const LEADUP = /^UPDATE leads SET enriched_city=\$2/;
   eq('F: a gmail address is not looked up', f.apolloCalls, 0);
 
   /* ── G. The dashboard carries the corrected labels ── */
-  const html = await (await realFetch(BASE + '/monitor?token=stub')).text();
+  /* the classic page, at its fallback address since the switch (PR D) */
+  const html = await (await realFetch(BASE + '/monitor/classic?token=stub')).text();
   ok('G: the Completed-no-booking card says what it counts', /Completed, no booking yet/.test(html) && !/No booking yet \(SDR\)/.test(html));
   ok('G: the daily chart no longer calls entries "one bar per person"', !/One bar per person/.test(html) && /counts form entries/.test(html));
   ok('G: the Blocked heading names BOTH mechanisms', /by the brand-domain list or by the website check/.test(html));

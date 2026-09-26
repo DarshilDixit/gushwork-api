@@ -987,13 +987,20 @@ function liftClientJs(startMarker, endMarker) {
          comparing a null yields null and the row quietly counts as un-booked. */
       /* ONE definition since 26 Sept: RECOVERED_BOOKINGS_SQL, read by both
          /monitor/metrics and /monitor/overview, so the two cannot drift. */
-      const recSql = between(src, 'const RECOVERED_BOOKINGS_SQL', '`;');
+      /* since 26 Sept the one definition is a FUNCTION, so the Overview can
+         read it minus our own test rows; the constant is its bare call */
+      const recSql = between(src, 'function recoveredBookingsSql', '`;');
       ok('booking: recovered bookings still COALESCEs booked_at with created_at',
          /COALESCE\(b\.booked_at, b\.created_at\) >= l\.created_at/.test(recSql), recSql.slice(0, 300));
       ok('booking: /monitor/metrics reads the one recovered definition, not a copy',
          /recovered: pool\.query\(RECOVERED_BOOKINGS_SQL\)/.test(metrics) && !/AS recovered FROM \(/.test(metrics));
-      ok('booking: /monitor/overview reads the same definition',
-         /db\.query\(RECOVERED_BOOKINGS_SQL\)/.test(between(src, 'async function overviewReport', "app.get('/monitor/overview'")));
+      ok('booking: RECOVERED_BOOKINGS_SQL is that definition, called bare',
+         /const RECOVERED_BOOKINGS_SQL = recoveredBookingsSql\(\);/.test(src));
+      const ovr = between(src, 'async function overviewReport', "app.get('/monitor/overview'");
+      ok('booking: /monitor/overview reads the same definition, minus our own test rows on both sides',
+         /db\.query\(recoveredBookingsSql\(keepL, keepB\), rp\)/.test(ovr) &&
+         /const keepL = [^;]*internalLeadSqlClause\('l\.email', 'l\.page_url', rp\)\} IS NOT TRUE/.test(ovr) &&
+         /const keepB = [^;]*internalLeadSqlClause\('b\.email', 'b\.page_url', rp\)\} IS NOT TRUE/.test(ovr));
 
       /* The Pending recovery card asks question 2 and now says so. The old
          tooltip claimed "no booking on any other session of that email", which

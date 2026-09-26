@@ -101,7 +101,7 @@ GW.TABS.dropoff = (function (G) {
     if (!d && err) body = '<section class="card panel">' + U.unavailable('The dropoff report', err) + '</section>';
     else if (!d) body = U.loading(4);
     else body = summary(d) + U.panel({ title: 'By outcome', qual: 'counted as ' + d.unit, body: tableHtml(d),
-      foot: '<span>A period marked <b>part</b> is not fully covered by the window — usually the current one, still filling. Source is read from the ad click first, then from the referrer where the click lost its tags: that recovers <b>' + fmt(d.recovered) + '</b> ' + esc(d.unit) + ' that would otherwise read as direct. Our own test submissions are included (the Lead magnet tab is the one place they are left out) — <b>' + fmt(d.internal) + '</b> of these.' +
+      foot: '<span>A period marked <b>part</b> is not fully covered by the window — usually the current one, still filling. Source is read from the ad click first, then from the referrer where the click lost its tags: that recovers <b>' + fmt(d.recovered) + '</b> ' + esc(d.unit) + ' that would otherwise read as direct. Our own test submissions are left out, as on the Overview — <b>' + fmt(d.internal) + '</b> ' + G.plural(d.internal, 'submission') + ' in this window, not counted above.' +
         /* ON SCREEN, not only in the select's hover title: in People mode a
            week here can read lower than the Overview's, and both are right. */
         (d.unit === 'people' ? ' Counting people: each person sits in the period they <b>first</b> arrived within this window, carrying the best outcome any attempt reached — so a week here can read lower than on the Overview, which counts everyone who came that week.' : '') + '</span>' });

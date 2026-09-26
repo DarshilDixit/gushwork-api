@@ -1,5 +1,11 @@
 /* ============================================================================
-   monitor-next.js -- builds and serves the new dashboard at /monitor/next.
+   monitor-next.js -- builds and serves the dashboard at /monitor.
+
+   THE SWITCH (PR D, Darshil's go-ahead 26 Sept 2026): /monitor is this page.
+   /monitor/next, where it was built side by side, now REDIRECTS here -- a
+   browser keeps the #tab=... fragment across a redirect, so every bookmark
+   and link into it still lands on its tab. The old dashboard moved to
+   /monitor/classic for one week as the fallback, then goes in its own PR.
 
    The dashboard's front end lives in real files under monitor/ -- HTML-free
    CSS and plain classic scripts -- instead of 2,000 lines of HTML written
@@ -61,7 +67,7 @@ function page({ token, tz, labels }) {
   const themeBtns = '<button data-theme-set="light" aria-label="Light theme" title="Light"><svg class="ic" aria-hidden="true"><use href="#i-sun"/></svg></button>' +
     '<button data-theme-set="dark" aria-label="Dark theme" title="Dark"><svg class="ic" aria-hidden="true"><use href="#i-moon"/></svg></button>' +
     '<button data-theme-set="system" aria-label="Match my computer" title="Match my computer"><svg class="ic" aria-hidden="true"><use href="#i-monitor"/></svg></button>';
-  const foot = '<div class="sfoot"><span><b>All times Eastern (ET)</b></span><a href="/monitor' + tq + '">Open the classic dashboard</a></div>';
+  const foot = '<div class="sfoot"><span><b>All times Eastern (ET)</b></span><a href="/monitor/classic' + tq + '">Open the classic dashboard</a></div>';
   return '<!DOCTYPE html><html lang="en" data-theme="light"><head><meta charset="UTF-8">' +
     '<meta name="viewport" content="width=device-width,initial-scale=1">' +
     '<meta name="robots" content="noindex,nofollow"><meta name="color-scheme" content="light dark"><title>Gushwork Monitor</title>' +
@@ -85,7 +91,7 @@ function page({ token, tz, labels }) {
     '<div class="drawer-catch" id="drawer-catch"></div>' +
     '<aside class="drawer" id="drawer" aria-label="Menu"><div class="drawer-tools"><span>Theme</span><div class="itg" role="group" aria-label="Theme">' + themeBtns + '</div></div>' +
     '<nav class="groups" id="nav-drawer" aria-label="Dashboard"></nav>' + foot + '</aside>' +
-    configScript({ token: token || '', tz, classic: '/monitor', labels: labels || {} }) +
+    configScript({ token: token || '', tz, classic: '/monitor/classic', labels: labels || {} }) +
     '<script>' + PARTS.js + '</script></body></html>';
 }
 
@@ -95,10 +101,17 @@ function authorised(req) {
 }
 
 function mount(app, { tz, labels }) {
-  app.get('/monitor/next', (req, res) => {
+  app.get('/monitor', (req, res) => {
     if (!authorised(req)) return res.status(401).send('<h2 style="font-family:sans-serif;padding:2rem">401 — Unauthorized. Add ?token=YOUR_TOKEN to the URL.</h2>');
     res.set('Cache-Control', 'no-store');
     res.type('html').send(page({ token: req.query.token || '', tz, labels }));
+  });
+  /* The old address of this page. The query string rides along (the token);
+     the fragment is the browser's to keep. Before the token check, on
+     purpose: the page it lands on does its own. */
+  app.get('/monitor/next', (req, res) => {
+    const i = req.originalUrl.indexOf('?');
+    res.redirect(302, '/monitor' + (i >= 0 ? req.originalUrl.slice(i) : ''));
   });
   app.get('/monitor/next/asset/:name', (req, res) => {
     if (!authorised(req)) return res.status(401).end();

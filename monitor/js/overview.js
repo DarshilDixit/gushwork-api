@@ -177,6 +177,22 @@ GW.TABS.overview = (function (G) {
     return 'Since the form went live · ' + G.etD(d.first_lead, { noWeekday: true, year: true }) + ' – ' + G.etD(d.asof, { noWeekday: true, year: true });
   }
 
+  /* OUR OWN TEST SUBMISSIONS ARE LEFT OUT of every number here (Darshil,
+     26 Sept 2026, with Dropoff and the Monday digest), and the page says
+     how many, in words -- a subtraction nobody can see is how a number
+     stops reconciling. Counted in SUBMISSIONS whatever the People/Leads
+     toggle says, because a test is one submission. Sessions cannot be told
+     apart (a session has no email), so the sentence says they still count. */
+  function oursNote(d) {
+    var o = d.ours; if (!o || !o.leads) return '';
+    var a = o.leads[0] || 0, b = o.leads[1] || 0;
+    /* "1 of our own test submissions" -- the plural is right for one too */
+    var head = 'Leaves out ' + fmt(a) + ' of our own test submissions';
+    var when = d.view === 'today' ? ' today, and ' + fmt(b) + ' by this time yesterday'
+      : d.view === 'week' ? ' this week, and ' + fmt(b) + ' by this point last week'
+      : ' all time' + (o.month ? ', ' + fmt(o.month.leads || 0) + ' of them this month' : '');
+    return head + when + '. Sessions cannot be told apart by address, so those still include ours.';
+  }
   function kpis(d) {
     var u = G.S.unit, W = word(), k = d.kpi, h = '';
     var peopleLbl = u === 'people' ? 'People' : 'Leads';
@@ -293,7 +309,7 @@ GW.TABS.overview = (function (G) {
     var body, p = null;
     if (!d && e) body = '<section class="card panel">' + U.unavailable('The overview', e) + '</section>';
     else if (!d) body = '<section class="kpis">' + U.loading(2) + U.loading(2) + '</section>';
-    else { p = panels(d); body = '<section class="kpis" id="ov-kpis">' + kpis(d) + '</section><div class="grid2">' + p.html + '</div>'; }
+    else { p = panels(d); body = '<section class="kpis" id="ov-kpis">' + kpis(d) + '</section><p class="lnote ov-ours" id="ov-ours">' + esc(oursNote(d)) + '</p><div class="grid2">' + p.html + '</div>'; }
     G.paint(root, head + attention() + body);
     if (p) p.draw();
   }
@@ -303,5 +319,5 @@ GW.TABS.overview = (function (G) {
   });
   G.onVisibility = function (isHidden) { var b = document.getElementById('ov-live'); if (b) { b.className = 'badge ' + (isHidden ? 'b-neu' : 'b-good'); b.innerHTML = '<span class="live-dot' + (isHidden ? ' paused' : '') + '"></span>' + (isHidden ? 'Paused' : 'Live'); } };
   return { title: 'Overview', activate: activate, deactivate: deactivate, render: render, setView: setView, refresh: refresh,
-           _data: function () { return data; }, _slotsFor: slotsFor, _seriesFor: seriesFor, _sumNote: sumNote, _momFn: momFn, _meta: meta };
+           _data: function () { return data; }, _slotsFor: slotsFor, _seriesFor: seriesFor, _sumNote: sumNote, _momFn: momFn, _meta: meta, _oursNote: oursNote };
 })(GW);

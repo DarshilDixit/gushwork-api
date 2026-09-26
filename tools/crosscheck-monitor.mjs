@@ -126,7 +126,7 @@ async function open(url, ready) {
 const num = (s) => (s === null || s === undefined ? null : Number(String(s).replace(/,/g, '')));
 
 /* CLASSIC */
-await open(`${BASE}/monitor?token=${encodeURIComponent(TOKEN)}`, `typeof showTab === 'function'`);
+await open(`${BASE}/monitor/classic?token=${encodeURIComponent(TOKEN)}`, `typeof showTab === 'function'`);
 const C = {};
 await ev(`showTab('leads')`); await waitFor(`!/Loading/.test(document.getElementById('ltbody').textContent)`);
 C.leads = await ev(`(() => ({ total: (document.getElementById('lcount').textContent.match(/(\\d+)/) || [])[1], sids: [...document.querySelectorAll('#ltbody td.xbtn')].map((t) => (t.getAttribute('onclick').match(/toggleRow\\('l-([^']+)'/) || [])[1]),
@@ -151,7 +151,7 @@ C.partners = await ev(`(() => { const t = (id) => (document.getElementById(id) |
   domains: document.querySelectorAll('#pdtbody tr').length, partners: document.querySelectorAll('#ptbody tr.prow').length }; })()`);
 
 /* NEW */
-await open(`${BASE}/monitor/next?token=${encodeURIComponent(TOKEN)}#tab=leads`, `!!(window.GW && GW.show && GW.TABS && GW.TABS.leads)`);
+await open(`${BASE}/monitor?token=${encodeURIComponent(TOKEN)}#tab=leads`, `!!(window.GW && GW.show && GW.TABS && GW.TABS.leads)`);
 const N = {};
 const settle = async (tab) => { await ev(`GW.show(${JSON.stringify(tab)})`); await waitFor(`!document.querySelector('#view .skel, #view [aria-busy="true"]')`); await sleep(600); };
 await settle('leads');

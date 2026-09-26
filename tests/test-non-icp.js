@@ -833,7 +833,7 @@ let results8;
   const mustNotSee = [
     ['PartnerStack signup', between('async function runPartnerStackSignup', 'async function sendQualificationForDomain')],
     ['recovery health',     between('async function checkRecoveryHealth', 'The model layer')],
-    ['SDR list',            between("app.get('/monitor/sdr'", "app.get('/monitor'")],
+    ['SDR list',            between("app.get('/monitor/sdr'", "app.get('/monitor/classic'")],
   ];
   for (const [name, body] of mustNotSee) {
     ok(`10f: ${name} does NOT gate on the flag column`, !body.includes('non_icp_llm_flagged'), name);

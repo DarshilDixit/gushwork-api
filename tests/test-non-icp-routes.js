@@ -44,7 +44,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* Scenario state, reset between runs. */
 const S = { fetches: [], slackPayloads: [], leadRow: null, writes: [], psBlocked: false, verdict: null,
-  dropoffRows: null, dropoffSources: null,
+  dropoffRows: null, dropoffSources: null, dropoffInternal: null,
             /* /monitor/non-icp's two inputs, set per scenario. null means
                "this suite is not driving the report", so every other
                scenario keeps the stub's existing behaviour. */
@@ -165,6 +165,11 @@ function stubQuery(q, params) {
      deliberately odd so a painted value cannot match by coincidence. */
   if (/SELECT bucket, source, stage, COUNT/.test(flat)) {
     const rows = S.dropoffRows || [];
+    return { rows, rowCount: rows.length };
+  }
+  /* what the Dropoff route LEFT OUT: our own test submissions, per period */
+  if (/SELECT bucket, COUNT\(\*\)::int AS internal_n FROM base WHERE internal IS TRUE GROUP BY 1/.test(flat)) {
+    const rows = S.dropoffInternal || [];
     return { rows, rowCount: rows.length };
   }
   if (/AS source[\s\S]*FROM base GROUP BY 1 ORDER BY 2 DESC$/.test(flat)) {
@@ -303,7 +308,7 @@ const post = async (p, body) => {
   let j = null; try { j = await r.json(); } catch (_) {}
   return { status: r.status, body: j };
 };
-const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; S.dropoffRows = null; S.dropoffSources = null; };
+const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; S.dropoffInternal = null; S.dropoffRows = null; S.dropoffSources = null; };
 const metaFired      = () => S.fetches.some((u) => /graph\.facebook\.com/.test(u));
 const salesforceHit  = () => S.fetches.some((u) => /\/sobjects\//.test(u));
 const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') || true);
@@ -685,12 +690,15 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     /* Two weeks, explicit dates, so the buckets are deterministic rather
        than whatever twelve weeks back happens to be today. */
     S.dropoffRows = [
-      { bucket: '2026-01-05', source: 'Meta',   stage: '1_booked',       n: 61, internal_n: 2, recovered_n: 11 },
-      { bucket: '2026-01-05', source: 'Meta',   stage: '7_drop_step1',   n: 17, internal_n: 1, recovered_n: 4 },
-      { bucket: '2026-01-05', source: 'Google', stage: '2_dq_b2c',       n: 5,  internal_n: 0, recovered_n: 0 },
-      { bucket: '2026-01-12', source: 'Meta',   stage: '1_booked',       n: 43, internal_n: 1, recovered_n: 8 },
-      { bucket: '2026-01-12', source: 'Meta',   stage: '6_drop_calendar', n: 9, internal_n: 0, recovered_n: 0 },
+      /* KEPT rows only since 26 Sept: our own tests are left out of n and
+         counted apart, below, which is what the route now does */
+      { bucket: '2026-01-05', source: 'Meta',   stage: '1_booked',       n: 61, recovered_n: 11 },
+      { bucket: '2026-01-05', source: 'Meta',   stage: '7_drop_step1',   n: 17, recovered_n: 4 },
+      { bucket: '2026-01-05', source: 'Google', stage: '2_dq_b2c',       n: 5,  recovered_n: 0 },
+      { bucket: '2026-01-12', source: 'Meta',   stage: '1_booked',       n: 43, recovered_n: 8 },
+      { bucket: '2026-01-12', source: 'Meta',   stage: '6_drop_calendar', n: 9, recovered_n: 0 },
     ];
+    S.dropoffInternal = [{ bucket: '2026-01-05', internal_n: 3 }, { bucket: '2026-01-12', internal_n: 1 }];
     S.dropoffSources = [{ source: 'Meta', n: 130 }, { source: 'Google', n: 5 }];
     let r = null, body = null;
     try {
@@ -755,8 +763,12 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
        rather than believed, and so our own test rows stay visible. */
     ok('dropoff route: it reports how many leads the referrer recovered',
        body && body.recovered === 23, body && String(body.recovered));
-    ok('dropoff route: it reports how many are our own testing',
-       body && body.internal === 4, body && String(body.internal));
+    ok('dropoff route: it reports how many of our own tests it LEFT OUT',
+       body && body.internal === 4 && body.internal_excluded === true, body && String(body.internal));
+    ok('dropoff route: ...per period, so the digest can name last week\'s',
+       body && body.internal_by_period && body.internal_by_period['2026-01-05'] === 3 && body.internal_by_period['2026-01-12'] === 1,
+       body && JSON.stringify(body.internal_by_period));
+    ok('dropoff route: what it left out is NOT inside the totals', body && body.grand === 135);
 
     /* A RATE WE COULD NOT COMPUTE IS NULL, NEVER 0 -- the same rule the
        lead-path checkers follow, pointed at a dashboard. */
@@ -794,7 +806,8 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
 
   /* ---- the browser half ---- */
   {
-    const page = await realFetch(BASE + '/monitor?token=stub', { signal: AbortSignal.timeout(20000) });
+    /* the classic page, at its fallback address since the switch (PR D) */
+    const page = await realFetch(BASE + '/monitor/classic?token=stub', { signal: AbortSignal.timeout(20000) });
     const html = await page.text();
     ok('dashboard: /monitor renders', page.status === 200 && html.length > 5000, String(page.status));
 
