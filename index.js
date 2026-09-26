@@ -2453,6 +2453,12 @@ async function checkApolloHealth(db) {
         (SELECT COUNT(*) FROM win)                                                             AS eligible,
         COUNT(*) FILTER (WHERE e.in_win AND e.found)                                           AS matched,
         COUNT(*) FILTER (WHERE e.in_win AND e.refused)                                         AS refused,
+        /* The RED line's count is "refused in the last 24h", a count of
+           lookups, not a rate -- so it stays keyed on when they happened.
+           Keyed on the window's leads it would read 0 while Apollo refuses
+           visitors who never press Next (the lookup runs on blur, before
+           the lead row exists). */
+        COUNT(*) FILTER (WHERE e.refused AND e.enriched_at >= NOW() - INTERVAL '${HEALTH_APOLLO_WINDOW_H} hours') AS refused_recent,
         MAX(e.enriched_at) FILTER (WHERE e.found)                                              AS last_matched,
         MAX(e.enriched_at) FILTER (WHERE NOT e.refused)                                        AS last_answered,
         MAX(e.enriched_at) FILTER (WHERE e.refused)                                            AS last_refused
@@ -2467,6 +2473,7 @@ async function checkApolloHealth(db) {
     const eligible = parseInt(row.eligible) || 0;
     const matched  = parseInt(row.matched)  || 0;
     const refused  = parseInt(row.refused)  || 0;
+    const refusedRecent = parseInt(row.refused_recent) || 0;
     const ms       = (v) => (v ? new Date(v).getTime() : null);
     const lastMatched = ms(row.last_matched), lastAnswered = ms(row.last_answered), lastRefused = ms(row.last_refused);
     const win      = HEALTH_APOLLO_WINDOW_H + 'h';
@@ -2490,8 +2497,8 @@ async function checkApolloHealth(db) {
          insufficient credits! Upgrade your plan..."), for the Overview's
          strip, which an SDR reads. System health keeps the full detail. */
       return Object.assign(hc('apollo', 'red', what + (since ? ' for ' + fmtAge(Date.now() - since) : ''),
-        reason + ' · ' + refused + ' refused in the last ' + win + ' · ' + lastNote),
-        { summary: refused + ' refused in the last ' + win + ' · ' + lastNote });
+        reason + ' · ' + refusedRecent + ' refused in the last ' + win + ' · ' + lastNote),
+        { summary: refusedRecent + ' refused in the last ' + win + ' · ' + lastNote });
     }
 
     if (eligible < HEALTH_MIN_SAMPLE) {

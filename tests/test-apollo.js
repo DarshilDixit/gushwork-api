@@ -308,6 +308,71 @@ const LEADUP = /^UPDATE leads SET enriched_city=\$2/;
   await tool.apply(db3, async (u, o) => { calls3++; return { status: 200, json: async () => FOUND_BODY }; }, p3, { apiKey: 'k', pauseMs: 0, limit: 1, log: () => {} });
   eq('H: --limit 1 makes one lookup', calls3, 1);
 
+  /* ── I. tools/sync-enrichment-out.js, against a stubbed mirror and Salesforce ──
+     Run once for real on 26 Sept 2026 (mirror 342 rows, Salesforce 140
+     Leads). What must hold if anyone runs it again: FILL-ONLY -- a value
+     already there is never replaced -- a targeted UPDATE rather than
+     syncToAWS, converted Leads left alone, numeric fields sent as numbers,
+     and a partial Salesforce read refused rather than acted on. */
+  const sync = require(path.join(__dirname, '..', 'tools', 'sync-enrichment-out.js'));
+  ok('I: the Salesforce field names come from salesforce.js', sync.SF_MAP.length >= 10 && sync.SF_MAP.some(([c, sf]) => c === 'enriched_title' && sf === 'enriched_title__c'));
+  const SC = { all: ['enriched_city', 'enriched_company_size', 'enriched_founded_year', 'enriched_title'], rows: [
+    { session_id: 's1', email: 'a@x.test', enriched_title: 'Chief Executive Officer', enriched_city: 'Woburn', enriched_company_size: '11-50', enriched_founded_year: '2015', enriched_seniority: 'c_suite' },
+    { session_id: 's2', email: 'b@x.test', enriched_title: 'New title' } ] };
+  const mirrorDb = (rows) => { const log = []; return { log, query: async (sql, params) => { log.push({ sql: String(sql), params });
+    if (/information_schema/.test(sql)) return { rows: ['enriched_title', 'enriched_city', 'enriched_company_size', 'enriched_other'].map((c) => ({ column_name: c })) };
+    if (/^SELECT session_id/.test(String(sql).trim())) return { rows };
+    return { rowCount: 1, rows: [] }; } }; };
+  const MROWS = [{ session_id: 's1', enriched_title: null, enriched_city: 'Boston', enriched_company_size: '' }];
+  let md = mirrorDb(MROWS);
+  const dry = await sync.syncMirror(md, SC, { apply: false, log: () => {} });
+  ok('I mirror: a dry run writes nothing', !md.log.some((q) => /UPDATE|INSERT/i.test(q.sql)));
+  ok('I mirror: blanks only -- title and size to fill, the city it already has is left alone',
+     dry.rows_to_fill === 1 && dry.fields_to_fill === 2 && dry.by_field.enriched_title === 1 && dry.by_field.enriched_company_size === 1 && !dry.by_field.enriched_city, JSON.stringify(dry));
+  ok('I mirror: a session with no mirror row is counted, never created', dry.not_on_mirror === 1);
+  md = mirrorDb(MROWS);
+  await sync.syncMirror(md, SC, { apply: true, log: () => {} });
+  const mUps = md.log.filter((q) => /^UPDATE/.test(q.sql.trim()));
+  ok('I mirror: ONE targeted update, by session, fill-only at write time too',
+     mUps.length === 1 && /^UPDATE gw_form_leads SET /.test(mUps[0].sql) && /WHERE session_id = \$1$/.test(mUps[0].sql.trim())
+     && /enriched_title = COALESCE\(NULLIF\(enriched_title, ''\), \$\d\)/.test(mUps[0].sql) && mUps[0].params[0] === 's1', mUps[0] && mUps[0].sql);
+  ok('I mirror: it never touches the city it did not need, disqualified, or any other column',
+     mUps.length === 1 && !/enriched_city/.test(mUps[0].sql) && !/disqualified/.test(mUps[0].sql) && !md.log.some((q) => /INSERT|ON CONFLICT/i.test(q.sql)));
+
+  const sfRun = async (records, { apply, totalSize } = {}) => {
+    const updates = [];
+    const SF = { getSalesforceToken: async () => ({ accessToken: 't', instanceUrl: 'https://sf.test' }),
+      updateSFLead: async (id, patch) => { updates.push([id, patch]); return { success: true, leadId: id }; } };
+    const fetchFn = async (u) => ({ ok: true, json: async () => (/describe$/.test(u)
+      ? { fields: [{ name: 'enriched_title__c', type: 'string', length: 10, updateable: true },
+                   { name: 'enriched_founded_year__c', type: 'double', updateable: true },
+                   { name: 'enriched_city__c', type: 'string', length: 255, updateable: true },
+                   { name: 'enriched_linkedin__c', type: 'string', length: 255, updateable: false },
+                   /* the org's real spelling, capital I, and writable */
+                   { name: 'enriched_Seniority__c', type: 'string', length: 255, updateable: true }] }
+      : { totalSize: totalSize == null ? records.length : totalSize, done: true, records }) });
+    let out = null, err = null;
+    try { out = await sync.syncSalesforce(SC, { apply, log: () => {}, SF, fetchFn }); } catch (e) { err = e; }
+    return { out, err, updates };
+  };
+  const RECS = [
+    { Id: 'L1', Email: 'A@x.test', IsConverted: false, enriched_title__c: null, enriched_founded_year__c: null, enriched_city__c: 'Boston' },
+    { Id: 'L2', Email: 'a@x.test', IsConverted: true },
+    { Id: 'L3', Email: 'b@x.test', IsConverted: false, enriched_title__c: 'Existing' } ];
+  let r = await sfRun(RECS, { apply: false });
+  ok('I SF: a dry run writes nothing', r.updates.length === 0 && r.out, r.err && r.err.message);
+  ok('I SF: a converted Lead is counted and skipped', r.out && r.out.converted_skipped === 1);
+  ok('I SF: a Lead that already has the value is left alone', r.out && r.out.leads_to_fill === 1, JSON.stringify(r.out));
+  ok('I SF: a field our user cannot write is reported, not attempted', r.out && r.out.not_updateable_in_sf.includes('enriched_linkedin__c'));
+  r = await sfRun(RECS, { apply: true });
+  ok('I SF: exactly one Lead written, the unconverted one, matched on the email whatever its case', r.updates.length === 1 && r.updates[0][0] === 'L1', JSON.stringify(r.updates));
+  ok('I SF: blanks only, the length Salesforce declares, and a number sent as a number',
+     r.updates[0] && r.updates[0][1].enriched_title__c === 'Chief Exec' && r.updates[0][1].enriched_founded_year__c === 2015 && !('enriched_city__c' in r.updates[0][1]), JSON.stringify(r.updates[0]));
+  ok('I SF: a field Salesforce spells in a different CASE is still matched and written (enriched_linkedIn__c, 26 Sept)',
+     r.updates[0] && r.updates[0][1].enriched_seniority__c === 'c_suite', JSON.stringify(r.updates[0]));
+  r = await sfRun(RECS, { apply: true, totalSize: 9 });
+  ok('I SF: a partial Salesforce read is REFUSED -- nothing written', !!r.err && r.updates.length === 0 && /partial/.test(r.err.message), r.err && r.err.message);
+
   console.log('');
   if (failures.length) {
     console.log('  FAILURES:');

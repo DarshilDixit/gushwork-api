@@ -90,15 +90,23 @@ async function scope(db, since) {
   const all = [...new Set([...lc, ...ec])].filter((c) => c !== 'enriched_at').sort();
   const expr = (c) => (lc.has(c) && ec.has(c) ? `COALESCE(l.${c}::text, e.${c}::text)` : lc.has(c) ? `l.${c}::text` : `e.${c}::text`);
   const { rows } = await db.query(`
-    SELECT l.session_id::text AS session_id, lower(l.email) AS email, l.page_url, l.created_at,
+    SELECT l.session_id::text AS session_id, lower(l.email) AS email, lower(e.email) AS looked_up, l.page_url, l.created_at,
            ${all.map((c) => `${expr(c)} AS ${c}`).join(', ')}
       FROM enrichment_data e JOIN leads l ON l.session_id = e.session_id
      WHERE e.enriched_at >= $1 AND l.email IS NOT NULL
      ORDER BY l.created_at DESC`, [since]);
-  const ours = rows.filter((r) => L.isInternalSubmission(r.email, r.page_url));
-  const real = rows.filter((r) => !L.isInternalSubmission(r.email, r.page_url));
+  /* THE LOOKED-UP ADDRESS MUST BE THE LEAD'S ADDRESS. A refusal row is
+     insert-only, so a visitor who typed A, then changed it to B during an
+     outage, keeps a refusal for A -- and the backfill looked up A. Carrying
+     that onto B's Salesforce Lead would put a stranger's title and city in
+     front of an AE. The form clears enrichment when the email changes; this
+     skips it. Checked on the 26 Sept run: 0 such sessions. */
+  const moved = rows.filter((r) => r.looked_up && r.looked_up !== r.email);
+  const kept = rows.filter((r) => !(r.looked_up && r.looked_up !== r.email));
+  const ours = kept.filter((r) => L.isInternalSubmission(r.email, r.page_url));
+  const real = kept.filter((r) => !L.isInternalSubmission(r.email, r.page_url));
   const withValues = real.filter((r) => all.some((c) => !blank(r[c])));
-  return { all, rows: withValues, ours: ours.length, empty: real.length - withValues.length };
+  return { all, rows: withValues, ours: ours.length, empty: real.length - withValues.length, email_changed: moved.length };
 }
 
 async function syncMirror(aws, sc, { apply, log }) {
@@ -127,18 +135,24 @@ async function syncMirror(aws, sc, { apply, log }) {
   return out;
 }
 
-async function syncSalesforce(sc, { apply, log }) {
-  const SF = require(path.join(ROOT, 'salesforce.js'));
+/* SF and fetchFn are parameters only so tests/test-apollo.js can drive this
+   against a stubbed Salesforce; a real run always takes the defaults. */
+async function syncSalesforce(sc, { apply, log, SF = require(path.join(ROOT, 'salesforce.js')), fetchFn = fetch } = {}) {
   const { accessToken, instanceUrl } = await SF.getSalesforceToken();
-  const get = async (u) => { const r = await fetch(u, { headers: { Authorization: `Bearer ${accessToken}` } });
+  const get = async (u) => { const r = await fetchFn(u, { headers: { Authorization: `Bearer ${accessToken}` } });
     if (!r.ok) throw new Error(`Salesforce ${r.status}: ${(await r.text()).slice(0, 200)}`); return r.json(); };
   /* types and lengths from Salesforce itself */
   const desc = await get(`${instanceUrl}/services/data/v60.0/sobjects/Lead/describe`);
-  const meta = new Map(desc.fields.map((f) => [f.name, f]));
-  const fields = SF_MAP.filter(([, sf]) => meta.has(sf) && meta.get(sf).updateable);
-  const missing = SF_MAP.filter(([, sf]) => !meta.has(sf) || !meta.get(sf).updateable).map(([, sf]) => sf);
+  /* KEYED IN LOWER CASE. Salesforce API names are case-insensitive, and the
+     org spells one of these enriched_linkedIn__c where salesforce.js says
+     enriched_linkedin__c. The first run looked names up exactly, missed it,
+     reported LinkedIn "not updateable" and skipped it on 140 Leads. */
+  const meta = new Map(desc.fields.map((f) => [f.name.toLowerCase(), f]));
+  const fieldOf = (sf) => meta.get(sf.toLowerCase());
+  const fields = SF_MAP.filter(([, sf]) => fieldOf(sf) && fieldOf(sf).updateable);
+  const missing = SF_MAP.filter(([, sf]) => !fieldOf(sf) || !fieldOf(sf).updateable).map(([, sf]) => sf);
   const coerce = (sf, v) => {
-    const f = meta.get(sf);
+    const f = fieldOf(sf);
     if (['double', 'int', 'currency', 'percent'].includes(f.type)) { const n = Number(String(v).replace(/[^0-9.-]/g, '')); return Number.isFinite(n) ? n : null; }
     const s = String(v); return f.length ? s.slice(0, f.length) : s;
   };
@@ -200,7 +214,8 @@ async function main() {
     options: '-c default_transaction_read_only=on -c statement_timeout=60000' });
   const sc = await scope(db, since);
   await db.end();
-  console.log(`Re-enriched since ${since}: ${sc.rows.length} session(s) with values; ${sc.ours} of ours skipped; ${sc.empty} with nothing to carry.`);
+  console.log(`Re-enriched since ${since}: ${sc.rows.length} session(s) with values; ${sc.ours} of ours skipped; ${sc.empty} with nothing to carry; ` +
+    `${sc.email_changed} skipped because the address looked up is not the lead's address.`);
   if (doMirror) {
     const aws = new Pool({ host: process.env.AWS_PG_HOST, port: parseInt(process.env.AWS_PG_PORT) || 5432, user: process.env.AWS_PG_USER,
       password: process.env.AWS_PG_PASSWORD, database: process.env.AWS_PG_DATABASE, ssl: { rejectUnauthorized: false }, max: 2,
