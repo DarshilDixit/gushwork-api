@@ -136,13 +136,14 @@ function browser(payloads, cfg) {
       classList: { add: (c) => cls.add(c), remove: (c) => cls.delete(c), contains: (c) => cls.has(c), toggle: (c, on) => { if (on === undefined ? !cls.has(c) : on) cls.add(c); else cls.delete(c); } },
       setAttribute: (k, v) => { attrs[k] = String(v); }, getAttribute: (k) => (k in attrs ? attrs[k] : null), removeAttribute: (k) => { delete attrs[k]; }, hasAttribute: (k) => k in attrs,
       querySelector: () => null, querySelectorAll: () => [], contains: () => false, focus() {}, addEventListener() {}, closest: () => null,
+      appendChild(c) { c.parentNode = this; return c; }, removeChild(c) { c.parentNode = null; return c; }, parentNode: null,
     };
     return e;
   };
   const document = {
     getElementById: (id) => els[id] || (els[id] = mk(id)),
     querySelector: () => null, querySelectorAll: () => [],
-    documentElement: mk('__html'), body: mk('__body'), activeElement: null, title: '', visibilityState: 'visible',
+    documentElement: mk('__html'), body: mk('__body'), head: mk('__head'), activeElement: null, title: '', visibilityState: 'visible',
     addEventListener: (t, f) => { (listeners[t] = listeners[t] || []).push(f); },
     createElement: () => mk('__created'), fonts: { ready: Promise.resolve(), check: () => true },
   };
@@ -331,6 +332,18 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
       unreadable: [{ domain: 'nosite.test', scrape_status: 'thin', error: null, checked_at: '2026-09-24T10:00:00Z', email: 'e@nosite.test', website: 'nosite.test', blocked: true, blocked_by: 'llm_name_only' }],
       inProcess: { ok: 23, errored: 1, unreachable: 2, cacheHits: 8, cacheMisses: 2, cacheHitPct: 80 }, notes: ['Latest outcome per domain, not a historical rate.'] },
     nearMisses: { band: 0.1, floors: { page: 0.75, name: 0.9 }, total: 13, withLeads: 2, rows: [{ domain: 'nearly.io', label: 'Real estate', confidence_pct: 71, floor_pct: 75, judged_from: 'their website', leads: 2 }] } };
+  /* Visitors: the classic suite's own odd numbers, places deliberately NOT in lead order */
+  const VIS = { window_days: 90, coverage: { leads: 4471, with_address: 3312, with_place: 3301, address_only: 11, distinct_addresses: 2287 },
+    repeats: { total: 9, shown: 2, rows: [
+      { ip_address: '203.0.113.45', leads: 7, people: 3, city: 'Boston', region: 'Massachusetts', country: 'US', isp: 'Verizon Business', first_seen: '2026-06-01T12:00:00Z', last_seen: '2026-09-20T12:00:00Z', emails: ['a@x.com', 'b@x.com'] },
+      { ip_address: '2001:db8::1', leads: 2, people: 2, city: null, region: null, country: null, isp: null, first_seen: '2026-07-01T12:00:00Z', last_seen: '2026-08-01T12:00:00Z', emails: null }] },
+    places: { mappable: 2, rows: [
+      { city: 'Denver', region: 'Colorado', country: 'US', lat: 39.74, lon: -104.99, leads: 153, people: 150, booked: 90 },
+      { city: 'Boston', region: 'Massachusetts', country: 'US', lat: 42.36, lon: -71.06, leads: 612, people: 590, booked: 402 },
+      { city: 'Austin', region: 'Texas', country: 'US', lat: null, lon: null, leads: 77, people: 71, booked: 40 }] },
+    networks: [{ isp: 'Verizon Business', org_domain: 'verizonbusiness.com', leads: 829, people: 800, booked: 511 }, { isp: 'Verizon Business', org_domain: 'frontiernet.net', leads: 11, people: 10, booked: 4 },
+      { isp: 'AT&T Enterprises, LLC', org_domain: 'att.com', leads: 37, people: 36, booked: 20 }],
+    timezones: [{ timezone: 'America/New_York', leads: 937, booked: 604 }, { timezone: 'Not/AZone', leads: 3, booked: 1 }] };
   const SDR = { total: 37, leads: [
     { email: 'Ann@Acme.co', first_name: 'Ann', last_name: 'Lee', company: 'Acme Widgets', enriched_industry: 'Manufacturing', completed: true, created_at: '2026-09-24T12:00:00Z', ps_partner_name: 'Alpha Partners', hear_about_us_raw: 'a podcast', enriched_linkedin: 'javascript:alert(2)', phone: '+14155550134' },
     { email: 'bo@zeta.io', first_name: 'Bo', company: 'Zeta', completed: false, created_at: '2026-09-23T12:00:00Z' },
@@ -350,6 +363,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     if (p === '/monitor/metrics') return METRICS;
     if (p === '/monitor/sdr') return SDR;
     if (p === '/monitor/non-icp') return MODEL;
+    if (p === '/monitor/visitors') return VIS;
     if (p === '/monitor/leads') return q.nonicp === 'only' ? (q.internal === 'exclude' ? { total: 45, page: 1, pages: 2, leads: [] } : BLOCKED) : LEADS;
     if (p === '/monitor/filter-options') return { hearAbout: ['Podcast'], utmSource: ['facebook', 'google'], partners: [{ key: 'pk_77', name: null, email: 'p@partner.co' }] };
     if (p === '/monitor/lead-changes') return CHANGES[q.session_id] || { ok: true, changes: [] };
@@ -718,11 +732,42 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('model: with Meta NOT withheld, the row says Meta was still sent', v.includes('Flagged by the model (Meta still sent)') && !v.includes('>Meta withheld only<'));
   GW.TABS.model._set(null); GW.TABS.model.render();
 
+  /* ═══ PR C: Visitors ═══ */
+  const vc0 = b.calls.length;
+  GW.show('visitors', true, { days: '90' }); await ticks(20); v = view();
+  ok('visitors: the window from the link reaches the request', b.calls.slice(vc0).some((c) => c.path === '/monitor/visitors' && c.q.days === '90'));
+  ok('visitors: coverage is the payload\'s, each with its unit in words', ['4471', '3312', '3301', '2287'].every((x) => new RegExp('data-v="' + x + '"').test(v)) && /id="vis-cov"[\s\S]*?addresses/.test(v));
+  ok('visitors: coverage is never a percentage', !/id="vis-cov"[\s\S]*?%[\s\S]*?id="vis-repeats"/.test(v));
+  ok('visitors: a repeat address is painted with its count, IPv6 included', /data-v="7"/.test(v) && v.includes('<code>2001:db8::1</code>'));
+  ok('visitors: it says how many of how many repeat addresses', v.includes('Showing 2 of 9 repeat addresses'));
+  const nets = GW.TABS.visitors._merge(VIS.networks);
+  ok('visitors: ONE provider under two domains is ONE row, both domains kept', nets.length === 2 && nets[0].isp === 'Verizon Business' && nets[0].leads === 840 && nets[0].domains.join(',') === 'verizonbusiness.com,frontiernet.net');
+  ok('visitors: a different provider stays its own row, escaped on screen', nets[1].isp === 'AT&T Enterprises, LLC' && v.includes('AT&amp;T Enterprises, LLC') && /data-v="840"/.test(v) && !/data-v="829"/.test(v));
+  ok('visitors: the country chips add up the places', v.includes('US · 842 leads'));
+  ok('visitors: local time is the VISITOR\'s zone, and an unknown zone is blank', GW.TABS.visitors._localNow('Asia/Kolkata') !== GW.TABS.visitors._localNow('America/Los_Angeles') && GW.TABS.visitors._localNow('Not/AZone') === '');
+  const visSrc = fs.readFileSync(path.join(ROOT, 'monitor', 'js', 'visitors.js'), 'utf8');
+  ok('visitors: tiles from Esri Canvas, {z}/{y}/{x}, never a rejected provider', /services\.arcgisonline\.com\/ArcGIS\/rest\/services\/Canvas\/World_Light_Gray_Base\/MapServer\/tile\/\{z\}\/\{y\}\/\{x\}/.test(GW.TABS.visitors._tiles) && !/tile\.openstreetmap\.org|basemaps\.cartocdn\.com/.test(visSrc));
+  ok('visitors: Leaflet is pinned and checked by SRI', /leaflet@1\.9\.4\/dist\/leaflet\.js/.test(visSrc) && /sha384-[A-Za-z0-9+/=]{64}/.test(visSrc) && /crossOrigin = 'anonymous'/.test(visSrc));
+  /* the map: absent Leaflet says so; a stand-in Leaflet runs the drawing code */
+  delete b.window.L; GW.TABS.visitors._draw(VIS);
+  ok('visitors: with no Leaflet the map says so, and nothing throws', /did not load/.test(b.els['vis-map-note'].textContent));
+  const drawn = [];
+  b.window.L = { Browser: { mobile: false }, map() { return { setView() { return this; }, attributionControl: { setPrefix() {} }, invalidateSize() {}, removeLayer() {}, fitBounds() {} }; },
+    tileLayer: (u, o) => ({ u, o, addTo() { return this; } }), latLngBounds: () => ({ pad() { return this; } }),
+    circleMarker: (ll, opts) => { const m = { ll, opts, bindPopup(c) { m.popup = c; return m; } }; drawn.push(m); return m; }, layerGroup: (a) => ({ a, addTo() { return this; } }) };
+  const res = GW.TABS.visitors._draw(VIS);
+  ok('visitors: it draws exactly the mappable places, and counts the rest', res && res.drawn === 2 && res.miss === 1 && /2 places drawn; <b>1<\/b> more resolved to a city but have no coordinates/.test(b.els['vis-map-note'].innerHTML));
+  ok('visitors: circles are drawn LARGEST FIRST, whatever order the API sent', drawn[0].ll[0] === 42.36 && drawn[1].ll[0] === 39.74);
+  ok('visitors: circle AREA scales with leads -- a quarter the leads, half the extra radius', Math.abs((drawn[1].opts.radius - 6) - (drawn[0].opts.radius - 6) / 2) < 0.5);
+  ok('visitors: circles are styled by class, from tokens, never raw hex', drawn.every((m) => m.opts.className === 'vdot' && !m.opts.color && !m.opts.fillColor));
+  ok('visitors: the popup names the place and its counts', /<b>Boston, Massachusetts, US<\/b><br>612 leads<br>590 people<br>402 booked/.test(drawn[0].popup));
+  delete b.window.L;
+
   /* Hash, tabs, nav */
-  ok('nav: every rebuilt tab is registered with activate and deactivate', ['overview', 'health', 'dropoff', 'dupes', 'lm', 'leads', 'blocked', 'sdr', 'model'].every((t) => GW.TABS[t] && GW.TABS[t].activate && GW.TABS[t].deactivate && GW.TABS[t].title));
-  ok('nav: switching tab writes the hash', /tab=model/.test(b.window.location.hash) && /days=30/.test(b.window.location.hash), b.window.location.hash);
+  ok('nav: every rebuilt tab is registered with activate and deactivate', ['overview', 'health', 'dropoff', 'dupes', 'lm', 'leads', 'blocked', 'sdr', 'model', 'visitors'].every((t) => GW.TABS[t] && GW.TABS[t].activate && GW.TABS[t].deactivate && GW.TABS[t].title));
+  ok('nav: switching tab writes the hash', /tab=visitors/.test(b.window.location.hash) && /days=90/.test(b.window.location.hash), b.window.location.hash);
   const navHtml = b.els['nav-side'] ? b.els['nav-side'].innerHTML : '';
-  ok('nav: the tabs not rebuilt link to the classic dashboard', /href="\/monitor\?token=[^"]*#tab=partners"/.test(navHtml) && /href="\/monitor\?token=[^"]*#tab=visitors"/.test(navHtml));
+  ok('nav: the tabs not rebuilt link to the classic dashboard', /href="\/monitor\?token=[^"]*#tab=partners"/.test(navHtml));
   ok('nav: All leads and Blocked are rebuilt, no longer classic links', /data-tab="leads"/.test(navHtml) && /data-tab="blocked"/.test(navHtml) && !/href="\/monitor\?token=[^"]*#tab=leads"/.test(navHtml) && !/href="\/monitor\?token=[^"]*#tab=blocked"/.test(navHtml));
   ok('nav: a classic link says it leaves', /\(classic dashboard\)/.test(navHtml));
   /* the last health run could not reach /monitor/health: all nine server

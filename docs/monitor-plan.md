@@ -311,7 +311,12 @@ _(kept current as the work moves)_
     all three groups always show. "Meta withheld" becomes "Meta still sent"
     in flag-only mode. The decisions and unreadable lists page at 25. Live:
     375 leads in 7 days, 47 decisions.
-  - [ ] Visitors
+  - [x] **Visitors** (`visitors.js`). Leaflet loads only when the map
+    opens, pinned 1.9.4 with SRI; Esri Canvas tiles; circles by area,
+    largest first, styled by class (tokens). ONE map container, re-attached
+    after each repaint. Networks are merged by name in the browser. The
+    tests run the drawing code through a stand-in Leaflet. Live: 1,344
+    leads in 30 days, 124 places drawn.
   - [ ] Partners
 - [ ] Number-for-number checks against the classic, live, read-only
 - [ ] Layout check, screenshots by eye

@@ -412,6 +412,20 @@ input.field { min-width: 0; }
 .rt td.quote { min-width: 180px; max-width: 360px; color: var(--ink-label); }
 .rt code, .rt td.wrap { overflow-wrap: anywhere; }
 
+/* ── Visitors ── */
+.chips { display: flex; flex-wrap: wrap; gap: var(--gw-space-8); }
+.vbar { display: grid; grid-template-columns: 48px minmax(60px, 1fr); align-items: center; gap: var(--gw-space-8); font-variant-numeric: tabular-nums; }
+.vbar .tr { height: 6px; border-radius: var(--gw-radius-full); background: var(--track); overflow: hidden; }
+.vbar .fi { height: 100%; background: var(--data); border-radius: var(--gw-radius-full); }
+/* The map. The basemap is LIGHT grey in both themes (the one provider that
+   works embedded has no dark tiles), so the ring is white in both. Leaflet
+   sets presentation attributes on the SVG; a CSS rule beats them. */
+.vmap-slot, .vmap { height: 460px; }
+.vmap { border-radius: var(--gw-radius-12); overflow: hidden; }
+.leaflet-interactive.vdot { fill: var(--data); fill-opacity: .75; stroke: var(--gw-color-white); stroke-opacity: .95; }
+.vmap .leaflet-popup-content { font: var(--gw-text-body-12-reg); }
+@container view (max-width: 559px) { .vmap-slot, .vmap { height: 340px; } }
+
 /* Dropoff's period table scrolls INSIDE its card, with the outcome column
    pinned, rather than squeezing twelve periods into a phone. */
 .xscroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
@@ -491,6 +505,9 @@ input.field { min-width: 0; }
   .nav { min-height: 44px; }
   .pills button { min-height: 44px; }
   .pgb { min-width: 44px; height: 44px; }
+  /* Leaflet's own controls, thumb-sized (its touch default is 30px) */
+  .vmap .leaflet-touch .leaflet-bar a, .vmap.leaflet-touch .leaflet-bar a { width: 44px; height: 44px; line-height: 44px; }
+  .vmap .leaflet-popup-close-button { width: 44px !important; height: 44px !important; line-height: 44px !important; }
   .sortb { min-height: 44px; }
   .sfoot a, .drawer-tools a { display: inline-flex; align-items: center; min-height: 44px; }
 }

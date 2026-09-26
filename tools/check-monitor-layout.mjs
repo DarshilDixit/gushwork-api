@@ -38,7 +38,8 @@ const TOKEN = process.env.MONITOR_TOKEN || cfg.token || '';
 const OUT = process.env.OUT || './layout-shots';
 const WIDTHS = (process.env.WIDTHS || '360,390,414,768,1024,1440').split(',').map(Number);
 const THEMES = (process.env.THEMES || 'light,dark').split(',');
-const PAGES = (process.env.PAGES || 'overview:today,overview:week,overview:all,overview:week:leads,overview:today:table,health,dropoff,dupes,lm').split(',');
+/* tab[:view[:mod]], or tab?key=value&... for a tab's own filters (the map) */
+const PAGES = (process.env.PAGES || 'overview:today,overview:week,overview:all,overview:week:leads,overview:today:table,health,dropoff,dupes,lm,leads,blocked,sdr,model,visitors,visitors?map=1').split(',');
 const SHOTS = process.env.SHOTS !== '0';
 mkdirSync(OUT, { recursive: true });
 
@@ -69,6 +70,8 @@ const AUDIT = `(() => {
   if (document.documentElement.scrollWidth > W + 1) out.push(['overflow', 'the page scrolls sideways: ' + document.documentElement.scrollWidth + 'px on a ' + W + 'px screen']);
   for (const el of document.querySelectorAll('#view *, .topbar *')) {
     if (el.closest('svg') && el.tagName !== 'svg') continue;
+    /* the map's tiles and vector layer are clipped BY the map, on purpose */
+    if (el.closest('.leaflet-container') && !el.classList.contains('leaflet-container')) continue;
     if (hiddenAncestor(el) || !vis(el)) continue;
     const r = el.getBoundingClientRect();
     if ((r.right > W + 1 || r.left < -1) && !inScroller(el)) { out.push(['overflow', el.tagName.toLowerCase() + '.' + (el.className.baseVal ?? el.className) + ' "' + name(el) + '" runs off-screen (' + Math.round(r.left) + '..' + Math.round(r.right) + ')']); }
@@ -126,9 +129,10 @@ for (const width of WIDTHS) {
     if (first) { await send('Page.navigate', { url: `${BASE}/monitor/next?token=${encodeURIComponent(TOKEN)}#tab=overview&view=week` }); await sleep(2500); first = false; }
     await ev(`GW.setTheme(${JSON.stringify(theme)})`);
     for (const pg of PAGES) {
-      const [tab, view, mod] = pg.split(':');
+      const [spec, qs] = pg.split('?'); const [tab, view, mod] = spec.split(':');
+      const q = qs ? Object.fromEntries(new URLSearchParams(qs)) : null;
       events = [];
-      await ev(`(()=>{ GW.S.unit=${JSON.stringify(mod === 'leads' ? 'leads' : 'people')}; GW.S.table=${mod === 'table'}; if (GW.current() !== ${JSON.stringify(tab)}) GW.show(${JSON.stringify(tab)}); ${view ? `GW.TABS.overview.setView(${JSON.stringify(view)});` : ''} if (GW.TABS[${JSON.stringify(tab)}].render) GW.TABS[${JSON.stringify(tab)}].render(); })()`);
+      await ev(`(()=>{ GW.S.unit=${JSON.stringify(mod === 'leads' ? 'leads' : 'people')}; GW.S.table=${mod === 'table'}; if (GW.current() !== ${JSON.stringify(tab)} || ${q ? 'true' : 'false'}) GW.show(${JSON.stringify(tab)}, false, ${q ? JSON.stringify(q) : 'null'}); ${view ? `GW.TABS.overview.setView(${JSON.stringify(view)});` : ''} if (GW.TABS[${JSON.stringify(tab)}].render) GW.TABS[${JSON.stringify(tab)}].render(); })()`);
       /* Wait for the data: no skeleton left, or give up after 20s and say so. */
       let a; for (let k = 0; k < 40; k++) { await sleep(500); a = await ev(AUDIT); if (!a.loading) break; }
       await sleep(300); a = await ev(AUDIT);
@@ -136,7 +140,7 @@ for (const width of WIDTHS) {
       if (a.loading) issues.push({ kind: 'errors', what: 'still loading after 20s' });
       for (const e of events) if (!/favicon/.test(e)) issues.push({ kind: 'errors', what: e });
       if (a.theme !== theme) issues.push({ kind: 'errors', what: 'theme is ' + a.theme + ', expected ' + theme });
-      const label = `${width}-${theme}-${pg.replace(/:/g, '-')}`;
+      const label = `${width}-${theme}-${pg.replace(/[:?=&]/g, '-')}`;
       if (SHOTS) { await send('Emulation.setDeviceMetricsOverride', { width, height: Math.min(a.h, 6000), deviceScaleFactor: 1, mobile: width < 768 }); await sleep(250);
         const s = await send('Page.captureScreenshot', { format: 'png' }); writeFileSync(`${OUT}/${label}.png`, Buffer.from(s.result.data, 'base64'));
         await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: width < 768 }); }
