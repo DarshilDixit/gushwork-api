@@ -106,7 +106,11 @@ function stubQuery(q, params) {
     return { rows: [{
       non_icp_blocked:     bound('non_icp_blocked') === true,
       non_icp_reason:      bound('non_icp_reason') || null,
-      non_icp_source:      bound('non_icp_source') || null,
+      /* S.stickySource stands in for the upsert's COALESCE keeping an EARLIER
+         decision's source, which a stub of bound values cannot otherwise
+         produce -- and without which the "wording follows the evidence"
+         fix could be deleted with every test still passing (measured). */
+      non_icp_source:      S.stickySource || bound('non_icp_source') || null,
       non_icp_checked_at:  bound('non_icp_checked_at') || null,
       non_icp_llm_flagged: bound('non_icp_llm_flagged') === true,
       product:             bound('product') || null,
@@ -308,7 +312,7 @@ const post = async (p, body) => {
   let j = null; try { j = await r.json(); } catch (_) {}
   return { status: r.status, body: j };
 };
-const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; S.dropoffInternal = null; S.dropoffRows = null; S.dropoffSources = null; };
+const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; S.dropoffInternal = null; S.dropoffRows = null; S.dropoffSources = null; S.stickySource = null; };
 const metaFired      = () => S.fetches.some((u) => /graph\.facebook\.com/.test(u));
 const salesforceHit  = () => S.fetches.some((u) => /\/sobjects\//.test(u));
 const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') || true);
@@ -1925,6 +1929,86 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     const txt = JSON.stringify(S.slackPayloads);
     ok('META-ONLY: Slack says Meta was withheld, NOT that it would have blocked',
        /Meta events withheld/.test(txt) && !/Would have been blocked/.test(txt), txt.slice(0, 200));
+  }
+
+  /* ── A NAME-ONLY VERDICT ANSWERS TO ITS OWN FLOOR, FOR META TOO ──
+     26 Sept 2026, hernandezins.com: judged insurance from the letters
+     "ins" alone at 0.82, under the name floor, so correctly not blocked
+     -- and it lost its Meta events anyway, because the Meta read used the
+     PAGE floor (0.75) for every row. Slack then called insurance "one of
+     the four that never block", and the lead row said the model had read
+     their website. All three driven through the real routes. ── */
+  {
+    const NAMEROW = (o = {}) => VROW({ domain: 'hernandezins.test', business_type: 'insurance', blocking: false,
+      confidence: 0.82, evidence_quote: 'ins', source: 'llm_name_only', prompt_version: 'name-v1-2026-09-23',
+      scrape_status: 'unreachable', ...o });
+    const partialAs = async (sid, row) => {
+      reset(); S.verdict = row;
+      await post('/partial', { session_id: sid, email: 'm@hernandezins.test', sell_to: 'B2B',
+        step_reached: 1, page_url: 'https://www.gushwork.ai/demo' });
+      await sleep(500);
+      return boundCols(S.writes.find((w) => /INSERT INTO leads \(/.test(w.flat)));
+    };
+    /* the incident: under the name floor, so NOTHING happens -- Meta included */
+    let b = await partialAs('00000000-0000-4000-8000-0000000000b1', NAMEROW());
+    ok('NAME FLOOR: an 0.82 name-only insurance guess is not blocked', b.non_icp_blocked === false, String(b.non_icp_blocked));
+    ok('NAME FLOOR: ...and not flagged -- too weak to block on is too weak to withhold Meta on', b.non_icp_llm_flagged !== true, String(b.non_icp_llm_flagged));
+    ok('NAME FLOOR: ...so StartTrial FIRES, as for any clean lead', metaFired(), 'no graph.facebook.com call was made');
+    /* the same row as a PAGE verdict clears the page floor: the difference is the source, nothing else */
+    b = await partialAs('00000000-0000-4000-8000-0000000000b2', NAMEROW({ source: 'llm', business_type: 'restaurant_food' }));
+    ok('NAME FLOOR: the same 0.82 from a PAGE still withholds Meta (page floor unchanged)', b.non_icp_llm_flagged === true && !metaFired(), String(b.non_icp_llm_flagged));
+    b = await partialAs('00000000-0000-4000-8000-0000000000b3', NAMEROW({ business_type: 'restaurant_food' }));
+    ok('NAME FLOOR: a name-only 0.82 restaurant does nothing either', b.non_icp_llm_flagged !== true && metaFired(), String(b.non_icp_llm_flagged));
+    b = await partialAs('00000000-0000-4000-8000-0000000000b4', NAMEROW({ business_type: 'restaurant_food', confidence: 0.86 }));
+    ok('NAME FLOOR: a name-only 0.86 restaurant clears the 0.85 floor and withholds Meta', b.non_icp_llm_flagged === true && !metaFired(), String(b.non_icp_llm_flagged));
+    /* a name-only BLOCK records which evidence decided it */
+    b = await partialAs('00000000-0000-4000-8000-0000000000b5', NAMEROW({ domain: 'hernandezins.test', blocking: true, confidence: 0.88 }));
+    ok('NAME SOURCE: a name-only block is stamped blocked', b.non_icp_blocked === true, String(b.non_icp_blocked));
+    ok('NAME SOURCE: ...and recorded as llm_name_only, not as "read their website"', b.non_icp_source === 'llm_name_only', String(b.non_icp_source));
+    b = await partialAs('00000000-0000-4000-8000-0000000000b6', VROW({ domain: 'hernandezins.test' }));
+    ok('NAME SOURCE: a page block is still recorded as llm', b.non_icp_source === 'llm', String(b.non_icp_source));
+
+    /* the two Slack posts, read as sent */
+    reset();
+    S.verdict = NAMEROW({ blocking: true, confidence: 0.88 });
+    S.leadRow = { email: 'm@hernandezins.test', company: 'H', website: null, phone: null, non_icp_blocked: true,
+                  non_icp_reason: 'hernandezins.test', non_icp_source: 'llm_name_only' };
+    await post('/submit', { session_id: '00000000-0000-4000-8000-0000000000b7', email: 'm@hernandezins.test',
+      first_name: 'M', last_name: 'H', company: 'H', phone: '+15551230000', sell_to: 'B2B',
+      page_url: 'https://www.gushwork.ai/demo' });
+    await sleep(700);
+    let txt = JSON.stringify(S.slackPayloads);
+    ok('NAME SLACK: a name-only block says the domain NAME was judged, not the website',
+       /Lead Blocked/.test(txt) && /judged the domain name alone/.test(txt) && !/Read their website/.test(txt), txt.slice(0, 300));
+    ok('NAME SLACK: ...quotes the part of the name, labelled as such', /The part of the name it read:\*? “ins”/.test(txt), txt.slice(0, 400));
+    ok('NAME SLACK: ...and points at the MODEL off switch, not the brand list', /NON_ICP_LLM_BLOCK=false/.test(txt) && !/NON_ICP_DOMAINS/.test(txt));
+
+    reset();
+    S.verdict = NAMEROW({ business_type: 'restaurant_food', confidence: 0.86, evidence_quote: 'diner' });
+    await post('/submit', { session_id: '00000000-0000-4000-8000-0000000000b8', email: 'm@hernandezins.test',
+      first_name: 'M', last_name: 'H', company: 'H', phone: '+15551230000', sell_to: 'B2B',
+      page_url: 'https://www.gushwork.ai/demo' });
+    await sleep(700);
+    txt = JSON.stringify(S.slackPayloads);
+    ok('NAME SLACK: a Meta-only post names the industry it withheld for, and why',
+       /Meta events withheld/.test(txt) && /restaurant \/ food service is one of the four industries that suppress Meta but never block/.test(txt), txt.slice(0, 600));
+    ok('NAME SLACK: ...and says it judged the name alone', /Judged from the domain name alone/.test(txt), txt.slice(0, 300));
+    ok('NAME SLACK: it never calls a BLOCKING industry "one of the four"', !/insurance is one of the four|real estate is one of the four/i.test(txt));
+
+    /* THE WORDING FOLLOWS THE EVIDENCE SHOWN. The lead row keeps its FIRST
+       decision (sticky); the quote comes from the fresh verdict. A lead
+       recorded name-only earlier and blocked from its WEBSITE at submit must
+       not read "judged the domain name alone" above a quote from the page. */
+    reset();
+    S.verdict = VROW({ domain: 'brokerage.test', business_type: 'real_estate', evidence_quote: 'homes for sale in Austin' });
+    S.stickySource = 'llm_name_only';   /* the row's first decision, kept by COALESCE */
+    await post('/submit', { session_id: '00000000-0000-4000-8000-0000000000b9', email: 'm@diner.test', website: 'brokerage.test',
+      first_name: 'M', last_name: 'D', company: 'D', phone: '+15551230001', sell_to: 'B2B', page_url: 'https://www.gushwork.ai/demo' });
+    await sleep(700);
+    txt = JSON.stringify(S.slackPayloads);
+    S.stickySource = null;
+    ok('NAME SLACK: a page quote shown under a lead first recorded name-only still says the WEBSITE was read',
+       /Read their website and judged/.test(txt) && /homes for sale in Austin/.test(txt) && !/judged the domain name alone/.test(txt), txt.slice(0, 400));
   }
 
   /* ========================================================

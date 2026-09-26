@@ -1758,14 +1758,26 @@ function slackNonIcpBlocked(d) {
      on -- so that sentence is printed, verbatim, in the message. Without
      it "Non-ICP" is unfalsifiable again, which is the exact failure the
      matched-domain field was added to fix one version ago. */
-  if (d.source === 'llm') {
+  /* nonIcpSourceIsModel, never === 'llm': since 26 Sept a name-only block
+     arrives as 'llm_name_only', and the literal would have filed it under
+     the brand list -- "Matched" a domain that is on no list. */
+  /* The WORDING follows the evidence shown, which /submit takes from the
+     fresh verdict; d.source is the lead row's, which keeps the FIRST
+     decision. A lead flagged name-only at step 1 and blocked from its
+     website at submit would otherwise read "judged the domain name alone"
+     above a quote from the page. */
+  const nameOnly = (d.evidence_source || d.source) === 'llm_name_only';
+  if (nonIcpSourceIsModel(d.source)) {
     blocks.push(bSection(
-      `*Read their website and judged:* ${d.business_type_label || d.business_type || 'unknown'}` +
+      (nameOnly
+        ? `*Their website did not load, so we judged the domain name alone:* ${d.business_type_label || d.business_type || 'unknown'}`
+        : `*Read their website and judged:* ${d.business_type_label || d.business_type || 'unknown'}`) +
       (d.confidence != null ? `  _(confidence ${Math.round(d.confidence * 100)}%)_` : '') +
       `\n*Domain judged:* \`${d.matched_domain || 'unknown'}\`` +
       `\n*Their website:* ${d.website || '_none given_'}` +
       (d.evidence_quote
-        ? `\n*What it said:* “${slackTruncate(d.evidence_quote)}”`
+        ? (nameOnly ? `\n*The part of the name it read:* “${slackTruncate(d.evidence_quote)}”`
+                    : `\n*What it said:* “${slackTruncate(d.evidence_quote)}”`)
         : '\n⚠️ _No supporting quote came back — treat this one as weak._') +
       `\n*Stopped at:* ${d.stage === 'partial' ? 'step 1 (email domain)' : 'submit (email + website)'}`
     ));
@@ -1805,7 +1817,7 @@ function slackNonIcpBlocked(d) {
     'No Meta event fired. Not pushed to Salesforce._'
   ));
   blocks.push(bSection(
-    d.source === 'llm'
+    nonIcpSourceIsModel(d.source)
       ? '*Wrong?* `NON_ICP_LLM_BLOCK=false` on Railway stops the model layer blocking ' +
         'without touching the brand-domain list or needing a deploy. ' +
         (d.model_id ? `_Decided by ${d.model_id}, prompt ${d.prompt_version || '?'}._` : '')
@@ -1837,17 +1849,30 @@ function slackNonIcpLlmFlagged(d) {
      it "would have been blocked" would be a straight falsehood in the one
      channel that exists to catch mistakes. */
   const metaOnly = d.action === 'meta';
+  const nameOnly = d.source === 'llm_name_only';
+  /* THE REASON IS READ OFF THE VERDICT, never assumed. This post used to
+     say every Meta-only lead was "one of the four industries that
+     suppress Meta but never block" -- and on 26 Sept said it about an
+     INSURANCE lead, one of the two that do block, which had only reached
+     here because a name-only guess cleared the page floor. That path is
+     closed; the sentence now also names the industry, so it cannot claim
+     the wrong one again. */
+  const typeInfo = NON_ICP_BUSINESS_TYPES[d.business_type] || {};
   const blocks = [];
   blocks.push(bHeader(metaOnly
     ? '📉 Meta events withheld — non-ICP industry (model)'
     : '🔎 Would have been blocked — non-ICP (model)'));
   blocks.push(bDivider());
   blocks.push(bSection(
-    `*Judged:* ${d.business_type_label || d.business_type || 'unknown'}` +
+    (nameOnly ? '*Judged from the domain name alone* _(their website did not load)_: ' : '*Judged:* ') +
+    `${d.business_type_label || d.business_type || 'unknown'}` +
     (d.confidence != null ? `  _(confidence ${Math.round(d.confidence * 100)}%)_` : '') +
     `\n*Domain judged:* \`${d.matched_domain || 'unknown'}\`` +
     `\n*Their website:* ${d.website || '_none given_'}` +
-    (d.evidence_quote ? `\n*What it said:* “${slackTruncate(d.evidence_quote)}”` : '')
+    (d.evidence_quote
+      ? (nameOnly ? `\n*The part of the name it read:* “${slackTruncate(d.evidence_quote)}”`
+                  : `\n*What it said:* “${slackTruncate(d.evidence_quote)}”`)
+      : '')
   ));
   const lf = bFields([
     { label: '👤 Name',    value: name      },
@@ -1857,8 +1882,11 @@ function slackNonIcpLlmFlagged(d) {
   if (lf) blocks.push(lf);
   blocks.push(bSection(metaOnly
     ? '_This lead went through completely normally — calendar, Salesforce, SDR list, all as usual._ ' +
-      '*Only the Meta conversion events were withheld*, because this industry is one of the four ' +
-      'that suppress Meta but never block. `NON_ICP_LLM_META=false` stops this.'
+      '*Only the Meta conversion events were withheld*, because ' +
+      (typeInfo.blocks
+        ? `${typeInfo.label || d.business_type} is an industry we block, and this verdict withheld Meta without blocking. That should not happen — worth a look. `
+        : `${(typeInfo.label || d.business_type || 'this industry').toLowerCase()} is one of the four industries that suppress Meta but never block. `) +
+      '`NON_ICP_LLM_META=false` stops this.'
     : '_This lead went through normally — they reached the calendar and are in Salesforce._ ' +
       '*Nothing was blocked.* Read these for a week before switching `NON_ICP_LLM_BLOCK` on.'
   ));
@@ -8571,7 +8599,12 @@ async function nonIcpVerdict({ email, website } = {}) {
           llm_flagged:    true,
           llm_action:     hit.action,
           suppress_meta:  NON_ICP_LLM_META,
-          source:         'llm',
+          /* WHICH evidence, not just "the model". This said 'llm' for every
+             model verdict, so a lead decided on its domain NAME was
+             recorded, and labelled on the dashboard, as "read their
+             website" -- hernandezins.com, 26 Sept. The dashboards already
+             had a label for llm_name_only; nothing ever wrote it. */
+          source:         v.source === 'llm_name_only' ? 'llm_name_only' : 'llm',
           reason:         v.domain,
           label:          (NON_ICP_BUSINESS_TYPES[v.business_type] || {}).label || v.business_type,
           business_type:  v.business_type,
@@ -9053,8 +9086,17 @@ const NON_ICP_NAME_PROMPT_VERSION  = 'name-v1-2026-09-23';
 /* HIGHER THAN THE PAGE FLOOR (0.75) ON PURPOSE. "realtor" inside a
    hostname is close to conclusive; almost everything else is not, and the
    cost of being wrong here is a real prospect turned away on the strength
-   of a string. */
-const NON_ICP_NAME_CONFIDENCE_FLOOR = Number(process.env.NON_ICP_NAME_CONFIDENCE_FLOOR || 0.9);
+   of a string.
+
+   0.85 SINCE 26 SEPT 2026, down from 0.9 (Darshil). It went live at 0.9 as
+   a provisional number, to be moved after two or three misses, and they
+   came: planrightlegacyins.com (insurance) scored 0.82 and its www-typo
+   0.85 on 23 Sept; homes.com (real estate) 0.88 on 25 Sept; and
+   hernandezins.com (insurance) 0.82 on 26 Sept. At 0.85 the two above it
+   block and the two at 0.82 still do not -- measured over all 40 name-only
+   verdicts, nothing else moves. It stays well above the page floor,
+   because the evidence is still only a hostname. */
+const NON_ICP_NAME_CONFIDENCE_FLOOR = Number(process.env.NON_ICP_NAME_CONFIDENCE_FLOOR || 0.85);
 
 const NON_ICP_NAME_SYSTEM_PROMPT = [
   'You are shown ONLY a domain name. Its website could not be read — it refused our',
@@ -9636,20 +9678,50 @@ async function nonIcpLlmCachedVerdict({ email, website } = {}) {
        a lead whose email is a restaurant and whose website is a brokerage
        would be Meta-suppressed and not blocked, which is the weaker of the
        two actions winning by accident of iteration order. */
-    if (row.blocking === true) return { row, action: 'block' };
+    /* BLOCKING IS ALSO READ FROM THE TYPE AND ITS FLOOR, as Meta is below,
+       as well as from the stored column. The column is fixed when a domain
+       is classified; without this, a name-only verdict stored under the old
+       0.9 floor at 0.85-0.9 would WITHHOLD META AND NOT BLOCK until its six
+       hours ran out -- the weaker action, on evidence the new floor says is
+       enough to block. Measured on 26 Sept: every page verdict reads the
+       same either way (no page row of a blocking type at or over 0.75 is
+       stored non-blocking), so this only ever adds a block the floor
+       already decided. */
+    if (row.blocking === true
+        || (nonIcpTypeBlocks(row.business_type) && Number(row.confidence) >= nonIcpFloorFor(row.source))) {
+      return { row, action: 'block' };
+    }
     /* Meta suppression is decided from the TYPE at read time, not from the
        stored `blocking` column, so the six-industry scope can change
        without re-classifying anything. The confidence floor is the same
        one blocking uses: a verdict too weak to act on is too weak to act
        on, and using a lower bar for Meta would mean the ad audience is
-       reshaped on evidence we would not turn anyone away for. */
+       reshaped on evidence we would not turn anyone away for.
+
+       THE SAME ONE FOR THAT KIND OF EVIDENCE, and until 26 Sept it was
+       not. This read the page floor (0.75) for every row, so a NAME-ONLY
+       verdict -- whose own floor is higher -- withheld Meta on evidence
+       too weak to block on: hernandezins.com, judged insurance from the
+       letters "ins" at 0.82, lost its Meta events while its website read
+       as a business-funding coach. Exactly the case this comment forbids,
+       arriving through the second source. nonIcpFloorFor is the one
+       place a source picks its floor. */
     if (!metaOnly
         && nonIcpTypeSuppressesMeta(row.business_type)
-        && Number(row.confidence) >= NON_ICP_LLM_CONFIDENCE_FLOOR) {
+        && Number(row.confidence) >= nonIcpFloorFor(row.source)) {
       metaOnly = { row, action: 'meta' };
     }
   }
   return metaOnly;
+}
+
+/* WHICH BAR A VERDICT MUST CLEAR, by the evidence behind it: a hostname is
+   weaker evidence than a page, so it has the higher floor. Blocking at
+   write time uses the same two constants; this is where a READ picks one.
+   A declaration, so it is hoisted, and the constants it reads are only
+   touched at call time. */
+function nonIcpFloorFor(source) {
+  return source === 'llm_name_only' ? NON_ICP_NAME_CONFIDENCE_FLOOR : NON_ICP_LLM_CONFIDENCE_FLOOR;
 }
 
 /* The verdict. Reason strings are stable identifiers — they are stored, and
@@ -12760,8 +12832,7 @@ async function nonIcpModelReport({ days, product } = {}) {
      LIMIT 500`, [blockingTypes]);
   const nearMisses = nearRows.rows
     .map((r) => {
-      const floor = r.source === 'llm_name_only'
-        ? NON_ICP_NAME_CONFIDENCE_FLOOR : NON_ICP_LLM_CONFIDENCE_FLOOR;
+      const floor = nonIcpFloorFor(r.source);
       /* THE HUMAN LABEL, from the same enum the Model tab reads. CLAUDE.md:
          "Plain, direct language in Slack alerts and dashboard labels. They
          are read by SDRs, not engineers." real_estate is a key, not a
@@ -15264,6 +15335,7 @@ app.post('/submit', async (req, res) => {
            step these are absent, and the post degrades to naming the domain
            -- which is still falsifiable, just thinner. */
         source: nonIcpSource,
+        evidence_source: nonIcp.business_type ? (nonIcp.source || null) : null,
         business_type: nonIcp.business_type || null,
         business_type_label: nonIcp.label || null,
         confidence: nonIcp.confidence != null ? nonIcp.confidence : null,
@@ -15364,6 +15436,7 @@ app.post('/submit', async (req, res) => {
       if (nonIcpLlmFlagged) {
         slackNonIcpLlmFlagged({ matched_domain: nonIcpReason,
           action: nonIcp.llm_action || null,
+          source: nonIcp.source || null,
           business_type: nonIcp.business_type || null,
           business_type_label: nonIcp.label || null,
           confidence: nonIcp.confidence != null ? nonIcp.confidence : null,
@@ -15573,11 +15646,19 @@ function slackNonIcpLateBlock(d) {
   blocks.push(bSection(
     `*They already have a slot.* The verdict arrived after they submitted, so nothing ` +
     `could stop the booking. Nothing here has been cancelled.`));
+  /* d is the lead plus the VERDICT ROW, so d.source is 'llm' or
+     'llm_name_only'. Name-only verdicts are the slow ones -- they only run
+     after a scrape fails -- so they are exactly what this sweep catches, and
+     "quoted from their site" about the letters "ins" would send a human to
+     decide on a meeting from a quote nobody wrote. */
+  const nameOnly = d.source === 'llm_name_only';
   blocks.push(bSection(
-    `*Read their website and judged:* ${d.business_type_label || d.business_type || 'unknown'}` +
+    (nameOnly ? `*Their website did not load, so we judged the domain name alone:* ` : `*Read their website and judged:* `) +
+    `${d.business_type_label || d.business_type || 'unknown'}` +
     (d.confidence != null ? `  _(confidence ${Math.round(Number(d.confidence) * 100)}%)_` : '') +
     (d.domain ? `\n*Matched on:* \`${d.domain}\`` : '')));
-  if (d.evidence_quote) blocks.push(bSection(`*Evidence, quoted from their site:*\n> ${slackTruncate(d.evidence_quote)}`));
+  if (d.evidence_quote) blocks.push(bSection((nameOnly ? `*The part of the name it read:*` : `*Evidence, quoted from their site:*`) +
+    `\n> ${slackTruncate(d.evidence_quote)}`));
   const lf = bFields([
     { label: '👤 Name',     value: name },
     { label: '📧 Email',    value: d.email },

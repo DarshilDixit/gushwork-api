@@ -66,12 +66,33 @@ Three things follow from that, and they are not negotiable:
    `westexinsurance.com` does not connect, `adrianadearaujorealtor.com`
    returns 200 with 64 characters because it renders client-side.
 
-   It carries **its own higher confidence floor (0.9 against 0.75)**, its
+   It carries **its own higher confidence floor (0.85 against 0.75)**, its
    own `non_icp_source='llm_name_only'` and its own prompt version, because
    a 0.75 meaning "the page says we sell insurance" and a 0.75 meaning "the
    hostname contains those letters" are not the same claim. `unknown`
-   returns null rather than a verdict, so the row keeps the six-hour
-   failure TTL instead of a 180-day non-answer.
+   returns null rather than a verdict.
+
+   **0.85 since 26 Sept 2026, down from a provisional 0.9 (Darshil),** after
+   the misses it was waiting for: `homes.com` 0.88 and the www-typo of
+   `planrightlegacyins.com` 0.85 now block; the 0.82s still do not.
+
+   **ONE FLOOR PER KIND OF EVIDENCE, FOR BOTH ACTIONS.** The Meta-only read
+   used the page floor for every verdict until 26 Sept, so a name-only guess
+   too weak to block still withheld Meta — `hernandezins.com`, insurance
+   from the letters "ins" at 0.82, whose website read as a business-funding
+   coach. `nonIcpFloorFor(source)` is now the one place a read picks its
+   floor, and the lead row records `llm_name_only` (it said `llm`, "read
+   their website", for every model verdict).
+
+   **A name-only verdict is cached for SIX HOURS, not 180 days, on purpose**
+   (the comment above the TTL in `nonIcpReadVerdictRow` says why: it exists
+   only because the site would not load, so the site should be tried again
+   soon). This file used to imply 180 days.
+
+   **Blocking is read at decision time from the type and its floor, as well
+   as from the stored `blocking` column** — so a floor change applies to the
+   cache at once. Measured 26 Sept: every page verdict reads the same either
+   way; only name-only rows between the old and new floor gain a block.
 
    **The domain, never the company field the visitor typed.** The cache is
    keyed by domain; a per-lead input would make the stored verdict depend
