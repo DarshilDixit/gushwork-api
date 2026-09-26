@@ -1067,7 +1067,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   fire('input', el({ 'data-sdr-q': '' }, { value: '' }));
   /* 17. the words: website verdicts as the SERVER words them, and no false claims */
   const wrlSrc = (fs.readFileSync(path.join(ROOT, 'index.js'), 'utf8').match(/function websiteReasonLabel\(reason\) \{[\s\S]*?\n\}/) || [])[0];
-  const wrl = wrlSrc && new Function('WEBSITE_REASON_LABELS', wrlSrc + '\nreturn websiteReasonLabel;')(servedCfg.labels.website);
+  const wrl = wrlSrc && new Function('WEBSITE_REASON_LABELS', wrlSrc + '\nreturn websiteReasonLabel;')(((servedCfg && servedCfg.labels) || {}).website || {});
   const WIN = ['http_403', 'http_999', 'http_401', 'http_429', 'http_500', 'http_404', 'parked_confirmed', 'timeout', 'some_new_code', 'resolved'];
   ok('review: every website verdict reads exactly as the server words it', wrl && WIN.every((r) => GW.L.website(r) === wrl(r)), WIN.map((r) => r + '=' + GW.L.website(r) + '|' + (wrl && wrl(r))).join('; '));
   ok('review: the Meta chip for an unverified site never says "no website"', GW.L.metaShort('website') === 'site not verified');
