@@ -1037,6 +1037,39 @@ success. It is now printed when non-empty.
 
 ---
 
+**THE ORIGIN CHECK ADMITS THE API'S OWN ADDRESS, EXACTLY — SINCE 27 SEPT
+2026.** The `cors` origin function throws for any Origin that isn't in
+`ALLOWED_ORIGIN`, and that throw is a **500 before any route runs**. A
+browser sends Origin on every font request and every POST, even to the site
+the page came from (Chrome for fonts; every browser for POSTs), and the
+dashboards are served BY this API.
+
+**What that broke:**
+- the dashboard's fonts, which never once loaded on production;
+- the three write buttons on both dashboards (Lead magnet delivered and
+  retry, Partners acknowledge), which could never have worked: 0 delivered,
+  0 acknowledged, ever.
+
+**Why nothing caught it:** the preview and the layout check serve the page
+from localhost with no origin check. After a front-end deploy, look at the
+fonts in a real browser on production.
+
+**The fix:**
+- `SELF_ORIGIN` is `https://` plus Railway's own `RAILWAY_PUBLIC_DOMAIN`,
+  compared as a whole string: no wildcard, no other subdomain, no http, no
+  port.
+- `selfOriginFrom` refuses anything that isn't a bare hostname.
+- Unset (a laptop, a test) admits nothing extra.
+- **Foreign origins still get the 500, deliberately:** a page on another
+  site still cannot make any **POST** route run. This was never cross-site
+  protection for GETs: a link or an image sends no Origin, and no-Origin is
+  admitted, as always.
+- **If a custom domain is ever attached,** `RAILWAY_PUBLIC_DOMAIN` may name
+  it instead, and the railway.app address is refused again. That's the safe
+  direction; the answer is the other exact name, never a pattern.
+- Never widen this to `endsWith` or a pattern.
+- `tests/test-monitor-next.js` §2b drives each case over HTTP.
+
 **THE VISITORS TAB, AND THE THREE TILE PROVIDERS IT TOOK.**
 `/monitor/visitors` plus the **Visitors** tab: coverage, repeat addresses,
 places, networks, timezones, and a map toggle.

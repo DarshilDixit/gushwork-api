@@ -118,7 +118,9 @@ global.fetch = async function (url, opts) {
   S.fetches.push(u);
   return { ok: true, status: 200, json: async () => ({}), text: async () => '{}' };
 };
-Object.assign(process.env, { PORT: String(PORT), DATABASE_URL: 'postgres://stub/stub', MONITOR_TOKEN: TOKEN, ALLOWED_ORIGIN: 'https://www.gushwork.ai' });
+Object.assign(process.env, { PORT: String(PORT), DATABASE_URL: 'postgres://stub/stub', MONITOR_TOKEN: TOKEN, ALLOWED_ORIGIN: 'https://www.gushwork.ai',
+  /* the API's own host, as Railway provides it -- see the ORIGIN CHECK section */
+  RAILWAY_PUBLIC_DOMAIN: 'api.gushwork.test' });
 const realLog = console.log, realWarn = console.warn, realErr = console.error;
 const quiet = () => { console.log = console.warn = console.error = () => {}; };
 const loud = () => { console.log = realLog; console.warn = realWarn; console.error = realErr; };
@@ -333,6 +335,57 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
      from monitor-next.js, the same function the route calls, and every
      later assertion still runs and still counts. */
   if (r.status !== 200) html = mn.page({ token: TOKEN, tz: 'America/New_York', labels: {} });
+
+  /* ═══ 2b. THE ORIGIN CHECK: THE API'S OWN PAGES, AND NOTHING BROADER ══════
+     A browser sends Origin on every font request and every POST, even to
+     the site the page came from, and the dashboard is served BY the API. So
+     its fonts and all three write buttons -- on both dashboards -- were
+     rejected with a 500 before any route ran (27 Sept 2026, measured on
+     production). Driven over HTTP with the header a browser adds. A route
+     that runs answers its own JSON; the origin check answers an HTML 500
+     and no query is sent. */
+  {
+    const SELF = 'https://api.gushwork.test';
+    const req = async (method, pth, origin, body) => {
+      S.queries = [];
+      const headers = {}; if (origin) headers.Origin = origin;
+      if (body) headers['Content-Type'] = 'application/json';
+      const r = await realFetch(BASE + pth, { method, headers, body: body ? JSON.stringify(body) : undefined });
+      const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch (e) {}
+      /* the table the button writes, so an unrelated background UPDATE landing in this window cannot turn a pass red */
+      return { status: r.status, json: j, text: t, type: r.headers.get('content-type') || '', wrote: S.queries.some((q) => /^\s*UPDATE lead_magnet_leads\b/i.test(q.sql)) };
+    };
+    const fontPath = '/monitor/next/asset/Inter-VariableFont_opsz_wght.ttf' + tq;
+    let r = await req('GET', fontPath, SELF);
+    ok('origin: the dashboard\'s font loads from the API\'s own page', r.status === 200 && /font\/ttf/.test(r.type), r.status + ' ' + r.type);
+    r = await req('GET', '/monitor/next/asset/Vert_Grotesk_Display_VF.ttf' + tq, SELF);
+    ok('origin: ...and the display font', r.status === 200 && /font\/ttf/.test(r.type), r.status + ' ' + r.type);
+    r = await req('POST', '/monitor/lm-delivered/424242' + tq + '&undo=0', SELF);
+    ok('origin: Lead magnet "delivered" reaches its route from the API\'s own page', r.status === 200 && r.json && r.json.ok === true && r.wrote, r.status + ' ' + r.text.slice(0, 80));
+    r = await req('POST', '/monitor/lm-loops-retry/424242' + tq, SELF);
+    ok('origin: Lead magnet "retry" reaches its route (its own 404 for an unknown lead, not the check\'s 500)', r.status === 404 && r.json && /not found/.test(r.json.error || ''), r.status + ' ' + r.text.slice(0, 80));
+    ok('origin: ...and never called Loops for an unknown lead', !S.fetches.some((u) => /loops\.so/.test(u)));
+    r = await req('POST', '/monitor/partner-ack' + tq, SELF, { customer_key: 'cors-check.test', acknowledged: true });
+    ok('origin: Partners "acknowledge" reaches its route from the API\'s own page', r.status === 200 && r.json && r.json.ok === true, r.status + ' ' + r.text.slice(0, 80));
+    /* NOTHING BROADER. Each of these must stop at the check, before any query. */
+    const FOREIGN = ['https://evil.test', 'http://api.gushwork.test', 'https://api.gushwork.test:8443', 'https://x.api.gushwork.test',
+      'https://api.gushwork.test.evil.test', 'https://xapi.gushwork.test', 'https://api-gushwork.test', 'null'];
+    for (const o of FOREIGN) {
+      r = await req('POST', '/monitor/lm-delivered/424242' + tq + '&undo=0', o);
+      ok('origin: a foreign origin is still REJECTED before any write -- ' + o, r.status === 500 && !r.json && !r.wrote, r.status + ' wrote=' + r.wrote);
+    }
+    r = await req('GET', fontPath, 'https://evil.test');
+    ok('origin: ...and a foreign page cannot load the fonts either', r.status === 500, String(r.status));
+    r = await req('POST', '/monitor/lm-delivered/424242' + tq + '&undo=0', 'https://www.gushwork.ai');
+    ok('origin: the listed site (www.gushwork.ai) is still allowed, as before', r.status === 200 && r.json && r.json.ok === true, String(r.status));
+    r = await req('POST', '/monitor/lm-delivered/424242' + tq + '&undo=0', null);
+    ok('origin: a request with no Origin (a script, curl) still works, as before', r.status === 200 && r.json && r.json.ok === true, String(r.status));
+    /* the helper, EXECUTED: only a bare hostname ever becomes an origin */
+    const sof = new Function((fs.readFileSync(path.join(ROOT, 'index.js'), 'utf8').match(/function selfOriginFrom\(host\) \{[\s\S]*?\n\}/) || [''])[0] + '\nreturn selfOriginFrom;')();
+    eq('origin: selfOriginFrom turns Railway\'s host into exactly one https origin', sof(' GUSHWORK-API-PRODUCTION.up.railway.app '), 'https://gushwork-api-production.up.railway.app');
+    ok('origin: ...and refuses a wildcard, a scheme, a path, a port, a bare name or nothing',
+       ['*.up.railway.app', 'https://x.app', 'x.app/', 'x.app:443', 'localhost', '', null, 'a..b.app', 'evil.com x.app'].every((h) => sof(h) === null));
+  }
 
   /* ═══ 3. THE PAGE, EXECUTED ════════════════════════════════════════════ */
   const js = (html.match(/<script>(\/\* ---- core\.js[\s\S]*?)<\/script><\/body>/) || [])[1] || '';

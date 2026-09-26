@@ -66,10 +66,44 @@ app.use(helmet({
 const allowedOrigins = (process.env.ALLOWED_ORIGIN || '')
   .split(',').map(o => o.trim()).filter(Boolean);
 
+/* THE API'S OWN ADDRESS, AND NOTHING BROADER. Added 27 Sept 2026.
+
+   Chrome puts an Origin header on every font request, and every browser on
+   every POST, even to the site the page came from. The dashboard is served
+   BY this API,
+   so its own requests carried Origin: https://<this host> -- which was on
+   no list, so they were rejected with a 500 before any route ran. Measured
+   on production after the switch: both dashboard fonts answered 500 in
+   every fresh browser (they had never loaded there -- every screenshot was
+   taken through the local preview), and the three write buttons (Lead
+   magnet delivered and retry, Partners acknowledge) on BOTH dashboards
+   could never have worked: 0 lead magnets ever marked delivered, 0 partner
+   failures ever acknowledged.
+
+   EXACT MATCH ONLY. The host is Railway's own RAILWAY_PUBLIC_DOMAIN; it
+   must be a bare hostname, and the only origin it admits is https:// plus
+   that name, compared as a whole string -- no wildcard, no other
+   subdomain, no http, no port. Unset (a laptop, a test) admits nothing
+   extra. A foreign page cannot make a browser send this Origin, so this
+   admits only pages this API serves itself.
+
+   NOT CSRF PROTECTION FOR GETs, before or after: a link or an image sends
+   no Origin, and no-Origin was always admitted. It stops foreign POSTs.
+   And RAILWAY_PUBLIC_DOMAIN can name a CUSTOM domain once one is attached;
+   then the railway.app address is refused again -- the safe direction --
+   and this needs the other name, never a pattern. */
+function selfOriginFrom(host) {
+  const h = String(host || '').trim().toLowerCase();
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(h)) return null;
+  return 'https://' + h;
+}
+const SELF_ORIGIN = selfOriginFrom(process.env.RAILWAY_PUBLIC_DOMAIN);
+
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
+    if (SELF_ORIGIN && origin === SELF_ORIGIN) return callback(null, true);
     callback(new Error(`CORS blocked: ${origin}`));
   },
   methods: ['GET', 'POST', 'OPTIONS'],
