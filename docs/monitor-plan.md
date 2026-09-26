@@ -20,7 +20,7 @@ switches them.
 | A | Apollo: page on out-of-credits, an honest System Health row, label fixes | **merged** 25 Sept | [#122](https://github.com/DarshilDixit/gushwork-api/pull/122), `cards/PR-122-apollo-honest-health.md` |
 | B | The new dashboard, five tabs: Overview, System health, Dropoff, Duplicates, Lead magnet | **merged** 25 Sept 22:53 UTC (`5bb0479`), deploy confirmed | [#123](https://github.com/DarshilDixit/gushwork-api/pull/123), `cards/PR-123-monitor-next.md` |
 | C | The other six tabs: All leads, Blocked, SDR list, Partners, Model, Visitors | **merged** (#124, 26 Sept 11:13 UTC, `c83683a`); deploy confirmed | card `cards/PR-124-monitor-next-c.md` |
-| D | The switch: `/monitor` becomes the new page; the old one stays at `/monitor/classic` for a week, then goes | not started; **waits on decisions 1 and 5** | — |
+| D | The switch: `/monitor` becomes the new page; the old one stays at `/monitor/classic` for a week, then goes. Plus decisions 1 and 5 | **in progress** on `feat/monitor-next-d` | — |
 
 Earlier, related: [#121](https://github.com/DarshilDixit/gushwork-api/pull/121)
 (the Dropoff presets fix, 25 Sept).
@@ -60,8 +60,10 @@ Earlier, related: [#121](https://github.com/DarshilDixit/gushwork-api/pull/121)
   - the crosscheck against the classic, pointed at production: **45 of 45**
     (the first run failed 4 live-partition checks because a lead arrived
     mid-run; see learnings).
-- **PR D (the switch) does not start until Darshil decides items 1 and 5
-  below.** He asked for both before PR D, and said to wait.
+- **PR D started 26 Sept** on `feat/monitor-next-d` (from the docs branch,
+  so this file rides in it), after Darshil decided items 1 and 5: exclude
+  our tests from Overview, Dropoff and the digest, and build the CSV rule
+  as proposed. Progress is under "PR D" at the end of this file.
 
 ## Decisions waiting on Darshil
 
@@ -494,3 +496,27 @@ _(kept current as the work moves)_
   scratch git worktree (removed after) with a memory check before each.
 - [x] Card (`cards/PR-124-monitor-next-c.md`), branch pushed, **PR #124**
   opened, then merged on Darshil's word (26 Sept 11:13 UTC, `c83683a`).
+
+### PR D progress
+
+_(kept current as the work moves)_
+
+- [x] **Decision 1, our tests left out** of the Overview, Dropoff and the
+  Monday digest, row by row, each saying in words how many it left out
+  (commit `e37b90d`). Verified against the real database, read-only:
+  Overview and Dropoff agree for this week in Leads mode (318 = 318, both
+  leaving out 1), blocked agrees (23 = 23), and all-time reads 5,741 leads
+  and 5,315 people -- the "without" figures measured before deciding.
+- [x] **Decision 5, csvCell** on the All leads and SDR exports. Over every
+  real exported value: 2,676 phone numbers, **0 changed**; 4 cells got the
+  apostrophe, exactly the four predicted; 866 quoted as before.
+- [x] **The switch**: `/monitor` is the new page, `/monitor/next` redirects
+  keeping its query, the classic is `/monitor/classic` with a fallback
+  notice. Tests and tools moved to the new paths; the preview serves this
+  branch's `dropoffReport` (commit `bed4d96`).
+- [x] Full bar, bare: 14 suites, 4,963 assertions, 0 failures.
+- [ ] Layout check (all widths, both themes), keyboard, crosscheck
+- [ ] Screenshots by eye
+- [ ] Review sweep + fixes
+- [ ] Mutations on the new guards
+- [ ] Card, push, PR -- stop before merging
