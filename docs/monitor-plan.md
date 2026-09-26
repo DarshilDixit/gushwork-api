@@ -67,11 +67,11 @@ Earlier, related: [#121](https://github.com/DarshilDixit/gushwork-api/pull/121)
 
 ## Decisions waiting on Darshil
 
-1. **Our own test addresses are in every Overview number.** This is the
-   standing, undecided distortion in `CLAUDE.md` ("Internal / test
-   addresses: Included"). They are marked on Duplicates and Lead magnet,
-   never subtracted. Excluding them moves every historical number at once,
-   so it is his call.
+1. **DECIDED 26 Sept (Darshil): our own test addresses are left out of the
+   Overview, Dropoff and the digest, and counted in words there; kept and
+   marked where rows are listed.** Built in PR D. Kept below for the record
+   of what was measured before deciding. They were in every Overview number
+   until then, marked on Duplicates and Lead magnet, never subtracted.
 
    **Measured 26 Sept, read-only.** The real `overviewReport` was run
    twice, the second time with every read of `leads` swapped for "leads
@@ -499,7 +499,7 @@ _(kept current as the work moves)_
 
 ### PR D progress
 
-_(kept current as the work moves; last updated 26 Sept 2026, before a context compaction)_
+_(kept current as the work moves; last updated 26 Sept 2026, after the checks)_
 
 **Branch `feat/monitor-next-d`, NOT pushed yet, no PR yet.** It was branched from
 `docs/monitor-plan-after-c`, so this file's earlier commit rides in it, as
@@ -561,74 +561,33 @@ Darshil asked.
     Blocked;
   - the suite checks every classic tab name is registered on the new page.
 
-**Verified:**
-- **Full bar, bare:** 4,963 assertions, 0 failures, baseline saved, before
-  `066d099`. **`066d099` added 2 assertions (`test-monitor-next` 410 to 412),
-  and the baseline has NOT been re-saved.** Run `--check` bare, then
-  `--save`, and read both.
-- **Real database, read-only** (scratch `verify-d.js`):
-  - `csvCell` over every exported value: 2,676 phone numbers, **0 changed**;
-    4 cells prefixed, the 4 predicted; 866 quoted as before;
-  - Overview and Dropoff agree this week in Leads mode (318 = 318, both
-    leaving out 1), and on blocked (23 = 23);
-  - all time reads 5,741 leads and 5,315 people.
-- **Keyboard and old links, real Chrome:** clean. I broke the redirect on
-  purpose (a Location carrying its own `#tab=overview`) and the check
-  failed for the right reason, then passed again once restored.
+**After the compaction** (`92569da`, the review fixes):
+- The review workflow's agents hit the usage limit, so its findings were
+  checked by hand. Three were real and are fixed with tests:
+  - the "ours" marker said "counted in every total";
+  - Dropoff counted rows with no email (0 exist; aligned with the Overview);
+  - the CSV docs over-claimed what Excel shows.
+- The `;`-locale CSV limit (0 values affected) is left as Darshil's rule and
+  raised on the card as his call.
 
-**Layout check, first run:** 128 combinations, **0 findings**: 360 and 390
-in both themes, 414 light, and 414 dark up to Model. Then it CRASHED (the
-page's document momentarily null, "reading 'scrollWidth' of null"), with
-nothing wrong on the page. The checker now retries a measurement three
-times and REPORTS it as a finding instead of crashing (uncommitted
-change in `tools/check-monitor-layout.mjs`; commit it with the next
-batch).
+**Verified, on the final code:**
+- the bar, bare: 4,970 assertions, 0 failures, baseline saved;
+- the real database, read-only: Overview 322 = Dropoff 322 this week in
+  Leads mode, both leaving out 1;
+- the crosscheck: 45 of 45;
+- the layout check: 0 findings across every width and theme (128 + 224
+  combinations);
+- keyboard and old links: clean;
+- the screenshots, read by eye;
+- the mutation run over 38 guards, in a scratch worktree (results on the
+  card).
 
-**Running when this was written** (check before re-running):
-- **Layout rerun:** the widths the crash did not reach (414, 768, 1024,
-  1280, 1440, both themes). Log `$S/lcD2.log`, background task
-  `bhvcjau5m`.
-- **Review sweep:** workflow run `wf_97675e29-6ed` (task `wv2v62dqb`), five
-  lenses plus verifiers, reading committed code only. The script is saved
-  under the session's `workflows/scripts/review-pr-d-*.js`; resume it with
-  `resumeFromRunId` if it was cut off.
-
-**Still to do, in order:**
-1. Re-save the baseline for 412, as above.
-2. Read the layout result and fix any findings. Read the review result and
-   fix the confirmed findings, with tests.
-3. **Crosscheck** (`tools/crosscheck-monitor.mjs`, now classic at
-   `/monitor/classic`, new at `/monitor`) against the preview.
-4. **Screenshots by eye**, phone and desktop, both themes:
-   - the Overview's "Leaves out …" sentence;
-   - the Dropoff note;
-   - the classic's fallback banner and link;
-   - that `/monitor` is the new page.
-5. **Mutations on the new guards**, in a scratch worktree, with the memory
-   gate in `$S/mutate.py`. Candidates:
-   - the `IS NOT TRUE` exclusion in each Overview read (KPIs, series,
-     channels, last lead, first lead, recovered);
-   - the ours count query;
-   - the Dropoff `kept` filter and the left-out query;
-   - `internal_by_period`;
-   - the source list filter;
-   - `oursNote` wording;
-   - the digest line;
-   - `csvCell`: each branch (`=`/`@`/tab/CR, the `+`/`-` number-only rule,
-     CR in the quoting);
-   - the `/monitor/next` redirect keeping the query;
-   - `/monitor` serving the new page;
-   - the classic at `/monitor/classic`;
-   - the footer's classic link;
-   - the preview's classic fallback.
-6. **Card** `cards/PR-<n>-monitor-next-d.md`:
-   - what changed and what did not;
-   - that nothing changes blocking or Meta;
-   - the classic `/monitor/metrics` still counts ours, and says so;
-   - that the digest text changed and has NOT been fired (firing posts to
-     the leads channel, so ask first).
-7. **Push** the branch (not main), **open the PR**, update this file,
-   **stop**. Stop the preview and any Chrome.
+**Status:** the card is `cards/PR-125-monitor-next-d.md`. The branch is
+pushed and the PR opened. **STOP: merge only on Darshil's explicit word.**
+After the merge:
+- confirm read-only that `/monitor` serves the new page, `/monitor/next`
+  redirects, and `/monitor/classic` is the classic;
+- then the classic's removal PR, one week later.
 
 **Answered on the side, for the record:**
 - Production's Apollo key ends **…zEuA**. Its scope cannot name its owner
