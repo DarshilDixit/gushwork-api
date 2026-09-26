@@ -186,7 +186,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   const noTok = await realFetch(BASE + '/monitor');
   eq('route: no token is 401', noTok.status, 401);
   const r = await realFetch(BASE + '/monitor' + tq);
-  const html = await r.text();
+  let html = await r.text();
   eq('route: the page is 200', r.status, 200);
   ok('route: served as HTML, never cached', /text\/html/.test(r.headers.get('content-type')) && /no-store/.test(r.headers.get('cache-control') || ''));
   const mn = require(path.join(ROOT, 'monitor-next.js'));
@@ -317,6 +317,14 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   const dead = await realFetch(BASE + '/monitor/overview' + tq + '&view=week');
   S.dbDead = false;
   eq('overview: a dead database is a 500, never a page of zeros', dead.status, 500);
+
+  /* A BROKEN ROUTE MUST FAIL THE SUITE, NOT END IT. With /monitor no longer
+     serving the page, the route assertions above fail -- and everything
+     below used to die with them, at assertion 100 of 418, which measure.js
+     rightly refuses to count as a catch. So the page is then built straight
+     from monitor-next.js, the same function the route calls, and every
+     later assertion still runs and still counts. */
+  if (r.status !== 200) html = mn.page({ token: TOKEN, tz: 'America/New_York', labels: {} });
 
   /* ═══ 3. THE PAGE, EXECUTED ════════════════════════════════════════════ */
   const js = (html.match(/<script>(\/\* ---- core\.js[\s\S]*?)<\/script><\/body>/) || [])[1] || '';
