@@ -159,9 +159,14 @@ for (const width of (KEYS === 'only' ? [] : WIDTHS)) {
       events = [];
       await ev(`(()=>{ GW.S.unit=${JSON.stringify(mod === 'leads' ? 'leads' : 'people')}; GW.S.table=${mod === 'table'}; if (GW.current() !== ${JSON.stringify(tab)} || ${q ? 'true' : 'false'}) GW.show(${JSON.stringify(tab)}, false, ${q ? JSON.stringify(q) : 'null'}); ${view ? `GW.TABS.overview.setView(${JSON.stringify(view)});` : ''} if (GW.TABS[${JSON.stringify(tab)}].render) GW.TABS[${JSON.stringify(tab)}].render(); })()`);
       /* Wait for the data: no skeleton left, or give up after 20s and say so. */
-      let a; for (let k = 0; k < 40; k++) { await sleep(500); a = await ev(AUDIT); if (!a.loading) break; }
+      /* A MEASUREMENT THAT THROWS IS RETRIED, then REPORTED -- never a crash.
+         On 26 Sept a run died 128 combinations in with the page's document
+         momentarily gone ("reading 'scrollWidth' of null"), and a crash
+         reports nothing about the combinations it never reached. */
+      const audit = async () => { for (let t = 0; t < 3; t++) { try { return await ev(AUDIT); } catch (e) { await sleep(1000); if (t === 2) return { out: [['errors', 'the page could not be measured: ' + String(e.message).split('\n')[0]]], loading: 0, h: 900, theme }; } } };
+      let a; for (let k = 0; k < 40; k++) { await sleep(500); a = await audit(); if (!a.loading) break; }
       if (openRows) { await ev(`[...document.querySelectorAll('#view [data-x][aria-expanded="false"]')].slice(0, 8).forEach((b) => b.click())`); await sleep(2500); }
-      await sleep(300); a = await ev(AUDIT);
+      await sleep(300); a = await audit();
       const issues = a.out.map(([kind, what]) => ({ kind, what }));
       if (a.loading) issues.push({ kind: 'errors', what: 'still loading after 20s' });
       for (const e of events) if (!/favicon/.test(e)) issues.push({ kind: 'errors', what: e });

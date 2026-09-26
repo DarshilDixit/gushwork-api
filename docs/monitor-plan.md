@@ -576,9 +576,18 @@ Darshil asked.
   purpose (a Location carrying its own `#tab=overview`) and the check
   failed for the right reason, then passed again once restored.
 
+**Layout check, first run:** 128 combinations, **0 findings**: 360 and 390
+in both themes, 414 light, and 414 dark up to Model. Then it CRASHED (the
+page's document momentarily null, "reading 'scrollWidth' of null"), with
+nothing wrong on the page. The checker now retries a measurement three
+times and REPORTS it as a finding instead of crashing (uncommitted
+change in `tools/check-monitor-layout.mjs`; commit it with the next
+batch).
+
 **Running when this was written** (check before re-running):
-- **Full layout check:** `KEYS=0`, all widths, both themes, log
-  `$S/lcD.log`, background task `b13ww9oo3`.
+- **Layout rerun:** the widths the crash did not reach (414, 768, 1024,
+  1280, 1440, both themes). Log `$S/lcD2.log`, background task
+  `bhvcjau5m`.
 - **Review sweep:** workflow run `wf_97675e29-6ed` (task `wv2v62dqb`), five
   lenses plus verifiers, reading committed code only. The script is saved
   under the session's `workflows/scripts/review-pr-d-*.js`; resume it with
