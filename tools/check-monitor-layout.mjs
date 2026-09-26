@@ -38,8 +38,10 @@ const TOKEN = process.env.MONITOR_TOKEN || cfg.token || '';
 const OUT = process.env.OUT || './layout-shots';
 const WIDTHS = (process.env.WIDTHS || '360,390,414,768,1024,1440').split(',').map(Number);
 const THEMES = (process.env.THEMES || 'light,dark').split(',');
-/* tab[:view[:mod]], or tab?key=value&... for a tab's own filters (the map) */
-const PAGES = (process.env.PAGES || 'overview:today,overview:week,overview:all,overview:week:leads,overview:today:table,health,dropoff,dupes,lm,leads,blocked,sdr,model,visitors,visitors?map=1').split(',');
+/* tab[:view[:mod]], or tab?key=value&... for a tab's own filters (the map);
+   a trailing +open expands the first eight rows, so the detail panels -- and
+   the tables inside them -- are measured too, not only the collapsed list. */
+const PAGES = (process.env.PAGES || 'overview:today,overview:week,overview:all,overview:week:leads,overview:today:table,health,dropoff,dupes,lm,leads,blocked,sdr,model,visitors,visitors?map=1,partners,leads+open,blocked+open,sdr+open,model+open,visitors+open,partners+open').split(',');
 const SHOTS = process.env.SHOTS !== '0';
 mkdirSync(OUT, { recursive: true });
 
@@ -76,8 +78,10 @@ const AUDIT = `(() => {
     const r = el.getBoundingClientRect();
     if ((r.right > W + 1 || r.left < -1) && !inScroller(el)) { out.push(['overflow', el.tagName.toLowerCase() + '.' + (el.className.baseVal ?? el.className) + ' "' + name(el) + '" runs off-screen (' + Math.round(r.left) + '..' + Math.round(r.right) + ')']); }
     const cs = getComputedStyle(el);
-    /* .sr-only is clipped ON PURPOSE -- it is the screen-reader label, visually hidden by design. */
-    if ((cs.overflowX === 'hidden' || cs.overflowX === 'clip') && el.scrollWidth > el.clientWidth + 1 && el.textContent.trim() && !el.classList.contains('tr') && !el.closest('.tr') && !el.closest('.sr-only')) out.push(['clipped', '"' + name(el) + '" is cut off by its own box']);
+    /* .sr-only is clipped ON PURPOSE -- it is the screen-reader label, visually hidden by design.
+       So is the map container: its tile pane is wider than the map by design, and
+       the container is still held to the off-screen check above. */
+    if ((cs.overflowX === 'hidden' || cs.overflowX === 'clip') && el.scrollWidth > el.clientWidth + 1 && el.textContent.trim() && !el.classList.contains('tr') && !el.closest('.tr') && !el.closest('.sr-only') && !el.classList.contains('leaflet-container')) out.push(['clipped', '"' + name(el) + '" is cut off by its own box']);
   }
   /* VISUALLY HIDDEN ON PURPOSE -- .sr-only, and the skip link until it is
      focused -- is a 1px clipped box, not a target a thumb has to hit. Judged
@@ -94,7 +98,11 @@ const AUDIT = `(() => {
      anything inside a scroller, which is exactly where a cut-off column
      hides. The SDR list shipped its last column off the edge at 1440 and
      passed every check. */
-  for (const w of document.querySelectorAll('#view .rt-wrap')) {
+  /* .tbl too -- the plain tables (gaps, places, networks, the change log).
+     A table that scrolls sideways inside its box hides its last column on a
+     phone just as surely; the Partners gaps table cut its date off at 390
+     and every other check passed. */
+  for (const w of document.querySelectorAll('#view .rt-wrap, #view .tbl')) {
     if (!vis(w) || hiddenAncestor(w)) continue;
     if (w.scrollWidth > w.clientWidth + 1) out.push(['hscroll', 'a table is ' + (w.scrollWidth - w.clientWidth) + 'px wider than its card (' + (w.querySelector('th') ? [...w.querySelectorAll('thead th')].map((t) => t.textContent.trim()).filter(Boolean).slice(-2).join(', ') : '') + ' cut off)']);
   }
@@ -129,22 +137,25 @@ for (const width of WIDTHS) {
     if (first) { await send('Page.navigate', { url: `${BASE}/monitor/next?token=${encodeURIComponent(TOKEN)}#tab=overview&view=week` }); await sleep(2500); first = false; }
     await ev(`GW.setTheme(${JSON.stringify(theme)})`);
     for (const pg of PAGES) {
-      const [spec, qs] = pg.split('?'); const [tab, view, mod] = spec.split(':');
+      const openRows = /\+open$/.test(pg); const [spec, qs] = pg.replace(/\+open$/, '').split('?'); const [tab, view, mod] = spec.split(':');
       const q = qs ? Object.fromEntries(new URLSearchParams(qs)) : null;
       events = [];
       await ev(`(()=>{ GW.S.unit=${JSON.stringify(mod === 'leads' ? 'leads' : 'people')}; GW.S.table=${mod === 'table'}; if (GW.current() !== ${JSON.stringify(tab)} || ${q ? 'true' : 'false'}) GW.show(${JSON.stringify(tab)}, false, ${q ? JSON.stringify(q) : 'null'}); ${view ? `GW.TABS.overview.setView(${JSON.stringify(view)});` : ''} if (GW.TABS[${JSON.stringify(tab)}].render) GW.TABS[${JSON.stringify(tab)}].render(); })()`);
       /* Wait for the data: no skeleton left, or give up after 20s and say so. */
       let a; for (let k = 0; k < 40; k++) { await sleep(500); a = await ev(AUDIT); if (!a.loading) break; }
+      if (openRows) { await ev(`[...document.querySelectorAll('#view [data-x][aria-expanded="false"]')].slice(0, 8).forEach((b) => b.click())`); await sleep(2500); }
       await sleep(300); a = await ev(AUDIT);
       const issues = a.out.map(([kind, what]) => ({ kind, what }));
       if (a.loading) issues.push({ kind: 'errors', what: 'still loading after 20s' });
       for (const e of events) if (!/favicon/.test(e)) issues.push({ kind: 'errors', what: e });
       if (a.theme !== theme) issues.push({ kind: 'errors', what: 'theme is ' + a.theme + ', expected ' + theme });
-      const label = `${width}-${theme}-${pg.replace(/[:?=&]/g, '-')}`;
+      const label = `${width}-${theme}-${pg.replace(/[:?=&+]/g, '-')}`;
       if (SHOTS) { await send('Emulation.setDeviceMetricsOverride', { width, height: Math.min(a.h, 6000), deviceScaleFactor: 1, mobile: width < 768 }); await sleep(250);
         const s = await send('Page.captureScreenshot', { format: 'png' }); writeFileSync(`${OUT}/${label}.png`, Buffer.from(s.result.data, 'base64'));
         await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: width < 768 }); }
       results.push({ label, issues });
+      /* close them again, or the next plain visit to this tab measures them open */
+      if (openRows) { await ev(`[...document.querySelectorAll('#view [data-x][aria-expanded="true"]')].forEach((b) => b.click())`); await sleep(300); }
       process.stdout.write((issues.length ? '✗ ' : '✓ ') + label + (issues.length ? '  ' + issues.length + ' issue(s)' : '') + '\n');
     }
     /* The drawer, at every width that uses it: opens, is thumb-sized, closes on Escape, and returns focus. */

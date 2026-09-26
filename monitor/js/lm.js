@@ -102,8 +102,12 @@ GW.TABS.lm = (function (G) {
             return '<div class="lbar"><div class="t"><span>' + esc(x.label) + '</span><small>' + fmt(x.n) + ' opens · ' + pc(x.completed, x.n) + ' submitted</small></div><div class="tr"><div class="fi" style="width:' + (m.entry_points[0].n ? x.n / m.entry_points[0].n * 100 : 0) + '%"></div></div><span class="v">' + fmt(x.n) + '</span></div>'; }).join('')
           : U.empty('No opens recorded yet', 'The page needs the v4.4 embed to record which call to action opened the form.') }) +
         U.panel({ cls: 'span-all', title: 'Custom categories entered', qual: 'what people typed when the list did not fit', body: (m.custom_categories || []).length ? bars(m.custom_categories, null) : U.empty('None yet', 'The dropdown is covering everyone so far.') }) +
-        U.panel({ cls: 'span-all', title: 'Daily volume', qual: 'views, emails and submissions', body: (m.daily || []).length ? '<div class="tbl" tabindex="0" role="region" aria-label="Daily volume"><table><tr><th>Day</th><th>Views</th><th>Email entered</th><th>Submitted</th></tr>' +
-            m.daily.slice().reverse().map(function (x) { return '<tr><td class="day">' + esc(G.dayD(x.day)) + '</td><td>' + fmt(x.views) + '</td><td>' + fmt(x.emails) + '</td><td>' + fmt(x.submitted) + '</td></tr>'; }).join('') + '</table></div>' : U.empty('No days yet') }) +
+        U.panel({ cls: 'span-all', title: 'Daily volume', qual: 'views, emails and submissions', body: (m.daily || []).length ? U.grid([
+            { label: 'Day', cls: 'day', get: function (x) { return G.dayD(x.day); } },
+            { label: 'Views', get: function (x) { return fmt(x.views); } },
+            { label: 'Email entered', get: function (x) { return fmt(x.emails); } },
+            { label: 'Submitted', get: function (x) { return fmt(x.submitted); } },
+          ], m.daily.slice().reverse(), { region: 'Daily volume' }) : U.empty('No days yet') }) +
         '</div>';
     }
     /* Leads */

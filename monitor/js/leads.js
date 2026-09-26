@@ -61,8 +61,12 @@
     var h = '<div class="pbox"><h3 class="pgh">Partner</h3>' + U.kv(rows.filter(function (r) { return r && r[1]; }));
     if (hist && hist.length) {
       /* the LAST click wins attribution; the history answers "why A and not B" */
-      h += '<div class="pgh sub">Click history (' + hist.length + ', oldest first — the last click wins)</div><div class="tbl"><table><tr><th>Click</th><th>When (ET)</th><th>Partner key</th><th>Click id</th></tr>' +
-        hist.map(function (c, i) { var won = i === hist.length - 1; return '<tr><td>' + (won ? '<span class="badge b-good">won</span>' : '<span class="na">earlier</span>') + '</td><td>' + esc(c.at ? G.et(c.at) : '—') + '</td><td><code>' + esc(c.pk || '—') + '</code></td><td><code>' + esc(c.xid || '—') + '</code></td></tr>'; }).join('') + '</table></div>';
+      h += '<div class="pgh sub">Click history (' + hist.length + ', oldest first — the last click wins)</div>' + U.grid([
+        { label: 'Click', html: function (c) { return c._won ? '<span class="badge b-good">won</span>' : '<span class="na">earlier</span>'; } },
+        { label: 'When (ET)', cls: 'day', get: function (c) { return c.at ? G.et(c.at) : '—'; } },
+        { label: 'Partner key', html: function (c) { return '<code>' + esc(c.pk || '—') + '</code>'; } },
+        { label: 'Click id', html: function (c) { return '<code>' + esc(c.xid || '—') + '</code>'; } },
+      ], hist.map(function (c, i) { return Object.assign({ _won: i === hist.length - 1 }, c); }));
     }
     return h + '</div>';
   }
@@ -117,12 +121,13 @@
     if (!c || c.state === 'loading') return h + '<div class="lnote">Reading the change history…</div>';
     if (c.state === 'error') return h + '<div class="lnote warn">Change log unavailable — this is not the same as no changes. Close and reopen the row to try again.</div>';
     if (!c.rows.length) return h + '<div class="lnote">No identity fields changed on this lead.</div>';
-    return h + '<div class="tbl"><table><tr><th>When (ET)</th><th>Field</th><th>Change</th><th>Who</th><th>Where</th></tr>' + c.rows.map(function (x) {
-      var w = L.changeWho(x.attribution), wh = L.changeWhere(x);
-      return '<tr><td class="day">' + esc(G.et(x.changed_at)) + '</td><td><b>' + esc(x.field) + '</b></td><td>' + esc(x.old_value || '—') + ' → ' + esc(x.new_value || '—') +
-        (x.booking_uid_present ? ' <span class="badge b-neu">after booking</span>' : '') + '</td><td>' + (w.badge ? '<span class="badge b-neu">' + esc(w.t) + '</span>' : '<span class="na">' + esc(w.t) + '</span>') +
-        '</td><td>' + esc(x.source_route || '') + (wh ? '<div class="na">' + esc(wh) + '</div>' : '') + '</td></tr>';
-    }).join('') + '</table></div>' + (c.rows.length >= 200 ? '<div class="lnote">Showing the first 200 changes; there may be more.</div>' : '');
+    return h + U.grid([
+      { label: 'When (ET)', cls: 'day', get: function (x) { return G.et(x.changed_at); } },
+      { label: 'Field', html: function (x) { return '<b>' + esc(x.field) + '</b>'; } },
+      { label: 'Change', html: function (x) { return esc(x.old_value || '—') + ' → ' + esc(x.new_value || '—') + (x.booking_uid_present ? ' <span class="badge b-neu">after booking</span>' : ''); } },
+      { label: 'Who', html: function (x) { var w = L.changeWho(x.attribution); return w.badge ? '<span class="badge b-neu">' + esc(w.t) + '</span>' : '<span class="na">' + esc(w.t) + '</span>'; } },
+      { label: 'Where', html: function (x) { var wh = L.changeWhere(x); return esc(x.source_route || '') + (wh ? '<div class="na">' + esc(wh) + '</div>' : ''); } },
+    ], c.rows) + (c.rows.length >= 200 ? '<div class="lnote">Showing the first 200 changes; there may be more.</div>' : '');
   }
   /* The RAW session_id addresses the lead; the row key addresses the DOM.
      Never swap them (the classic incident). */

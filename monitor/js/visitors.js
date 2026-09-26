@@ -29,8 +29,13 @@ GW.TABS.visitors = (function (G) {
   var DAYS = [['7', 'Last 7 days'], ['30', 'Last 30 days'], ['90', 'Last 90 days'], ['365', 'Last year']];
   var LEAFLET = { js: 'https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js', css: 'https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css',
                   jsSri: 'sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH', cssSri: 'sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H' };
-  var TILES = 'https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}';
-  var data = null, err = null, root = null, seq = 0, libState = null, mapEl = null, map = null, layer = null;
+  /* ONE BASEMAP PER THEME, both from the same keyless Esri Canvas service: the
+     light-grey map sat as a bright block on the dark page. The dark one was
+     checked the way CLAUDE.md asks of any tile source -- tiles downloaded at
+     three zoom levels and looked at -- before it was added. */
+  var TILES = { light: 'https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+                dark: 'https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}' };
+  var data = null, err = null, root = null, seq = 0, libState = null, mapEl = null, map = null, layer = null, tiles = null, tilesFor = null;
   function days() { var d = G.S.q.days; return DAYS.some(function (x) { return x[0] === d; }) ? d : '30'; }
   function mapOn() { return G.S.q.map === '1'; }
   function load() {
@@ -94,17 +99,32 @@ GW.TABS.visitors = (function (G) {
         (rp.total > rp.shown ? '<p class="lnote">Showing ' + fmt(rp.shown) + ' of ' + fmt(rp.total) + ' repeat addresses — the ones with the most leads.</p>' : '') });
     h += U.panel({ id: 'vis-places', title: 'Where they were', qual: 'leads in the window, by place',
       body: '<div class="chips">' + countries(pl).map(function (c) { return '<span class="badge b-neu">' + esc(c[0]) + ' · ' + fmt(c[1]) + ' ' + G.plural(c[1], 'lead') + '</span>'; }).join('') + '</div>' +
-        (pl.length ? '<div class="tbl"><table><tr><th>City</th><th>Region</th><th>Country</th><th>Leads</th><th>People</th><th>Booked</th></tr>' + pl.map(function (p) {
-          return '<tr><td>' + esc(p.city || '—') + '</td><td>' + esc(p.region || '—') + '</td><td>' + esc(p.country || '—') + '</td><td>' + bar(p.leads, pmax) + '</td><td>' + fmt(p.people) + '</td><td>' + fmt(p.booked) + '</td></tr>'; }).join('') + '</table></div>' : U.empty('Nothing resolved in this window')) +
+        (pl.length ? U.grid([
+          { label: 'City', get: function (p) { return p.city || '—'; } },
+          { label: 'Region', get: function (p) { return p.region || '—'; } },
+          { label: 'Country', get: function (p) { return p.country || '—'; } },
+          { label: 'Leads', html: function (p) { return bar(p.leads, pmax); } },
+          { label: 'People', get: function (p) { return fmt(p.people); } },
+          { label: 'Booked', get: function (p) { return fmt(p.booked); } },
+        ], pl) : U.empty('Nothing resolved in this window')) +
         (pl.length >= 500 ? '<p class="lnote">The 500 places with the most leads; the country totals above add up those 500.</p>' : '') });
     h += U.panel({ id: 'vis-networks', title: 'Networks', qual: 'who provides their connection',
       body: '<p class="lnote">A business provider is a different signal from home broadband. One provider seen under several domains is one row, with every domain listed.</p>' +
-        (nets.length ? '<div class="tbl"><table><tr><th>Network</th><th>Domains</th><th>Leads</th><th>People</th><th>Booked</th></tr>' + nets.map(function (n) {
-          return '<tr><td>' + esc(n.isp) + '</td><td class="na">' + esc(n.domains.join(', ') || '—') + '</td><td>' + bar(n.leads, nmax) + '</td><td>' + fmt(n.people) + '</td><td>' + fmt(n.booked) + '</td></tr>'; }).join('') + '</table></div>' : U.empty('Nothing resolved in this window')) +
+        (nets.length ? U.grid([
+          { label: 'Network', get: function (n) { return n.isp; } },
+          { label: 'Domains', cls: 'na', get: function (n) { return n.domains.join(', ') || '—'; } },
+          { label: 'Leads', html: function (n) { return bar(n.leads, nmax); } },
+          { label: 'People', get: function (n) { return fmt(n.people); } },
+          { label: 'Booked', get: function (n) { return fmt(n.booked); } },
+        ], nets) : U.empty('Nothing resolved in this window')) +
         (nets.length ? '<p class="lnote">People is added up across a provider’s domains, so one person seen on two of them counts twice.' + ((d.networks || []).length >= 100 ? ' These are the 100 busiest.' : '') + '</p>' : '') });
     h += U.panel({ id: 'vis-zones', title: 'Time zones', qual: 'what time it is where they are, for whoever is calling',
-      body: tz.length ? '<div class="tbl"><table><tr><th>Time zone</th><th>Local time now</th><th>Leads</th><th>Booked</th></tr>' + tz.map(function (z) {
-        return '<tr><td>' + esc(z.timezone) + '</td><td>' + esc(localNow(z.timezone) || '—') + '</td><td>' + bar(z.leads, tmax) + '</td><td>' + fmt(z.booked) + '</td></tr>'; }).join('') + '</table></div>' +
+      body: tz.length ? U.grid([
+        { label: 'Time zone', get: function (z) { return z.timezone; } },
+        { label: 'Local time now', get: function (z) { return localNow(z.timezone) || '—'; } },
+        { label: 'Leads', html: function (z) { return bar(z.leads, tmax); } },
+        { label: 'Booked', get: function (z) { return fmt(z.booked); } },
+      ], tz) +
         (tz.length >= 60 ? '<p class="lnote">The 60 busiest time zones.</p>' : '') : U.empty('Nothing resolved in this window') });
     return h;
   }
@@ -126,6 +146,15 @@ GW.TABS.visitors = (function (G) {
       .slice().sort(function (a, b) { return (b.leads || 0) - (a.leads || 0); });   /* largest first, HERE, never trusted from the API order */
   }
   function radius(leads, max) { return 6 + 16 * Math.sqrt((leads || 0) / Math.max(max, 1)); }
+  function setTiles(t) {
+    var Lf = window.L; if (!map || !Lf) return;
+    t = t || (document.documentElement && document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light');
+    if (tilesFor === t) return;
+    if (tiles) map.removeLayer(tiles);
+    tiles = Lf.tileLayer(TILES[t] || TILES.light, { maxZoom: 12, attribution: 'Tiles &copy; Esri' }).addTo(map); tilesFor = t;
+  }
+  var prevOnTheme = G.onTheme;
+  G.onTheme = function (t) { if (prevOnTheme) prevOnTheme(t); setTiles(t); };
   function drawMap(d) {
     var Lf = window.L, slot = document.getElementById('vis-map-slot'), note = document.getElementById('vis-map-note');
     if (!slot) return;
@@ -133,10 +162,13 @@ GW.TABS.visitors = (function (G) {
     if (!mapEl) {
       mapEl = document.createElement('div'); mapEl.className = 'vmap';
       slot.appendChild(mapEl);
-      map = Lf.map(mapEl, { worldCopyJump: true, scrollWheelZoom: false, dragging: !(Lf.Browser && Lf.Browser.mobile), tap: false, attributionControl: true }).setView([25, 0], 2);
+      /* held inside the world north to south: zoomed out, the view ran past
+         the top of the tiles and drew a bare band above the Arctic */
+      map = Lf.map(mapEl, { worldCopyJump: true, scrollWheelZoom: false, dragging: !(Lf.Browser && Lf.Browser.mobile), tap: false, attributionControl: true,
+        maxBounds: [[-85, -720], [85, 720]], maxBoundsViscosity: 1 }).setView([25, 0], 2);
       map.attributionControl.setPrefix(false);
-      Lf.tileLayer(TILES, { maxZoom: 12, attribution: 'Tiles &copy; Esri' }).addTo(map);
     } else if (mapEl.parentNode !== slot) slot.appendChild(mapEl);
+    setTiles();
     setTimeout(function () { if (map) map.invalidateSize(); }, 0);
     if (layer) { map.removeLayer(layer); layer = null; }
     var pts = points(d), max = pts.reduce(function (a, p) { return Math.max(a, p.leads || 0); }, 0);

@@ -121,8 +121,12 @@ GW.TABS.partners = (function (G) {
     var head = oc.ok === false ? fmt(missed) + '+?' : fmt(missed + missing);
     var sub = fmt(missed) + ' with no conversion · ' + (oc.ok === false ? 'the Opportunity check is unavailable' : oc.checked === false ? 'none old enough to check for an Opportunity yet' : fmt(missing) + ' with no Opportunity, of ' + fmt(oc.candidates) + ' checked');
     var list = function (rows, when) {
-      return '<div class="tbl"><table><tr><th>Company</th><th>Partner</th><th>Email</th><th>' + (when === 'met_at' ? 'Demo (ET)' : 'First seen (ET)') + '</th></tr>' + rows.map(function (x) {
-        return '<tr><td><code>' + esc(x.customer_key) + '</code></td><td>' + esc(display(x)) + '</td><td>' + esc(x.email || '—') + '</td><td class="day">' + esc(G.et(x[when])) + '</td></tr>'; }).join('') + '</table></div>';
+      return U.grid([
+        { label: 'Company', html: function (x) { return '<code>' + esc(x.customer_key) + '</code>'; } },
+        { label: 'Partner', get: function (x) { return display(x); } },
+        { label: 'Email', cls: 'wrap', get: function (x) { return x.email || '—'; } },
+        { label: when === 'met_at' ? 'Demo (ET)' : 'First seen (ET)', cls: 'day', get: function (x) { return G.et(x[when]); } },
+      ], rows);
     };
     var h = '<div class="gaphead"><span class="num" data-v="' + esc(head) + '">' + head + '</span><span class="lnote">' + sub + '</span></div>';
     if (oc.ok === false) h += '<p class="lnote bad-t">The Opportunity check is unavailable (' + esc(oc.reason || 'unknown') + '). This is NOT a clean result — the second check did not run.</p>';

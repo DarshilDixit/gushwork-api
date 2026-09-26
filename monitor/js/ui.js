@@ -141,6 +141,27 @@ GW.ui = (function (G) {
   /* A PAGER that always says where you are: first, last, the pages either
      side of this one, and "Page X of Y" in words. Hidden when there is one
      page. Every button carries attr="N". */
+  /* A PLAIN TABLE -- a compact grid of numbers or short facts, no expander.
+     Every cell carries its column's name, so below 560px each row stacks into
+     "label ... value" lines, the same shape as an rtable card: a plain table
+     that scrolls sideways hides its last column on a phone. The Partners gaps
+     table cut its date off at 390 and the Visitors tables ran 230px past their
+     cards, and every check passed until the layout check measured .tbl too.
+     cols: [{ label, html(r) | get(r), cls, attr(r) }]. The first column is the
+     row's title. o.rowCls(r); o.region: a label, and the box becomes a
+     focusable scroll region (a long list held in a fixed height). */
+  function grid(cols, rows, o) {
+    o = o || {};
+    var head = '<thead><tr>' + cols.map(function (c) { return '<th>' + esc(c.label) + '</th>'; }).join('') + '</tr></thead>';
+    var body = rows.map(function (r) {
+      var rc = o.rowCls ? o.rowCls(r) : '';
+      return '<tr' + (rc ? ' class="' + rc + '"' : '') + '>' + cols.map(function (c) {
+        var v = c.html ? c.html(r) : esc(c.get ? c.get(r) : r[c.k]);
+        return '<td' + (c.cls ? ' class="' + c.cls + '"' : '') + (c.attr ? ' ' + c.attr(r) : '') + ' data-l="' + esc(c.label) + '"><span class="cv">' + (v === '' ? '—' : v) + '</span></td>';
+      }).join('') + '</tr>';
+    }).join('');
+    return '<div class="tbl stack"' + (o.region ? ' tabindex="0" role="region" aria-label="' + esc(o.region) + '"' : '') + '><table>' + head + '<tbody>' + body + '</tbody></table></div>';
+  }
   function pager(page, pages, attr) {
     if (!pages || pages <= 1) return '';
     var b = function (n, lbl, dis, cur) { return '<button class="pgb' + (cur ? ' on' : '') + '" ' + attr + '="' + n + '"' + (dis ? ' disabled' : '') + (cur ? ' aria-current="page"' : '') + (lbl ? ' aria-label="' + lbl + '"' : '') + '>' + (lbl ? ic(n < page ? 'caret-left' : 'caret-right') : n) + '</button>'; };
@@ -160,5 +181,5 @@ GW.ui = (function (G) {
       return '<button ' + attr + '="' + esc(d[0]) + '" aria-pressed="' + (d[0] === current) + '">' + (d[2] || '') + esc(d[1]) + '</button>'; }).join('') + '</div>';
   }
   return { delta: delta, cmpBlock: cmpBlock, leadCard: leadCard, metricCard: metricCard, panel: panel, empty: empty,
-           unavailable: unavailable, loading: loading, funnel: funnel, kv: kv, rtable: rtable, keyOf: keyOf, pager: pager, pills: pills, tg: tg };
+           unavailable: unavailable, loading: loading, funnel: funnel, kv: kv, rtable: rtable, grid: grid, keyOf: keyOf, pager: pager, pills: pills, tg: tg };
 })(GW);

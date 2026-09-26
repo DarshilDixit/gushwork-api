@@ -76,9 +76,12 @@ GW.TABS.model = (function (G) {
     if (!gs.length) return U.panel({ title: 'What we acted on', qual: 'by what decided', body: U.empty('Nothing acted on in this window') });
     return '<div class="mgroups">' + gs.map(function (g) {
       var body = !g.rows || !g.rows.length ? '<p class="lnote">None in this window.</p>' :
-        '<div class="tbl"><table><tr><th>Industry</th><th>Leads</th><th>Companies</th><th>Median confidence</th></tr>' + g.rows.map(function (r) {
-          return '<tr' + (r.uncategorised ? ' class="uncat"' : '') + '><td>' + esc(r.label) + '</td><td data-v="' + esc(r.leads) + '">' + fmt(r.leads) + '</td><td>' + (r.uncategorised && !r.domains ? '—' : fmt(r.domains)) +
-            '</td><td>' + (r.uncategorised ? '—' : conf(r.median_confidence)) + '</td></tr>'; }).join('') + '</table></div>';
+        U.grid([
+          { label: 'Industry', get: function (r) { return r.label; } },
+          { label: 'Leads', attr: function (r) { return 'data-v="' + esc(r.leads) + '"'; }, get: function (r) { return fmt(r.leads); } },
+          { label: 'Companies', get: function (r) { return r.uncategorised && !r.domains ? '—' : fmt(r.domains); } },
+          { label: 'Median confidence', html: function (r) { return r.uncategorised ? '—' : conf(r.median_confidence); } },
+        ], g.rows, { rowCls: function (r) { return r.uncategorised ? 'uncat' : ''; } });
       /* the note is a server constant, escaped anyway */
       return U.panel({ cls: 'mgroup', title: g.label, qual: fmt(g.leads) + ' ' + G.plural(g.leads, 'lead'), body: '<p class="lnote">' + esc(g.note || '') + '</p>' + body });
     }).join('') + '</div>';
@@ -110,9 +113,10 @@ GW.TABS.model = (function (G) {
     var list = U.rtable({ ns: 'mdlu', rows: rows, key: function (u) { return u.domain + '|' + (u.email || ''); }, rowName: function (u) { return u.domain; },
       emptyTitle: 'Every domain we have an answer for was readable', emptyBody: 'Domains never tried are counted above, not here.',
       cols: [
-        { label: 'Domain', html: function (u) { return '<code>' + esc(u.domain) + '</code>'; } },
+        { label: 'Domain', cls: 'kcell', html: function (u) { return '<code>' + esc(u.domain) + '</code>'; } },
         { label: 'Why', html: function (u) { return '<span title="' + esc(u.scrape_status || '') + '">' + esc(L.scrape(u.scrape_status)) + '</span>' + (u.error ? '<div class="na">' + esc(String(u.error).slice(0, 120)) + '</div>' : ''); } },
-        { label: 'Lead', cls: 'wrap', get: function (u) { return u.email || '—'; } },
+        /* a break offered after the @, so a narrow column splits an address there, not mid-word */
+        { label: 'Lead', cls: 'wrap', html: function (u) { return u.email ? esc(u.email).replace('@', '@<wbr>') : '—'; } },
         { label: 'Their website', cls: 'wrap', opt: 1, get: function (u) { return u.website || '—'; } },
         { label: 'Blocked anyway?', html: function (u) { return u.blocked ? '<span class="badge b-bad">Yes — ' + esc(L.sourceShort(u.blocked_by)) + '</span>' : '<span class="badge b-neu">No</span>'; } },
         { label: 'Last tried (ET)', cls: 'm', get: function (u) { return when(u.checked_at); } },
@@ -147,9 +151,11 @@ GW.TABS.model = (function (G) {
     var c = d.cache || {}, rows = c.byType || [];
     return U.panel({ id: 'mdl-cachet', title: 'What the cache knows', qual: 'companies, all time',
       body: '<p class="lnote">A standing inventory of every company ever classified, mostly the historical backfill. <b>Not this window, and not leads</b>: how many companies in our history the AI check would act on if they came back today.</p>' +
-        (rows.length ? '<div class="tbl"><table><tr><th>Industry</th><th>What it does</th><th>Companies</th></tr>' + rows.map(function (r) {
-          return '<tr><td>' + esc(r.label) + '</td><td>' + (r.action === 'block' ? '<span class="badge b-bad">Blocks</span>' : r.action === 'meta' ? '<span class="badge b-warn">Withholds Meta</span>' : '<span class="badge b-neu">No action</span>') +
-            '</td><td data-v="' + esc(r.domains) + '">' + fmt(r.domains) + '</td></tr>'; }).join('') + '</table></div>' : U.empty('Nothing cached yet')) });
+        (rows.length ? U.grid([
+          { label: 'Industry', get: function (r) { return r.label; } },
+          { label: 'What it does', html: function (r) { return r.action === 'block' ? '<span class="badge b-bad">Blocks</span>' : r.action === 'meta' ? '<span class="badge b-warn">Withholds Meta</span>' : '<span class="badge b-neu">No action</span>'; } },
+          { label: 'Companies', attr: function (r) { return 'data-v="' + esc(r.domains) + '"'; }, get: function (r) { return fmt(r.domains); } },
+        ], rows) : U.empty('Nothing cached yet')) });
   }
   function render() {
     if (!root || (G.current && G.current() !== 'model')) return;

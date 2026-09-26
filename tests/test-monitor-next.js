@@ -610,7 +610,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('lm: the pills read the SERVER totals, not the loaded rows', /data-lm-pill="sent"[^>]*>Sent<span>571</.test(v) && /data-lm-pill="all"[^>]*>All real leads<span>613</.test(v));
   ok('lm: page views are visits, never people', v.includes('visits to the page') && !v.includes('people who loaded the page'));
   ok('lm: the summary is a four-card grid by CLASS, so the phone rule applies', /<section class="sumgrid four">/.test(v) && !/grid-template-columns:repeat\(4/.test(v));
-  ok('lm: daily volume reads as dates', /<td class="day">Thu 24 Sep<\/td>/.test(v));
+  ok('lm: daily volume reads as dates', /<td class="day" data-l="Day"><span class="cv">Thu 24 Sep<\/span><\/td>/.test(v));
   /* THE CSV, executed: a visitor-typed formula must arrive as text */
   const lmSrc = fs.readFileSync(path.join(ROOT, 'monitor', 'js', 'lm.js'), 'utf8');
   const qqSrc = (lmSrc.match(/qq = (function \(v\) \{[\s\S]*?\});/) || [])[1];
@@ -680,7 +680,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   fire('click', rowA); await ticks();
   const lc = b.calls.slice(callsBefore).filter((c) => c.path === '/monitor/lead-changes');
   ok('leads: opening a row fetches its change log by the RAW session_id', lc.length === 1 && lc[0].q.session_id === SID_A, JSON.stringify(lc));
-  ok('leads: the change log is painted, with who and where in words', /sell_to<\/b><\/td><td>B2C → B2B \(clarified from B2C\)/.test(b.els['lc-' + keyA].innerHTML) && b.els['lc-' + keyA].innerHTML.includes('they said “actually B2B”'));
+  ok('leads: the change log is painted, with who and where in words', /sell_to<\/b><\/span><\/td><td data-l="Change"><span class="cv">B2C → B2B \(clarified from B2C\)/.test(b.els['lc-' + keyA].innerHTML) && b.els['lc-' + keyA].innerHTML.includes('they said “actually B2B”'));
   fire('click', rowA); fire('click', rowA); await ticks();   /* closed, then opened again */
   eq('leads: a loaded log is not fetched twice', b.calls.slice(callsBefore).filter((c) => c.path === '/monitor/lead-changes').length, 1);
   const keyB = keyA.replace(SID_A.replace(/[^A-Za-z0-9]/g, (c) => '_' + c.charCodeAt(0).toString(16)), SID_B.replace(/[^A-Za-z0-9]/g, (c) => '_' + c.charCodeAt(0).toString(16)));
@@ -747,7 +747,15 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('model: the caption names the product that was APPLIED', v.includes('leads in the window — CRM only'));
   ok('model: a capped window says the counts are a floor', v.includes('the counts are a floor, not a total'));
   ok('model: all THREE groups render, the empty one included', v.includes('Blocked by the brand-domain list') && v.includes('Blocked by the model') && v.includes('Meta withheld by the model — not blocked') && /Blocked by the model[\s\S]*?None in this window\./.test(v));
-  ok('model: an uncategorised row says so, with no borrowed confidence', /class="uncat"><td>Not categorised[^<]*<\/td><td data-v="36">36<\/td><td>—<\/td><td>—<\/td>/.test(v));
+  ok('model: an uncategorised row says so, with no borrowed confidence', /class="uncat"><td data-l="Industry"><span class="cv">Not categorised[^<]*<\/span><\/td><td data-v="36" data-l="Leads"><span class="cv">36<\/span><\/td><td data-l="Companies"><span class="cv">—<\/span><\/td><td data-l="Median confidence"><span class="cv">—<\/span><\/td>/.test(v));
+  /* PLAIN TABLES STACK ON A PHONE only because every cell names its column --
+     a cell with no label turns into an unlabelled number in the stacked card. */
+  const gh = GW.ui.grid([{ label: 'City', get: (r) => r.c }, { label: 'Leads', attr: (r) => 'data-v="' + r.n + '"', get: (r) => String(r.n) }, { label: 'Note', get: () => '' }],
+    [{ c: 'Oslo <b>', n: 83 }, { c: 'Lima', n: 29 }], { rowCls: (r) => (r.n === 29 ? 'uncat' : ''), region: 'Places' });
+  const ghCells = [...gh.matchAll(/<td[^>]*>/g)].map((m) => m[0]);
+  ok('grid: every cell carries its column name, in column order', ghCells.length === 6 && ghCells.every((c, i) => c.includes('data-l="' + ['City', 'Leads', 'Note'][i % 3] + '"')), ghCells.join(' '));
+  ok('grid: values are escaped, an empty one reads as a dash, attributes and row classes arrive', gh.includes('Oslo &lt;b&gt;') && />—<\/span>/.test(gh) && gh.includes('data-v="83"') && gh.includes('<tr class="uncat">'));
+  ok('grid: it is a stacking box, and a scroll region only when asked', /^<div class="tbl stack" tabindex="0" role="region" aria-label="Places">/.test(gh) && /^<div class="tbl stack"><table>/.test(GW.ui.grid([{ label: 'A', get: () => 'x' }], [{}])));
   ok('model: the ALL-TIME figures come from the TOP-LEVEL cache', /data-card="mdl-cache"[\s\S]*?data-v="2975"/.test(v) && v.includes('2,965 judged from their site · 10 currently unreadable') && !/data-card="mdl-cache"[\s\S]*?data-v="0"/.test(v));
   ok('model: never-tried is its own number, outside the rate', /data-card="mdl-never"[\s\S]*?data-v="7"[\s\S]*?of 19 companies — not a failure/.test(v) && /data-card="mdl-unread"[\s\S]*?data-v="25"[\s\S]*?3 of 12 companies/.test(v));
   ok('model: the "latest outcome, not a rate" note is ON SCREEN', v.includes('Latest outcome per domain, not a historical rate.'));
@@ -775,20 +783,26 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('visitors: the country chips add up the places', v.includes('US · 842 leads'));
   ok('visitors: local time is the VISITOR\'s zone, and an unknown zone is blank', GW.TABS.visitors._localNow('Asia/Kolkata') !== GW.TABS.visitors._localNow('America/Los_Angeles') && GW.TABS.visitors._localNow('Not/AZone') === '');
   const visSrc = fs.readFileSync(path.join(ROOT, 'monitor', 'js', 'visitors.js'), 'utf8');
-  ok('visitors: tiles from Esri Canvas, {z}/{y}/{x}, never a rejected provider', /services\.arcgisonline\.com\/ArcGIS\/rest\/services\/Canvas\/World_Light_Gray_Base\/MapServer\/tile\/\{z\}\/\{y\}\/\{x\}/.test(GW.TABS.visitors._tiles) && !/tile\.openstreetmap\.org|basemaps\.cartocdn\.com/.test(visSrc));
+  ok('visitors: tiles from Esri Canvas, {z}/{y}/{x}, never a rejected provider', /services\.arcgisonline\.com\/ArcGIS\/rest\/services\/Canvas\/World_Light_Gray_Base\/MapServer\/tile\/\{z\}\/\{y\}\/\{x\}/.test(GW.TABS.visitors._tiles.light) && /services\.arcgisonline\.com\/ArcGIS\/rest\/services\/Canvas\/World_Dark_Gray_Base\/MapServer\/tile\/\{z\}\/\{y\}\/\{x\}/.test(GW.TABS.visitors._tiles.dark) && !/tile\.openstreetmap\.org|basemaps\.cartocdn\.com/.test(visSrc));
   ok('visitors: Leaflet is pinned and checked by SRI', /leaflet@1\.9\.4\/dist\/leaflet\.js/.test(visSrc) && /sha384-[A-Za-z0-9+/=]{64}/.test(visSrc) && /crossOrigin = 'anonymous'/.test(visSrc));
   /* the map: absent Leaflet says so; a stand-in Leaflet runs the drawing code */
   delete b.window.L; GW.TABS.visitors._draw(VIS);
   ok('visitors: with no Leaflet the map says so, and nothing throws', /did not load/.test(b.els['vis-map-note'].textContent));
-  const drawn = [];
-  b.window.L = { Browser: { mobile: false }, map() { return { setView() { return this; }, attributionControl: { setPrefix() {} }, invalidateSize() {}, removeLayer() {}, fitBounds() {} }; },
-    tileLayer: (u, o) => ({ u, o, addTo() { return this; } }), latLngBounds: () => ({ pad() { return this; } }),
+  const drawn = [], tileLog = [];
+  b.window.L = { Browser: { mobile: false }, map() { return { setView() { return this; }, attributionControl: { setPrefix() {} }, invalidateSize() {}, removeLayer(x) { if (x && x.u) tileLog.push('-' + x.u); }, fitBounds() {} }; },
+    tileLayer: (u, o) => ({ u, o, addTo() { tileLog.push('+' + u); return this; } }), latLngBounds: () => ({ pad() { return this; } }),
     circleMarker: (ll, opts) => { const m = { ll, opts, bindPopup(c) { m.popup = c; return m; } }; drawn.push(m); return m; }, layerGroup: (a) => ({ a, addTo() { return this; } }) };
   const res = GW.TABS.visitors._draw(VIS);
   ok('visitors: it draws exactly the mappable places, and counts the rest', res && res.drawn === 2 && res.miss === 1 && /2 places drawn; <b>1<\/b> more resolved to a city but have no coordinates/.test(b.els['vis-map-note'].innerHTML));
   ok('visitors: circles are drawn LARGEST FIRST, whatever order the API sent', drawn[0].ll[0] === 42.36 && drawn[1].ll[0] === 39.74);
   ok('visitors: circle AREA scales with leads -- a quarter the leads, half the extra radius', Math.abs((drawn[1].opts.radius - 6) - (drawn[0].opts.radius - 6) / 2) < 0.5);
   ok('visitors: circles are styled by class, from tokens, never raw hex', drawn.every((m) => m.opts.className === 'vdot' && !m.opts.color && !m.opts.fillColor));
+  const tl = GW.TABS.visitors._tiles;
+  ok('visitors: the map starts on the basemap for the theme it opened in', tileLog.length === 1 && tileLog[0] === '+' + (b.document.documentElement.getAttribute('data-theme') === 'dark' ? tl.dark : tl.light), tileLog.join(' '));
+  tileLog.length = 0; GW.onTheme('dark'); GW.onTheme('dark');
+  ok('visitors: switching to dark swaps the basemap once, and a repeat does nothing', tileLog.length === 2 && tileLog[1] === '+' + tl.dark && tileLog[0].startsWith('-'), tileLog.join(' '));
+  tileLog.length = 0; GW.onTheme('light');
+  ok('visitors: and back to light', tileLog.length === 2 && tileLog[1] === '+' + tl.light, tileLog.join(' '));
   ok('visitors: the popup names the place and its counts', /<b>Boston, Massachusetts, US<\/b><br>612 leads<br>590 people<br>402 booked/.test(drawn[0].popup));
   delete b.window.L;
 
@@ -875,6 +889,15 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   const allJs = mn.JS_ORDER.map((f) => fs.readFileSync(path.join(ROOT, 'monitor', 'js', f), 'utf8')).join('\n');
   ok('dates: no calendar date from the viewer’s laptop clock', !/\.(getFullYear|getMonth|getDate|getHours)\(\)/.test(allJs));
   ok('css: every colour is a token or an alias', !/#[0-9a-fA-F]{3,8}\b/.test(css.replace(/\/\*[\s\S]*?\*\//g, '')), (css.replace(/\/\*[\s\S]*?\*\//g, '').match(/#[0-9a-fA-F]{3,8}\b/g) || []).slice(0, 5).join(','));
+  /* THE CARD RULES REACH THE OUTER TABLE ONLY. As descendant selectors they
+     also restyled every table inside an expanded row: on a phone the lead's
+     change log kept its header row above cells stacked with no labels. */
+  const cssNc = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  ok('css: no rtable rule reaches a table nested in its detail row', !/\.rt (tbody|thead|tr|td|th)\b/.test(cssNc) && /\.rt > tbody > tr\.detail > td \{/.test(cssNc), (cssNc.match(/\.rt (tbody|thead|tr|td|th)\b[^{]*/g) || []).slice(0, 4).join(' | '));
+  ok('css: a plain table stacks, labelled, below 560', /@container view \(max-width: 559px\) \{[^@]*\.tbl\.stack td::before \{ content: attr\(data-l\)/.test(cssNc) && /\.tbl\.stack thead \{ display: none; \}/.test(cssNc));
+  ok('css: a link that is a detail value is thumb-sized on touch', /@media \(max-width: 1023px\), \(pointer: coarse\) \{[^@]*\.kv \.v a \{[^}]*min-height: 44px/.test(cssNc));
+  ok('tables: every plain table outside the chart goes through U.grid', mn.JS_ORDER.filter((f) => f !== 'chart.js').every((f) => !/class="tbl"/.test(fs.readFileSync(path.join(ROOT, 'monitor', 'js', f), 'utf8'))),
+    mn.JS_ORDER.filter((f) => f !== 'chart.js' && /class="tbl"/.test(fs.readFileSync(path.join(ROOT, 'monitor', 'js', f), 'utf8'))).join(','));
   const pv = fs.readFileSync(path.join(ROOT, 'tools', 'preview-monitor.js'), 'utf8');
   ok('preview: every connection is read-only at the database', /default_transaction_read_only=on/.test(pv));
   ok('preview: every non-GET is refused', /req\.method !== 'GET' && req\.method !== 'HEAD'/.test(pv) && /status\(405\)/.test(pv));
