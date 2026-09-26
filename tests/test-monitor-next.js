@@ -248,6 +248,11 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     const count = (q) => /\) IS TRUE\s+GROUP BY w\.k/.test(q.sql);
     ok(`overview/${v}: every read of leads leaves our own tests out (or is the one that counts them)`, reads.length >= (v === 'all' ? 4 : 5) && reads.every((q) => skip(q) || count(q)), reads.filter((q) => !skip(q) && !count(q)).map((q) => q.sql.replace(/\s+/g, ' ').slice(0, 90)).join(' | '));
     ok(`overview/${v}: exactly one query counts what was left out`, reads.filter(count).length === 1);
+    /* ...and every read keeps rows with an email only -- the Dropoff rule
+       too, so the two agree by construction rather than while no such row
+       happens to exist. */
+    const noEmail = reads.filter((q) => !/\b(l\.)?email IS NOT NULL/.test(q.sql));
+    ok(`overview/${v}: every read of leads counts rows with an email only, as Dropoff does`, noEmail.length === 0, noEmail.map((q) => q.sql.replace(/\s+/g, ' ').slice(0, 160)).join(' | '));
     ok(`overview/${v}: the clause's lists are BOUND, never pasted into SQL`, reads.every((q) => (q.params || []).some((x) => Array.isArray(x))));
   }
   ok('overview/week: what was left out comes back, this period and the comparison', JSON.stringify(P.week.ours.leads) === '[7,11]' && JSON.stringify(P.week.ours.people) === '[3,5]' && P.week.ours.excluded === true, JSON.stringify(P.week.ours));
@@ -700,6 +705,16 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('leads: each expander carries the RAW session_id, apart from the sanitised key', v.includes('data-sid="' + SID_A + '"') && /data-x="ld-3f2a9c1e_2d7b4d/.test(v));
   ok('leads: the stage ladder, with "Left on step 2" -- never "Step 1"', v.includes('>Completed<') && v.includes('>Booked<') && v.includes('>Left on step 2<') && !/>Step 1</.test(v));
   ok('leads: markers are words -- blocked, website failed, ours', />blocked<\/span>/.test(v) && />website failed<\/span>/.test(v) && />ours<\/span>/.test(v));
+  /* SINCE 26 SEPT THE OVERVIEW, DROPOFF AND THE DIGEST LEAVE OURS OUT, so the
+     marker must not still claim they are "counted in every total" -- a
+     tooltip that contradicts the Overview's own sentence is a wrong number
+     in words. Read off the painted row. */
+  const oursTip = (v.match(/title="(One of our own test submissions[^"]*)">ours</) || [])[1] || '';
+  ok('leads: the ours marker says where they ARE left out, not "counted in every total"',
+     oursTip.includes('The Overview, the Dropoff tab and the Monday digest already leave them out') && !/every total/.test(oursTip), oursTip);
+  { const isrc = fs.readFileSync(path.join(ROOT, 'index.js'), 'utf8');
+    ok('classic: its ours marker no longer says "counted in every total" either, and names what leaves them out',
+       !isrc.includes('One of our own test submissions. Counted in every total') && isrc.includes('The Dropoff tab and the new dashboard leave them out.')); }
   ok('leads: the Meta chip is not repeated beside "blocked"', !/>Meta: blocked</.test(v) && />Meta: ours</.test(v) && />Meta: model</.test(v));
   ok('leads: a clarified B2B reads as B2B, the stored text kept', /B2B <span class="badge b-neu" title="B2B \(clarified from B2C\)">clarified<\/span>/.test(v));
   ok('leads: source is the ad click, else where they came from', v.includes('facebook / paid') && v.includes('from google.com') && !/>referral</.test(v));

@@ -3584,8 +3584,18 @@ app.get('/monitor/duplicates', async (req, res) => {
    otherwise. Every real phone shape passes through untouched; four real
    values ever got the apostrophe ("- google", two @ values).
 
+   "UNCHANGED" IS THE BYTES, which is what the dialer imports. Excel still
+   reads a number-only cell as a number: +19495550123 loses its "+", and a
+   dashed +1-949-555-0123 is worked out as a sum. No stored phone has the
+   dashed shape (0 of 2,679, 26 Sept).
+
    Then quoted on a comma, a quote, or a CR/LF. CR used to be missing from
-   that test, so a stray carriage return split a row. */
+   that test, so a stray carriage return split a row.
+
+   NOT COVERED, on purpose: a spreadsheet that splits on ";" splits a cell
+   mid-way at a ";" or a line break, and a piece starting "=" there would
+   run. No stored value has that shape (0, 26 Sept); guarding it would put
+   an apostrophe inside bullet lists, so it is Darshil's call. */
 const CSV_NUMBER_ONLY = /^[+-][0-9 ().-]*[0-9][0-9 ().-]*$/;
 function csvCell(v) {
   if (v === null || v === undefined) return '';
@@ -5873,7 +5883,7 @@ app.get('/monitor/classic', (req, res) => {
      Leads and Blocked, so anything it calls has to be visible to both -- the
      scope bug that made Blocked rows silently unexpandable. */
   'function leadRowsHtml(leads,ns){return leads.map(function(l){var sid=esc(l.session_id),key=esc(ns||"x")+"-"+sid,name=[l.first_name,l.last_name].filter(Boolean).map(esc).join(" ")||"\\u2014",src=l.utm_source?esc(l.utm_source)+(l.utm_medium?" / "+esc(l.utm_medium):""):(l.referrer?"referral":"\\u2014");' +
-  'return"<tr"+(l.non_icp_blocked?" style=\\"background:#fff7ed\\"":"")+"><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+key+"\',\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.is_internal?"<span title=\\"One of our own test submissions. Counted in every total, like everything else \\u2014 use the filter to take them out of a number you are about to quote.\\" style=\\"color:#6b7280\\">&#129514; </span>":"")+(l.non_icp_blocked?"<span title=\\"Blocked \\u2014 non-ICP ("+esc(l.non_icp_reason||"")+"). Blocked by: "+esc(nonIcpSourceShort(l.non_icp_source))+". "+esc(nonIcpSourceWhy(l.non_icp_source))+" Still counted in every total.\\" style=\\"color:#c2410c\\">&#128683; </span>":"")+((l.non_icp_blocked&&ns==="b")?"<span class=\\"pschip\\" title=\\""+esc(nonIcpSourceWhy(l.non_icp_source))+"\\">"+esc(nonIcpSourceShort(l.non_icp_source))+"</span> ":"")+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+metaMark(l,ns)+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+esc(l.product||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
+  'return"<tr"+(l.non_icp_blocked?" style=\\"background:#fff7ed\\"":"")+"><td class=\\"xbtn\\" onclick=\\"toggleRow(\'"+key+"\',\'"+sid+"\')\\">&#9658;</td><td class=\\"te\\" title=\\""+esc(l.email)+"\\">"+(l.is_internal?"<span title=\\"One of our own test submissions. Counted in this dashboard\\u2019s Overview and on this tab \\u2014 use the filter to take them out of a number you are about to quote. The Dropoff tab and the new dashboard leave them out.\\" style=\\"color:#6b7280\\">&#129514; </span>":"")+(l.non_icp_blocked?"<span title=\\"Blocked \\u2014 non-ICP ("+esc(l.non_icp_reason||"")+"). Blocked by: "+esc(nonIcpSourceShort(l.non_icp_source))+". "+esc(nonIcpSourceWhy(l.non_icp_source))+" Still counted in every total.\\" style=\\"color:#c2410c\\">&#128683; </span>":"")+((l.non_icp_blocked&&ns==="b")?"<span class=\\"pschip\\" title=\\""+esc(nonIcpSourceWhy(l.non_icp_source))+"\\">"+esc(nonIcpSourceShort(l.non_icp_source))+"</span> ":"")+(l.website_check_failed?"<span style=\\"color:#b91c1c\\">&#9888;&#65039; </span>":(l.website_check_reason==="social_profile_url"?"<span style=\\"color:#1d4ed8\\" title=\\"Social profile \\u2014 no company site\\">&#128279; </span>":""))+metaMark(l,ns)+esc(l.email||"\\u2014")+"</td><td>"+name+"</td><td class=\\"tc\\">"+esc(l.company||"\\u2014")+"</td><td>"+esc(l.sell_to||"\\u2014")+"</td><td>"+esc(l.product||"\\u2014")+"</td><td>"+stageBadge(l)+"</td><td>"+(l.booking_uid?"<span class=\\"badge bg\\">Yes</span>":"<span class=\\"badge bx\\">No</span>")+"</td><td>"+enrichBadge(l)+"</td><td style=\\"color:#999;white-space:nowrap\\">"+et(l.created_at)+"</td><td style=\\"color:#999;font-size:11px\\">"+src+"</td></tr>"+' +
   '"<tr class=\\"erow\\" id=\\"er-"+key+"\\" style=\\"display:none\\"><td></td><td colspan=\\"10\\">"+enrichPanel(l)+"<div id=\\"lc-"+key+"\\"></div></td></tr>";}).join("");}' +
   'async function loadLeads(pg){curPage=pg||1;var search=document.getElementById("fsearch").value.trim(),stage=document.getElementById("fstage").value,sellTo=document.getElementById("fsellto").value,product=document.getElementById("fproduct").value,interest=document.getElementById("finterest").value,source=document.getElementById("fsource").value,enrich=document.getElementById("fenrich").value,websiteCheck=document.getElementById("fwebsitecheck").value,repeatAttempts=document.getElementById("frepeat").value,hear=document.getElementById("fhear").value.trim(),partner=document.getElementById("fpartner").value,from=document.getElementById("ffrom").value,to=document.getElementById("fto").value;' +
   'var url=API+"/monitor/leads"+(TP||"?")+(TP?"&":"")+"page="+curPage+"&stage="+stage+"&sort="+curSort+"&dir="+curDir;' +
@@ -6264,12 +6274,13 @@ const ELV_WINDOW_MAX      = 200; // hard cap so a traffic burst can't grow the w
 const ELV_EXCLUDED_DOMAINS = ['gushwork.ai', 'test.com', 'example.com', 'example.org'];
 
 /* ── OUR OWN TEST SUBMISSIONS ────────────────────────────────────────
-   MARKED, NEVER SILENTLY EXCLUDED. CLAUDE.md is explicit that internal
-   addresses are counted in every leads number today, that this is a
-   known distortion nobody chose, and that quietly fixing it would move
-   every historical number at once. So this changes no total: it adds a
-   flag, a marker on the row, an opt-in filter, and an "excluding ours"
-   figure printed BESIDE the count rather than instead of it.
+   MARKED, NEVER SILENTLY EXCLUDED. Until 26 Sept 2026 they were counted
+   in every leads number, a known distortion nobody chose. Darshil then
+   DECIDED: the Overview, the Dropoff tab and the Monday digest leave them
+   out, and each says in words how many it left out -- a stated
+   exclusion, not a silent one. Everywhere rows are LISTED they stay, with
+   a marker and an opt-in filter, and the classic /monitor/metrics still
+   counts them. This block itself changes no total.
 
    Same shape as the non-ICP block one layer up -- blocked leads are
    counted in every headline and marked rather than hidden -- and for
@@ -6374,8 +6385,8 @@ function isInternalSubmission(email, page_url) {
    asserts all five sites call it AND executes it.
 
    This does NOT touch the lead itself. It still books, still reaches the
-   dashboard, still counts in every headline number -- the rule that our
-   own submissions are marked rather than hidden is unchanged. */
+   dashboard and every list -- the rule that our own submissions are
+   marked rather than hidden is unchanged. */
 function internalLeadSuppressesMeta(email, page_url, where) {
   if (!isInternalSubmission(email, page_url)) return false;
   const why = isInternalLead(email) ? 'internal address' : 'staging site';
@@ -13071,7 +13082,11 @@ async function dropoffReport({ from, to, grain, source, mode } = {}) {
            ${DROPOFF_STAGE_SQL} AS stage,
            ${internalLeadSqlClause('email', 'page_url', params)} AS internal
       FROM leads
-     WHERE (created_at AT TIME ZONE '${DASH_TZ}') >= $1::timestamp
+     /* email IS NOT NULL: the Overview's rule, so the two agree by
+        construction and not only while no such row exists (0 of 5,851 on
+        26 Sept). A row with no email is not a person to count. */
+     WHERE email IS NOT NULL
+       AND (created_at AT TIME ZONE '${DASH_TZ}') >= $1::timestamp
        AND (created_at AT TIME ZONE '${DASH_TZ}') <  ($2::date + 1)::timestamp
        ${srcFilter}`;
 
@@ -13128,9 +13143,10 @@ async function dropoffReport({ from, to, grain, source, mode } = {}) {
       SELECT lower(email) AS person, created_at,
              ${DROPOFF_SOURCE_SQL} AS source
         FROM leads
-       WHERE (created_at AT TIME ZONE '${DASH_TZ}') >= $1::timestamp
+       WHERE email IS NOT NULL
+         AND (created_at AT TIME ZONE '${DASH_TZ}') >= $1::timestamp
          AND (created_at AT TIME ZONE '${DASH_TZ}') <  ($2::date + 1)::timestamp
-         /* IS NOT TRUE, never NOT: a row with no email makes the clause
+         /* IS NOT TRUE, never NOT: a row with no page_url makes the clause
             NULL, and NOT NULL is NULL -- the row would vanish from the list */
          AND ${internalLeadSqlClause('email', 'page_url', sp)} IS NOT TRUE)
     SELECT source, ${md === 'people' ? 'COUNT(DISTINCT person)' : 'COUNT(*)'}::int AS n
@@ -13572,7 +13588,7 @@ async function overviewReport(db, { view, asof } = {}) {
       UNION ALL
       SELECT 'leads', source, COUNT(*)::int FROM rows_ GROUP BY source`, cp)) - 1;
     const lp = [asofIso];
-    lastIdx = jobs.push(db.query(`SELECT MAX(created_at) AS last_lead_at FROM leads WHERE created_at < $1 AND ${internalLeadSqlClause('email', 'page_url', lp)} IS NOT TRUE`, lp)) - 1;
+    lastIdx = jobs.push(db.query(`SELECT MAX(created_at) AS last_lead_at FROM leads WHERE email IS NOT NULL AND created_at < $1 AND ${internalLeadSqlClause('email', 'page_url', lp)} IS NOT TRUE`, lp)) - 1;
   } else {
     /* the shared definition, minus our own rows on BOTH sides of it */
     const rp = [];

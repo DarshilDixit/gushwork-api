@@ -1976,9 +1976,21 @@ numbers start with "+"**. The Lead magnet export's blanket
 imports. A number-only cell cannot call a function or reach another cell, so
 it is safe to leave alone.
 
-**Excel and Sheets still read `+19495550123` as a number and drop the "+"**
-on open. That is theirs, not ours. Keeping the "+" there would need the
-apostrophe, which breaks the dialer, and one file cannot do both.
+**"Unchanged" means the BYTES, which is what the dialer imports — not what a
+spreadsheet shows.** Excel and Sheets still read a number-only cell as a
+number: `+19495550123` loses its "+", and a dashed one like
+`+1-949-555-0123` is worked out as a SUM and shows -1626. No stored phone
+has the dashed shape (0 of 2,679, 26 Sept), and both were true before this
+change. Keeping them readable in a spreadsheet would need the apostrophe,
+which breaks the dialer, and one file cannot do both.
+
+**One limit, left open on purpose:** a spreadsheet set to split columns on
+`;` (common in European locales) splits a cell mid-way at a `;` or a line
+break, and a piece starting with `=` there would run. Quoting cannot fix
+that — the whole file is misread in that setting. No stored value has a `;`
+or a line break followed by a formula character (0, 26 Sept). Guarding it
+would put a visible apostrophe inside bullet lists in `about_business`, so it
+is a decision for Darshil, not a quiet widening of his rule.
 `tests/test-batch2.js` §32 runs the real function over every stored phone
 shape and the hostile ones.
 

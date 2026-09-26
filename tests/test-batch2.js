@@ -2964,12 +2964,12 @@ async function section12() {
    the walkthrough as agent@allstate.com, which makes "10 blocked" a
    number nobody can quote.
 
-   CLAUDE.md is explicit that internal addresses are counted in every
-   leads number today, that this is a known distortion nobody chose, and
-   that excluding them would move every historical number at once. So
-   the fix adds a flag, a marker, an opt-in filter and a figure printed
-   BESIDE the count -- and changes no total. This section is what stops
-   that turning into a quiet subtraction later.
+   Internal addresses were counted in every leads number, a known
+   distortion nobody chose. The fix here added a flag, a marker, an
+   opt-in filter and a figure printed BESIDE the count, and changed no
+   total. Since 26 Sept 2026 the Overview, Dropoff and the digest leave
+   them out by Darshil's decision -- and SAY so, which is what this
+   section guards: an exclusion that is stated, never a quiet one.
    ============================================================ */
 {
   const M = require('module');

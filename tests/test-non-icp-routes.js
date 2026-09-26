@@ -763,6 +763,12 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
        rather than believed, and so our own test rows stay visible. */
     ok('dropoff route: it reports how many leads the referrer recovered',
        body && body.recovered === 23, body && String(body.recovered));
+    /* The Overview's rule, read off the SQL actually sent: a row with no
+       email is nobody, on both surfaces, so they agree by construction. */
+    const dReads = S.writes.filter((w) => /WITH base AS/.test(w.flat) && /FROM leads/.test(w.flat));
+    ok('dropoff route: every read of leads (counts, left out, sources) counts rows with an email only, as the Overview does',
+       dReads.length === 3 && dReads.every((w) => /FROM leads (\/\*[^*]*\*\/ )?WHERE email IS NOT NULL AND/.test(w.flat)),
+       dReads.length + ' reads: ' + dReads.map((w) => (w.flat.match(/FROM leads WHERE [^(]{0,40}/) || ['?'])[0]).join(' | '));
     ok('dropoff route: it reports how many of our own tests it LEFT OUT',
        body && body.internal === 4 && body.internal_excluded === true, body && String(body.internal));
     ok('dropoff route: ...per period, so the digest can name last week\'s',

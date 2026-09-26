@@ -93,7 +93,7 @@
     var why = [];
     if (l.non_icp_blocked) { why.push(['Blocked by', L.sourceShort(l.non_icp_source) + ' — ' + L.sourceWhy(l.non_icp_source)]); why.push(kvm('Matched domain', l.non_icp_reason)); }
     if (l.meta_withheld_reason) why.push(['Meta conversion', L.metaWhy(l.meta_withheld_reason)]);
-    if (l.is_internal) why.push(['Ours', 'One of our own test submissions, or sent from the staging site. Counted in every total like everything else.']);
+    if (l.is_internal) why.push(['Ours', 'One of our own test submissions, or sent from the staging site. Listed and counted here; the Overview, the Dropoff tab and the Monday digest leave these out.']);
     var loc = [l.enriched_city, l.enriched_state, l.enriched_country].filter(Boolean).join(', ');
     return group('Why this lead is marked', why) + partnerBox(l) +
       /* THE VISITOR'S location, from their IP -- a different fact from
@@ -161,7 +161,7 @@
   }
   function marks(l, ns) {
     var b = [];
-    if (l.is_internal) b.push('<span class="badge b-neu" title="One of our own test submissions, or sent from the staging site. Counted in every total — the Our own tests filter takes them out of a number you are about to quote.">ours</span>');
+    if (l.is_internal) b.push('<span class="badge b-neu" title="One of our own test submissions, or sent from the staging site. Counted on this tab — the Our own tests filter takes them out. The Overview, the Dropoff tab and the Monday digest already leave them out.">ours</span>');
     if (l.non_icp_blocked) {
       /* On Blocked every row is blocked, so the chip says WHICH CHECK did it */
       b.push(ns === 'blk' ? '<span class="badge b-bad" title="' + esc(L.sourceWhy(l.non_icp_source)) + '">' + esc(L.sourceShort(l.non_icp_source)) + '</span>'
