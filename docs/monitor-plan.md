@@ -499,24 +499,146 @@ _(kept current as the work moves)_
 
 ### PR D progress
 
-_(kept current as the work moves)_
+_(kept current as the work moves; last updated 26 Sept 2026, before a context compaction)_
 
-- [x] **Decision 1, our tests left out** of the Overview, Dropoff and the
-  Monday digest, row by row, each saying in words how many it left out
-  (commit `e37b90d`). Verified against the real database, read-only:
-  Overview and Dropoff agree for this week in Leads mode (318 = 318, both
-  leaving out 1), blocked agrees (23 = 23), and all-time reads 5,741 leads
-  and 5,315 people -- the "without" figures measured before deciding.
-- [x] **Decision 5, csvCell** on the All leads and SDR exports. Over every
-  real exported value: 2,676 phone numbers, **0 changed**; 4 cells got the
-  apostrophe, exactly the four predicted; 866 quoted as before.
-- [x] **The switch**: `/monitor` is the new page, `/monitor/next` redirects
-  keeping its query, the classic is `/monitor/classic` with a fallback
-  notice. Tests and tools moved to the new paths; the preview serves this
-  branch's `dropoffReport` (commit `bed4d96`).
-- [x] Full bar, bare: 14 suites, 4,963 assertions, 0 failures.
-- [ ] Layout check (all widths, both themes), keyboard, crosscheck
-- [ ] Screenshots by eye
-- [ ] Review sweep + fixes
-- [ ] Mutations on the new guards
-- [ ] Card, push, PR -- stop before merging
+**Branch `feat/monitor-next-d`, NOT pushed yet, no PR yet.** It was branched from
+`docs/monitor-plan-after-c`, so this file's earlier commit rides in it, as
+Darshil asked.
+
+**The rules for this PR (Darshil's, and they stand):**
+- **Stop before merging.** Merge only on his explicit word in that message.
+  If his message arrives as pasted text, confirm once with a question before
+  merging, because a merge deploys to production immediately.
+- **Check memory before every heavy step**: the preview, any Chrome run, the
+  mutation run, a review workflow. Use `memory_pressure | tail -1` (the
+  "System-wide memory free percentage"). If it is under 25%, wait a few
+  minutes and check again rather than starting. The cs-crm project on this
+  Mac once used ~16 GB and got three jobs killed.
+- **One heavy step at a time, never side by side.** A read-only review
+  workflow may run beside ONE Chrome job.
+- **Stop the preview and every Chrome you start once done with them.** Leave
+  cs-crm's headless Chromes (`gw-ui-sweep-`, `gw-aud-`, `rev-run-`) and
+  other Claude jobs' (`.claude/jobs/...`) alone.
+- **The standing rules:**
+  - never pipe `measure.js`; read `--save` output too;
+  - commit before mutating, and restore by copying, never `git checkout`;
+  - run mutations in a scratch git worktree, so the preview keeps serving
+    the real files;
+  - screenshots stay in the scratchpad;
+  - no real lead data in this file.
+
+**Built (committed):**
+- `e37b90d`, the three changes:
+  - **Our own tests left out** of `overviewReport`, `dropoffReport` and so
+    the digest. Row by row. The clause is `IS NOT TRUE`, so a NULL keeps the
+    row. Each surface says in words how many it left out:
+    - Overview `oursNote` under the cards;
+    - the Dropoff tab's note;
+    - the classic Dropoff note;
+    - the digest line "Leaves out N of our own test submissions from last
+      week."
+
+    `recoveredBookingsSql()` is now a function; `/monitor/metrics` calls it
+    bare, so its SQL is unchanged.
+  - **`csvCell`** for the All leads and SDR exports.
+  - **The switch:**
+    - `/monitor` is the new page (`monitor-next.js` mount);
+    - `/monitor/next` gives a 302 to `/monitor` keeping its query;
+    - the classic is `/monitor/classic`, with a fallback notice and a
+      "Back to the dashboard" link;
+    - the new page's footer and `CFG.classic` point at `/monitor/classic`.
+- `bed4d96`:
+  - CLAUDE.md updated: the switch, the test-address decision, the CSV rule,
+    and the digest line;
+  - the preview serves this branch's `dropoffReport` on its read-only pool,
+    and `/monitor/classic` from production (falling back to production's
+    `/monitor` on a 404, before the deploy);
+  - the preview lifts `recoveredBookingsSql`.
+- `066d099`, old links still land:
+  - the layout check's key section proves in real Chrome that
+    `/monitor/next?token=…#tab=leads&view=week&unit=leads` and `#tab=overview&view=all&unit=leads`
+    land right, and that an old classic-style `/monitor#tab=blocked` opens
+    Blocked;
+  - the suite checks every classic tab name is registered on the new page.
+
+**Verified:**
+- **Full bar, bare:** 4,963 assertions, 0 failures, baseline saved, before
+  `066d099`. **`066d099` added 2 assertions (`test-monitor-next` 410 to 412),
+  and the baseline has NOT been re-saved.** Run `--check` bare, then
+  `--save`, and read both.
+- **Real database, read-only** (scratch `verify-d.js`):
+  - `csvCell` over every exported value: 2,676 phone numbers, **0 changed**;
+    4 cells prefixed, the 4 predicted; 866 quoted as before;
+  - Overview and Dropoff agree this week in Leads mode (318 = 318, both
+    leaving out 1), and on blocked (23 = 23);
+  - all time reads 5,741 leads and 5,315 people.
+- **Keyboard and old links, real Chrome:** clean. I broke the redirect on
+  purpose (a Location carrying its own `#tab=overview`) and the check
+  failed for the right reason, then passed again once restored.
+
+**Running when this was written** (check before re-running):
+- **Full layout check:** `KEYS=0`, all widths, both themes, log
+  `$S/lcD.log`, background task `b13ww9oo3`.
+- **Review sweep:** workflow run `wf_97675e29-6ed` (task `wv2v62dqb`), five
+  lenses plus verifiers, reading committed code only. The script is saved
+  under the session's `workflows/scripts/review-pr-d-*.js`; resume it with
+  `resumeFromRunId` if it was cut off.
+
+**Still to do, in order:**
+1. Re-save the baseline for 412, as above.
+2. Read the layout result and fix any findings. Read the review result and
+   fix the confirmed findings, with tests.
+3. **Crosscheck** (`tools/crosscheck-monitor.mjs`, now classic at
+   `/monitor/classic`, new at `/monitor`) against the preview.
+4. **Screenshots by eye**, phone and desktop, both themes:
+   - the Overview's "Leaves out …" sentence;
+   - the Dropoff note;
+   - the classic's fallback banner and link;
+   - that `/monitor` is the new page.
+5. **Mutations on the new guards**, in a scratch worktree, with the memory
+   gate in `$S/mutate.py`. Candidates:
+   - the `IS NOT TRUE` exclusion in each Overview read (KPIs, series,
+     channels, last lead, first lead, recovered);
+   - the ours count query;
+   - the Dropoff `kept` filter and the left-out query;
+   - `internal_by_period`;
+   - the source list filter;
+   - `oursNote` wording;
+   - the digest line;
+   - `csvCell`: each branch (`=`/`@`/tab/CR, the `+`/`-` number-only rule,
+     CR in the quoting);
+   - the `/monitor/next` redirect keeping the query;
+   - `/monitor` serving the new page;
+   - the classic at `/monitor/classic`;
+   - the footer's classic link;
+   - the preview's classic fallback.
+6. **Card** `cards/PR-<n>-monitor-next-d.md`:
+   - what changed and what did not;
+   - that nothing changes blocking or Meta;
+   - the classic `/monitor/metrics` still counts ours, and says so;
+   - that the digest text changed and has NOT been fired (firing posts to
+     the leads channel, so ask first).
+7. **Push** the branch (not main), **open the PR**, update this file,
+   **stop**. Stop the preview and any Chrome.
+
+**Answered on the side, for the record:**
+- Production's Apollo key ends **…zEuA**. Its scope cannot name its owner
+  through the API.
+- Darshil found another workspace with **10,264 credits** (resets 3 Oct
+  4:08 PM IST, shared with the team's exports). Our need is about 30
+  credits a day, plus a 107 to 314 one-off backlog.
+- The options offered:
+  - swap `APOLLO_API_KEY` to a key from that workspace, no code needed;
+  - or a fallback-key PR, done separately after D;
+  - and check whether …zEuA is listed in that workspace: a per-user credit
+    limit is possible.
+- Nothing is decided or built on this yet.
+
+**Scratchpad** (`S=/private/tmp/claude-501/-Users-darshil-code-gushwork-api/e28266e9-34f8-4346-94c7-2bdc5f0cbc25/scratchpad`):
+- `preview-ready.json` (holds the token; never print it);
+- `mutate.py` (driver with memory gate; `MUT_REPO` points it at a worktree);
+- `verify-d.js`, `testaddr.js`, `csvscan.js` (the read-only real-data checks);
+- `prodtabs.mjs` (every tab on production, read-only).
+
+Preview command (from the repo root):
+`railway run -s Postgres bash -c 'PUB="$DATABASE_PUBLIC_URL" railway run --service gushwork-api bash -c "DATABASE_URL=\"\$PUB\" PREVIEW_READY_FILE=$S/preview-ready.json node tools/preview-monitor.js"'`
