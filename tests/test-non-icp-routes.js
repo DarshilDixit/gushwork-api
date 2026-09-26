@@ -769,6 +769,23 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     ok('dropoff route: every read of leads (counts, left out, sources) counts rows with an email only, as the Overview does',
        dReads.length === 3 && dReads.every((w) => /FROM leads (\/\*[^*]*\*\/ )?WHERE email IS NOT NULL AND/.test(w.flat)),
        dReads.length + ' reads: ' + dReads.map((w) => (w.flat.match(/FROM leads WHERE [^(]{0,40}/) || ['?'])[0]).join(' | '));
+    /* WHAT IS LEFT OUT, read off the SQL actually sent, per query. The
+       numbers above come from stubbed rows, so they cannot see whether the
+       counts query still skips our tests -- a mutation dropping the filter
+       SURVIVED the whole bar until these existed. */
+    const cSql = (S.writes.find((w) => /SELECT bucket, source, stage, COUNT/.test(w.flat)) || {}).flat || '';
+    ok('dropoff route: Leads mode counts only what is left once our own tests are taken out',
+       /kept AS \(SELECT \* FROM base WHERE internal IS NOT TRUE\)/.test(cSql) && /FROM kept GROUP BY 1,2,3/.test(cSql) && !/FROM base GROUP BY 1,2,3/.test(cSql), cSql.slice(0, 300));
+    const sSql = (S.writes.find((w) => /AS source[\s\S]*FROM base GROUP BY 1 ORDER BY 2 DESC$/.test(w.flat)) || {}).flat || '';
+    ok('dropoff route: the source list leaves our own tests out too',
+       /= ANY\(\$\d+::text\[\]\)[\s\S]*\) IS NOT TRUE\) SELECT source/.test(sSql), sSql.slice(-300));
+    {
+      S.writes = [];
+      try { await realFetch(BASE + '/monitor/dropoff?token=stub&grain=week&from=2026-01-05&to=2026-01-18&mode=people', { signal: AbortSignal.timeout(20000) }); } catch (e) {}
+      const pSql = (S.writes.find((w) => /SELECT bucket, source, stage, COUNT/.test(w.flat)) || {}).flat || '';
+      ok('dropoff route: People mode forms people from what is left once our own tests are taken out',
+         /kept AS \(SELECT \* FROM base WHERE internal IS NOT TRUE\)/.test(pSql) && /FROM kept ORDER BY person/.test(pSql), pSql.slice(0, 400));
+    }
     ok('dropoff route: it reports how many of our own tests it LEFT OUT',
        body && body.internal === 4 && body.internal_excluded === true, body && String(body.internal));
     ok('dropoff route: ...per period, so the digest can name last week\'s',

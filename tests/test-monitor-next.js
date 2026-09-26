@@ -248,6 +248,18 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     const count = (q) => /\) IS TRUE\s+GROUP BY w\.k/.test(q.sql);
     ok(`overview/${v}: every read of leads leaves our own tests out (or is the one that counts them)`, reads.length >= (v === 'all' ? 4 : 5) && reads.every((q) => skip(q) || count(q)), reads.filter((q) => !skip(q) && !count(q)).map((q) => q.sql.replace(/\s+/g, ' ').slice(0, 90)).join(' | '));
     ok(`overview/${v}: exactly one query counts what was left out`, reads.filter(count).length === 1);
+    /* PER READ, NOT PER QUERY. One query can read leads twice -- the
+       channels query has a people half and a rows half, recovered bookings
+       reads the lead and then its later booking -- and a query-level check
+       passed with either half's filter deleted: three mutations SURVIVED
+       it. So every FROM/JOIN of leads needs its own clause. */
+    const perRead = reads.filter((q) => !count(q)).map((q) => ({
+      reads: (q.sql.match(/\b(FROM|JOIN) leads\b/g) || []).length,
+      skips: (q.sql.match(/= ANY\(\$\d+::text\[\]\)[\s\S]*?\) IS NOT TRUE/g) || []).length,
+      head: q.sql.replace(/\s+/g, ' ').slice(0, 90) }));
+    const short = perRead.filter((r) => r.skips < r.reads);
+    ok(`overview/${v}: EVERY read of leads inside each query leaves our own tests out`, perRead.length > 0 && short.length === 0,
+       short.map((r) => r.reads + ' reads, ' + r.skips + ' skips: ' + r.head).join(' | '));
     /* ...and every read keeps rows with an email only -- the Dropoff rule
        too, so the two agree by construction rather than while no such row
        happens to exist. */
