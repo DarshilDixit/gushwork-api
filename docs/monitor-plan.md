@@ -279,6 +279,27 @@ done; they are listed for Darshil instead:
   touch. One-finger drags scroll the page on phones.
 - **All leads gains the "our own tests" filter** the route already
   supports. The 🧪 tooltip used to point at a filter that did not exist.
+- **From the review (display only):**
+  - the Meta chip reads **"site not verified"**, never "no website": the
+    reason covers timeouts and 403s from live sites;
+  - website verdicts read as the server words them (`http_403` is "Site
+    blocked our check (403)"), pinned against `websiteReasonLabel`;
+  - the model and website Meta reasons no longer claim the lead "books and
+    is dialled" -- it may be disqualified or never have submitted; the
+    Model tab's Meta group note is overridden in the page for the same
+    reason (the server's note still says it; that is a server change);
+  - in flag-only mode (`NON_ICP_LLM_META` off) the decision chip, the group
+    title and the lede say Meta was still sent, as the ladder already did;
+  - the SDR date column is "Newest qualifying attempt", the partner card
+    "with a lead in the last 24 hours", the map note no longer claims an
+    exact area ratio;
+  - a Model row whose page read fine is "page read; the model call failed";
+  - card view gets a Sort select for All leads and Per partner; every
+    column hidden at mid widths is in its row's detail; the ack note and
+    competing partners are visible text, not only a tooltip;
+  - the map follows the theme (dark Esri basemap, checked by downloading
+    tiles), keeps the reader's zoom across refreshes, and colours the area
+    past the world's edge as the tiles' own sea.
 
 ### PR C progress
 
@@ -341,6 +362,12 @@ _(kept current as the work moves)_
   137 combinations, 0 findings. Read by eye: Partners, Model, Visitors and
   the map, the lead panel's change log, in both themes, phone and desktop.
   **Still to do: one final full run, both themes, all seven widths.**
-- [ ] Mutation tests
-- [ ] Review sweep + fixes
+- [x] **Review sweep** (five lenses, each finding adversarially verified;
+  workflow run `wf_c2ad4b99-d16`). 45 confirmed, about 30 distinct fixes,
+  commit `5bd3659`; the two first-round mutation survivors pinned in
+  `7afa68d`. Headline: a session_id of "constructor" blanked All leads;
+  every tab painted before loading, so stale rows sat under new filters;
+  Custom dates were unreachable; the ack note was wiped by refreshes.
+- [ ] Mutation tests: round 1 (26, on the build) 24 caught, 2 survived and
+  now pinned; round 2 (37, on the review fixes) -- in progress
 - [ ] Card, PR, stop for review
