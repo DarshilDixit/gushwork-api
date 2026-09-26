@@ -106,7 +106,11 @@ function stubQuery(q, params) {
     return { rows: [{
       non_icp_blocked:     bound('non_icp_blocked') === true,
       non_icp_reason:      bound('non_icp_reason') || null,
-      non_icp_source:      bound('non_icp_source') || null,
+      /* S.stickySource stands in for the upsert's COALESCE keeping an EARLIER
+         decision's source, which a stub of bound values cannot otherwise
+         produce -- and without which the "wording follows the evidence"
+         fix could be deleted with every test still passing (measured). */
+      non_icp_source:      S.stickySource || bound('non_icp_source') || null,
       non_icp_checked_at:  bound('non_icp_checked_at') || null,
       non_icp_llm_flagged: bound('non_icp_llm_flagged') === true,
       product:             bound('product') || null,
@@ -308,7 +312,7 @@ const post = async (p, body) => {
   let j = null; try { j = await r.json(); } catch (_) {}
   return { status: r.status, body: j };
 };
-const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; S.dropoffInternal = null; S.dropoffRows = null; S.dropoffSources = null; };
+const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; S.dropoffInternal = null; S.dropoffRows = null; S.dropoffSources = null; S.stickySource = null; };
 const metaFired      = () => S.fetches.some((u) => /graph\.facebook\.com/.test(u));
 const salesforceHit  = () => S.fetches.some((u) => /\/sobjects\//.test(u));
 const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') || true);
@@ -1997,12 +2001,12 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
        not read "judged the domain name alone" above a quote from the page. */
     reset();
     S.verdict = VROW({ domain: 'brokerage.test', business_type: 'real_estate', evidence_quote: 'homes for sale in Austin' });
-    S.leadRow = { email: 'm@diner.test', company: 'D', website: 'brokerage.test', phone: null, non_icp_blocked: true,
-                  non_icp_reason: 'diner.test', non_icp_source: 'llm_name_only' };
+    S.stickySource = 'llm_name_only';   /* the row's first decision, kept by COALESCE */
     await post('/submit', { session_id: '00000000-0000-4000-8000-0000000000b9', email: 'm@diner.test', website: 'brokerage.test',
       first_name: 'M', last_name: 'D', company: 'D', phone: '+15551230001', sell_to: 'B2B', page_url: 'https://www.gushwork.ai/demo' });
     await sleep(700);
     txt = JSON.stringify(S.slackPayloads);
+    S.stickySource = null;
     ok('NAME SLACK: a page quote shown under a lead first recorded name-only still says the WEBSITE was read',
        /Read their website and judged/.test(txt) && /homes for sale in Austin/.test(txt) && !/judged the domain name alone/.test(txt), txt.slice(0, 400));
   }
