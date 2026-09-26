@@ -97,7 +97,16 @@ GW.ui = (function (G) {
   function keyOf(o, r, i) { return o.ns + '-' + (o.key ? String(o.key(r)).replace(/[^A-Za-z0-9]/g, function (c) { return '_' + c.charCodeAt(0).toString(16); }) : i); }
   function rtable(o) {
     var cols = o.cols;
-    var head = '<tr>' + (o.detail ? '<th class="xcell"><span class="sr-only">Details</span></th>' : '') + cols.map(function (c) { return '<th' + (c.r ? ' class="r"' : '') + '>' + esc(c.label) + '</th>'; }).join('') + '</tr>';
+    /* A SORTABLE column is a real button in its header, and the header says
+       which way it sorts (aria-sort) -- the arrow alone is invisible to a
+       screen reader. o.sort = { key, dir, attr }. */
+    var srt = o.sort || null;
+    var th = function (c) {
+      var on = srt && c.sort && srt.key === c.sort, aria = on ? ' aria-sort="' + (srt.dir === 'asc' ? 'ascending' : 'descending') + '"' : '';
+      var inner = c.sort && srt ? '<button class="sortb" ' + srt.attr + '="' + esc(c.sort) + '">' + esc(c.label) + (on ? (srt.dir === 'asc' ? ic('arrow-up') : ic('arrow-down')) : '') + '</button>' : esc(c.label);
+      return '<th' + (c.r ? ' class="r"' : '') + aria + '>' + inner + '</th>';
+    };
+    var head = '<tr>' + (o.detail ? '<th class="xcell"><span class="sr-only">Details</span></th>' : '') + cols.map(th).join('') + '</tr>';
     var body = o.rows.map(function (r, i) {
       var key = keyOf(o, r, i);
       var cells = cols.map(function (c, ci) {
@@ -106,9 +115,14 @@ GW.ui = (function (G) {
         return '<td' + (cls ? ' class="' + cls + '"' : '') + ' data-l="' + esc(c.label) + '"><span class="cv">' + (v === '' ? '—' : v) + '</span></td>';
       }).join('');
       var nm = o.rowName ? o.rowName(r) : 'row ' + (i + 1);
-      var x = o.detail ? '<td class="xcell"><button class="xb" data-x="' + key + '" aria-expanded="false" aria-controls="' + key + '-d" aria-label="Details for ' + esc(nm) + '">' + ic('caret-right') + '</button></td>' : '';
+      /* o.xattr(r): extra attributes on the expander -- All leads puts the RAW
+         session_id there, because the row key is sanitised and must never be
+         sent to /monitor/lead-changes as if it were one (CLAUDE.md, ONE ROW
+         BUILDER, TWO TABLES). */
+      var xa = o.xattr ? ' ' + o.xattr(r) : '';
+      var x = o.detail ? '<td class="xcell"><button class="xb" data-x="' + key + '"' + xa + ' aria-expanded="false" aria-controls="' + key + '-d" aria-label="Details for ' + esc(nm) + '">' + ic('caret-right') + '</button></td>' : '';
       var d = o.detail ? '<tr class="detail" id="' + key + '-d" hidden><td colspan="' + (cols.length + 1) + '"><div class="well">' + o.detail(r) + '</div></td></tr>' : '';
-      return '<tr class="main">' + x + cells + '</tr>' + d;
+      return '<tr class="main' + (o.rowCls ? ' ' + o.rowCls(r) : '') + '">' + x + cells + '</tr>' + d;
     }).join('');
     return '<div class="rt-wrap"><table class="rt"><thead>' + head + '</thead><tbody>' + (body || '<tr><td colspan="' + (cols.length + 1) + '">' + empty(o.emptyTitle || 'Nothing here yet', o.emptyBody) + '</td></tr>') + '</tbody></table></div>';
   }
@@ -123,6 +137,19 @@ GW.ui = (function (G) {
       if (open) d.setAttribute('hidden', ''); else d.removeAttribute('hidden');
     });
   }
+  /* A PAGER that always says where you are: first, last, the pages either
+     side of this one, and "Page X of Y" in words. Hidden when there is one
+     page. Every button carries attr="N". */
+  function pager(page, pages, attr) {
+    if (!pages || pages <= 1) return '';
+    var b = function (n, lbl, dis, cur) { return '<button class="pgb' + (cur ? ' on' : '') + '" ' + attr + '="' + n + '"' + (dis ? ' disabled' : '') + (cur ? ' aria-current="page"' : '') + (lbl ? ' aria-label="' + lbl + '"' : '') + '>' + (lbl ? ic(n < page ? 'caret-left' : 'caret-right') : n) + '</button>'; };
+    var h = b(Math.max(1, page - 1), 'Previous page', page <= 1, false), last = 0;
+    for (var n = 1; n <= pages; n++) {
+      if (n === 1 || n === pages || Math.abs(n - page) <= 2) { if (last && n - last > 1) h += '<span class="pgg" aria-hidden="true">…</span>'; h += b(n, null, false, n === page); last = n; }
+    }
+    h += b(Math.min(pages, page + 1), 'Next page', page >= pages, false);
+    return '<nav class="pager" aria-label="Pages">' + h + '<span class="pgi">Page ' + fmt(page) + ' of ' + fmt(pages) + '</span></nav>';
+  }
   function pills(defs, current, counts, attr, label) {
     return '<div class="pills" role="group" aria-label="' + esc(label || 'Filter') + '">' + defs.map(function (p) {
       return '<button ' + attr + '="' + esc(p[0]) + '" aria-pressed="' + (p[0] === current) + '">' + esc(p[1]) + (counts ? '<span>' + fmt(counts[p[0]] || 0) + '</span>' : '') + '</button>'; }).join('') + '</div>';
@@ -132,5 +159,5 @@ GW.ui = (function (G) {
       return '<button ' + attr + '="' + esc(d[0]) + '" aria-pressed="' + (d[0] === current) + '">' + (d[2] || '') + esc(d[1]) + '</button>'; }).join('') + '</div>';
   }
   return { delta: delta, cmpBlock: cmpBlock, leadCard: leadCard, metricCard: metricCard, panel: panel, empty: empty,
-           unavailable: unavailable, loading: loading, funnel: funnel, kv: kv, rtable: rtable, keyOf: keyOf, pills: pills, tg: tg };
+           unavailable: unavailable, loading: loading, funnel: funnel, kv: kv, rtable: rtable, keyOf: keyOf, pager: pager, pills: pills, tg: tg };
 })(GW);

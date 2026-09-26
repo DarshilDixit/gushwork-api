@@ -288,7 +288,20 @@ _(kept current as the work moves)_
   each. They live in this session's scratchpad (`specs/*.md`); if lost,
   re-run the same read (routes, writes, UI, rules, traps, crosscheck and
   tests per tab) before building.
-- [ ] Build: All leads + Blocked, SDR list, Partners, Model, Visitors
+- [ ] Build:
+  - [x] **Foundation.** Tab filters in the hash (`G.S.q`); JSON bodies
+    for writes; dates that never throw; http(s)-only links; the server's
+    label maps carried in the page config; `labels.js`; sortable headers,
+    row attributes and a pager in `ui.js`.
+  - [x] **All leads and Blocked** (`leads.js`): one renderer, namespaces
+    `ld` and `blk`. Checked on live data through the preview: 5,822 leads
+    in 233 pages; Blocked shows 51 leads, 42 people and 45 leads excluding
+    ours. Tests: painted numbers, markers, panel order, the change log's
+    three states by the raw session_id, filters to the request, CSV.
+  - [ ] SDR list
+  - [ ] Model
+  - [ ] Visitors
+  - [ ] Partners
 - [ ] Number-for-number checks against the classic, live, read-only
 - [ ] Layout check, screenshots by eye
 - [ ] Mutation tests

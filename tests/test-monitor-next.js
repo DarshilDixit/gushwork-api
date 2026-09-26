@@ -125,7 +125,7 @@ require(path.join(ROOT, 'index.js'));
 const tq = '?token=' + encodeURIComponent(TOKEN);
 
 /* ── A stubbed browser: enough DOM for the page's own scripts to run ───── */
-function browser(payloads) {
+function browser(payloads, cfg) {
   const els = {}, listeners = {}, intervals = [], calls = [];
   const mk = (id) => {
     const attrs = {}, cls = new Set();
@@ -150,7 +150,9 @@ function browser(payloads) {
     location: { hash: '' }, history: { replaceState: (a, b, h) => { window.location.hash = h; } },
     localStorage: { getItem: () => null, setItem() {} }, matchMedia: () => ({ matches: false, addEventListener() {} }),
     addEventListener() {}, innerWidth: 1440, scrollTo() {}, alert() {},
-    __GW__: { token: TOKEN, tz: 'America/New_York', classic: '/monitor' },
+    /* THE SERVED PAGE'S OWN CONFIG when given -- it carries the server's
+       label maps, so the page is tested with what a real visitor gets */
+    __GW__: cfg || { token: TOKEN, tz: 'America/New_York', classic: '/monitor' },
   };
   const fetchStub = async (url, init) => {
     const u = new URL(String(url), 'http://x');
@@ -293,7 +295,24 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     statusTotals: { all: 613, awaiting: 17, sent: 571, abandoned: 25, internal: 4 } };
   const LM_L = { total: 900, leads: [{ id: 1, email: 'a@b.co', status: 'awaiting', industry_category: 'SaaS', created_at: ASOF }] };
   const COV = { ok: false, reason: 'salesforce_timeout', held: 431, submitted: 947, days: 30 };
-  const METRICS = { enriched: 4537, enrichTitlePct: 55, enrichFundingPct: 8, enrichLocationPct: 63 };
+  const METRICS = { enriched: 4537, enrichTitlePct: 55, enrichFundingPct: 8, enrichLocationPct: 63, peopleNonIcp: 42 };
+  /* ── PR C fixtures: odd, distinct numbers so a painted value cannot match by accident ── */
+  const SID_A = '3f2a9c1e-7b4d-4e21-9a0c-5d6e7f8a9b0c', SID_B = '8c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f', SID_C = '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
+  const LEAD_A = { session_id: SID_A, email: 'ann@acmerealty.com', first_name: 'Ann', last_name: 'Acme', company: 'Acme Realty', sell_to: 'B2B (clarified from B2C)', product: 'aeo',
+    completed: true, booking_uid: null, disqualified: false, non_icp_blocked: true, non_icp_source: 'llm_name_only', non_icp_reason: 'acmerealty.com', meta_withheld_reason: 'blocked', is_internal: false,
+    website_check_failed: true, website_check_reason: 'parked_confirmed', created_at: '2026-09-24T14:05:00Z', start_time: 'not a date', enriched_linkedin: 'javascript:alert(1)',
+    ip_city: 'Boston', ip_region: 'Massachusetts', ip_country: 'US', enriched_city: 'Woburn', enriched_state: 'Massachusetts', enriched_country: 'United States',
+    prior_attempts: '2', prior_disqualified: '1', utm_source: 'facebook', utm_medium: 'paid',
+    ps_partner_key: 'pk_77', ps_partner_name: null, ps_partner_email: 'p@partner.co', ps_signup_fail_reason: 'http_400',
+    ps_click_history: JSON.stringify([{ at: '2026-09-20T10:00:00Z', pk: 'pk_11', xid: 'x1' }, { at: '2026-09-21T10:00:00Z', pk: 'pk_77', xid: 'x2' }]) };
+  const LEAD_B = { session_id: SID_B, email: 'darshil@gushwork.ai', first_name: 'D', company: 'Gushwork', sell_to: 'B2B', product: 'crm', completed: true, booking_uid: 'bk_1',
+    is_internal: true, meta_withheld_reason: 'internal', created_at: '2026-03-02T15:00:00Z', enriched_title: 'Founder' };
+  const LEAD_C = { session_id: SID_C, email: 'cy@shop.example', sell_to: 'B2C', product: 'aeo', completed: false, booking_uid: null, meta_withheld_reason: 'model',
+    referrer: 'https://www.google.com/search?q=x', created_at: '2026-09-25T11:00:00Z' };
+  const LEADS = { total: 4471, page: 2, pages: 179, leads: [LEAD_A, LEAD_B, LEAD_C] };
+  const BLOCKED = { total: 51, page: 1, pages: 3, leads: [LEAD_A] };
+  const CHANGES = { [SID_A]: { ok: true, changes: [{ field: 'sell_to', old_value: 'B2C', new_value: 'B2B (clarified from B2C)', attribution: 'ours_sell_to_clarified', source_route: '/partial', arrived_step: 1, booking_uid_present: false, changed_at: '2026-09-24T14:06:00Z' }] },
+    [SID_B]: { ok: false, unavailable: true }, [SID_C]: { ok: true, changes: [] } };
   let healthDown = false;
   const payloads = (p, q) => {
     if (p === '/monitor/overview') return P[q.view] || P.week;
@@ -305,10 +324,15 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     if (p === '/monitor/lm-leads') return LM_L;
     if (p === '/monitor/enrichment-coverage') return COV;
     if (p === '/monitor/metrics') return METRICS;
+    if (p === '/monitor/leads') return q.nonicp === 'only' ? (q.internal === 'exclude' ? { total: 45, page: 1, pages: 2, leads: [] } : BLOCKED) : LEADS;
+    if (p === '/monitor/filter-options') return { hearAbout: ['Podcast'], utmSource: ['facebook', 'google'], partners: [{ key: 'pk_77', name: null, email: 'p@partner.co' }] };
+    if (p === '/monitor/lead-changes') return CHANGES[q.session_id] || { ok: true, changes: [] };
     if (p === '/health') return { ok: true };
     return {};
   };
-  const b = browser(payloads);
+  const servedCfg = JSON.parse((cfgTag.match(/window\.__GW__=(.*);<\/script>$/) || [])[1] || 'null');
+  ok('page: the config carries the server\'s label maps', servedCfg && servedCfg.labels && servedCfg.labels.website && servedCfg.labels.website.parked_confirmed === 'Domain registered but no website on it' && servedCfg.labels.meta.blocked === 'Blocked — non-ICP');
+  const b = browser(payloads, servedCfg);
   b.window.location.hash = '#tab=overview&view=week&unit=people';
   let GW = null, evalErr = null;
   try { GW = run(js, b); } catch (e) { evalErr = e; }
@@ -321,6 +345,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
      real one would be. */
   const el = (attrs, extra) => Object.assign({
     getAttribute: (k) => (k in attrs ? attrs[k] : null), hasAttribute: (k) => k in attrs,
+    setAttribute: (k, v) => { attrs[k] = String(v); }, removeAttribute: (k) => { delete attrs[k]; },
     closest(sel) { const m = /^\[([a-z-]+)(?:="([^"]*)")?\]$/.exec(sel); return m && m[1] in attrs && (m[2] === undefined || attrs[m[1]] === m[2]) ? this : null; },
   }, extra || {});
   const fire = (type, target) => (b.listeners[type] || []).forEach((f) => f({ target, preventDefault() {}, key: target.key }));
@@ -555,11 +580,77 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('paint: the focused control is focused again after the swap', refocused === 'week');
   ok('paint: an open row is opened again after the swap', reopened === 'true' && !b.els['dupe-a-d'].hasAttribute('hidden'));
 
+  /* ═══ PR C: All leads ═══ */
+  GW.show('leads'); await ticks(20); v = view();
+  ok('leads: rendered', /<h1 class="title" tabindex="-1">All leads<\/h1>/.test(v));
+  ok('leads: the count is the payload\'s, in LEADS, with the page', /<b>4,471<\/b> leads found · page 2 of 179/.test(v), (v.match(/class="readat">[^]*?<\/span>/) || [''])[0].slice(0, 200));
+  ok('leads: the pager says where you are, and marks the current page', v.includes('Page 2 of 179') && /class="pgb on" data-pg="2"[^>]*aria-current="page"/.test(v) && v.includes('data-pg="179"'));
+  eq('leads: one expander per lead', (v.match(/class="xb"/g) || []).length, 3);
+  ok('leads: each expander carries the RAW session_id, apart from the sanitised key', v.includes('data-sid="' + SID_A + '"') && /data-x="ld-3f2a9c1e_2d7b4d/.test(v));
+  ok('leads: the stage ladder, with "Left on step 2" -- never "Step 1"', v.includes('>Completed<') && v.includes('>Booked<') && v.includes('>Left on step 2<') && !/>Step 1</.test(v));
+  ok('leads: markers are words -- blocked, website failed, ours', />blocked<\/span>/.test(v) && />website failed<\/span>/.test(v) && />ours<\/span>/.test(v));
+  ok('leads: the Meta chip is not repeated beside "blocked"', !/>Meta: blocked</.test(v) && />Meta: ours</.test(v) && />Meta: model</.test(v));
+  ok('leads: a clarified B2B reads as B2B, the stored text kept', /B2B <span class="badge b-neu" title="B2B \(clarified from B2C\)">clarified<\/span>/.test(v));
+  ok('leads: source is the ad click, else where they came from', v.includes('facebook / paid') && v.includes('from google.com') && !/>referral</.test(v));
+  ok('leads: last year\'s row keeps its year, this year\'s drops it', /Mar 2, 2026|Mar 2, 2026,/.test(v) || /Mar 2,/.test(v));
+  /* the panel of row A, painted in the detail row */
+  ok('leads: the panel says WHY the row is marked, in words', v.includes('Why this lead is marked') && v.includes('AI check (name only) — We could not load their website'));
+  ok('leads: the Meta line uses the SERVER\'s label, from the page config', v.includes('No Meta conversion was sent for this lead: Blocked — non-ICP.'));
+  ok('leads: the visitor\'s IP location is its own group, BEFORE Apollo\'s', v.indexOf('Visitor — from their IP address') > 0 && v.indexOf('Visitor — from their IP address') < v.indexOf('Form &amp; enrichment'));
+  ok('leads: Apollo\'s location is named as the PERSON\'s', v.includes('Person location (Apollo)') && v.includes('Woburn, Massachusetts, United States'));
+  ok('leads: attempts from bigint strings', v.includes('Attempt 3 — 2 earlier, 1 of them disqualified'));
+  ok('leads: a malformed start_time prints as itself, it never throws', v.includes('>not a date<'));
+  ok('leads: a javascript: link is never a link', !/href="javascript/i.test(v) && v.includes('javascript:alert(1)'));
+  ok('leads: the partner box -- email when no name, the reason in words', v.includes('p@partner.co <span class="na">(name not resolved)</span>') && v.includes('PartnerStack answered HTTP 400') && v.includes('>won<'));
+  ok('leads: the website verdict uses the server\'s own label', v.includes('Domain registered but no website on it'));
+  /* the change log: opened through the real handler, fetched by the RAW session_id */
+  const callsBefore = b.calls.length;
+  const keyA = 'ld-' + SID_A.replace(/[^A-Za-z0-9]/g, (c) => '_' + c.charCodeAt(0).toString(16));
+  /* a real row starts CLOSED: the shared handler opens it, then this one fetches */
+  const rowA = el({ 'data-x': keyA, 'data-sid': SID_A, 'aria-expanded': 'false' });
+  fire('click', rowA); await ticks();
+  const lc = b.calls.slice(callsBefore).filter((c) => c.path === '/monitor/lead-changes');
+  ok('leads: opening a row fetches its change log by the RAW session_id', lc.length === 1 && lc[0].q.session_id === SID_A, JSON.stringify(lc));
+  ok('leads: the change log is painted, with who and where in words', /sell_to<\/b><\/td><td>B2C → B2B \(clarified from B2C\)/.test(b.els['lc-' + keyA].innerHTML) && b.els['lc-' + keyA].innerHTML.includes('they said “actually B2B”'));
+  fire('click', rowA); fire('click', rowA); await ticks();   /* closed, then opened again */
+  eq('leads: a loaded log is not fetched twice', b.calls.slice(callsBefore).filter((c) => c.path === '/monitor/lead-changes').length, 1);
+  const keyB = keyA.replace(SID_A.replace(/[^A-Za-z0-9]/g, (c) => '_' + c.charCodeAt(0).toString(16)), SID_B.replace(/[^A-Za-z0-9]/g, (c) => '_' + c.charCodeAt(0).toString(16)));
+  const keyC = 'ld-' + SID_C.replace(/[^A-Za-z0-9]/g, (c) => '_' + c.charCodeAt(0).toString(16));
+  fire('click', el({ 'data-x': keyB, 'data-sid': SID_B, 'aria-expanded': 'false' })); fire('click', el({ 'data-x': keyC, 'data-sid': SID_C, 'aria-expanded': 'false' })); await ticks();
+  ok('leads: an unreadable log says UNAVAILABLE, never "no changes"', b.els['lc-' + keyB].innerHTML.includes('Change log unavailable — this is not the same as no changes'));
+  ok('leads: an empty log says so', b.els['lc-' + keyC].innerHTML.includes('No identity fields changed on this lead.'));
+  /* filters: from the link, to the request; defaults never sent */
+  GW.S.q = { stage: 'booked', partner: 'pk_77', search: '  jo hn ', sellTo: 'all' };
+  const lp = GW.TABS.leads._params({ page: 1 });
+  ok('leads: filters reach the request, typed text trimmed there and only there', lp.stage === 'booked' && lp.partner === 'pk_77' && lp.search === 'jo hn' && !('sellTo' in lp) && !('utmSource' in lp) && lp.sort === 'created_at');
+  GW.S.q = {};
+  ok('leads: with no filters, only stage, sort and dir are sent', JSON.stringify(Object.keys(GW.TABS.leads._params()).sort()) === JSON.stringify(['dir', 'sort', 'stage']));
+  fire('change', el({ 'data-lf': 'preset' }, { value: '7d' })); await ticks();
+  ok('leads: a date preset sets BOTH dates, and counts as ONE filter', GW.S.q.dateFrom && GW.S.q.dateTo && /data-lmore[^>]*>[\s\S]*?Filters <span class="badge b-neu">1<\/span>/.test(view()), JSON.stringify(GW.S.q));
+  fire('change', el({ 'data-lf': 'preset' }, { value: '' })); await ticks();
+  ok('leads: "Any date" CLEARS both dates', !GW.S.q.dateFrom && !GW.S.q.dateTo);
+  fire('click', el({ 'data-lcsv': '' })); 
+  ok('leads: Export CSV is the same query, format=csv, token in the query', /\/monitor\/leads\?token=[^&]+&.*format=csv/.test(String(b.window.location.href || '')), String(b.window.location.href || '').replace(/token=[^&]+/, 'token=***'));
+  /* ═══ PR C: Blocked ═══ */
+  const bc0 = b.calls.length;
+  GW.show('blocked'); await ticks(20); v = view();
+  ok('blocked: three figures, each with its unit', /<b>51<\/b> leads blocked · <b>42<\/b> people · <b>45<\/b> leads excluding our own tests/.test(v), (v.match(/class="readat">[^]*?<\/span><\/div>/) || [''])[0].slice(0, 220));
+  const blkCalls = b.calls.slice(bc0).filter((c) => c.path === '/monitor/leads');
+  ok('blocked: it reads /monitor/leads with nonicp=only, newest first', blkCalls.length === 2 && blkCalls.every((c) => c.q.nonicp === 'only' && c.q.stage === 'all' && c.q.sort === 'created_at' && c.q.dir === 'desc') && blkCalls.some((c) => c.q.internal === 'exclude'));
+  ok('blocked: the chip says WHICH CHECK, and no "Meta: blocked"', />AI check \(name only\)<\/span>/.test(v) && !/>Meta: blocked</.test(v));
+  ok('blocked: the same lead has a DIFFERENT key here than on All leads', v.includes('data-x="blk-3f2a9c1e') && !v.includes('data-x="ld-3f2a9c1e'));
+  ok('blocked: the lede is true for late verdicts too', v.includes('a few were marked only after they had booked') && !v.includes('turned away before the calendar'));
+  const bc1 = b.calls.length;
+  fire('change', el({ 'data-blk': '' }, { value: 'only' })); await ticks(20); v = view();
+  ok('blocked: "only ours" says so, and asks for no people figure', /<b>51<\/b> of our own test leads blocked/.test(v) && !b.calls.slice(bc1).some((c) => c.path === '/monitor/metrics'));
+  fire('change', el({ 'data-blk': '' }, { value: '' })); await ticks(20);
+
   /* Hash, tabs, nav */
-  ok('nav: every rebuilt tab is registered with activate and deactivate', ['overview', 'health', 'dropoff', 'dupes', 'lm'].every((t) => GW.TABS[t] && GW.TABS[t].activate && GW.TABS[t].deactivate && GW.TABS[t].title));
-  ok('nav: switching tab writes the hash', /tab=lm/.test(b.window.location.hash), b.window.location.hash);
+  ok('nav: every rebuilt tab is registered with activate and deactivate', ['overview', 'health', 'dropoff', 'dupes', 'lm', 'leads', 'blocked'].every((t) => GW.TABS[t] && GW.TABS[t].activate && GW.TABS[t].deactivate && GW.TABS[t].title));
+  ok('nav: switching tab writes the hash', /tab=blocked/.test(b.window.location.hash), b.window.location.hash);
   const navHtml = b.els['nav-side'] ? b.els['nav-side'].innerHTML : '';
-  ok('nav: the tabs not rebuilt link to the classic dashboard', /href="\/monitor\?token=[^"]*#tab=leads"/.test(navHtml) && /href="\/monitor\?token=[^"]*#tab=partners"/.test(navHtml));
+  ok('nav: the tabs not rebuilt link to the classic dashboard', /href="\/monitor\?token=[^"]*#tab=partners"/.test(navHtml) && /href="\/monitor\?token=[^"]*#tab=sdr"/.test(navHtml));
+  ok('nav: All leads and Blocked are rebuilt, no longer classic links', /data-tab="leads"/.test(navHtml) && /data-tab="blocked"/.test(navHtml) && !/href="\/monitor\?token=[^"]*#tab=leads"/.test(navHtml) && !/href="\/monitor\?token=[^"]*#tab=blocked"/.test(navHtml));
   ok('nav: a classic link says it leaves', /\(classic dashboard\)/.test(navHtml));
   /* the last health run could not reach /monitor/health: all nine server
      checks are red, and the badge -- now set by System health too -- says 9 */

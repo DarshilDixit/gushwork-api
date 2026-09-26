@@ -353,6 +353,51 @@ input.field { min-width: 0; }
 .pills button[aria-pressed="true"] { background: var(--tab-on); color: var(--tab-on-ink); box-shadow: none; }
 .pills button[aria-pressed="true"] span { color: inherit; opacity: .7; }
 
+/* ── PR C: All leads, Blocked (and the pieces the other tabs reuse) ─── */
+/* The filter bar: search, stage and the Filters button always; the rest in a
+   panel that opens beneath -- sixteen controls in one row was the classic's
+   bar, and on a phone it was a page of selects before the first lead. */
+.lf-top { display: flex; flex-wrap: wrap; align-items: center; gap: var(--gw-space-8); width: 100%; }
+.lf-top .search { flex: 1 1 280px; }
+.lf-panel { width: 100%; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--gw-space-12); padding: var(--gw-space-16); border-radius: var(--gw-radius-12); background: var(--card); box-shadow: inset 0 0 0 1px var(--card-line); }
+.lfl { display: flex; flex-direction: column; gap: var(--gw-space-4); min-width: 0; }
+.lfl > span { font: var(--gw-text-body-12-med); color: var(--ink-label); }
+.lfl .field { width: 100%; }
+.lfl.inline { flex-direction: row; align-items: center; gap: var(--gw-space-8); }
+.lfl.inline .field { width: auto; }
+.lfl.dates { flex-direction: row; gap: var(--gw-space-8); grid-column: span 2; }
+.lfl.dates label { display: flex; flex-direction: column; gap: var(--gw-space-4); flex: 1 1 0; font: var(--gw-text-body-12-med); color: var(--ink-label); }
+.controls.lf { flex-direction: column; align-items: stretch; }
+/* markers sit AFTER the email, as on Duplicates */
+.marks { display: inline-flex; flex-wrap: wrap; gap: var(--gw-space-4); margin-left: var(--gw-space-8); vertical-align: middle; }
+/* the email column gets the room: an address broken mid-word is unreadable */
+.rt td.ecell { min-width: 240px; }
+.em { overflow-wrap: anywhere; }
+/* a sortable header is a real button */
+.sortb { display: inline-flex; align-items: center; gap: var(--gw-space-4); font: inherit; color: inherit; padding: 0; border-radius: var(--gw-radius-4); }
+.sortb:hover { color: var(--ink); text-decoration: underline; }
+.sortb .ic { width: 12px; height: 12px; }
+.pager { display: flex; flex-wrap: wrap; align-items: center; gap: var(--gw-space-4); padding: var(--gw-space-12) var(--gw-space-16); border-top: 1px solid var(--card-line); }
+.pgb { min-width: 32px; height: 32px; padding: 0 var(--gw-space-8); display: inline-grid; place-items: center; border-radius: var(--gw-radius-8); box-shadow: inset 0 0 0 1px var(--btn-line); font: var(--gw-text-button-12); color: var(--ink); font-variant-numeric: tabular-nums; }
+.pgb:hover { background: var(--btn-hover); }
+.pgb.on { background: var(--tab-on); color: var(--tab-on-ink); box-shadow: none; }
+.pgb[disabled] { color: var(--ink-disabled); cursor: not-allowed; }
+.pgb .ic { width: 12px; height: 12px; }
+.pgg { color: var(--ink-muted); padding: 0 var(--gw-space-2); }
+.pgi { margin-left: auto; font: var(--gw-text-body-12-reg); color: var(--ink-muted); }
+/* the lead panel's groups */
+.pgrp { margin-top: var(--gw-space-16); }
+.pgrp:first-child { margin-top: 0; }
+.pgh { font: var(--gw-text-body-12-sem); color: var(--ink-label); margin-bottom: var(--gw-space-8); }
+.pgh.sub { margin-top: var(--gw-space-12); font: var(--gw-text-body-12-med); }
+.pbox { margin-top: var(--gw-space-16); padding: var(--gw-space-12); border-radius: var(--gw-radius-12); background: var(--card); box-shadow: inset 0 0 0 1px var(--card-line); }
+.pbox:first-child { margin-top: 0; }
+.lnote { font: var(--gw-text-body-12-reg); color: var(--ink-muted); }
+.lnote.warn { color: var(--warn-ink); }
+.bad-t { color: var(--bad-ink); }
+.na { color: var(--ink-muted); }
+.kv code, .tbl code { font-size: 11px; overflow-wrap: anywhere; }   /* the classic's 10-11px monospace for keys and ids -- no token (R15) */
+
 /* Dropoff's period table scrolls INSIDE its card, with the outcome column
    pinned, rather than squeezing twelve periods into a phone. */
 .xscroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
@@ -431,6 +476,8 @@ input.field { min-width: 0; }
   .itg button { width: 44px; height: 44px; }
   .nav { min-height: 44px; }
   .pills button { min-height: 44px; }
+  .pgb { min-width: 44px; height: 44px; }
+  .sortb { min-height: 44px; }
   .sfoot a, .drawer-tools a { display: inline-flex; align-items: center; min-height: 44px; }
 }
 @media (max-width: 767px) {

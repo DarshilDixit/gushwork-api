@@ -11,7 +11,12 @@ var GW = (function () {
   var TZ = CFG.tz || 'America/New_York';
 
   /* ── State, and the hash that mirrors it, so a link says what it shows ── */
-  var S = { tab: 'overview', view: 'week', unit: 'people', table: false };
+  /* q holds the CURRENT tab's own filters (All leads, Model, Visitors...), so a
+     copied link says exactly what it shows and Partners can open "All leads,
+     partner = X". Every key that is not one of the four shared ones lands
+     here; a tab reads and writes its own keys and nothing else. */
+  var S = { tab: 'overview', view: 'week', unit: 'people', table: false, q: {} };
+  var SHARED = { tab: 1, view: 1, unit: 1, table: 1 };
   var TABS = {};
   /* Returns false, and changes nothing, for a hash that is not ours: the
      "Skip to content" link is #view, and reading that as a state would reset
@@ -25,6 +30,7 @@ var GW = (function () {
     h.split('&').forEach(function (kv) { var i = kv.indexOf('='); if (i > 0) { try { p[decodeURIComponent(kv.slice(0, i))] = decodeURIComponent(kv.slice(i + 1)); } catch (e) {} } });
     if (!p.tab) return false;
     S.tab = p.tab;
+    S.q = {}; Object.keys(p).forEach(function (k) { if (!SHARED[k]) S.q[k] = p[k]; });
     if (p.view === 'today' || p.view === 'week' || p.view === 'all') S.view = p.view;
     if (p.unit === 'people' || p.unit === 'leads') S.unit = p.unit;
     S.table = p.table === '1';
@@ -32,6 +38,7 @@ var GW = (function () {
   }
   function writeHash() {
     var h = 'tab=' + S.tab + (S.tab === 'overview' ? '&view=' + S.view : '') + '&unit=' + S.unit + (S.table ? '&table=1' : '');
+    Object.keys(S.q || {}).forEach(function (k) { var v = S.q[k]; if (v !== undefined && v !== null && v !== '') h += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(v); });
     try { if (window.history && window.history.replaceState) window.history.replaceState(null, '', '#' + h); else window.location.hash = h; } catch (e) {}
   }
 
@@ -42,9 +49,14 @@ var GW = (function () {
     Object.keys(params || {}).forEach(function (k) { if (params[k] !== undefined && params[k] !== null && params[k] !== '') q.push(encodeURIComponent(k) + '=' + encodeURIComponent(params[k])); });
     return path + (q.length ? '?' + q.join('&') : '');
   }
+  /* opts.body is sent as JSON. The one write that needs it is the Partners
+     acknowledgement, whose route reads req.body only -- and whose un-ack
+     needs the JSON boolean false, which a query string cannot carry. The
+     token still rides in the query, like every other /monitor call. */
   function api(path, params, opts) {
     opts = opts || {};
     var init = { cache: 'no-store', method: opts.method || 'GET' };
+    if (opts.body !== undefined) { init.headers = { 'Content-Type': 'application/json' }; init.body = JSON.stringify(opts.body); }
     try { if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) init.signal = AbortSignal.timeout(opts.timeout || 20000); } catch (e) {}
     return fetch(url(path, params), init).then(function (r) {
       if (!r.ok) return r.text().then(function (t) { var e = new Error('HTTP ' + r.status + (t ? ' ' + String(t).slice(0, 120) : '')); e.status = r.status; throw e; });
@@ -60,14 +72,29 @@ var GW = (function () {
   function pct1(a, b) { return b ? Math.round(a / b * 1000) / 10 : null; }
   function esc(s) { if (s === null || s === undefined) return ''; return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
   function dtf(opts) { return new Intl.DateTimeFormat('en-US', Object.assign({ timeZone: TZ }, opts)); }
-  function et(ts) { if (!ts) return '—'; return dtf({ dateStyle: 'medium', timeStyle: 'short' }).format(new Date(ts)); }
-  function etTime(ts) { if (!ts) return '—'; return dtf({ hour: 'numeric', minute: '2-digit' }).format(new Date(ts)); }
-  function etDate(ts, opts) { if (!ts) return '—'; return dtf(opts || { weekday: 'short', day: 'numeric', month: 'short' }).format(new Date(ts)); }
+  /* A VALUE THAT IS NOT A DATE PRINTS AS ITSELF, it never throws. Intl's
+     format() throws RangeError on an invalid Date, and leads.start_time is
+     TEXT that can be malformed -- one bad row would have blanked a whole
+     table from inside its detail panel. */
+  function okDate(ts) { var d = new Date(ts); return isNaN(d.getTime()) ? null : d; }
+  function et(ts) { if (!ts) return '—'; var d = okDate(ts); return d ? dtf({ dateStyle: 'medium', timeStyle: 'short' }).format(d) : String(ts); }
+  function etTime(ts) { if (!ts) return '—'; var d = okDate(ts); return d ? dtf({ hour: 'numeric', minute: '2-digit' }).format(d) : String(ts); }
+  function etDate(ts, opts) { if (!ts) return '—'; var d = okDate(ts); return d ? dtf(opts || { weekday: 'short', day: 'numeric', month: 'short' }).format(d) : String(ts); }
+  /* A link from DATA is only ever http(s). A LinkedIn field holding
+     "javascript:..." ran on click in the classic tab. A bare domain gets
+     https:// in front, as the classic did; anything else is not a link. */
+  function href(v) {
+    var s = String(v || '').trim(); if (!s) return null;
+    if (/^https?:\/\//i.test(s)) return s;
+    if (/^[a-z][a-z0-9+.-]*:/i.test(s)) return null;
+    return 'https://' + s.replace(/^\/+/, '');
+  }
   /* "Mon 21 Sep" / "21 Sep 2026" -- built from parts, because Intl's en-US
      ordering gives "21 Mon" or "Fri, Sep 25", neither of which reads right. */
   function etD(ts, o) {
     if (!ts) return '\u2014'; o = o || {};
-    var parts = {}; dtf({ weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }).formatToParts(new Date(ts)).forEach(function (x) { parts[x.type] = x.value; });
+    var dd = okDate(ts); if (!dd) return String(ts);
+    var parts = {}; dtf({ weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }).formatToParts(dd).forEach(function (x) { parts[x.type] = x.value; });
     return [o.noWeekday ? null : parts.weekday, parts.day, o.noMonth ? null : parts.month, o.year ? parts.year : null].filter(Boolean).join(' ');
   }
   /* A calendar date the SERVER already resolved in ET ("2026-09-25"), shown
@@ -129,7 +156,10 @@ var GW = (function () {
      rows are open, swap, then put both back. A control that no longer
      exists simply is not refocused. */
   var FOCUS_KEYS = ['data-view', 'data-unit', 'data-table-toggle', 'data-attn', 'data-tab', 'data-dp', 'data-dupes', 'data-dupes-q', 'data-more',
-                    'data-lm-pill', 'data-lm-q', 'data-lm-days', 'data-lm-csv', 'data-lm-mark', 'data-lm-retry', 'data-recheck', 'data-x', 'data-refresh'];
+                    'data-lm-pill', 'data-lm-q', 'data-lm-days', 'data-lm-csv', 'data-lm-mark', 'data-lm-retry', 'data-recheck', 'data-x', 'data-refresh',
+                    /* PR C: All leads, Blocked, SDR, Partners, Model, Visitors */
+                    'data-lf', 'data-lsort', 'data-pg', 'data-lmore', 'data-lcsv', 'data-lclear', 'data-blk', 'data-sdr-q', 'data-sdr-csv',
+                    'data-psort', 'data-pdrill', 'data-ack', 'data-ack-go', 'data-ack-cancel', 'data-ack-note', 'data-mdl', 'data-vis', 'data-vis-map'];
   function focusSel(el) {
     if (!el || !el.getAttribute) return null;
     for (var i = 0; i < FOCUS_KEYS.length; i++) {
@@ -167,7 +197,7 @@ var GW = (function () {
   function classic(tab) { return (CFG.classic || '/monitor') + (CFG.token ? '?token=' + encodeURIComponent(CFG.token) : '') + '#tab=' + encodeURIComponent(tab); }
 
   return { CFG: CFG, TZ: TZ, S: S, TABS: TABS, readHash: readHash, writeHash: writeHash, url: url, api: api,
-           fmt: fmt, pct: pct, pct1: pct1, esc: esc, et: et, etTime: etTime, etDate: etDate, etD: etD, dayD: dayD, etDay: etDay, ago: ago, plural: plural,
+           fmt: fmt, pct: pct, pct1: pct1, esc: esc, et: et, etTime: etTime, etDate: etDate, etD: etD, dayD: dayD, etDay: etDay, okDate: okDate, href: href, ago: ago, plural: plural,
            every: every, stop: stop, hidden: hidden, jobs: jobs, applyTheme: applyTheme, setTheme: setTheme,
            theme: function () { return themeChoice; }, ic: ic, $: $, classic: classic, paint: paint, announce: announce, focusSel: focusSel };
 })();
