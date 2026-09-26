@@ -316,6 +316,20 @@ const LEADUP = /^UPDATE leads SET enriched_city=\$2/;
      and a partial Salesforce read refused rather than acted on. */
   const sync = require(path.join(__dirname, '..', 'tools', 'sync-enrichment-out.js'));
   ok('I: the Salesforce field names come from salesforce.js', sync.SF_MAP.length >= 10 && sync.SF_MAP.some(([c, sf]) => c === 'enriched_title' && sf === 'enriched_title__c'));
+  /* scope(): THE LOOKED-UP ADDRESS MUST BE THE LEAD'S. A refusal row is
+     insert-only, so a visitor who changed their email during an outage keeps
+     the old address on it -- and carrying that person's Apollo record onto
+     the new address's Salesforce Lead would show an AE a stranger. */
+  const scopeDb = { query: async (sql) => {
+    if (/information_schema/.test(sql)) return { rows: /'leads'|\$1/.test(sql) ? [{ column_name: 'enriched_city' }] : [] };
+    return { rows: [
+      { session_id: 'k1', email: 'kept@x.test', looked_up: 'kept@x.test', page_url: '/demo', enriched_city: 'Austin', enriched_title: 'CTO' },
+      { session_id: 'k2', email: 'new@y.test', looked_up: 'old@z.test', page_url: '/demo', enriched_city: 'Paris', enriched_title: 'VP' },
+      { session_id: 'k3', email: 'none@x.test', looked_up: 'none@x.test', page_url: '/demo', enriched_city: null, enriched_title: null } ] }; } };
+  const scoped = await sync.scope(scopeDb, '2026-09-26T00:00:00Z');
+  ok('I scope: a session whose looked-up address is not the lead\'s is SKIPPED, and counted',
+     scoped.rows.length === 1 && scoped.rows[0].session_id === 'k1' && scoped.email_changed === 1, JSON.stringify({ rows: scoped.rows.map((r) => r.session_id), moved: scoped.email_changed }));
+  ok('I scope: a session with nothing to carry is counted, not carried', scoped.empty === 1);
   const SC = { all: ['enriched_city', 'enriched_company_size', 'enriched_founded_year', 'enriched_title'], rows: [
     { session_id: 's1', email: 'a@x.test', enriched_title: 'Chief Executive Officer', enriched_city: 'Woburn', enriched_company_size: '11-50', enriched_founded_year: '2015', enriched_seniority: 'c_suite' },
     { session_id: 's2', email: 'b@x.test', enriched_title: 'New title' } ] };
