@@ -361,7 +361,11 @@ _(kept current as the work moves)_
   downloading tiles); a doubled line under the last row. Light, six widths:
   137 combinations, 0 findings. Read by eye: Partners, Model, Visitors and
   the map, the lead panel's change log, in both themes, phone and desktop.
-  **Still to do: one final full run, both themes, all seven widths.**
+  **Final run after the review fixes (26 Sept): 288 combinations, 0
+  findings** -- every width 360-1280 in both themes, and 16 of 22 views at
+  1440 light. It was STOPPED there (Claude Code reclaimed memory; not a
+  failure). **Still to run: 1440 light's opened views, all of 1440 dark,
+  the keyboard section, and the crosscheck after the review fixes.**
 - [x] **Review sweep** (five lenses, each finding adversarially verified;
   workflow run `wf_c2ad4b99-d16`). 45 confirmed, about 30 distinct fixes,
   commit `5bd3659`; the two first-round mutation survivors pinned in
@@ -369,5 +373,10 @@ _(kept current as the work moves)_
   every tab painted before loading, so stale rows sat under new filters;
   Custom dates were unreachable; the ack note was wiped by refreshes.
 - [ ] Mutation tests: round 1 (26, on the build) 24 caught, 2 survived and
-  now pinned; round 2 (37, on the review fixes) -- in progress
+  now pinned (`7afa68d`). Round 2 (37, on the review fixes, list in the
+  session scratchpad as `muts2.json`): R01-R05 run, all CAUGHT after one
+  fix -- R02 was first UNMEASURED because the draw-guard test left a broken
+  row behind that crashed the suite later (`db7851e`). **R06-R37 not run**:
+  the run was stopped for memory. Run them in a git worktree so the
+  preview keeps serving the real tree.
 - [ ] Card, PR, stop for review
