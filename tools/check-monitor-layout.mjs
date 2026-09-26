@@ -151,7 +151,7 @@ for (const width of (KEYS === 'only' ? [] : WIDTHS)) {
   await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: width < 768 });
   await send('Emulation.setTouchEmulationEnabled', { enabled: width <= 1023, maxTouchPoints: width <= 1023 ? 5 : 1 });
   for (const theme of THEMES) {
-    if (first) { await send('Page.navigate', { url: `${BASE}/monitor/next?token=${encodeURIComponent(TOKEN)}#tab=overview&view=week` }); await sleep(2500); first = false; }
+    if (first) { await send('Page.navigate', { url: `${BASE}/monitor?token=${encodeURIComponent(TOKEN)}#tab=overview&view=week` }); await sleep(2500); first = false; }
     await ev(`GW.setTheme(${JSON.stringify(theme)})`);
     for (const pg of PAGES) {
       const openRows = /\+open$/.test(pg); const [spec, qs] = pg.replace(/\+open$/, '').split('?'); const [tab, view, mod] = spec.split(':');
@@ -159,9 +159,14 @@ for (const width of (KEYS === 'only' ? [] : WIDTHS)) {
       events = [];
       await ev(`(()=>{ GW.S.unit=${JSON.stringify(mod === 'leads' ? 'leads' : 'people')}; GW.S.table=${mod === 'table'}; if (GW.current() !== ${JSON.stringify(tab)} || ${q ? 'true' : 'false'}) GW.show(${JSON.stringify(tab)}, false, ${q ? JSON.stringify(q) : 'null'}); ${view ? `GW.TABS.overview.setView(${JSON.stringify(view)});` : ''} if (GW.TABS[${JSON.stringify(tab)}].render) GW.TABS[${JSON.stringify(tab)}].render(); })()`);
       /* Wait for the data: no skeleton left, or give up after 20s and say so. */
-      let a; for (let k = 0; k < 40; k++) { await sleep(500); a = await ev(AUDIT); if (!a.loading) break; }
+      /* A MEASUREMENT THAT THROWS IS RETRIED, then REPORTED -- never a crash.
+         On 26 Sept a run died 128 combinations in with the page's document
+         momentarily gone ("reading 'scrollWidth' of null"), and a crash
+         reports nothing about the combinations it never reached. */
+      const audit = async () => { for (let t = 0; t < 3; t++) { try { return await ev(AUDIT); } catch (e) { await sleep(1000); if (t === 2) return { out: [['errors', 'the page could not be measured: ' + String(e.message).split('\n')[0]]], loading: 0, h: 900, theme }; } } };
+      let a; for (let k = 0; k < 40; k++) { await sleep(500); a = await audit(); if (!a.loading) break; }
       if (openRows) { await ev(`[...document.querySelectorAll('#view [data-x][aria-expanded="false"]')].slice(0, 8).forEach((b) => b.click())`); await sleep(2500); }
-      await sleep(300); a = await ev(AUDIT);
+      await sleep(300); a = await audit();
       const issues = a.out.map(([kind, what]) => ({ kind, what }));
       if (a.loading) issues.push({ kind: 'errors', what: 'still loading after 20s' });
       for (const e of events) if (!/favicon/.test(e)) issues.push({ kind: 'errors', what: e });
@@ -214,7 +219,7 @@ const key = async (k, shift) => { const base = { key: k, code: k, windowsVirtual
      jump, not a load, so focus would stay wherever the checks above left it
      and the "first Tab" would not be the first. */
   await send('Page.navigate', { url: 'about:blank' }); await sleep(300);
-  await send('Page.navigate', { url: `${BASE}/monitor/next?token=${encodeURIComponent(TOKEN)}#tab=overview&view=week&unit=leads` }); await sleep(3000);
+  await send('Page.navigate', { url: `${BASE}/monitor?token=${encodeURIComponent(TOKEN)}#tab=overview&view=week&unit=leads` }); await sleep(3000);
   await key('Tab');
   const sk = await ev(`(()=>{ const a=document.activeElement, r=a.getBoundingClientRect(); return { cls: a.className, w: r.width, h: r.height, top: r.top }; })()`);
   if (sk.cls !== 'skip') issues.push({ kind: 'keys', what: 'the first Tab landed on "' + sk.cls + '", not the skip link' });
@@ -243,6 +248,18 @@ const key = async (k, shift) => { const base = { key: k, code: k, windowsVirtual
   await ev(`GW.show('leads', true, { stage: 'booked' })`); await waitIdle();
   await ev(`document.querySelector('[data-lclear]').focus()`); await key('Enter'); await waitIdle();
   if (!(await on('[data-lf="search"]'))) issues.push({ kind: 'keys', what: 'after Clear, focus was not on the search box' });
+  /* OLD LINKS STILL LAND (PR D, the switch). /monitor/next answers a 302 to
+     /monitor keeping its query; the #fragment is the BROWSER's to keep across
+     a redirect, so only a real browser can prove it. And a classic-era
+     /monitor#tab= link now opens the new page, which must honour it. */
+  const land = async (url) => { await send('Page.navigate', { url: 'about:blank' }); await sleep(250); await send('Page.navigate', { url }); for (let k = 0; k < 40; k++) { await sleep(300); if (await ev('!!(window.GW && GW.current && GW.current())')) break; } await sleep(600);
+    return ev(`({ path: location.pathname, hash: location.hash, tab: GW.current(), view: GW.S.view, unit: GW.S.unit, token: new URLSearchParams(location.search).has('token') })`); };
+  const L1 = await land(`${BASE}/monitor/next?token=${encodeURIComponent(TOKEN)}#tab=leads&view=week&unit=leads`);
+  if (L1.path !== '/monitor' || !L1.token || L1.tab !== 'leads' || !/tab=leads/.test(L1.hash)) issues.push({ kind: 'links', what: 'an old /monitor/next#tab=leads link landed on ' + L1.path + L1.hash + ' (tab ' + L1.tab + ', token kept: ' + L1.token + ')' });
+  const L2 = await land(`${BASE}/monitor/next?token=${encodeURIComponent(TOKEN)}#tab=overview&view=all&unit=leads`);
+  if (L2.path !== '/monitor' || L2.tab !== 'overview' || L2.view !== 'all' || L2.unit !== 'leads') issues.push({ kind: 'links', what: 'an old /monitor/next#tab=overview&view=all&unit=leads link landed on ' + L2.tab + ' / ' + L2.view + ' / ' + L2.unit });
+  const L3 = await land(`${BASE}/monitor?token=${encodeURIComponent(TOKEN)}#tab=blocked`);
+  if (L3.path !== '/monitor' || L3.tab !== 'blocked') issues.push({ kind: 'links', what: 'an old classic-style /monitor#tab=blocked link opened ' + L3.tab });
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 800, deviceScaleFactor: 1, mobile: true });
   await sleep(400);
   await ev(`document.querySelector('.menu-trigger').click()`); await sleep(350);

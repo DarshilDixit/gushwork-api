@@ -5,7 +5,7 @@ current as the work moves, so a new session, or one resumed after a pause,
 can carry on without anyone re-explaining. The rules in `CLAUDE.md` still
 apply on top of everything here.
 
-Last updated: **26 Sept 2026 (IST)**. #123 merged and its deploy confirmed; PR C started.
+Last updated: **26 Sept 2026 (IST)**. #123 and #124 (PRs B and C) merged, deploys confirmed. Every tab is rebuilt. **PR D waits on Darshil's decisions 1 and 5.**
 
 ---
 
@@ -19,8 +19,8 @@ switches them.
 |---|---|---|---|
 | A | Apollo: page on out-of-credits, an honest System Health row, label fixes | **merged** 25 Sept | [#122](https://github.com/DarshilDixit/gushwork-api/pull/122), `cards/PR-122-apollo-honest-health.md` |
 | B | The new dashboard, five tabs: Overview, System health, Dropoff, Duplicates, Lead magnet | **merged** 25 Sept 22:53 UTC (`5bb0479`), deploy confirmed | [#123](https://github.com/DarshilDixit/gushwork-api/pull/123), `cards/PR-123-monitor-next.md` |
-| C | The other six tabs: All leads, Blocked, SDR list, Partners, Model, Visitors | **PR #124 open, waiting for Darshil's review. Do not merge without his word.** | branch `feat/monitor-next-c`, card `cards/PR-124-monitor-next-c.md` |
-| D | The switch: `/monitor` becomes the new page; the old one stays at `/monitor/classic` for a week, then goes | not started | — |
+| C | The other six tabs: All leads, Blocked, SDR list, Partners, Model, Visitors | **merged** (#124, 26 Sept 11:13 UTC, `c83683a`); deploy confirmed | card `cards/PR-124-monitor-next-c.md` |
+| D | The switch: `/monitor` becomes the new page; the old one stays at `/monitor/classic` for a week, then goes. Plus decisions 1 and 5 | **in progress** on `feat/monitor-next-d` | — |
 
 Earlier, related: [#121](https://github.com/DarshilDixit/gushwork-api/pull/121)
 (the Dropoff presets fix, 25 Sept).
@@ -49,17 +49,65 @@ Earlier, related: [#121](https://github.com/DarshilDixit/gushwork-api/pull/121)
   - `/monitor/metrics` keeps the same 29 keys.
   - A before/after diff of the classic `/monitor` page shows exactly the
     8 intended fragments and nothing else.
-- **Unmerged**: PR C is **PR #124**, on `feat/monitor-next-c`. Every check is
-  done and recorded on its card (`cards/PR-124-monitor-next-c.md`). It waits
-  on Darshil's review; PR D (the switch) starts only after it merges.
+- **#124 (PR C) merged** 26 Sept 11:13 UTC as `c83683a`, on Darshil's word.
+  Deployed about 32 seconds later. Confirmed read-only:
+  - the classic `/monitor` is **byte-identical** to before the deploy (the
+    page, with the token masked, compared byte for byte), and
+    `/monitor/metrics` has the same 29 keys;
+  - **all 13 views** of `/monitor/next` (11 tabs, Overview in all three
+    periods) load on production with live data: no error, nothing left
+    loading, no failed or non-GET request;
+  - the crosscheck against the classic, pointed at production: **45 of 45**
+    (the first run failed 4 live-partition checks because a lead arrived
+    mid-run; see learnings).
+- **PR D started 26 Sept** on `feat/monitor-next-d` (from the docs branch,
+  so this file rides in it), after Darshil decided items 1 and 5: exclude
+  our tests from Overview, Dropoff and the digest, and build the CSV rule
+  as proposed. Progress is under "PR D" at the end of this file.
 
 ## Decisions waiting on Darshil
 
-1. **Our own test addresses are in every Overview number.** This is the
-   standing, undecided distortion in `CLAUDE.md` ("Internal / test
-   addresses: Included"). They are marked on Duplicates and Lead magnet,
-   never subtracted. Excluding them moves every historical number at once,
-   so it is his call.
+1. **DECIDED 26 Sept (Darshil): our own test addresses are left out of the
+   Overview, Dropoff and the digest, and counted in words there; kept and
+   marked where rows are listed.** Built in PR D. Kept below for the record
+   of what was measured before deciding. They were in every Overview number
+   until then, marked on Duplicates and Lead magnet, never subtracted.
+
+   **Measured 26 Sept, read-only.** The real `overviewReport` was run
+   twice, the second time with every read of `leads` swapped for "leads
+   minus `internalLeadSqlClause`" (the rule behind the "ours" marker). The
+   plain run matched production's `/monitor/overview` exactly. Ours are
+   **107 lead rows, 32 addresses**, 1.8% of all rows.
+
+   | Overview | With ours | Without | Moves by |
+   |---|---|---|---|
+   | All time, leads | 5,848 | 5,741 | 107 (1.8%) |
+   | All time, people | 5,343 | 5,315 | 28 (0.5%) |
+   | All time, booked rate (people) | 68.20% | 68.33% | 0.13 points |
+   | All time, blocked leads | 50 | 44 | **6 (12%)** |
+   | This week, people | 308 | 307 | 1 |
+   | Last week, people (the comparison) | 223 | 219 | 4, so the week-on-week change reads +38.1% not +40.2% |
+   | Today | same | same | 0 |
+
+   Rates barely move (at most about 0.25 points). Small counts do:
+   Blocked, and testing days. The worst days were 23 Mar (9 of ours), and
+   18 and 30 Jun (7 each). March was 18 of 45 leads, 40%. Sessions cannot be
+   separated by address, because a session has no email.
+
+   **Recommendation: EXCLUDE from the Overview (and Dropoff), keep them
+   marked everywhere rows are listed.**
+   - The Overview describes real demand, and our tests are not demand.
+   - The outbound systems already refuse them (Meta, Salesforce and the
+     dialer, since 19 Sept), so the dashboard is the odd one out.
+   - Moving history costs little: no rate moves by more than about 0.25
+     points, and no trend changes.
+   - Dropoff must move with it, or the documented "Overview and Dropoff
+     agree exactly in Leads mode" breaks, and so must the Monday digest,
+     which reads Dropoff.
+   - The Overview should say it in words: "excludes N of our own test
+     submissions".
+   - All leads, Blocked and Duplicates keep them, marked, with the filter.
+     Those tabs are where a person reconciles a row.
 2. **Apollo top-up.** Apollo has been out of credits since 23 Sept. System
    Health is red and pages every 3 hours by design. He said on 25 Sept he
    was not topping up yet.
@@ -75,14 +123,64 @@ Earlier, related: [#121](https://github.com/DarshilDixit/gushwork-api/pull/121)
    match rate is 82%. 16 addresses can be copied from an earlier answer for
    free.
 4. **The notice to Utsav** (design system). The departures below need
-   declaring, as does every new component built for this. The #123 card
-   lists them.
+   declaring, as does every new component built for this. The #123 and
+   #124 cards list them. #124 adds: the stacking plain table (`U.grid`),
+   the card-view Sort select, the inline acknowledge form, the themed map
+   controls, and one new alias, `--map-sea` (neutral-200 in light,
+   neutral-900 in dark, the tokens nearest the basemaps' sampled ocean).
    - **Light muted text** is neutral-600, not the spec's neutral-500
      (3.41:1, under the 4.5 floor).
    - **The focus ring** is solid primary, not the 40%-alpha token (under 3:1
      on every surface).
    - **Badge labels** are at /600.
    - **The current nav row** is semibold as well as filled.
+
+5. **CSV formula escaping on the All leads and SDR exports.** Proposed 26
+   Sept; **not built.** Today those two server exports (the routes both
+   dashboards call) only quote commas, quotes and newlines. A cell starting
+   with `=` or `@` runs as a formula when the file is opened in Excel or
+   Sheets. The Lead magnet export's blanket rule (escape `= + - @`) cannot
+   be copied here: measured read-only, **2,669 of 2,676 stored phone
+   numbers start with "+"**, so it would put an apostrophe on 99.7% of the
+   phone column a dialer imports.
+
+   **The rule:** one `csvCell` shared by both exports.
+   - A cell starting with `=`, `@`, a tab or a carriage return ALWAYS gets
+     a leading apostrophe.
+   - A cell starting with `+` or `-` gets one UNLESS it is only a number:
+     digits, spaces, `( ) . -`, and at least one digit.
+   - Then quote on a comma, a quote, or `\r`/`\n` (`\r` is missing from
+     the quoting today).
+
+   **In real data:** every stored phone shape passes through untouched
+   (`+99999999999` x2,493, `+999999999999` x163, `+99 99999 99999`, and the
+   rest). Only 4 real values would get the apostrophe: 2 "heard about us"
+   answers starting with "-", 1 website and 1 company starting with "@".
+   Nothing stored starts with "=".
+
+   | Value | The CSV (what a dialer importing it reads) |
+   |---|---|
+   | `+19495550123` | `+19495550123` (unchanged) |
+   | `+44 20 7946 0958` | `+44 20 7946 0958` (unchanged) |
+   | `+1 (949) 555-0123` | `+1 (949) 555-0123` (unchanged) |
+   | `-5` | `-5` (unchanged) |
+   | `=HYPERLINK("http://evil.test","Click")` | `"'=HYPERLINK(""http://evil.test"",""Click"")"` |
+   | `@SUM(A1:A9)` | `'@SUM(A1:A9)` |
+   | `+cmd\|' /C calc'!A0` | `'+cmd\|' /C calc'!A0` |
+   | `- google search` | `'- google search` |
+   | `@acme studio` | `'@acme studio` |
+
+   **Two caveats to decide with:**
+   - An apostrophe is hidden by Excel and Sheets, but a plain importer
+     keeps it as a real character. That is fine for the 4 odd values
+     above, and it is why the rule leaves numbers alone.
+   - Excel and Sheets ALREADY turn `+19495550123` into the number
+     19495550123 and drop the "+". That is a spreadsheet habit, not ours,
+     and this proposal neither fixes nor worsens it. Keeping the "+" in a
+     spreadsheet would need the apostrophe, which breaks the dialer. One
+     file cannot do both, so this keeps the file right for the dialer.
+     The Lead magnet export has no phone column; bringing it onto the same
+     rule is a separate one-line choice.
 
 ## Rulings so far (Darshil's, and they stand)
 
@@ -110,6 +208,13 @@ Earlier, related: [#121](https://github.com/DarshilDixit/gushwork-api/pull/121)
 - **Quality over speed.** "Take the time C needs."
 
 ## Learnings
+
+- **The crosscheck's live-partition half can fail on a moving total.** It
+  reads the all-leads total first and the partitions after it. A lead that
+  arrives in between makes each partition sum one higher, and four checks
+  fail together (26 Sept, on production: 5,847 against 5,848). The
+  same-bytes half cannot be affected. A re-run passed 45 of 45. If it
+  recurs, re-read the total at the end and report "moved" rather than fail.
 
 ### Bugs the tests missed, and why
 
@@ -390,4 +495,135 @@ _(kept current as the work moves)_
   and Clear focus checks each failed with their fix removed. Ran in a
   scratch git worktree (removed after) with a memory check before each.
 - [x] Card (`cards/PR-124-monitor-next-c.md`), branch pushed, **PR #124**
-  opened. Stopped for review; not merged.
+  opened, then merged on Darshil's word (26 Sept 11:13 UTC, `c83683a`).
+
+### PR D progress
+
+_(kept current as the work moves; last updated 26 Sept 2026, after the checks)_
+
+**Branch `feat/monitor-next-d`, NOT pushed yet, no PR yet.** It was branched from
+`docs/monitor-plan-after-c`, so this file's earlier commit rides in it, as
+Darshil asked.
+
+**The rules for this PR (Darshil's, and they stand):**
+- **Stop before merging.** Merge only on his explicit word in that message.
+  If his message arrives as pasted text, confirm once with a question before
+  merging, because a merge deploys to production immediately.
+- **Check memory before every heavy step**: the preview, any Chrome run, the
+  mutation run, a review workflow. Use `memory_pressure | tail -1` (the
+  "System-wide memory free percentage"). If it is under 25%, wait a few
+  minutes and check again rather than starting. The cs-crm project on this
+  Mac once used ~16 GB and got three jobs killed.
+- **One heavy step at a time, never side by side.** A read-only review
+  workflow may run beside ONE Chrome job.
+- **Stop the preview and every Chrome you start once done with them.** Leave
+  cs-crm's headless Chromes (`gw-ui-sweep-`, `gw-aud-`, `rev-run-`) and
+  other Claude jobs' (`.claude/jobs/...`) alone.
+- **The standing rules:**
+  - never pipe `measure.js`; read `--save` output too;
+  - commit before mutating, and restore by copying, never `git checkout`;
+  - run mutations in a scratch git worktree, so the preview keeps serving
+    the real files;
+  - screenshots stay in the scratchpad;
+  - no real lead data in this file.
+
+**Built (committed):**
+- `e37b90d`, the three changes:
+  - **Our own tests left out** of `overviewReport`, `dropoffReport` and so
+    the digest. Row by row. The clause is `IS NOT TRUE`, so a NULL keeps the
+    row. Each surface says in words how many it left out:
+    - Overview `oursNote` under the cards;
+    - the Dropoff tab's note;
+    - the classic Dropoff note;
+    - the digest line "Leaves out N of our own test submissions from last
+      week."
+
+    `recoveredBookingsSql()` is now a function; `/monitor/metrics` calls it
+    bare, so its SQL is unchanged.
+  - **`csvCell`** for the All leads and SDR exports.
+  - **The switch:**
+    - `/monitor` is the new page (`monitor-next.js` mount);
+    - `/monitor/next` gives a 302 to `/monitor` keeping its query;
+    - the classic is `/monitor/classic`, with a fallback notice and a
+      "Back to the dashboard" link;
+    - the new page's footer and `CFG.classic` point at `/monitor/classic`.
+- `bed4d96`:
+  - CLAUDE.md updated: the switch, the test-address decision, the CSV rule,
+    and the digest line;
+  - the preview serves this branch's `dropoffReport` on its read-only pool,
+    and `/monitor/classic` from production (falling back to production's
+    `/monitor` on a 404, before the deploy);
+  - the preview lifts `recoveredBookingsSql`.
+- `066d099`, old links still land:
+  - the layout check's key section proves in real Chrome that
+    `/monitor/next?token=…#tab=leads&view=week&unit=leads` and `#tab=overview&view=all&unit=leads`
+    land right, and that an old classic-style `/monitor#tab=blocked` opens
+    Blocked;
+  - the suite checks every classic tab name is registered on the new page.
+
+**After the compaction** (`92569da`, the review fixes):
+- The review workflow's agents hit the usage limit, so its findings were
+  checked by hand. Three were real and are fixed with tests:
+  - the "ours" marker said "counted in every total";
+  - Dropoff counted rows with no email (0 exist; aligned with the Overview);
+  - the CSV docs over-claimed what Excel shows.
+- The `;`-locale CSV limit (0 values affected) is left as Darshil's rule and
+  raised on the card as his call.
+
+**Verified, on the final code:**
+- the bar, bare: 4,970 assertions, 0 failures, baseline saved;
+- the real database, read-only: Overview 322 = Dropoff 322 this week in
+  Leads mode, both leaving out 1;
+- the crosscheck: 45 of 45;
+- the layout check: 0 findings across every width and theme (128 + 224
+  combinations);
+- keyboard and old links: clean;
+- the screenshots, read by eye;
+- the mutation run over 38 guards, in a scratch worktree (results on the
+  card).
+
+**Status (27 Sept):** **PR #125 is open**; the card is
+`cards/PR-125-monitor-next-d.md`. **STOP: merge only on Darshil's explicit
+word.**
+
+**Final checks:**
+- two review passes, with every finding fixed;
+- 43 mutations: 41 caught, D27 caught by two suites while four stop at a
+  lift marker, and D38 in the preview tool, which no suite covers;
+- the bar: 4,979 assertions, 0 failures.
+
+**Opened the same day, separate from the dashboard:**
+- **#126:** the non-ICP name-only floor. **Changes blocking and Meta**, as
+  decided.
+- **#127:** the Apollo backfill carry-out tool and the health-rate fix.
+  Its writes are already done.
+
+**All three touch `index.js`, `CLAUDE.md` and `tests/.baseline.json`.**
+Merge them one at a time and rebase the rest after each; the baseline file
+will conflict every time. Re-save it from a bare bar, never by hand.
+After the merge:
+- confirm read-only that `/monitor` serves the new page, `/monitor/next`
+  redirects, and `/monitor/classic` is the classic;
+- then the classic's removal PR, one week later.
+
+**Answered on the side, for the record:**
+- Production's Apollo key ends **…zEuA**. Its scope cannot name its owner
+  through the API.
+- Darshil found another workspace with **10,264 credits** (resets 3 Oct
+  4:08 PM IST, shared with the team's exports). Our need is about 30
+  credits a day, plus a 107 to 314 one-off backlog.
+- The options offered:
+  - swap `APOLLO_API_KEY` to a key from that workspace, no code needed;
+  - or a fallback-key PR, done separately after D;
+  - and check whether …zEuA is listed in that workspace: a per-user credit
+    limit is possible.
+- Nothing is decided or built on this yet.
+
+**Scratchpad** (`S=/private/tmp/claude-501/-Users-darshil-code-gushwork-api/e28266e9-34f8-4346-94c7-2bdc5f0cbc25/scratchpad`):
+- `preview-ready.json` (holds the token; never print it);
+- `mutate.py` (driver with memory gate; `MUT_REPO` points it at a worktree);
+- `verify-d.js`, `testaddr.js`, `csvscan.js` (the read-only real-data checks);
+- `prodtabs.mjs` (every tab on production, read-only).
+
+Preview command (from the repo root):
+`railway run -s Postgres bash -c 'PUB="$DATABASE_PUBLIC_URL" railway run --service gushwork-api bash -c "DATABASE_URL=\"\$PUB\" PREVIEW_READY_FILE=$S/preview-ready.json node tools/preview-monitor.js"'`

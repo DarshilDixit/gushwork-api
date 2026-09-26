@@ -92,6 +92,8 @@ function rowsFor(sql, params) {
   }
   if (/first AS \(/.test(flat)) return [{ unit: 'people', source: 'Google', n: 29 }, { unit: 'people', source: 'Meta', n: 197 }, { unit: 'people', source: 'Direct / organic', n: 31 }, { unit: 'people', source: 'LinkedIn', n: 3 }, { unit: 'people', source: 'Partner / referral', n: 3 }, { unit: 'leads', source: 'Meta', n: 211 }, { unit: 'leads', source: 'Google', n: 33 }];
   if (/MAX\(created_at\) AS last_lead_at/.test(flat)) return [{ last_lead_at: '2026-09-25T18:16:42.000Z' }];
+  /* WHAT THE OVERVIEW LEFT OUT: our own test submissions per window */
+  if (/AS people FROM w JOIN leads l .* IS TRUE GROUP BY w\.k/.test(flat)) return [{ k: 'cur', leads: 7, people: 3 }, { k: 'cmp', leads: 11, people: 5 }, { k: 'month', leads: 13, people: 6 }, { k: 'fun', leads: 7, people: 3 }];
   if (/AS recovered FROM \(/.test(flat)) return [{ recovered: '53' }];
   return [];
 }
@@ -153,7 +155,7 @@ function browser(payloads, cfg) {
     addEventListener: (t, f) => { (wlisteners[t] = wlisteners[t] || []).push(f); }, innerWidth: 1440, scrollTo() {}, alert() {},
     /* THE SERVED PAGE'S OWN CONFIG when given -- it carries the server's
        label maps, so the page is tested with what a real visitor gets */
-    __GW__: cfg || { token: TOKEN, tz: 'America/New_York', classic: '/monitor' },
+    __GW__: cfg || { token: TOKEN, tz: 'America/New_York', classic: '/monitor/classic' },
   };
   const fetchStub = async (url, init) => {
     const u = new URL(String(url), 'http://x');
@@ -178,10 +180,13 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   loud();
 
   /* ═══ 1. THE ROUTES ═══════════════════════════════════════════════════ */
-  const noTok = await realFetch(BASE + '/monitor/next');
+  /* THE SWITCH (PR D): /monitor IS the new dashboard; /monitor/next, where
+     it was built, redirects there with its query; the classic moved to
+     /monitor/classic as the one-week fallback. */
+  const noTok = await realFetch(BASE + '/monitor');
   eq('route: no token is 401', noTok.status, 401);
-  const r = await realFetch(BASE + '/monitor/next' + tq);
-  const html = await r.text();
+  const r = await realFetch(BASE + '/monitor' + tq);
+  let html = await r.text();
   eq('route: the page is 200', r.status, 200);
   ok('route: served as HTML, never cached', /text\/html/.test(r.headers.get('content-type')) && /no-store/.test(r.headers.get('cache-control') || ''));
   const mn = require(path.join(ROOT, 'monitor-next.js'));
@@ -201,9 +206,28 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   eq('asset: a name not on the list is 404', (await realFetch(BASE + '/monitor/next/asset/app.css' + tq)).status, 404);
   eq('asset: a path traversal is 404', (await realFetch(BASE + '/monitor/next/asset/..%2F..%2Findex.js' + tq)).status, 404);
   eq('asset: an inherited object key is 404, not a crash', (await realFetch(BASE + '/monitor/next/asset/constructor' + tq)).status, 404);
+  const rd = await realFetch(BASE + '/monitor/next' + tq + '&x=1', { redirect: 'manual' });
+  ok('switch: /monitor/next redirects to /monitor, keeping its query (the token)', rd.status === 302 && rd.headers.get('location') === '/monitor' + tq + '&x=1', rd.status + ' ' + rd.headers.get('location'));
+  const rd0 = await realFetch(BASE + '/monitor/next', { redirect: 'manual' });
+  ok('switch: ...and with no query, to plain /monitor (which then asks for the token)', rd0.status === 302 && rd0.headers.get('location') === '/monitor');
+  ok('switch: following the redirect lands on the new page', /id="view"/.test(await (await realFetch(BASE + '/monitor/next' + tq)).text()));
   /* The old dashboard, both directions */
-  const old = await (await realFetch(BASE + '/monitor' + tq)).text();
-  ok('classic: links to the new dashboard', /href="\/monitor\/next\?token=/.test(old));
+  const classicR = await realFetch(BASE + '/monitor/classic' + tq);
+  const old = await classicR.text();
+  ok('classic: served at /monitor/classic, behind the same token', classicR.status === 200 && (await realFetch(BASE + '/monitor/classic')).status === 401 && /function showTab/.test(old));
+  /* the token is printed raw by the classic, and this suite's token is
+     hostile on purpose -- so read the link without depending on it */
+  ok('classic: links back to the dashboard at /monitor, never to /monitor/next', /href="\/monitor\?token=/.test(old) && old.includes('&#8592; Back to the dashboard</a>') && !/href="\/monitor\/next/.test(old));
+  ok('classic: says on the page that it is the one-week fallback', old.includes('This is the <b>classic</b> dashboard, kept for one week as a fallback.'));
+  ok('classic: its Dropoff note gives the number a unit -- submissions, in People mode too', old.includes('</b> submissions in this window, not counted above.'));
+  ok('classic: ...and that its Overview counts our own tests where the new one does not', old.includes('Its Overview leaves out our own test submissions; this one still counts them'));
+  /* THE TOKEN IS ENCODED where the classic builds it. It lands in two hrefs
+     and in var TP="..." inside a script, and this suite's token carries a
+     quote and a closing tag on purpose. Raw, it broke out of both. */
+  ok('classic: the hostile token appears only ENCODED -- in the script and in both links',
+     old.includes('var TP="?token=' + encodeURIComponent(TOKEN) + '"') && old.includes('href="/monitor?token=' + encodeURIComponent(TOKEN) + '"')
+     && !old.includes(TOKEN), (old.match(/var TP="[^;]{0,80}/) || [''])[0]);
+  ok('classic: its Dropoff note says our own tests are left out there, and still counted on its own Overview', old.includes('Our own test submissions are left out of this tab') && old.includes('This dashboard\\u2019s Overview still counts them; the new one does not.') && !old.includes('are included, as everywhere else on this dashboard'));
   ok('classic: opens at #tab= when sent from the new one', /match\(\/tab=\(\[a-z\]\+\)\/\)/.test(old) && /showTab\(m\[1\]\)/.test(old));
   ok('classic: the disqualified card no longer says only "B2C / Mixed"', !/"B2C \/ Mixed \\u00B7 "/.test(old) && /B2C, mixed or waitlist/.test(old));
 
@@ -220,6 +244,39 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     ok(`overview/${v}: the asof is bound, never pasted into SQL`, S.queries.every((q) => !q.sql.includes('2026-09-25T18:52')), '');
     eq(`overview/${v}: the view comes back`, P[v].view, v);
   }
+  /* OUR OWN TEST SUBMISSIONS ARE LEFT OUT (Darshil, 26 Sept 2026): EVERY
+     query the Overview sends that reads leads skips them -- IS NOT TRUE,
+     so a NULL from the clause keeps the row -- except the one that counts
+     them. Read off the SQL actually sent, for both view shapes. */
+  for (const v of ['week', 'all']) {
+    S.queries = [];
+    await realFetch(BASE + '/monitor/overview' + tq + '&view=' + v + '&asof=' + encodeURIComponent(ASOF));
+    const reads = S.queries.filter((q) => /\b(FROM|JOIN) leads\b/.test(q.sql));
+    const skip = (q) => /= ANY\(\$\d+::text\[\]\)[\s\S]*\) IS NOT TRUE/.test(q.sql);
+    const count = (q) => /\) IS TRUE\s+GROUP BY w\.k/.test(q.sql);
+    ok(`overview/${v}: every read of leads leaves our own tests out (or is the one that counts them)`, reads.length >= (v === 'all' ? 4 : 5) && reads.every((q) => skip(q) || count(q)), reads.filter((q) => !skip(q) && !count(q)).map((q) => q.sql.replace(/\s+/g, ' ').slice(0, 90)).join(' | '));
+    ok(`overview/${v}: exactly one query counts what was left out`, reads.filter(count).length === 1);
+    /* PER READ, NOT PER QUERY. One query can read leads twice -- the
+       channels query has a people half and a rows half, recovered bookings
+       reads the lead and then its later booking -- and a query-level check
+       passed with either half's filter deleted: three mutations SURVIVED
+       it. So every FROM/JOIN of leads needs its own clause. */
+    const perRead = reads.filter((q) => !count(q)).map((q) => ({
+      reads: (q.sql.match(/\b(FROM|JOIN) leads\b/g) || []).length,
+      skips: (q.sql.match(/= ANY\(\$\d+::text\[\]\)[\s\S]*?\) IS NOT TRUE/g) || []).length,
+      head: q.sql.replace(/\s+/g, ' ').slice(0, 90) }));
+    const short = perRead.filter((r) => r.skips < r.reads);
+    ok(`overview/${v}: EVERY read of leads inside each query leaves our own tests out`, perRead.length > 0 && short.length === 0,
+       short.map((r) => r.reads + ' reads, ' + r.skips + ' skips: ' + r.head).join(' | '));
+    /* ...and every read keeps rows with an email only -- the Dropoff rule
+       too, so the two agree by construction rather than while no such row
+       happens to exist. */
+    const noEmail = reads.filter((q) => !/\b(l\.)?email IS NOT NULL/.test(q.sql));
+    ok(`overview/${v}: every read of leads counts rows with an email only, as Dropoff does`, noEmail.length === 0, noEmail.map((q) => q.sql.replace(/\s+/g, ' ').slice(0, 160)).join(' | '));
+    ok(`overview/${v}: the clause's lists are BOUND, never pasted into SQL`, reads.every((q) => (q.params || []).some((x) => Array.isArray(x))));
+  }
+  ok('overview/week: what was left out comes back, this period and the comparison', JSON.stringify(P.week.ours.leads) === '[7,11]' && JSON.stringify(P.week.ours.people) === '[3,5]' && P.week.ours.excluded === true, JSON.stringify(P.week.ours));
+  ok('overview/all: ...and this month, for the all-time view', P.all.ours.month && P.all.ours.month.leads === 13, JSON.stringify(P.all.ours));
   /* A hostile view never reaches SQL: it is whitelisted to a grain first. */
   S.queries = [];
   const inj = await (await realFetch(BASE + '/monitor/overview' + tq + '&view=' + encodeURIComponent("today'); DROP TABLE leads; --"))).json();
@@ -268,6 +325,14 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   const dead = await realFetch(BASE + '/monitor/overview' + tq + '&view=week');
   S.dbDead = false;
   eq('overview: a dead database is a 500, never a page of zeros', dead.status, 500);
+
+  /* A BROKEN ROUTE MUST FAIL THE SUITE, NOT END IT. With /monitor no longer
+     serving the page, the route assertions above fail -- and everything
+     below used to die with them, at assertion 100 of 418, which measure.js
+     rightly refuses to count as a catch. So the page is then built straight
+     from monitor-next.js, the same function the route calls, and every
+     later assertion still runs and still counts. */
+  if (r.status !== 200) html = mn.page({ token: TOKEN, tz: 'America/New_York', labels: {} });
 
   /* ═══ 3. THE PAGE, EXECUTED ════════════════════════════════════════════ */
   const js = (html.match(/<script>(\/\* ---- core\.js[\s\S]*?)<\/script><\/body>/) || [])[1] || '';
@@ -431,6 +496,14 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   /* THE PARTS ADD UP: 23 disqualified = 13 + 9 + the one with no reason */
   const dqOther = KPI.cur.people_dq - KPI.cur.people_b2c - KPI.cur.people_waitlist;
   ok('overview: the disqualified split names the remainder, so it adds up', dqOther === 1 && v.includes(' · ' + dqOther + ' no reason recorded'));
+  ok('overview: it says in words how many of our own tests it left out, and that sessions still count them',
+     v.includes('id="ov-ours">Leaves out 7 of our own test submissions this week, and 11 by this point last week. Sessions cannot be told apart by address, so those still include ours.</p>'), (v.match(/id="ov-ours">[^<]*/) || [''])[0]);
+  const on = GW.TABS.overview._oursNote;
+  ok('overview: the sentence for Today and All time ("1 of our own test submissions", never "submission")',
+     on({ view: 'today', ours: { leads: [1, 0] } }).startsWith('Leaves out 1 of our own test submissions today, and 0 by this time yesterday.') &&
+     on({ view: 'all', ours: { leads: [107, 0], month: { leads: 12 } } }).startsWith('Leaves out 107 of our own test submissions all time, 12 of them this month.'),
+     on({ view: 'today', ours: { leads: [1, 0] } }));
+  ok('overview: no ours in the payload paints no sentence rather than a guess', on({ view: 'week' }) === '');
   ok('overview: the withheld card says it is the MODEL, not every reason', v.includes('Meta withheld — model') && !/>Meta withheld<\/div>/.test(v));
   ok('overview: blocked and withheld cards', n.includes(String(KPI.cur.people_blocked)) && n.includes(String(KPI.cur.people_withheld)));
   ok('overview: Disqualified carries the comparison like every card, THEN its breakdown',
@@ -560,6 +633,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   GW.show('dropoff'); await ticks(); v = view();
   ok('dropoff: every payload cell is painted, in order', ['191', '173', '364', '47', '39', '86', '238', '212', '450'].every((x) => v.includes('>' + x + '<')), '');
   ok('dropoff: the partial period is marked', v.includes('<span class="part">part</span>'));
+  ok('dropoff: it says our own tests are LEFT OUT, with how many, in words', v.includes('Our own test submissions are left out, as on the Overview — <b>7</b> submissions in this window, not counted above.') && !v.includes('are included'));
   ok('dropoff: the summary reads the payload', nums(v).includes('450') && nums(v).includes('364'));
   ok('dropoff: the booked rate row', v.includes('80.9%'));
   ok('dropoff: the window reads as dates, not ISO', v.includes('6 Jul – 25 Sep 2026') && !v.includes('2026-07-06 to'));
@@ -659,6 +733,21 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('leads: each expander carries the RAW session_id, apart from the sanitised key', v.includes('data-sid="' + SID_A + '"') && /data-x="ld-3f2a9c1e_2d7b4d/.test(v));
   ok('leads: the stage ladder, with "Left on step 2" -- never "Step 1"', v.includes('>Completed<') && v.includes('>Booked<') && v.includes('>Left on step 2<') && !/>Step 1</.test(v));
   ok('leads: markers are words -- blocked, website failed, ours', />blocked<\/span>/.test(v) && />website failed<\/span>/.test(v) && />ours<\/span>/.test(v));
+  /* SINCE 26 SEPT THE OVERVIEW, DROPOFF AND THE DIGEST LEAVE OURS OUT, so the
+     marker must not still claim they are "counted in every total" -- a
+     tooltip that contradicts the Overview's own sentence is a wrong number
+     in words. Read off the painted row. */
+  const oursTip = (v.match(/title="(One of our own test submissions[^"]*)">ours</) || [])[1] || '';
+  ok('leads: the ours marker says where they ARE left out, not "counted in every total"',
+     oursTip.includes('The Overview, the Dropoff tab and the Monday digest already leave them out') && !/every total/.test(oursTip), oursTip);
+  { const isrc = fs.readFileSync(path.join(ROOT, 'index.js'), 'utf8');
+    ok('classic: its ours marker no longer says "counted in every total" either, and names what leaves them out',
+       !isrc.includes('One of our own test submissions. Counted in every total') && isrc.includes('The Dropoff tab and the new dashboard\\\\u2019s Overview leave them out.')); }
+  /* "IN EVERY TOTAL" STOPPED BEING TRUE on 26 Sept: the Overview and
+     Dropoff leave our own test submissions out, blocked or not. The All
+     leads and Blocked tabs must not claim it anywhere. */
+  ok('leads: nothing on All leads or Blocked claims a lead is "in every total" any more',
+     !/every total/.test(fs.readFileSync(path.join(ROOT, 'monitor', 'js', 'leads.js'), 'utf8')) && /title="Blocked[^"]*Still counted as a lead\.">blocked</.test(v), (v.match(/title="Blocked[^"]*"/) || [''])[0]);
   ok('leads: the Meta chip is not repeated beside "blocked"', !/>Meta: blocked</.test(v) && />Meta: ours</.test(v) && />Meta: model</.test(v));
   ok('leads: a clarified B2B reads as B2B, the stored text kept', /B2B <span class="badge b-neu" title="B2B \(clarified from B2C\)">clarified<\/span>/.test(v));
   ok('leads: source is the ad click, else where they came from', v.includes('facebook / paid') && v.includes('from google.com') && !/>referral</.test(v));
@@ -991,7 +1080,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   fire('input', el({ 'data-sdr-q': '' }, { value: '' }));
   /* 17. the words: website verdicts as the SERVER words them, and no false claims */
   const wrlSrc = (fs.readFileSync(path.join(ROOT, 'index.js'), 'utf8').match(/function websiteReasonLabel\(reason\) \{[\s\S]*?\n\}/) || [])[0];
-  const wrl = wrlSrc && new Function('WEBSITE_REASON_LABELS', wrlSrc + '\nreturn websiteReasonLabel;')(servedCfg.labels.website);
+  const wrl = wrlSrc && new Function('WEBSITE_REASON_LABELS', wrlSrc + '\nreturn websiteReasonLabel;')(((servedCfg && servedCfg.labels) || {}).website || {});
   const WIN = ['http_403', 'http_999', 'http_401', 'http_429', 'http_500', 'http_404', 'parked_confirmed', 'timeout', 'some_new_code', 'resolved'];
   ok('review: every website verdict reads exactly as the server words it', wrl && WIN.every((r) => GW.L.website(r) === wrl(r)), WIN.map((r) => r + '=' + GW.L.website(r) + '|' + (wrl && wrl(r))).join('; '));
   ok('review: the Meta chip for an unverified site never says "no website"', GW.L.metaShort('website') === 'site not verified');
@@ -1025,13 +1114,22 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   GW.show('partners'); await ticks(20); healthDown = true; await GW.TABS.health.run(); healthDown = false; await ticks(20);
 
   /* Hash, tabs, nav */
+  /* OLD LINKS STILL LAND: a classic-era /monitor#tab=<name> link now opens
+     THIS page, so every tab name the classic knew must be one this page
+     registers -- read from the classic's own showTab list, not restated. */
+  const classicTabs = JSON.parse(((old.match(/function showTab\(n\)\{(\[[^\]]+\])\.forEach/) || [])[1] || '[]'));
+  ok('links: every classic tab name is a tab here, so an old /monitor#tab= link lands on it', classicTabs.length >= 11 && classicTabs.every((t) => Object.prototype.hasOwnProperty.call(GW.TABS, t)), JSON.stringify(classicTabs.filter((t) => !GW.TABS[t])) + ' of ' + classicTabs.length);
+  GW.show('blocked'); await ticks(20);
+  b.window.location.hash = '#tab=leads&view=week&unit=leads'; (b.wlisteners.hashchange || []).forEach((f) => f()); await ticks(20);
+  ok('links: a #tab/view/unit fragment opens that tab with that unit', GW.current() === 'leads' && GW.S.unit === 'leads');
+  GW.show('partners'); await ticks(20);
   ok('nav: every rebuilt tab is registered with activate and deactivate', ['overview', 'health', 'dropoff', 'dupes', 'lm', 'leads', 'blocked', 'sdr', 'model', 'visitors', 'partners'].every((t) => GW.TABS[t] && GW.TABS[t].activate && GW.TABS[t].deactivate && GW.TABS[t].title));
   ok('nav: switching tab writes the hash', /tab=partners/.test(b.window.location.hash), b.window.location.hash);
   const navHtml = b.els['nav-side'] ? b.els['nav-side'].innerHTML : '';
   /* EVERY tab is rebuilt: no nav row leaves for the classic page, and the
      sidebar footer is the one way back to it until the switch (PR D) */
   ok('nav: no nav row links to the classic dashboard any more', !/class="nav" href="\/monitor\?token=/.test(navHtml) && !/\(classic dashboard\)/.test(navHtml));
-  ok('nav: the classic dashboard is still one click away, in the footer', /<a href="\/monitor\?token=[^"]*">Open the classic dashboard<\/a>/.test(html));
+  ok('nav: the classic dashboard is one click away, in the footer, at its fallback address', /<a href="\/monitor\/classic\?token=[^"]*">Open the classic dashboard<\/a>/.test(html) && /"classic":"\/monitor\/classic"/.test(html));
   ok('nav: All leads and Blocked are rebuilt, no longer classic links', /data-tab="leads"/.test(navHtml) && /data-tab="blocked"/.test(navHtml) && !/href="\/monitor\?token=[^"]*#tab=leads"/.test(navHtml) && !/href="\/monitor\?token=[^"]*#tab=blocked"/.test(navHtml));
   /* the last health run could not reach /monitor/health: all nine server
      checks are red, and the badge -- now set by System health too -- says 9 */

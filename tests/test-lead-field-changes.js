@@ -456,7 +456,8 @@ const NO_CHANGE  = Object.assign({}, CHANGED, { prev_email: CHANGED.email, prev_
 
   /* ── the dashboard JS must PARSE ────────────────────────────── */
   quiet();
-  const page = await (await realFetch(`${BASE}/monitor?token=tok`)).text();
+  /* the classic page, at its fallback address since the switch (PR D) */
+  const page = await (await realFetch(`${BASE}/monitor/classic?token=tok`)).text();
   loud();
   const scripts = page.match(/<script>([\s\S]*?)<\/script>/g) || [];
   ok('dashboard: served an inline script', scripts.length > 0);
