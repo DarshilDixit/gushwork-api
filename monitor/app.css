@@ -411,6 +411,7 @@ input.field { min-width: 0; }
 .tbl tr.uncat td { color: var(--ink-muted); font-style: italic; }
 .rt td.quote { min-width: 180px; max-width: 360px; color: var(--ink-label); }
 .rt code, .rt td.wrap { overflow-wrap: anywhere; }
+.rt td.kcell code { white-space: nowrap; overflow-wrap: normal; }   /* a company key stays whole in a table column... */
 
 /* ── Visitors ── */
 .chips { display: flex; flex-wrap: wrap; gap: var(--gw-space-8); }
@@ -425,6 +426,19 @@ input.field { min-width: 0; }
 .leaflet-interactive.vdot { fill: var(--data); fill-opacity: .75; stroke: var(--gw-color-white); stroke-opacity: .95; }
 .vmap .leaflet-popup-content { font: var(--gw-text-body-12-reg); }
 @container view (max-width: 559px) { .vmap-slot, .vmap { height: 340px; } }
+
+/* ── Partners ── */
+.sumgrid.six { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@container view (max-width: 559px) { .sumgrid.six { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.pfunnel { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--gw-space-12); }
+.pfs { display: flex; flex-direction: column; gap: var(--gw-space-4); padding: var(--gw-space-12); border-radius: var(--gw-radius-12); background: var(--well); }
+.pfs .num { font-size: 24px; }
+.pfk { font: var(--gw-text-body-12-med); color: var(--ink-label); }
+.pfr, .pfl { font: var(--gw-text-body-12-reg); color: var(--ink-muted); }
+.pfo { font: var(--gw-text-body-12-reg); color: var(--warn-ink); }
+.gaphead { display: flex; align-items: baseline; gap: var(--gw-space-12); flex-wrap: wrap; }
+.ackf { display: flex; flex-wrap: wrap; gap: var(--gw-space-8); align-items: center; }
+.ackf .field { flex: 1 1 180px; min-width: 0; }
 
 /* Dropoff's period table scrolls INSIDE its card, with the outcome column
    pinned, rather than squeezing twelve periods into a phone. */
@@ -569,6 +583,7 @@ input.field { min-width: 0; }
   .rt td { border: 0; padding: var(--gw-space-4) 0; display: flex; justify-content: space-between; align-items: baseline; gap: var(--gw-space-12); }
   .rt td::before { content: attr(data-l); font: var(--gw-text-body-12-med); color: var(--ink-label); text-align: left; flex: 0 0 auto; }
   .rt td .cv { min-width: 0; text-align: right; overflow-wrap: anywhere; }
+  .rt td.kcell code { white-space: normal; overflow-wrap: anywhere; }   /* ...and wraps in a phone card */
   .rt td.xcell { position: absolute; right: var(--gw-space-8); top: var(--gw-space-8); width: auto; padding: 0; }
   .rt td.xcell::before { content: none; }
   .rt td.lead-cell { font: var(--gw-text-body-14-med); padding-right: 52px; justify-content: flex-start; min-height: 44px; align-items: center; }

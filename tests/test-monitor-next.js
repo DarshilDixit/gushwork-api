@@ -157,7 +157,7 @@ function browser(payloads, cfg) {
   };
   const fetchStub = async (url, init) => {
     const u = new URL(String(url), 'http://x');
-    calls.push({ path: u.pathname, q: Object.fromEntries(u.searchParams), method: (init && init.method) || 'GET' });
+    calls.push({ path: u.pathname, q: Object.fromEntries(u.searchParams), method: (init && init.method) || 'GET', body: init && init.body, headers: init && init.headers });
     const body = payloads(u.pathname, Object.fromEntries(u.searchParams));
     if (body instanceof Error) return { ok: false, status: 503, json: async () => ({}), text: async () => body.message };
     return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
@@ -344,6 +344,32 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     networks: [{ isp: 'Verizon Business', org_domain: 'verizonbusiness.com', leads: 829, people: 800, booked: 511 }, { isp: 'Verizon Business', org_domain: 'frontiernet.net', leads: 11, people: 10, booked: 4 },
       { isp: 'AT&T Enterprises, LLC', org_domain: 'att.com', leads: 37, people: 36, booked: 20 }],
     timezones: [{ timezone: 'America/New_York', leads: 937, booked: 604 }, { timezone: 'Not/AZone', leads: 3, booked: 1 }] };
+  /* Partners: an internally consistent lifecycle -- the eight states add up
+     to the total, the Salesforce splits add up to the state they split */
+  const ago90 = new Date(Date.now() - 90 * 60000).toISOString();
+  const PD = [
+    { customer_key: 'fail.co', state: 'conversion_failed', partner_display: 'Alpha Partners', partner_key_count: 2, partner_others: ['Beta Co'], signup_fail_reason: 'http_400', acknowledged: false, sf_state: 'create_errored', last_seen: '2026-09-24T10:00:00Z' },
+    { customer_key: 'acked.co', state: 'conversion_failed', partner_display: 'Alpha Partners', partner_key_count: 1, signup_fail_reason: 'phantom_200', acknowledged: true, ack_note: 'known test', sf_state: null, last_seen: '2026-09-23T10:00:00Z' },
+    { customer_key: 'paid.co', state: 'qualified', partner_display: 'Alpha Partners', sf_state: 'ticked', qualified_sent: true, signup_sent: true, signup_verified: true, last_seen: '2026-09-22T10:00:00Z' },
+    { customer_key: 'wait.co', state: 'converted', partner_display: 'Alpha Partners', sf_state: 'ticked', qualified_sent: false, signup_sent: true, signup_verified: false, last_seen: '2026-09-21T10:00:00Z' },
+    { customer_key: 'ae.co', state: 'awaiting_demo', partner_display: 'b@beta.test', sf_state: 'exists_unticked', signup_sent: true, qualified_sent: false, last_seen: '2026-09-20T10:00:00Z' },
+    { customer_key: 'nosent.co', state: 'awaiting_demo', partner_display: 'b@beta.test', sf_state: 'exists_unticked', signup_sent: false, qualified_sent: false, last_seen: '2026-09-19T10:00:00Z' },
+    { customer_key: 'afterpaid.co', state: 'qualified', partner_display: 'b@beta.test', sf_state: 'exists_unticked', signup_sent: true, qualified_sent: true, last_seen: '2026-09-18T10:00:00Z' }];
+  const PARTNERS = { totals: { leads: 12, leads24h: 3, conversions: 5, qualified: 2 },
+    lifecycle: { needsAttention: 5, acknowledged: 1, needsAttentionComplete: true, totalDomains: 7, domains: PD, byState: { conversion_failed: 2, qualified: 2, converted: 1, awaiting_demo: 2 },
+      noCustomerKeyLeads: 3, bySfState: { ticked: 2, exists_unticked: 3, create_errored: 1 }, sfActionable: 1, sfUnactionable: 1, sfUntickedAfterPaid: 1,
+      sfNewestCheckedAt: ago90, sfStaleAfterMin: 45, sfLastRead: { ok: false, reason: 'incomplete' }, domainsCapped: false, domainsLimit: 500 },
+    funnel: { rateMin: 10, stages: [{ key: 'clicks', label: 'Clicks', unit: true }, { key: 'step1', label: 'Reached step 1' }, { key: 'completed', label: 'Completed the form' },
+      { key: 'conversions', label: 'Conversion sent', abs: 'abs_conversions' }, { key: 'verified', label: 'Conversion verified', abs: 'abs_verified' }, { key: 'booked', label: 'Booked', abs: 'abs_booked' },
+      { key: 'opportunity', label: 'Opportunity created', abs: 'abs_opportunity' }, { key: 'ticked', label: 'Qualified Demo ticked', abs: 'abs_ticked' }, { key: 'qualified', label: 'The $50 fired', abs: 'abs_qualified' }],
+      losses: { conversions: [{ key: 'lost_conversion', label: 'conversion failed', bad: true }, { key: 'lost_skipped', label: 'skipped' }] },
+      programme: { clicks: '14', step1: '40', completed: '32', conversions: '20', abs_conversions: '20', verified: '16', abs_verified: '16', booked: '9', abs_booked: '9',
+        opportunity: '0', abs_opportunity: '1', ticked: '0', abs_ticked: '1', qualified: '0', abs_qualified: '1', lost_conversion: '2', lost_skipped: '0' } },
+    partners: [{ partner_key: 'pk_a', partner_name: 'Alpha', step1: '7', completed: '6', conversions: '4', abs_conversions: '4', verified: '4', abs_verified: '4', booked: '0', abs_booked: '0', opportunity: '0', abs_opportunity: '0', ticked: '0', abs_ticked: '0', qualified: '0', abs_qualified: '2', clicks: 6 },
+      { partner_key: 'pk_b', partner_name: null, partner_email: 'b@beta.test', step1: '9', completed: '1', conversions: '1', abs_conversions: '1', verified: '1', abs_verified: '1', booked: '1', abs_booked: '1', opportunity: '0', abs_opportunity: '0', ticked: '0', abs_ticked: '0', qualified: '0', abs_qualified: '0', clicks: null }] };
+  const GAPS = { missedConversions: [{ customer_key: 'miss.co', partner_display: 'Alpha Partners', email: 'x@miss.co', first_seen: '2026-09-20T10:00:00Z' }], missingOpportunity: [],
+    opportunityCheck: { ok: false, reason: 'sf_down' }, skipped: [{ customer_key: 'test.com', reason: 'test_email' }], awaitingQualification: 5, graceDays: 3 };
+  let gapsDown = false;
   const SDR = { total: 37, leads: [
     { email: 'Ann@Acme.co', first_name: 'Ann', last_name: 'Lee', company: 'Acme Widgets', enriched_industry: 'Manufacturing', completed: true, created_at: '2026-09-24T12:00:00Z', ps_partner_name: 'Alpha Partners', hear_about_us_raw: 'a podcast', enriched_linkedin: 'javascript:alert(2)', phone: '+14155550134' },
     { email: 'bo@zeta.io', first_name: 'Bo', company: 'Zeta', completed: false, created_at: '2026-09-23T12:00:00Z' },
@@ -364,6 +390,9 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     if (p === '/monitor/sdr') return SDR;
     if (p === '/monitor/non-icp') return MODEL;
     if (p === '/monitor/visitors') return VIS;
+    if (p === '/monitor/partners') return PARTNERS;
+    if (p === '/monitor/partner-gaps') return gapsDown ? new Error('upstream down') : GAPS;
+    if (p === '/monitor/partner-ack') return { ok: true };
     if (p === '/monitor/leads') return q.nonicp === 'only' ? (q.internal === 'exclude' ? { total: 45, page: 1, pages: 2, leads: [] } : BLOCKED) : LEADS;
     if (p === '/monitor/filter-options') return { hearAbout: ['Podcast'], utmSource: ['facebook', 'google'], partners: [{ key: 'pk_77', name: null, email: 'p@partner.co' }] };
     if (p === '/monitor/lead-changes') return CHANGES[q.session_id] || { ok: true, changes: [] };
@@ -763,13 +792,62 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('visitors: the popup names the place and its counts', /<b>Boston, Massachusetts, US<\/b><br>612 leads<br>590 people<br>402 booked/.test(drawn[0].popup));
   delete b.window.L;
 
+  /* ═══ PR C: Partners ═══ */
+  GW.show('partners'); await ticks(20); v = view();
+  ok('partners: the six cards are the payload\'s', [['p-attn', 5], ['p-domains', 7], ['p-sfwait', 1], ['p-leads', 12], ['p-conv', 5], ['p-qual', 2]].every(([id, n]) => new RegExp('data-card="' + id + '"[\\s\\S]*?data-v="' + n + '"').test(v)));
+  ok('partners: Needs attention says act today', /data-card="p-attn"[\s\S]*?act on these today/.test(v));
+  ok('partners: the states are in LADDER order, the failed ones red', v.indexOf('2 qualified') > 0 && v.indexOf('2 qualified') < v.indexOf('2 conversion failed') && /b-bad">2 conversion failed</.test(v));
+  ok('partners: leads with no company domain are counted as LEADS, and say so', v.includes('3 with no company domain (leads, not companies)'));
+  ok('partners: the ticked split -- fired, and CANNOT fire when the conversion is not verified', v.includes('1 ticked, $50 fired') && v.includes('1 ticked, cannot fire yet') && !v.includes('1 ticked, will fire next poll'));
+  ok('partners: the unticked split adds up to the state', v.includes('1 waiting on an AE') && v.includes('1 unticked, no conversion sent (not actionable)') && v.includes('1 unticked after the $50 fired (not actionable)'));
+  ok('partners: never created is red; unchecked is its own number', /b-bad">1 Opportunity never created</.test(v) && v.includes('1 not checked yet'));
+  ok('partners: a failed Salesforce read and a STALE check are both red and named', v.includes('Salesforce read FAILED (incomplete)') && /b-bad"[^>]*>STALE — last checked 90 min ago</.test(v));
+  ok('partners: the funnel leads with what happened, and rates run stage to stage', /data-stage="completed"[\s\S]*?80% of the stage before/.test(v) && /data-stage="conversions"[\s\S]*?62\.5% of the stage before/.test(v) && /data-stage="opportunity"[\s\S]*?too few to rate \(n=9\)/.test(v));
+  ok('partners: a stage reached by a skip says so, and the $50 reads 1, never 0', v.includes('0 on the funnel path · 1 skipped an earlier stage') && /data-stage="qualified"[\s\S]*?data-v="1"/.test(v));
+  ok('partners: clicks are not companies; a zero loss is not shown; a real one is red', v.includes('clicks, not companies') && /bad-t">2 conversion failed</.test(v) && !/0 skipped</.test(v));
+  ok('partners: no rate above 100%', !/(1[0-9]{2}|[2-9][0-9]{2})(\.\d)?% of the stage before/.test(v));
+  ok('partners: revenue gaps with Salesforce down read N+? and are NOT clean', /data-v="1\+\?"/.test(v) && v.includes('NOT a clean result'));
+  ok('partners: a correct skip is reported in words, never counted as a gap', v.includes('<code>test.com</code> (our own test address, skipped)') && v.includes('5 partner demos past the 3-day mark'));
+  ok('partners: the reason is words, the slug kept for whoever debugs it', v.includes('<span title="http_400">PartnerStack answered HTTP 400</span>'));
+  ok('partners: a company claimed by two partners says so', v.includes('1 other partner'));
+  ok('partners: Salesforce per company follows the same rule', v.includes('ticked, cannot fire yet — conversion not verified') && v.includes('Opportunity never created'));
+  ok('partners: acknowledge is offered ONLY on failed rows; un-acknowledge on an acked one', (v.match(/data-ack="/g) || []).length === 2 && v.includes('data-ack="fail.co" data-on="1"') && v.includes('data-ack="acked.co" data-on="0"') && v.includes('>acknowledged<'));
+  const per = v.slice(v.indexOf('id="p-per"'));
+  ok('partners: per partner, sorted by step 1 (the one with 9 first)', per.indexOf('>b@beta.test<') > 0 && per.indexOf('>b@beta.test<') < per.indexOf('>Alpha<'), [per.indexOf('>b@beta.test<'), per.indexOf('>Alpha<')].join(','));
+  ok('partners: the dagger where a stage was skipped, and "—" for unknown clicks', /title="0 on the funnel path, 2 skipped an earlier stage[^"]*">2 †</.test(per) && per.includes('>—<'), (per.match(/†[^<]*/g) || []).join(' | '));
+  /* THE WRITE, driven: Cancel sends NOTHING; Acknowledge sends one JSON body */
+  const pc0 = b.calls.length;
+  fire('click', el({ 'data-ack': 'fail.co', 'data-on': '1' })); v = view();
+  ok('partners: Acknowledge opens a note, with a Cancel', v.includes('data-ack-note="fail.co"') && v.includes('data-ack-go="fail.co"') && v.includes('data-ack-cancel="fail.co"'));
+  fire('click', el({ 'data-ack-cancel': 'fail.co' })); await ticks();
+  ok('partners: CANCEL SENDS NOTHING -- the classic acknowledged anyway', !b.calls.slice(pc0).some((c) => c.path === '/monitor/partner-ack') && !view().includes('data-ack-note="fail.co"'));
+  fire('click', el({ 'data-ack': 'fail.co', 'data-on': '1' })); fire('click', el({ 'data-ack-go': 'fail.co' })); await ticks(20);
+  const ackc = b.calls.slice(pc0).filter((c) => c.path === '/monitor/partner-ack');
+  ok('partners: one POST, a JSON body with the BOOLEAN, the token in the query', ackc.length === 1 && ackc[0].method === 'POST' && ackc[0].q.token === TOKEN && ackc[0].headers && ackc[0].headers['Content-Type'] === 'application/json' &&
+     JSON.stringify(JSON.parse(ackc[0].body)) === JSON.stringify({ customer_key: 'fail.co', note: '', acknowledged: true }), ackc[0] && ackc[0].body);
+  ok('partners: after the write, the programme is read again', b.calls.slice(pc0).filter((c) => c.path === '/monitor/partners').length >= 1);
+  const pc1 = b.calls.length;
+  fire('click', el({ 'data-ack': 'acked.co', 'data-on': '0' })); await ticks(20);
+  const unack = b.calls.slice(pc1).find((c) => c.path === '/monitor/partner-ack');
+  ok('partners: un-acknowledge sends the JSON FALSE -- a string would acknowledge', unack && JSON.parse(unack.body).acknowledged === false && typeof JSON.parse(unack.body).acknowledged === 'boolean');
+  /* gaps unreadable: unavailable, never zero */
+  gapsDown = true; GW.TABS.partners._set(PARTNERS, null); await new Promise((r) => { b.intervals.filter((x) => x.ms === 600000).forEach((x) => x.fn()); setImmediate(r); }); await ticks(20); v = view(); gapsDown = false;
+  ok('partners: revenue gaps that cannot be read say UNAVAILABLE, never zero', /id="p-gaps"[\s\S]*?Partner revenue gaps could not be read/.test(v) && !/id="p-gaps"[\s\S]*?data-v="0"/.test(v));
+  /* the drill-down: a partner's leads, on the new All leads */
+  const pc2 = b.calls.length;
+  fire('click', el({ 'data-pdrill': 'pk_a' })); await ticks(20);
+  ok('partners: "See this partner\'s leads" opens All leads filtered on that partner', GW.current() === 'leads' && GW.S.q.partner === 'pk_a' && b.calls.slice(pc2).some((c) => c.path === '/monitor/leads' && c.q.partner === 'pk_a'));
+  GW.show('partners'); await ticks(20);
+
   /* Hash, tabs, nav */
-  ok('nav: every rebuilt tab is registered with activate and deactivate', ['overview', 'health', 'dropoff', 'dupes', 'lm', 'leads', 'blocked', 'sdr', 'model', 'visitors'].every((t) => GW.TABS[t] && GW.TABS[t].activate && GW.TABS[t].deactivate && GW.TABS[t].title));
-  ok('nav: switching tab writes the hash', /tab=visitors/.test(b.window.location.hash) && /days=90/.test(b.window.location.hash), b.window.location.hash);
+  ok('nav: every rebuilt tab is registered with activate and deactivate', ['overview', 'health', 'dropoff', 'dupes', 'lm', 'leads', 'blocked', 'sdr', 'model', 'visitors', 'partners'].every((t) => GW.TABS[t] && GW.TABS[t].activate && GW.TABS[t].deactivate && GW.TABS[t].title));
+  ok('nav: switching tab writes the hash', /tab=partners/.test(b.window.location.hash), b.window.location.hash);
   const navHtml = b.els['nav-side'] ? b.els['nav-side'].innerHTML : '';
-  ok('nav: the tabs not rebuilt link to the classic dashboard', /href="\/monitor\?token=[^"]*#tab=partners"/.test(navHtml));
+  /* EVERY tab is rebuilt: no nav row leaves for the classic page, and the
+     sidebar footer is the one way back to it until the switch (PR D) */
+  ok('nav: no nav row links to the classic dashboard any more', !/class="nav" href="\/monitor\?token=/.test(navHtml) && !/\(classic dashboard\)/.test(navHtml));
+  ok('nav: the classic dashboard is still one click away, in the footer', /<a href="\/monitor\?token=[^"]*">Open the classic dashboard<\/a>/.test(html));
   ok('nav: All leads and Blocked are rebuilt, no longer classic links', /data-tab="leads"/.test(navHtml) && /data-tab="blocked"/.test(navHtml) && !/href="\/monitor\?token=[^"]*#tab=leads"/.test(navHtml) && !/href="\/monitor\?token=[^"]*#tab=blocked"/.test(navHtml));
-  ok('nav: a classic link says it leaves', /\(classic dashboard\)/.test(navHtml));
   /* the last health run could not reach /monitor/health: all nine server
      checks are red, and the badge -- now set by System health too -- says 9 */
   ok('nav: the badge follows the LATEST run, from either tab', /data-tab="health"[\s\S]*?<span class="badge b-bad">9<span class="sr-only"> checks red<\/span>/.test(navHtml), (navHtml.match(/data-tab="health"[^]*?<\/a>/) || [''])[0].slice(0, 300));

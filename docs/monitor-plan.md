@@ -317,7 +317,12 @@ _(kept current as the work moves)_
     after each repaint. Networks are merged by name in the browser. The
     tests run the drawing code through a stand-in Leaflet. Live: 1,344
     leads in 30 days, 124 places drawn.
-  - [ ] Partners
+  - [x] **Partners** (`partners.js`). The eight-state ladder, the
+    Salesforce splits, the funnel (absolute headline, stage-to-stage rates,
+    nothing below 10), partner revenue gaps (moved here), per company and
+    per partner. The ack is inline and Cancel sends nothing; the POST's JSON
+    body is test-driven. The drill-down opens All leads filtered on that
+    partner. Live: 8 partner companies, 5 conversions, 2 qualified.
 - [ ] Number-for-number checks against the classic, live, read-only
 - [ ] Layout check, screenshots by eye
 - [ ] Mutation tests
