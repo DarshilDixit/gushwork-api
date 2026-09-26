@@ -582,8 +582,25 @@ Darshil asked.
 - the mutation run over 38 guards, in a scratch worktree (results on the
   card).
 
-**Status:** the card is `cards/PR-125-monitor-next-d.md`. The branch is
-pushed and the PR opened. **STOP: merge only on Darshil's explicit word.**
+**Status (27 Sept):** **PR #125 is open**; the card is
+`cards/PR-125-monitor-next-d.md`. **STOP: merge only on Darshil's explicit
+word.**
+
+**Final checks:**
+- two review passes, with every finding fixed;
+- 43 mutations: 41 caught, D27 caught by two suites while four stop at a
+  lift marker, and D38 in the preview tool, which no suite covers;
+- the bar: 4,979 assertions, 0 failures.
+
+**Opened the same day, separate from the dashboard:**
+- **#126:** the non-ICP name-only floor. **Changes blocking and Meta**, as
+  decided.
+- **#127:** the Apollo backfill carry-out tool and the health-rate fix.
+  Its writes are already done.
+
+**All three touch `index.js`, `CLAUDE.md` and `tests/.baseline.json`.**
+Merge them one at a time and rebase the rest after each; the baseline file
+will conflict every time. Re-save it from a bare bar, never by hand.
 After the merge:
 - confirm read-only that `/monitor` serves the new page, `/monitor/next`
   redirects, and `/monitor/classic` is the classic;
