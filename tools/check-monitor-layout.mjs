@@ -29,14 +29,22 @@
    Exit 0 only when every combination is clean. Screenshots land in OUT.
    ============================================================================ */
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const READY = process.env.PREVIEW_READY_FILE;
 const cfg = READY && existsSync(READY) ? JSON.parse(readFileSync(READY, 'utf8')) : {};
 const BASE = process.env.BASE || `http://localhost:${cfg.port || 4411}`;
 const TOKEN = process.env.MONITOR_TOKEN || cfg.token || '';
-const OUT = process.env.OUT || './layout-shots';
-const WIDTHS = (process.env.WIDTHS || '360,390,414,768,1024,1440').split(',').map(Number);
+/* OUTSIDE THE REPO by default. The +open pages photograph real people's
+   emails, phones and addresses, and the repo is public (jsDelivr serves the
+   form files from it) -- a screenshot folder in the working tree is one
+   "git add ." from being published. */
+const OUT = process.env.OUT || join(tmpdir(), 'gw-layout-shots');
+/* 1280 is in the list on purpose: it lands inside the 900-1099px content band
+   where optional columns hide, which neither 1024 nor 1440 reaches */
+const WIDTHS = (process.env.WIDTHS || '360,390,414,768,1024,1280,1440').split(',').map(Number);
 const THEMES = (process.env.THEMES || 'light,dark').split(',');
 /* tab[:view[:mod]], or tab?key=value&... for a tab's own filters (the map);
    a trailing +open expands the first eight rows, so the detail panels -- and
@@ -45,8 +53,15 @@ const PAGES = (process.env.PAGES || 'overview:today,overview:week,overview:all,o
 const SHOTS = process.env.SHOTS !== '0';
 mkdirSync(OUT, { recursive: true });
 
+/* its own throwaway profile, deleted on the way out: the history in it holds
+   the token-bearing URL */
+const PROFILE = mkdtempSync(join(tmpdir(), 'gw-layout-profile-'));
 const chrome = spawn('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', ['--headless=new', '--remote-debugging-port=9335',
-  '--user-data-dir=' + OUT + '/.profile', '--no-first-run', '--hide-scrollbars', '--force-color-profile=srgb', 'about:blank'], { stdio: 'ignore' });
+  '--user-data-dir=' + PROFILE, '--no-first-run', '--hide-scrollbars', '--force-color-profile=srgb', 'about:blank'], { stdio: 'ignore' });
+const cleanup = () => { try { chrome.kill(); } catch {} try { rmSync(PROFILE, { recursive: true, force: true }); } catch {} };
+process.on('exit', cleanup);
+process.on('uncaughtException', (e) => { console.error(e); cleanup(); process.exit(2); });
+process.on('unhandledRejection', (e) => { console.error(e); cleanup(); process.exit(2); });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let t; for (let i = 0; i < 60; i++) { try { t = await (await fetch('http://127.0.0.1:9335/json')).json(); if (t.length) break; } catch {} await sleep(250); }
 const ws = new WebSocket(t.find((x) => x.type === 'page').webSocketDebuggerUrl);
@@ -224,5 +239,5 @@ const bad = results.filter((r) => r.issues.length);
 const byKind = {}; bad.forEach((r) => r.issues.forEach((i) => { byKind[i.kind] = (byKind[i.kind] || 0) + 1; }));
 console.log(`\n${results.length} combinations, ${bad.length} with findings` + (bad.length ? ' — ' + Object.entries(byKind).map(([k, n]) => k + ' ' + n).join(', ') : ''));
 for (const r of bad.slice(0, 40)) { console.log(' ✗ ' + r.label); for (const i of r.issues.slice(0, 6)) console.log('     ' + i.kind + ': ' + i.what); }
-ws.close(); chrome.kill();
+ws.close(); cleanup();
 process.exit(bad.length ? 1 : 0);

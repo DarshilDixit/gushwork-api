@@ -57,7 +57,7 @@ GW.TABS.sdr = (function (G) {
     var body;
     if (!d && err) body = '<section class="card panel">' + U.unavailable('The SDR list', err) + '</section>';
     else if (!d) body = U.loading(5);
-    else body = (err ? '<div class="readat"><span class="badge b-warn">Last refresh failed (' + esc(String(err).slice(0, 40)) + ') — showing the previous read</span></div>' : '') +
+    else body = U.drawn('The SDR list', function () { return (err ? '<div class="readat"><span class="badge b-warn">Last refresh failed (' + esc(String(err).slice(0, 40)) + ') — showing the previous read</span></div>' : '') +
       '<section class="card">' + U.rtable({ ns: 'sdr', rows: page, key: function (l) { return String(l.email).toLowerCase(); }, rowName: function (l) { return l.email; },
         emptyTitle: t ? 'No one matches' : 'Nobody to call right now', emptyBody: t ? 'The search looks at email, company, first name and industry.' : 'Everyone qualifying has a booking.',
         cols: [
@@ -69,16 +69,25 @@ GW.TABS.sdr = (function (G) {
           { label: 'Industry', opt: 1, get: function (l) { return l.enriched_industry || '—'; } },
           /* booked and disqualified never reach this list, so the ladder is two rungs here */
           { label: 'Stage', html: L.stageBadge },
-          { label: 'Last attempt (ET)', cls: 'm', get: function (l) { return G.et(l.created_at); } },
+          /* the newest attempt that QUALIFIED -- a later B2C or blocked visit is not it */
+          { label: 'Newest qualifying attempt (ET)', cls: 'm', get: function (l) { return G.et(l.created_at); } },
         ], detail: detail }) +
-      (more > 0 ? '<div class="more"><span>Showing ' + fmt(page.length) + ' of ' + fmt(rows.length) + '</span><button class="btn" data-more="sdr">Show ' + fmt(Math.min(PAGE, more)) + ' more</button></div>' : '') + '</section>';
+      (more > 0 ? '<div class="more"><span>Showing ' + fmt(page.length) + ' of ' + fmt(rows.length) + '</span><button class="btn" data-more="sdr">Show ' + fmt(Math.min(PAGE, more)) + ' more</button></div>' : '') + '</section>'; });
     G.paint(root, head + body);
   }
+  var said = null;
   if (typeof document !== 'undefined' && document.addEventListener) {
-    document.addEventListener('input', function (e) { if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-sdr-q')) { q = e.target.value; shown = PAGE; render(); } });
+    document.addEventListener('input', function (e) {
+      if (!(e.target && e.target.hasAttribute && e.target.hasAttribute('data-sdr-q'))) return;
+      q = e.target.value; shown = PAGE; render();
+      /* said once the typing pauses, not on every key */
+      clearTimeout(said); said = setTimeout(function () { if (G.current() !== 'sdr' || !data) return; var n = (data.leads || []).filter(matches).length; G.announce(term() ? fmt(n) + ' ' + G.plural(n, 'person matches', 'people match') + ' the search' : fmt(data.total) + ' ' + G.plural(data.total, 'person', 'people') + ' to call'); }, 700);
+    });
     document.addEventListener('click', function (e) {
       var t = e.target && e.target.closest ? e.target : null; if (!t || (G.current && G.current() !== 'sdr')) return;
-      if (t.closest('[data-more="sdr"]')) { shown += PAGE; render(); return; }
+      /* the last "Show more" removes itself: focus the first person it revealed */
+      if (t.closest('[data-more="sdr"]')) { var from = shown; shown += PAGE; render();
+        if (!root.querySelector('[data-more="sdr"]')) { var xs = root.querySelectorAll('[data-x^="sdr-"]'); if (xs[from] && xs[from].focus) xs[from].focus(); } return; }
       /* the export carries the SAME trimmed term the table is filtered by */
       if (t.closest('[data-sdr-csv]')) { window.location.href = G.url('/monitor/sdr', { format: 'csv', search: String(q).trim() }); }
     });

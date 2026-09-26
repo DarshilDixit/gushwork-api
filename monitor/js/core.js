@@ -26,7 +26,7 @@ var GW = (function () {
      skipped, never fatal. */
   function readHash() {
     var h = String((window.location && window.location.hash) || '').replace(/^#/, '');
-    var p = {};
+    var p = Object.create(null);   /* keys come from the link */
     h.split('&').forEach(function (kv) { var i = kv.indexOf('='); if (i > 0) { try { p[decodeURIComponent(kv.slice(0, i))] = decodeURIComponent(kv.slice(i + 1)); } catch (e) {} } });
     if (!p.tab) return false;
     S.tab = p.tab;
@@ -158,8 +158,8 @@ var GW = (function () {
   var FOCUS_KEYS = ['data-view', 'data-unit', 'data-table-toggle', 'data-attn', 'data-tab', 'data-dp', 'data-dupes', 'data-dupes-q', 'data-more',
                     'data-lm-pill', 'data-lm-q', 'data-lm-days', 'data-lm-csv', 'data-lm-mark', 'data-lm-retry', 'data-recheck', 'data-x', 'data-refresh',
                     /* PR C: All leads, Blocked, SDR, Partners, Model, Visitors */
-                    'data-lf', 'data-lsort', 'data-pg', 'data-lmore', 'data-lcsv', 'data-lclear', 'data-blk', 'data-sdr-q', 'data-sdr-csv',
-                    'data-psort', 'data-pdrill', 'data-ack', 'data-ack-go', 'data-ack-cancel', 'data-ack-note', 'data-mdl', 'data-vis', 'data-vis-map'];
+                    'data-lf', 'data-lsortsel', 'data-lsort', 'data-pg-step', 'data-pg', 'data-lmore', 'data-lcsv', 'data-lclear', 'data-blk', 'data-sdr-q', 'data-sdr-csv',
+                    'data-psortsel', 'data-psort', 'data-pdrill', 'data-ack', 'data-ack-go', 'data-ack-cancel', 'data-ack-note', 'data-mdl', 'data-vis', 'data-vis-map'];
   function focusSel(el) {
     if (!el || !el.getAttribute) return null;
     for (var i = 0; i < FOCUS_KEYS.length; i++) {
@@ -184,6 +184,9 @@ var GW = (function () {
     });
     if (sel && root.querySelector) {
       var n = root.querySelector(sel);
+      /* the same control, now DISABLED (Next on the last page): focus goes to
+         the current choice beside it, never silently to the page body */
+      if (n && n.disabled && n.parentNode && n.parentNode.querySelector) n = n.parentNode.querySelector('[aria-current]') || n.parentNode.querySelector('button:not([disabled])') || n;
       if (n && n.focus) { try { n.focus({ preventScroll: true }); } catch (e) { n.focus(); } if (caret && n.setSelectionRange) { try { n.setSelectionRange(caret[0], caret[1]); } catch (e) {} } }
     }
   }

@@ -35,15 +35,16 @@ GW.TABS.visitors = (function (G) {
      three zoom levels and looked at -- before it was added. */
   var TILES = { light: 'https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
                 dark: 'https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}' };
-  var data = null, err = null, root = null, seq = 0, libState = null, mapEl = null, map = null, layer = null, tiles = null, tilesFor = null;
+  var data = null, err = null, root = null, seq = 0, busy = false, libState = null, mapEl = null, map = null, layer = null, tiles = null, tilesFor = null, drawnFor = null, fitFor = null;
   function days() { var d = G.S.q.days; return DAYS.some(function (x) { return x[0] === d; }) ? d : '30'; }
   function mapOn() { return G.S.q.map === '1'; }
   function load() {
-    var my = ++seq;
+    var my = ++seq; busy = true;
     return G.api('/monitor/visitors', { days: days() }, { timeout: 20000 })
-      .then(function (d) { if (my === seq) { data = d; err = null; } }, function (e) { if (my === seq) err = e.message; });
+      .then(function (d) { if (my === seq) { data = d; err = null; } }, function (e) { if (my === seq) err = e.message; })
+      .then(function () { if (my === seq) busy = false; });
   }
-  function activate(el) { root = el; render(); G.every('visitors', 300000, function () { load().then(render); }); return load().then(render); }
+  function activate(el) { root = el; var p = load(); render(); G.every('visitors', 300000, function () { load().then(render); }); return p.then(render); }
   function deactivate() { G.stop('visitors'); root = null; }
   function where(r) { return [r.city, r.region, r.country].filter(Boolean).join(', ') || '—'; }
   /* The visitor's OWN zone -- the one deliberate non-ET time on the
@@ -106,7 +107,7 @@ GW.TABS.visitors = (function (G) {
           { label: 'Leads', html: function (p) { return bar(p.leads, pmax); } },
           { label: 'People', get: function (p) { return fmt(p.people); } },
           { label: 'Booked', get: function (p) { return fmt(p.booked); } },
-        ], pl) : U.empty('Nothing resolved in this window')) +
+        ], pl, { region: 'Where they were' }) : U.empty('Nothing resolved in this window')) +
         (pl.length >= 500 ? '<p class="lnote">The 500 places with the most leads; the country totals above add up those 500.</p>' : '') });
     h += U.panel({ id: 'vis-networks', title: 'Networks', qual: 'who provides their connection',
       body: '<p class="lnote">A business provider is a different signal from home broadband. One provider seen under several domains is one row, with every domain listed.</p>' +
@@ -116,7 +117,7 @@ GW.TABS.visitors = (function (G) {
           { label: 'Leads', html: function (n) { return bar(n.leads, nmax); } },
           { label: 'People', get: function (n) { return fmt(n.people); } },
           { label: 'Booked', get: function (n) { return fmt(n.booked); } },
-        ], nets) : U.empty('Nothing resolved in this window')) +
+        ], nets, { region: 'Networks' }) : U.empty('Nothing resolved in this window')) +
         (nets.length ? '<p class="lnote">People is added up across a provider’s domains, so one person seen on two of them counts twice.' + ((d.networks || []).length >= 100 ? ' These are the 100 busiest.' : '') + '</p>' : '') });
     h += U.panel({ id: 'vis-zones', title: 'Time zones', qual: 'what time it is where they are, for whoever is calling',
       body: tz.length ? U.grid([
@@ -124,7 +125,7 @@ GW.TABS.visitors = (function (G) {
         { label: 'Local time now', get: function (z) { return localNow(z.timezone) || '—'; } },
         { label: 'Leads', html: function (z) { return bar(z.leads, tmax); } },
         { label: 'Booked', get: function (z) { return fmt(z.booked); } },
-      ], tz) +
+      ], tz, { region: 'Time zones' }) +
         (tz.length >= 60 ? '<p class="lnote">The 60 busiest time zones.</p>' : '') : U.empty('Nothing resolved in this window') });
     return h;
   }
@@ -170,33 +171,44 @@ GW.TABS.visitors = (function (G) {
     } else if (mapEl.parentNode !== slot) slot.appendChild(mapEl);
     setTiles();
     setTimeout(function () { if (map) map.invalidateSize(); }, 0);
-    if (layer) { map.removeLayer(layer); layer = null; }
     var pts = points(d), max = pts.reduce(function (a, p) { return Math.max(a, p.leads || 0); }, 0);
-    layer = Lf.layerGroup(pts.map(function (p) {
-      var name = [p.city, p.region, p.country].filter(Boolean).join(', ') || 'Unknown place';
-      return Lf.circleMarker([p.lat, p.lon], { radius: radius(p.leads, max), weight: 2, className: 'vdot' })
-        .bindPopup('<b>' + esc(name) + '</b><br>' + fmt(p.leads) + ' ' + G.plural(p.leads, 'lead') + '<br>' + fmt(p.people) + ' ' + G.plural(p.people, 'person', 'people') + '<br>' + fmt(p.booked) + ' booked');
-    })).addTo(map);
-    if (pts.length) map.fitBounds(Lf.latLngBounds(pts.map(function (p) { return [p.lat, p.lon]; })).pad(0.2));
+    /* THE READER'S PLACE SURVIVES A REFRESH. A repaint of the same read
+       (a width change, a theme switch) keeps the circles and any open popup;
+       new data swaps the circles and keeps the view; only a new window, or
+       the first draw, re-fits the map to its points. */
+    if (d !== drawnFor) {
+      if (layer) { map.removeLayer(layer); layer = null; }
+      layer = Lf.layerGroup(pts.map(function (p) {
+        var name = [p.city, p.region, p.country].filter(Boolean).join(', ') || 'Unknown place';
+        return Lf.circleMarker([p.lat, p.lon], { radius: radius(p.leads, max), weight: 2, className: 'vdot' })
+          .bindPopup('<b>' + esc(name) + '</b><br>' + fmt(p.leads) + ' ' + G.plural(p.leads, 'lead') + '<br>' + fmt(p.people) + ' ' + G.plural(p.people, 'person', 'people') + '<br>' + fmt(p.booked) + ' booked');
+      })).addTo(map);
+      drawnFor = d;
+    }
+    var wk = String(d.window_days);
+    if (pts.length && fitFor !== wk) { map.fitBounds(Lf.latLngBounds(pts.map(function (p) { return [p.lat, p.lon]; })).pad(0.2)); fitFor = wk; }
     var miss = ((d.places && d.places.rows) || []).length - pts.length;
     if (note) note.innerHTML = fmt(pts.length) + ' ' + G.plural(pts.length, 'place') + ' drawn' +
-      (miss > 0 ? '; <b>' + fmt(miss) + '</b> more resolved to a city but have no coordinates, so they cannot be placed — they are all in the tables.' : '.') + ' Circles are sized by lead count: twice the leads, twice the area.';
+      (miss > 0 ? '; <b>' + fmt(miss) + '</b> more resolved to a city but have no coordinates, so they cannot be placed — they are all in the tables.' : '.') + ' A circle’s area grows with its lead count, from a minimum size so a single lead stays visible.';
     return { drawn: pts.length, miss: miss };
   }
 
   function render() {
     if (!root || (G.current && G.current() !== 'visitors')) return;
     var d = data, on = mapOn();
-    var head = '<section class="ph"><div class="ph-top"><h1 class="title" tabindex="-1">Visitors</h1><span class="readat">' + (d ? 'Window ' + esc(String(d.window_days)) + ' days' : '') + '</span></div>' +
+    var stale = d && (busy || String(d.window_days) !== days());
+    var head = '<section class="ph"><div class="ph-top"><h1 class="title" tabindex="-1">Visitors</h1><span class="readat">' + (d ? 'Window ' + esc(String(d.window_days)) + ' days' : '') + (stale ? ' · updating…' : '') + '</span></div>' +
       '<p class="lede">Where people actually were when they filled the form, from their IP address. Different from <b>Person location</b> on a lead, which is Apollo’s record of where the person is based; the company’s own address is Company HQ.</p>' +
       '<div class="controls"><label class="lfl inline"><span>Window</span><select class="field" data-vis="days">' + DAYS.map(function (o) { return '<option value="' + o[0] + '"' + (o[0] === days() ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select></label>' +
-      '<button class="btn" data-vis-map aria-pressed="' + on + '">' + G.ic(on ? 'table' : 'map-trifold') + (on ? 'Show tables' : 'Show map') + '</button></div></section>';
+      /* the label says what the button DOES; with aria-pressed as well a
+         screen reader heard "Show tables, pressed" while the map was open */
+      '<button class="btn" data-vis-map>' + G.ic(on ? 'table' : 'map-trifold') + (on ? 'Show tables' : 'Show map') + '</button></div></section>';
     var body;
     if (!d && err) body = '<section class="card panel">' + U.unavailable('Visitors', err) + '</section>';
     else if (!d) body = U.loading(4);
-    else body = (err ? '<div class="readat"><span class="badge b-warn">Last refresh failed (' + esc(String(err).slice(0, 40)) + ') — showing the previous read</span></div>' : '') +
+    else body = U.drawn('Visitors', function () { return (err ? '<div class="readat"><span class="badge b-warn">Last refresh failed (' + esc(String(err).slice(0, 40)) + ') — showing the previous read</span></div>' : '') +
       U.panel({ id: 'vis-cov', title: 'Coverage', qual: 'this window', body: coverage(d.coverage || {}) }) +
-      (on ? U.panel({ id: 'vis-map', title: 'Map', qual: 'places in the window', body: '<div id="vis-map-slot" class="vmap-slot"></div><p class="lnote" id="vis-map-note">Loading the map…</p>' }) : lists(d));
+      (on ? U.panel({ id: 'vis-map', title: 'Map', qual: 'places in the window', body: '<div id="vis-map-slot" class="vmap-slot"></div><p class="lnote" id="vis-map-note">Loading the map…</p>' }) : lists(d)); });
     if (mapEl && mapEl.parentNode) mapEl.parentNode.removeChild(mapEl);   /* keep the container alive across the repaint */
     G.paint(root, head + body);
     if (d && on) loadLeaflet().then(function () { if (G.current() === 'visitors' && mapOn()) drawMap(data); });
@@ -205,7 +217,8 @@ GW.TABS.visitors = (function (G) {
     document.addEventListener('change', function (e) {
       var el = e.target; if (!el || !el.getAttribute || G.current() !== 'visitors' || el.getAttribute('data-vis') !== 'days') return;
       if (el.value === '30') delete G.S.q.days; else G.S.q.days = el.value;
-      G.writeHash(); render(); load().then(render);
+      G.writeHash(); var p = load(); render();
+      p.then(function () { if (G.current() !== 'visitors') return; render(); var c = data && data.coverage; if (c) G.announce(fmt(c.leads) + ' ' + G.plural(c.leads, 'lead') + ' in the last ' + esc(String(data.window_days)) + ' days'); });
     });
     document.addEventListener('click', function (e) {
       var t = e.target && e.target.closest ? e.target.closest('[data-vis-map]') : null; if (!t || G.current() !== 'visitors') return;

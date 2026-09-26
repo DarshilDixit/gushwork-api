@@ -23,8 +23,12 @@
      so the log must come from here rather than from a one-shot fetch that the
      next repaint throws away. Three states, never two: "loading", "ok" with
      rows (possibly none), and "error" -- an unreadable history is not a clean
-     one, and it is retried on the next open. */
-  var changes = {};
+     one, and it is retried on the next open.
+     NO PROTOTYPE: the key is a session_id, which is whatever the browser sent
+     /partial. On a plain {} a lead with session_id "constructor" found
+     Object's own constructor here, read it as a cached log, and threw -- and
+     All leads never painted again while that row was on page 1. */
+  var changes = Object.create(null);
   function link(v) { var h = G.href(v); return h ? '<a href="' + esc(h) + '" target="_blank" rel="noopener noreferrer">' + esc(v) + '</a>' : esc(v); }
   function group(title, fields) {
     var f = fields.filter(function (x) { return x && x[1] !== null && x[1] !== undefined && x[1] !== ''; });
@@ -97,7 +101,7 @@
       group('Visitor — from their IP address', [['Location', [l.ip_city, l.ip_region, l.ip_country].filter(Boolean).join(', ')], ['Timezone', l.ip_timezone],
         ['Network', l.ip_isp ? l.ip_isp + (l.ip_org_domain ? ' (' + l.ip_org_domain + ')' : '') : ''], kvm('IP address', l.ip_address)]) +
       group('Form &amp; enrichment', [['Title', l.enriched_title], ['Seniority', l.enriched_seniority], ['Department', l.enriched_departments], ['Email status (Apollo)', l.enriched_email_status],
-        ['Company', l.company || l.e_company], ['Company size', l.enriched_company_size], ['Industry', l.enriched_industry], ['Founded', l.enriched_founded_year],
+        ['Company', l.company || l.e_company], ['Sells to (as stored)', /^B2B \(clarified from /.test(l.sell_to || '') ? l.sell_to : null], ['Company size', l.enriched_company_size], ['Industry', l.enriched_industry], ['Founded', l.enriched_founded_year],
         ['Annual revenue', l.enriched_annual_revenue], ['Total funding', l.enriched_total_funding], ['Funding stage', l.enriched_funding_stage], ['Funding events', l.enriched_funding_events],
         ['Alexa rank', l.enriched_alexa_ranking], ['Keywords', l.enriched_keywords],
         /* Apollo's PERSON record (apolloEnrichmentFields reads person.city);
@@ -127,7 +131,7 @@
       { label: 'Change', html: function (x) { return esc(x.old_value || '—') + ' → ' + esc(x.new_value || '—') + (x.booking_uid_present ? ' <span class="badge b-neu">after booking</span>' : ''); } },
       { label: 'Who', html: function (x) { var w = L.changeWho(x.attribution); return w.badge ? '<span class="badge b-neu">' + esc(w.t) + '</span>' : '<span class="na">' + esc(w.t) + '</span>'; } },
       { label: 'Where', html: function (x) { var wh = L.changeWhere(x); return esc(x.source_route || '') + (wh ? '<div class="na">' + esc(wh) + '</div>' : ''); } },
-    ], c.rows) + (c.rows.length >= 200 ? '<div class="lnote">Showing the first 200 changes; there may be more.</div>' : '');
+    ], c.rows, { region: 'What changed on this lead' }) + (c.rows.length >= 200 ? '<div class="lnote">Showing the first 200 changes; there may be more.</div>' : '');
   }
   /* The RAW session_id addresses the lead; the row key addresses the DOM.
      Never swap them (the classic incident). */
@@ -241,6 +245,10 @@
   function preset() {
     var f = val('dateFrom'), t = val('dateTo'), d = today();
     if (!f && !t) return '';
+    /* "Custom" is the one preset the dates cannot say: seeded with the last
+       seven days it read back as "Last 7 days", so choosing it snapped the
+       select back and the From/To boxes never appeared. It is remembered. */
+    if (G.S.q.dp === 'custom') return 'custom';
     if (t === d && f === d) return 'today';
     if (t === d && f === minusDays(d, 6)) return '7d';
     if (t === d && f === minusDays(d, 29)) return '30d';
@@ -250,8 +258,14 @@
     var n = 0; Object.keys(DEF).forEach(function (k) { var v = val(k); if (k === 'search' || k === 'hearAbout') v = String(v).trim(); if (k !== 'dateFrom' && k !== 'dateTo' && v !== DEF[k]) n++; });
     return n + (val('dateFrom') || val('dateTo') ? 1 : 0);
   }
+  /* The sort comes from the link, so it is held to the columns the table
+     offers: the server looks it up in a plain object, and sort=constructor
+     put Object's own source text into ORDER BY and answered 500. */
+  var SORTS = 'email name company sell_to created_at'.split(' ');   /* a string, not an array: the icon check reads a three-string array as a nav entry */
+  function sortKey() { return SORTS.indexOf(G.S.q.sort) >= 0 ? G.S.q.sort : 'created_at'; }
+  function sortDir() { return G.S.q.dir === 'asc' ? 'asc' : 'desc'; }
   function params(extra) {
-    var p = { stage: val('stage'), sort: G.S.q.sort || 'created_at', dir: G.S.q.dir || 'desc' };
+    var p = { stage: val('stage'), sort: sortKey(), dir: sortDir() };
     /* typed text is kept as typed (so a space between two words survives the
        repaint) and trimmed only on the way to the server, as the server does */
     Object.keys(DEF).forEach(function (k) { if (k === 'stage') return; var v = val(k); if (k === 'search' || k === 'hearAbout') v = String(v).trim(); if (v !== DEF[k]) p[k] = v; });
@@ -264,18 +278,20 @@
     function load() {
       var my = ++seq; busy = true;
       return G.api('/monitor/leads', params({ page: page() }), { timeout: 20000 })
-        .then(function (d) { if (my === seq) { data = d; err = null; } }, function (e) { if (my === seq) err = e.message; })
+        .then(function (d) { if (my !== seq) return; if (pastEnd(d)) return load(); data = d; err = null; }, function (e) { if (my === seq) err = e.message; })
         .then(function () { if (my === seq) busy = false; });
     }
     function loadOpts() {
       return G.api('/monitor/filter-options', {}, { timeout: 15000 }).then(function (d) { opts = d; optsErr = null; }, function (e) { optsErr = e.message; });
     }
+    /* load BEFORE the first paint, so "updating…" shows over the old rows
+       instead of the old count sitting under new filters */
     function activate(el) {
-      root = el; render();
+      root = el; var p = Promise.all([load(), opts ? null : loadOpts()]); render();
       G.every('leads', 300000, function () { load().then(render); });
-      return Promise.all([load(), opts ? null : loadOpts()]).then(render);
+      return p.then(render);
     }
-    function deactivate() { G.stop('leads'); root = null; }
+    function deactivate() { G.stop('leads'); root = null; clearTimeout(tmr); }
     function sel(k, label, list) {
       var v = val(k);
       if (list.every(function (o) { return o[0] !== v; })) list = list.concat([[v, v]]);   /* a value from a link that is not in the list still shows as chosen */
@@ -287,11 +303,18 @@
       if (k === 'partner') return [['all', 'Any'], ['__any', 'Any partner'], ['__none', 'No partner']].concat(((opts && opts.partners) || []).map(function (p) { return [p.key, p.name || p.email || p.key]; }));
       return null;
     }
+    /* a direction the header set that the list above does not name */
+    function sortExtra() { var v = sortKey() + ':' + sortDir(), known = ['created_at:desc', 'created_at:asc', 'email:asc', 'name:asc', 'company:asc', 'sell_to:asc'];
+      return known.indexOf(v) >= 0 ? [] : [[v, ({ email: 'Email', name: 'Name', company: 'Company', sell_to: 'Sells to' })[sortKey()] + (sortDir() === 'asc' ? ' A–Z' : ' Z–A')]]; }
     function controls() {
       var n = active(), pr = preset();
       var top = '<div class="lf-top"><input class="field search" type="search" data-lf="search" placeholder="Search email, name, company, website, phone" aria-label="Search leads by email, first or last name, company, website, or phone number" value="' + esc(val('search')) + '">' +
         '<select class="field" data-lf="stage" aria-label="Stage">' + STAGES.map(function (o) { return '<option value="' + o[0] + '"' + (o[0] === val('stage') ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select>' +
         '<button class="btn" data-lmore aria-expanded="' + open + '" aria-controls="lf-panel">' + G.ic('sliders-horizontal') + 'Filters' + (n ? ' <span class="badge b-neu">' + n + '</span>' : '') + '</button>' +
+        /* the column headers ARE the sort controls, and a card view has no
+           header row -- so below 900 the same choice is a select */
+        '<select class="field cardsort" data-lsortsel aria-label="Sort by">' + [['created_at:desc', 'Newest first'], ['created_at:asc', 'Oldest first'], ['email:asc', 'Email A–Z'], ['name:asc', 'Name A–Z'],
+          ['company:asc', 'Company A–Z'], ['sell_to:asc', 'Sells to A–Z']].concat(sortExtra()).map(function (o) { return '<option value="' + o[0] + '"' + (o[0] === sortKey() + ':' + sortDir() ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select>' +
         (n ? '<button class="btn" data-lclear>' + G.ic('x') + 'Clear</button>' : '') +
         '<button class="btn" data-lcsv>' + G.ic('download-simple') + 'Export CSV</button></div>';
       var panel = '<div class="lf-panel" id="lf-panel"' + (open ? '' : ' hidden') + '>' +
@@ -309,32 +332,34 @@
       if (!root || (G.current && G.current() !== 'leads')) return;
       var d = data;
       var count = d ? '<b>' + fmt(d.total) + '</b> ' + G.plural(d.total, 'lead') + ' found' + (d.pages > 1 ? ' · page ' + fmt(d.page) + ' of ' + fmt(d.pages) : '') : '';
+      var sk = sortKey(), sd = sortDir();
       var head = '<section class="ph"><div class="ph-top"><h1 class="title" tabindex="-1">All leads</h1><span class="readat">' + count + (busy && d ? ' · updating…' : '') + '</span></div>' +
         '<p class="lede">One row per form session that got through step 1 — a person who tried twice is two rows. Blocked leads and our own tests are counted and marked, never hidden.</p>' +
         '<div class="controls lf">' + controls() + '</div></section>';
       var body;
       if (!d && err) body = '<section class="card panel">' + U.unavailable('All leads', err) + '</section>';
       else if (!d) body = U.loading(5);
-      else {
+      else body = U.drawn('All leads', function () {
         var n = active();
-        body = (err ? '<div class="readat"><span class="badge b-warn">Last refresh failed (' + esc(String(err).slice(0, 40)) + ') — showing the previous read</span></div>' : '') +
-          '<section class="card">' + table(d.leads || [], 'ld', { key: G.S.q.sort || 'created_at', dir: G.S.q.dir || 'desc', attr: 'data-lsort' },
+        return (err ? '<div class="readat"><span class="badge b-warn">Last refresh failed (' + esc(String(err).slice(0, 40)) + ') — showing the previous read</span></div>' : '') +
+          '<section class="card">' + table(d.leads || [], 'ld', { key: sk, dir: sd, attr: 'data-lsort' },
             n ? 'No leads match ' + n + ' active ' + G.plural(n, 'filter') : 'No leads yet', n ? 'Clear a filter, or clear them all.' : '') +
           U.pager(d.page, d.pages, 'data-pg') + '</section>';
-      }
+      });
       G.paint(root, head + body);
       afterPaint(root);
     }
     /* Partners' drill-down: "show me this partner's leads" */
     function openFiltered(q) { G.show('leads', true, q); }
-    return { title: 'All leads', activate: activate, deactivate: deactivate, render: render, load: load, openFiltered: openFiltered,
+    function said() { var d = data; return d ? fmt(d.total) + ' ' + G.plural(d.total, 'lead') + ' found' + (d.pages > 1 ? ', page ' + fmt(d.page) + ' of ' + fmt(d.pages) : '') : ''; }
+    return { title: 'All leads', activate: activate, deactivate: deactivate, render: render, load: load, openFiltered: openFiltered, said: said,
              toggle: function () { open = !open; render(); }, _set: function (d, o) { data = d; if (o) opts = o; }, _params: params };
   })();
 
   /* ── Blocked ───────────────────────────────────────────────────── */
   GW.TABS.blocked = (function () {
-    var data = null, err = null, tot = null, people = null, root = null, seq = 0;
-    function mode() { return G.S.q.internal || ''; }
+    var data = null, err = null, tot = null, people = null, root = null, seq = 0, busy = false, dm = '';
+    function mode() { var m = G.S.q.internal || ''; return m === 'only' || m === 'exclude' ? m : ''; }
     function page() { return Math.max(1, +G.S.q.page || 1); }
     function load() {
       var my = ++seq, m = mode(), base = { nonicp: 'only', stage: 'all', sort: 'created_at', dir: 'desc' };
@@ -345,12 +370,16 @@
          (non_icp_blocked, deduped by address). Only asked for with no filter,
          because that is the only population it describes. */
       var c = m ? Promise.resolve(null) : G.api('/monitor/metrics', {}, { timeout: 20000 }).then(function (d) { return d.peopleNonIcp; }, function () { return null; });
-      return Promise.all([a, b, c]).then(function (r) { if (my !== seq) return; data = r[0]; err = null; tot = r[1]; people = r[2]; }, function (e) { if (my === seq) err = e.message; });
+      busy = true;
+      /* dm is the mode THIS payload was fetched for: the header words its
+         number from the payload, never from the select, which moves first */
+      return Promise.all([a, b, c]).then(function (r) { if (my !== seq) return; if (pastEnd(r[0])) return load(); data = r[0]; dm = m; err = null; tot = r[1]; people = r[2]; }, function (e) { if (my === seq) err = e.message; })
+        .then(function () { if (my === seq) busy = false; });
     }
-    function activate(el) { root = el; render(); G.every('blocked', 300000, function () { load().then(render); }); return load().then(render); }
+    function activate(el) { root = el; var p = load(); render(); G.every('blocked', 300000, function () { load().then(render); }); return p.then(render); }
     function deactivate() { G.stop('blocked'); root = null; }
     function counts(d) {
-      var m = mode(), a = d.total;
+      var m = dm, a = d.total;
       if (m === 'only') return '<b>' + fmt(a) + '</b> of our own test ' + G.plural(a, 'lead') + ' blocked';
       if (m === 'exclude') return '<b>' + fmt(a) + '</b> ' + G.plural(a, 'lead') + ' blocked, not counting our own tests';
       return '<b>' + fmt(a) + '</b> ' + G.plural(a, 'lead') + ' blocked' + (people !== null && people !== undefined ? ' · <b>' + fmt(people) + '</b> ' + G.plural(people, 'person', 'people') : '') +
@@ -359,7 +388,7 @@
     function render() {
       if (!root || (G.current && G.current() !== 'blocked')) return;
       var d = data, m = mode();
-      var head = '<section class="ph"><div class="ph-top"><h1 class="title" tabindex="-1">Blocked</h1><span class="readat">' + (d ? counts(d) : '') + '</span></div>' +
+      var head = '<section class="ph"><div class="ph-top"><h1 class="title" tabindex="-1">Blocked</h1><span class="readat">' + (d ? counts(d) : '') + (busy && d ? ' · updating…' : '') + '</span></div>' +
         /* TRUE FOR EVERY ROW: a late model verdict marks a lead AFTER it has
            booked and never cancels the meeting, so "turned away before the
            calendar" was false for those. */
@@ -370,42 +399,65 @@
       var body;
       if (!d && err) body = '<section class="card panel">' + U.unavailable('Blocked leads', err) + '</section>';
       else if (!d) body = U.loading(4);
-      else body = (err ? '<div class="readat"><span class="badge b-warn">Last refresh failed (' + esc(String(err).slice(0, 40)) + ') — showing the previous read</span></div>' : '') +
+      else body = U.drawn('Blocked leads', function () { return (err ? '<div class="readat"><span class="badge b-warn">Last refresh failed (' + esc(String(err).slice(0, 40)) + ') — showing the previous read</span></div>' : '') +
         '<section class="card">' + table(d.leads || [], 'blk', null,
-          m === 'only' ? 'None of our own tests are blocked' : m === 'exclude' ? 'Nothing blocked apart from our own tests' : 'Nothing blocked',
-          m ? '' : 'Either the block is switched off or nobody has matched yet.') + U.pager(d.page, d.pages, 'data-pg') + '</section>' +
+          dm === 'only' ? 'None of our own tests are blocked' : dm === 'exclude' ? 'Nothing blocked apart from our own tests' : 'Nothing blocked',
+          dm ? '' : 'Either the block is switched off or nobody has matched yet.') + U.pager(d.page, d.pages, 'data-pg') + '</section>'; }) +
         '<p class="foot"><span>The chip on each row says which check blocked it. A brand-list block comes from NON_ICP_DOMAINS and stops with NON_ICP_BLOCK=false; an AI-check block stops with NON_ICP_LLM_BLOCK=false. Either takes effect on Railway without a deploy.</span></p>';
       G.paint(root, head + body);
       afterPaint(root);
     }
-    return { title: 'Blocked', activate: activate, deactivate: deactivate, render: render, load: load, _set: function (d, t, p) { data = d; tot = t; people = p; } };
+    function said() { var d = data; return d ? counts(d).replace(/<[^>]*>/g, '') : ''; }
+    return { title: 'Blocked', activate: activate, deactivate: deactivate, render: render, load: load, said: said, _set: function (d, t, p) { data = d; tot = t; people = p; dm = mode(); } };
   })();
 
   /* ── Events: one delegated set for both tabs ────────────────────── */
   var tmr = null;
   function tab() { return G.current && G.current(); }
-  function reload() { G.S.q.page = undefined; delete G.S.q.page; G.writeHash(); var T = G.TABS[tab()]; T.render(); T.load().then(T.render); }
+  /* A PAGE PAST THE END (a link, or a filtered set that shrank under the
+     five-minute refresh) came back empty beside a non-zero total and read
+     "No leads yet". It is moved to the last page and read again. */
+  function pastEnd(d) {
+    if (!d || (d.leads || []).length || !(d.total > 0) || !(d.pages >= 1) || !(+G.S.q.page > d.pages)) return false;
+    if (d.pages > 1) G.S.q.page = String(d.pages); else delete G.S.q.page;
+    G.writeHash(); return true;
+  }
+  /* load() FIRST, so the paint that follows shows "updating…"; then say what
+     the reader asked for came back (the live region, never the timer) */
+  function reload(keepPage) {
+    var cur = tab(); if (cur !== 'leads' && cur !== 'blocked') return;   /* the search debounce can fire after a tab change */
+    if (!keepPage) delete G.S.q.page;
+    G.writeHash(); var T = G.TABS[cur], p = T.load(); T.render();
+    return p.then(function () { if (tab() !== cur) return; T.render(); if (T.said) G.announce(T.said()); });
+  }
+  function setSort(k, d) {
+    G.S.q.sort = SORTS.indexOf(k) >= 0 ? k : 'created_at'; G.S.q.dir = d === 'asc' ? 'asc' : 'desc';
+    if (G.S.q.sort === 'created_at' && G.S.q.dir === 'desc') { delete G.S.q.sort; delete G.S.q.dir; }
+  }
   if (typeof document !== 'undefined' && document.addEventListener) {
     document.addEventListener('click', function (e) {
       var t = e.target && e.target.closest ? e.target : null; if (!t) return;
       var cur = tab(); if (cur !== 'leads' && cur !== 'blocked') return;
       /* the row opened (ui.js toggled it first): fetch its change log */
       var x = t.closest('[data-sid]'); if (x) { if (x.getAttribute('aria-expanded') === 'true') ensureChanges(x.getAttribute('data-sid'), x.getAttribute('data-x')); return; }
-      var pg = t.closest('[data-pg]'); if (pg) { G.S.q.page = pg.getAttribute('data-pg'); if (G.S.q.page === '1') delete G.S.q.page; G.writeHash(); var T = G.TABS[cur]; T.load().then(T.render); T.render(); return; }
+      var pg = t.closest('[data-pg]') || t.closest('[data-pg-step]'); if (pg) { G.S.q.page = pg.getAttribute('data-pg') || pg.getAttribute('data-pg-step'); if (G.S.q.page === '1') delete G.S.q.page; reload(true); return; }
       if (cur !== 'leads') return;
       var s = t.closest('[data-lsort]'); if (s) { var k = s.getAttribute('data-lsort'), was = G.S.q.sort || 'created_at';
         G.S.q.dir = k === was ? ((G.S.q.dir || 'desc') === 'desc' ? 'asc' : 'desc') : (k === 'created_at' ? 'desc' : 'asc');
-        G.S.q.sort = k; if (G.S.q.sort === 'created_at' && G.S.q.dir === 'desc') { delete G.S.q.sort; delete G.S.q.dir; } reload(); return; }
+        setSort(k, G.S.q.dir); reload(); return; }
       if (t.closest('[data-lmore]')) { G.TABS.leads.toggle(); return; }
-      if (t.closest('[data-lclear]')) { G.S.q = {}; reload(); return; }
+      /* Clear removes itself, so focus goes to the search box, not the body */
+      if (t.closest('[data-lclear]')) { G.S.q = {}; reload(); var f = document.querySelector('#view [data-lf="search"]'); if (f && f.focus) f.focus(); return; }
       if (t.closest('[data-lcsv]')) { var p = params({ format: 'csv' }); window.location.href = G.url('/monitor/leads', p); return; }
     });
     document.addEventListener('change', function (e) {
       var el = e.target; if (!el || !el.getAttribute) return;
       if (el.hasAttribute('data-blk') && tab() === 'blocked') { setQ('internal', el.value); reload(); return; }
+      if (el.hasAttribute('data-lsortsel') && tab() === 'leads') { var sv = String(el.value).split(':'); setSort(sv[0], sv[1]); reload(); return; }
       var k = el.getAttribute('data-lf'); if (!k || tab() !== 'leads' || k === 'search' || k === 'hearAbout') return;
       if (k === 'preset') {
         var v = el.value, d = today();
+        if (v === 'custom') G.S.q.dp = 'custom'; else delete G.S.q.dp;
         if (v === '') { setQ('dateFrom', ''); setQ('dateTo', ''); }
         else if (v === 'today') { setQ('dateFrom', d); setQ('dateTo', d); }
         else if (v === '7d') { setQ('dateFrom', minusDays(d, 6)); setQ('dateTo', d); }

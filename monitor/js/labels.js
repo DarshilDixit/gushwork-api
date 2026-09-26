@@ -15,21 +15,37 @@
    ============================================================================ */
 GW.L = (function (G) {
   var LB = (G.CFG && G.CFG.labels) || {};
-  function website(r) { return r ? ((LB.website || {})[r] || r) : ''; }
+  /* The server's websiteReasonLabel, step for step: the map, then http_NNN
+     in words, then underscores to spaces. http_NNN is a real stored verdict
+     (the check fails open on a live site that answers 403), and without this
+     branch it reached the lead panel as "http_403". */
+  function website(r) {
+    if (!r) return '';
+    var m = (LB.website || {})[r]; if (m) return m;
+    var s = String(r);
+    if (s.indexOf('http_') === 0) { var code = s.slice(5); return ['999', '403', '401', '429'].indexOf(code) >= 0 ? 'Site blocked our check (' + code + ')' : 'Site returned an error (' + code + ')'; }
+    return s.replace(/_/g, ' ');
+  }
   function metaLong(r) { return r ? ((LB.meta || {})[r] || r) : ''; }
 
   /* THE META CHIP. "ours", not "internal", in the words Duplicates and Lead
      magnet already use; "disqualified", not "B2C" -- the classic's "B2C"
      covered the waitlist too, 378 of the 683. */
-  var META_SHORT = { internal: 'ours', blocked: 'blocked', model: 'model', website: 'no website', disqualified: 'disqualified' };
+  /* "site not verified", never "no website": the reason covers a timeout, a
+     DNS failure and a 403 from a live site -- "we could not check" is not "we
+     checked and there is nothing there" (CLAUDE.md, rule 1). */
+  var META_SHORT = { internal: 'ours', blocked: 'blocked', model: 'model', website: 'site not verified', disqualified: 'disqualified' };
   /* What ELSE follows from the reason, stated per reason. The classic tooltip
      said "it still books, still reaches Salesforce" for every one of them,
      which is false for a blocked lead and for one of ours. */
   var META_AFTER = {
     internal: 'It is one of our own tests, so it does not reach Salesforce or the dialer either.',
     blocked: 'It is blocked as not our market; the Blocked tab lists what that stops.',
-    model: 'Nothing else changes: it books, reaches Salesforce and is dialled as normal.',
-    website: 'Nothing else changes: it books, reaches Salesforce and is dialled as normal.',
+    /* ONLY what the reason itself changes: a flagged or unverified lead can
+       also be disqualified or never have submitted, so "it books and is
+       dialled" was false for some of them */
+    model: 'The model flagged the industry. The lead is not blocked, and nothing else was held back.',
+    website: 'Its website could not be verified. The lead is not blocked, and nothing else was held back.',
     disqualified: 'It answered B2C or mixed, or asked for the waitlist, at step 1.',
   };
   function metaShort(r) { return META_SHORT[r] || ''; }

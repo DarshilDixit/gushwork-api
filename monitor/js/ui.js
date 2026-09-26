@@ -162,15 +162,30 @@ GW.ui = (function (G) {
     }).join('');
     return '<div class="tbl stack"' + (o.region ? ' tabindex="0" role="region" aria-label="' + esc(o.region) + '"' : '') + '><table>' + head + '<tbody>' + body + '</tbody></table></div>';
   }
+  /* Previous and Next carry their target in attr + '-step', NOT in attr: on
+     page 1 the disabled Previous also points at page 1, and G.paint refocuses
+     by selector -- the first [data-pg="1"] in the page was the dead button,
+     so focus fell to the body after every trip back to page 1. */
   function pager(page, pages, attr) {
     if (!pages || pages <= 1) return '';
-    var b = function (n, lbl, dis, cur) { return '<button class="pgb' + (cur ? ' on' : '') + '" ' + attr + '="' + n + '"' + (dis ? ' disabled' : '') + (cur ? ' aria-current="page"' : '') + (lbl ? ' aria-label="' + lbl + '"' : '') + '>' + (lbl ? ic(n < page ? 'caret-left' : 'caret-right') : n) + '</button>'; };
+    var b = function (n, lbl, dis, cur) { return '<button class="pgb' + (cur ? ' on' : '') + '" ' + attr + (lbl ? '-step' : '') + '="' + n + '"' + (dis ? ' disabled' : '') + (cur ? ' aria-current="page"' : '') + (lbl ? ' aria-label="' + lbl + '"' : '') + '>' + (lbl ? ic(n < page ? 'caret-left' : 'caret-right') : n) + '</button>'; };
     var h = b(Math.max(1, page - 1), 'Previous page', page <= 1, false), last = 0;
     for (var n = 1; n <= pages; n++) {
       if (n === 1 || n === pages || Math.abs(n - page) <= 2) { if (last && n - last > 1) h += '<span class="pgg" aria-hidden="true">…</span>'; h += b(n, null, false, n === page); last = n; }
     }
     h += b(Math.min(pages, page + 1), 'Next page', page >= pages, false);
     return '<nav class="pager" aria-label="Pages">' + h + '<span class="pgi">Page ' + fmt(page) + ' of ' + fmt(pages) + '</span></nav>';
+  }
+  /* ONE BAD ROW MUST NOT BLANK A TAB. A render that throws leaves the loading
+     skeleton up forever -- no count, no table, no error -- and every refresh
+     throws again. A session_id of "constructor" did exactly that. The body is
+     drawn through here, so a throw paints a plain error in its place and the
+     rest of the page still works. */
+  function drawn(title, fn) {
+    try { return fn(); } catch (e) {
+      if (typeof console !== 'undefined' && console.error) console.error('[monitor] ' + title + ' could not be drawn', e);
+      return '<section class="card panel">' + unavailable(title, 'this view could not be drawn (' + (e && e.message ? e.message : e) + ')') + '</section>';
+    }
   }
   function pills(defs, current, counts, attr, label) {
     return '<div class="pills" role="group" aria-label="' + esc(label || 'Filter') + '">' + defs.map(function (p) {
@@ -181,5 +196,5 @@ GW.ui = (function (G) {
       return '<button ' + attr + '="' + esc(d[0]) + '" aria-pressed="' + (d[0] === current) + '">' + (d[2] || '') + esc(d[1]) + '</button>'; }).join('') + '</div>';
   }
   return { delta: delta, cmpBlock: cmpBlock, leadCard: leadCard, metricCard: metricCard, panel: panel, empty: empty,
-           unavailable: unavailable, loading: loading, funnel: funnel, kv: kv, rtable: rtable, grid: grid, keyOf: keyOf, pager: pager, pills: pills, tg: tg };
+           unavailable: unavailable, loading: loading, funnel: funnel, kv: kv, rtable: rtable, grid: grid, keyOf: keyOf, pager: pager, drawn: drawn, pills: pills, tg: tg };
 })(GW);

@@ -370,7 +370,7 @@ input.field { min-width: 0; }
 .lfl .field { width: 100%; }
 .lfl.inline { flex-direction: row; align-items: center; gap: var(--gw-space-8); }
 .lfl.inline .field { width: auto; }
-.lfl.dates { flex-direction: row; gap: var(--gw-space-8); grid-column: span 2; }
+.lfl.dates { flex-direction: row; gap: var(--gw-space-8); grid-column: 1 / -1; }   /* the explicit columns only: span 2 forced a second column on a phone and reflowed every filter */
 .lfl.dates label { display: flex; flex-direction: column; gap: var(--gw-space-4); flex: 1 1 0; font: var(--gw-text-body-12-med); color: var(--ink-label); }
 .controls.lf { flex-direction: column; align-items: stretch; }
 /* markers sit AFTER the email, as on Duplicates */
@@ -537,7 +537,7 @@ input.field { min-width: 0; }
   /* Leaflet's own controls, thumb-sized (its touch default is 30px) */
   .vmap .leaflet-touch .leaflet-bar a, .vmap.leaflet-touch .leaflet-bar a { width: 44px; height: 44px; line-height: 44px; }
   .vmap .leaflet-popup-close-button { width: 44px !important; height: 44px !important; line-height: 44px !important; }
-  .sortb { min-height: 44px; }
+  .sortb { min-height: 44px; min-width: 44px; padding: 0 var(--gw-space-4); }   /* a header visible on a coarse-pointer laptop is still a target */
   .sfoot a, .drawer-tools a { display: inline-flex; align-items: center; min-height: 44px; }
   /* a link that IS a detail value (website, LinkedIn, landing page) is a
      target on its own, not a word in a sentence -- 15px tall until the
@@ -595,7 +595,9 @@ input.field { min-width: 0; }
    with Status and When off the edge. Each cell is "label ... value", the
    value ONE element so a badge stays beside its text. From 560 to 899 a
    card lays its cells out two across. */
+.cardsort { display: none; }
 @container view (max-width: 899px) {
+  .cardsort { display: block; }
   .rt, .rt > tbody, .rt > tbody > tr, .rt > tbody > tr > td { display: block; width: 100%; }
   .rt > thead { display: none; }
   .rt > tbody > tr.main { border-bottom: 1px solid var(--card-line); padding: var(--gw-space-8) var(--gw-space-12); position: relative; }

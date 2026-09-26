@@ -4,3 +4,5 @@ node_modules/
 .DS_Store
 *.log
 .claude/
+# layout-check screenshots can hold real lead data; the tool writes to the OS temp dir by default
+layout-shots/

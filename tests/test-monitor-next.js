@@ -126,7 +126,7 @@ const tq = '?token=' + encodeURIComponent(TOKEN);
 
 /* ── A stubbed browser: enough DOM for the page's own scripts to run ───── */
 function browser(payloads, cfg) {
-  const els = {}, listeners = {}, intervals = [], calls = [];
+  const els = {}, listeners = {}, wlisteners = {}, intervals = [], calls = [];
   const mk = (id) => {
     const attrs = {}, cls = new Set();
     const e = {
@@ -150,7 +150,7 @@ function browser(payloads, cfg) {
   const window = {
     location: { hash: '' }, history: { replaceState: (a, b, h) => { window.location.hash = h; } },
     localStorage: { getItem: () => null, setItem() {} }, matchMedia: () => ({ matches: false, addEventListener() {} }),
-    addEventListener() {}, innerWidth: 1440, scrollTo() {}, alert() {},
+    addEventListener: (t, f) => { (wlisteners[t] = wlisteners[t] || []).push(f); }, innerWidth: 1440, scrollTo() {}, alert() {},
     /* THE SERVED PAGE'S OWN CONFIG when given -- it carries the server's
        label maps, so the page is tested with what a real visitor gets */
     __GW__: cfg || { token: TOKEN, tz: 'America/New_York', classic: '/monitor' },
@@ -163,7 +163,7 @@ function browser(payloads, cfg) {
     return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
   };
   const setIntervalStub = (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; };
-  return { els, listeners, intervals, calls, document, window, fetch: fetchStub, setInterval: setIntervalStub };
+  return { els, listeners, wlisteners, intervals, calls, document, window, fetch: fetchStub, setInterval: setIntervalStub };
 }
 function run(js, b) {
   const GWo = new Function('window', 'document', 'fetch', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'AbortSignal', 'URL', 'Blob', 'Intl',
@@ -376,8 +376,9 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     { email: 'cy@omega.com', first_name: 'Cy', company: 'Omega', enriched_industry: 'Software', completed: false, created_at: '2026-09-22T12:00:00Z' }] };
   const CHANGES = { [SID_A]: { ok: true, changes: [{ field: 'sell_to', old_value: 'B2C', new_value: 'B2B (clarified from B2C)', attribution: 'ours_sell_to_clarified', source_route: '/partial', arrived_step: 1, booking_uid_present: false, changed_at: '2026-09-24T14:06:00Z' }] },
     [SID_B]: { ok: false, unavailable: true }, [SID_C]: { ok: true, changes: [] } };
-  let healthDown = false;
+  let healthDown = false, leadsHook = null, ackDown = false;
   const payloads = (p, q) => {
+    if (leadsHook && p === '/monitor/leads') { const r = leadsHook(q); if (r) return r; }
     if (p === '/monitor/overview') return P[q.view] || P.week;
     if (p === '/monitor/health') return healthDown ? new Error('upstream down') : HEALTH;
     if (p === '/monitor/elv-health') return { state: 'insufficient_data', rate: 0, checks: 0 };
@@ -392,7 +393,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     if (p === '/monitor/visitors') return VIS;
     if (p === '/monitor/partners') return PARTNERS;
     if (p === '/monitor/partner-gaps') return gapsDown ? new Error('upstream down') : GAPS;
-    if (p === '/monitor/partner-ack') return { ok: true };
+    if (p === '/monitor/partner-ack') return ackDown ? new Error('refused') : { ok: true };
     if (p === '/monitor/leads') return q.nonicp === 'only' ? (q.internal === 'exclude' ? { total: 45, page: 1, pages: 2, leads: [] } : BLOCKED) : LEADS;
     if (p === '/monitor/filter-options') return { hearAbout: ['Podcast'], utmSource: ['facebook', 'google'], partners: [{ key: 'pk_77', name: null, email: 'p@partner.co' }] };
     if (p === '/monitor/lead-changes') return CHANGES[q.session_id] || { ok: true, changes: [] };
@@ -789,9 +790,10 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   delete b.window.L; GW.TABS.visitors._draw(VIS);
   ok('visitors: with no Leaflet the map says so, and nothing throws', /did not load/.test(b.els['vis-map-note'].textContent));
   const drawn = [], tileLog = [];
-  b.window.L = { Browser: { mobile: false }, map() { return { setView() { return this; }, attributionControl: { setPrefix() {} }, invalidateSize() {}, removeLayer(x) { if (x && x.u) tileLog.push('-' + x.u); }, fitBounds() {} }; },
+  let fits = 0, layersAdded = 0;
+  b.window.L = { Browser: { mobile: false }, map() { return { setView() { return this; }, attributionControl: { setPrefix() {} }, invalidateSize() {}, removeLayer(x) { if (x && x.u) tileLog.push('-' + x.u); }, fitBounds() { fits++; } }; },
     tileLayer: (u, o) => ({ u, o, addTo() { tileLog.push('+' + u); return this; } }), latLngBounds: () => ({ pad() { return this; } }),
-    circleMarker: (ll, opts) => { const m = { ll, opts, bindPopup(c) { m.popup = c; return m; } }; drawn.push(m); return m; }, layerGroup: (a) => ({ a, addTo() { return this; } }) };
+    circleMarker: (ll, opts) => { const m = { ll, opts, bindPopup(c) { m.popup = c; return m; } }; drawn.push(m); return m; }, layerGroup: (a) => ({ a, addTo() { layersAdded++; return this; } }) };
   const res = GW.TABS.visitors._draw(VIS);
   ok('visitors: it draws exactly the mappable places, and counts the rest', res && res.drawn === 2 && res.miss === 1 && /2 places drawn; <b>1<\/b> more resolved to a city but have no coordinates/.test(b.els['vis-map-note'].innerHTML));
   ok('visitors: circles are drawn LARGEST FIRST, whatever order the API sent', drawn[0].ll[0] === 42.36 && drawn[1].ll[0] === 39.74);
@@ -803,6 +805,15 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('visitors: switching to dark swaps the basemap once, and a repeat does nothing', tileLog.length === 2 && tileLog[1] === '+' + tl.dark && tileLog[0].startsWith('-'), tileLog.join(' '));
   tileLog.length = 0; GW.onTheme('light');
   ok('visitors: and back to light', tileLog.length === 2 && tileLog[1] === '+' + tl.light, tileLog.join(' '));
+  /* THE READER'S PLACE: a repaint of the same read neither redraws nor
+     re-fits; new data redraws and keeps the view; a new window re-fits */
+  const f0 = fits, l0 = layersAdded;
+  GW.TABS.visitors._draw(VIS);
+  ok('review: repainting the SAME read keeps the circles and the view', fits === f0 && layersAdded === l0, [fits, f0, layersAdded, l0].join(','));
+  GW.TABS.visitors._draw(Object.assign({}, VIS));
+  ok('review: new data swaps the circles and keeps the reader\'s zoom', fits === f0 && layersAdded === l0 + 1, [fits, f0, layersAdded, l0].join(','));
+  GW.TABS.visitors._draw(Object.assign({}, VIS, { window_days: 7 }));
+  ok('review: a new window re-fits the map', fits === f0 + 1, [fits, f0].join(','));
   ok('visitors: the popup names the place and its counts', /<b>Boston, Massachusetts, US<\/b><br>612 leads<br>590 people<br>402 booked/.test(drawn[0].popup));
   delete b.window.L;
 
@@ -852,6 +863,153 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   fire('click', el({ 'data-pdrill': 'pk_a' })); await ticks(20);
   ok('partners: "See this partner\'s leads" opens All leads filtered on that partner', GW.current() === 'leads' && GW.S.q.partner === 'pk_a' && b.calls.slice(pc2).some((c) => c.path === '/monitor/leads' && c.q.partner === 'pk_a'));
   GW.show('partners'); await ticks(20);
+
+  /* ═══ PR C: the review's fixes, each one DRIVEN ═══ */
+  const live = () => (b.els['gw-live'] ? b.els['gw-live'].textContent : '');
+  /* 1. a session_id that is an Object.prototype name: the page must still paint */
+  leadsHook = (q) => q.nonicp ? null : { total: 1, page: 1, pages: 1, leads: [Object.assign({}, LEAD_C, { session_id: 'constructor', email: 'proto@x.test' })] };
+  GW.show('leads'); await ticks(20); v = view();
+  ok('review: a lead whose session_id is "constructor" still paints All leads', v.includes('proto@x.test') && v.includes('Reading the change history') && !v.includes('could not be drawn'), v.slice(0, 200));
+  leadsHook = null;
+  /* 2. the draw guard: a render that throws paints an error, never an endless skeleton */
+  const ce = console.error; console.error = () => {};
+  GW.TABS.leads._set({ total: 2, page: 1, pages: 1, leads: [null] }); GW.TABS.leads.render(); v = view(); console.error = ce;
+  ok('review: a row that cannot be drawn paints an error in place of the table', v.includes('All leads could not be read') && v.includes('this view could not be drawn') && v.includes('All leads</h1>'));
+  /* 3. the sort from a link is held to the table's own columns */
+  GW.S.q = { sort: 'constructor', dir: 'sideways' }; const sp = GW.TABS.leads._params();
+  GW.S.q = { sort: 'email', dir: 'asc' }; const sp2 = GW.TABS.leads._params(); GW.S.q = {};
+  ok('review: a sort from the link that is not a column is never sent', sp.sort === 'created_at' && sp.dir === 'desc' && sp2.sort === 'email' && sp2.dir === 'asc', JSON.stringify([sp, sp2]));
+  /* 4. a tab name that is an Object method */
+  GW.show('toString'); ok('review: a tab name like "toString" falls back to Overview', GW.current() === 'overview');
+  /* 5. Custom dates can be chosen from the screen */
+  GW.show('leads'); await ticks(20);
+  fire('change', el({ 'data-lf': 'preset' }, { value: 'custom' })); await ticks(20); v = view();
+  ok('review: choosing Custom shows From and To and STAYS Custom', /<option value="custom" selected>/.test(v) && v.includes('data-lf="dateFrom"') && v.includes('data-lf="dateTo"'));
+  fire('change', el({ 'data-lf': 'dateFrom' }, { value: '2026-09-01' })); await ticks(20); v = view();
+  ok('review: a typed From date keeps the Custom boxes', v.includes('value="2026-09-01"') && /<option value="custom" selected>/.test(v));
+  fire('change', el({ 'data-lf': 'preset' }, { value: '' })); await ticks(20);
+  ok('review: "Any date" leaves Custom and clears both dates', !GW.S.q.dp && !GW.S.q.dateFrom && !GW.S.q.dateTo);
+  /* 6. load BEFORE paint: old rows under new filters say "updating…" */
+  fire('change', el({ 'data-lf': 'stage' }, { value: 'booked' })); v = view();
+  ok('review: a filter change paints "updating…" until the new rows arrive', v.includes('updating…'));
+  await ticks(20);
+  ok('review: ...then clears it, and says what came back aloud', !view().includes('updating…') && live() === '4,471 leads found, page 2 of 179', live());
+  fire('change', el({ 'data-lf': 'stage' }, { value: 'all' })); await ticks(20);
+  /* the card-view sort select reaches the request */
+  const ss0 = b.calls.length; fire('change', el({ 'data-lsortsel': '' }, { value: 'email:asc' })); await ticks(20);
+  ok('review: the card-view sort select sorts', b.calls.slice(ss0).some((c) => c.path === '/monitor/leads' && c.q.sort === 'email' && c.q.dir === 'asc') && /data-lsortsel[\s\S]*?<option value="email:asc" selected>/.test(view()));
+  GW.S.q = {};
+  /* 7. a page past the end is read again as the last page */
+  leadsHook = (q) => q.nonicp ? null : q.page === '9' ? { total: 30, page: 9, pages: 2, leads: [] } : q.page === '2' ? { total: 30, page: 2, pages: 2, leads: [LEAD_C] } : null;
+  const pe0 = b.calls.length; GW.show('leads', false, { page: '9' }); await ticks(30); v = view();
+  const pages = b.calls.slice(pe0).filter((c) => c.path === '/monitor/leads').map((c) => c.q.page);
+  ok('review: a page past the end is read again as the last page, never "No leads yet"', pages.includes('9') && pages.includes('2') && GW.S.q.page === '2' && !v.includes('No leads yet') && v.includes('cy@shop.example'), JSON.stringify(pages));
+  leadsHook = null; GW.S.q = {};
+  /* 8. the pager: Previous and Next never share a selector with a page button */
+  GW.show('leads'); await ticks(20); v = view();
+  ok('review: Previous and Next carry their target apart from the page buttons', /data-pg-step="1"[^>]*aria-label="Previous page"/.test(v) && /data-pg-step="3"[^>]*aria-label="Next page"/.test(v) && !/data-pg="1"[^>]*aria-label/.test(v));
+  const pg0 = b.calls.length; fire('click', el({ 'data-pg-step': '3' })); await ticks(20);
+  ok('review: Next still pages, and the page is announced', b.calls.slice(pg0).some((c) => c.path === '/monitor/leads' && c.q.page === '3') && /page 2 of 179/.test(live()));
+  GW.S.q = {};
+  /* 9. a new hash on the SAME tab fetches, not only repaints */
+  GW.show('leads'); await ticks(20);
+  const hc0 = b.calls.length; b.window.location.hash = '#tab=leads&stage=booked'; (b.wlisteners.hashchange || []).forEach((f) => f()); await ticks(20);
+  ok('review: a new hash on the same tab reads the server again', b.calls.slice(hc0).some((c) => c.path === '/monitor/leads' && c.q.stage === 'booked'));
+  GW.S.q = {};
+  /* 10. Blocked words its count from the payload it has, not from the select */
+  GW.show('blocked'); await ticks(20);
+  fire('change', el({ 'data-blk': '' }, { value: 'only' })); v = view();
+  ok('review: Blocked keeps the old wording beside the old count until the new one lands', /<b>51<\/b> leads blocked · /.test(v) && v.includes('updating…') && !/of our own test leads blocked/.test(v));
+  await ticks(20); v = view();
+  ok('review: ...then words the new count for its own population', /<b>51<\/b> of our own test leads blocked/.test(v) && !v.includes('updating…'));
+  fire('change', el({ 'data-blk': '' }, { value: '' })); await ticks(20);
+  /* 11. the lead panel says how B2B was clarified, as text */
+  GW.show('leads'); await ticks(20); v = view();
+  ok('review: the lead panel shows the stored "clarified from" text', v.includes('Sells to (as stored)') && v.includes('B2B (clarified from B2C)</div>'));
+  /* 12. Partners: the note survives a repaint, a failed save keeps the form */
+  GW.show('partners'); await ticks(20);
+  fire('click', el({ 'data-ack': 'fail.co', 'data-on': '1' }));
+  fire('input', el({ 'data-ack-note': 'fail.co' }, { value: 'deleted by hand' }));
+  GW.TABS.partners.render(); v = view();
+  ok('review: a background repaint keeps the note being typed', v.includes('data-ack-note="fail.co" value="deleted by hand"'));
+  ok('review: every ack control names its company', v.includes('aria-label="Why the failure for fail.co is not a real loss"') && v.includes('aria-label="Acknowledge the failure for fail.co"') && v.includes('aria-label="Cancel acknowledging fail.co"'));
+  const ak0 = b.calls.length; ackDown = true; fire('click', el({ 'data-ack-go': 'fail.co' })); await ticks(20); v = view(); ackDown = false;
+  const akb = b.calls.slice(ak0).find((c) => c.path === '/monitor/partner-ack');
+  ok('review: the note sent is the one typed', akb && JSON.parse(akb.body).note === 'deleted by hand', akb && akb.body);
+  ok('review: a failed save keeps the form open, the note intact, the error inside it', v.includes('data-ack-note="fail.co" value="deleted by hand"') && /class="ackf"><div class="bad-t" role="alert">Could not update/.test(v));
+  ok('review: ...and says so aloud', /^Could not update/.test(live()), live());
+  fire('click', el({ 'data-ack-cancel': 'fail.co' })); v = view();
+  ok('review: Cancel clears the error and the draft', !v.includes('Could not update') && !v.includes('data-ack-note="fail.co"'));
+  fire('click', el({ 'data-ack': 'fail.co', 'data-on': '1' })); v = view();
+  ok('review: reopened after Cancel, the box is empty', v.includes('data-ack-note="fail.co" value=""'));
+  fire('click', el({ 'data-ack-go': 'fail.co' })); await ticks(20);
+  ok('review: a save that lands is announced', live() === 'Acknowledged fail.co', live());
+  /* 13. every claimant, and the facts that lived only in hover text */
+  v = view();
+  ok('review: the claimed-by tooltip names EVERY partner, the shown one first', v.includes('Claimed by 2 partners: Alpha Partners, Beta Co.'));
+  ok('review: a company row opens to Salesforce, the reason and every claimant, as text', /id="pd-fail_2eco-d"[\s\S]*?Salesforce[\s\S]*?Opportunity never created[\s\S]*?Claimed by[\s\S]*?Alpha Partners, Beta Co/.test(v));
+  ok('review: the acknowledgement note is visible text in the row', /id="pd-acked_2eco-d"[\s\S]*?Yes — known test/.test(v));
+  ok('review: a partner row opens to the columns a mid-width screen drops', /id="pp-pk_5fa-d"[\s\S]*?>Clicks<[\s\S]*?>Verified<[\s\S]*?>Opportunity</.test(v));
+  ok('review: what a dagger means is said in words under the table', v.includes('A number marked † counts companies that skipped an earlier stage'));
+  ok('review: the 24-hour figure says what it counts', v.includes('3 with a lead in the last 24 hours') && !v.includes('arrived in the last 24 hours'));
+  fire('change', el({ 'data-psortsel': '' }, { value: 'name:asc' })); v = view(); const per2 = v.slice(v.indexOf('id="p-per"'));
+  ok('review: card view sorts partners through a select', per2.indexOf('>Alpha<') > 0 && per2.indexOf('>Alpha<') < per2.indexOf('>b@beta.test<'));
+  fire('change', el({ 'data-psortsel': '' }, { value: 'step1:desc' }));
+  /* 14. a failed re-check of the gaps keeps the old result, and says how old */
+  await new Promise((r) => { b.intervals.filter((x) => x.ms === 600000).forEach((x) => x.fn()); setImmediate(r); }); await ticks(20);
+  gapsDown = true; await new Promise((r) => { b.intervals.filter((x) => x.ms === 600000).forEach((x) => x.fn()); setImmediate(r); }); await ticks(20); v = view(); gapsDown = false;
+  ok('review: a failed gaps re-check keeps the old result AND says how old it is', /id="p-gaps"[\s\S]*?The last check failed[\s\S]*?showing the result from [0-9]/.test(v) && /id="p-gaps"[\s\S]*?data-v="1\+\?"/.test(v));
+  /* 15. Model: flag-only mode, the deploy counters, the window, the caps */
+  const MF = JSON.parse(JSON.stringify(MODEL)); MF.flags.llm_meta = false; MF.scrape.inProcess.writeFailed = 3; MF.scrape.inProcess.bypassFailed = 0;
+  MF.scrape.unreadable.push({ domain: 'apifail.test', scrape_status: 'ok', error: 'timeout', checked_at: '2026-09-24T10:00:00Z', email: 'z@apifail.test', website: 'apifail.test', blocked: false, blocked_by: null });
+  GW.show('model'); await ticks(20); GW.S.q.days = '30'; GW.TABS.model._set(MF); GW.TABS.model.render(); v = view();
+  ok('review: flag-only mode -- the chip, the group and the lede all say Meta was still sent', v.includes('Flagged — Meta still sent') && v.includes('Flagged by the model — Meta still sent') && v.includes('its Meta events were still sent') && !/>Meta withheld</.test(v));
+  ok('review: writes failed and blocks failed open are on the deploy card, red when there are any', /data-card="mdl-deploy"[\s\S]*?>failures<[\s\S]*?class="bad-t">3 writes failed<\/span> · <span class="">0 blocks failed open/.test(v));
+  ok('review: the window is read back from the payload', v.includes('the last 30 days') && !v.includes('updating…'));
+  GW.S.q.days = '7'; GW.TABS.model.render();
+  ok('review: a window the payload was not read for says "updating…"', view().includes('updating…'));
+  GW.S.q.days = '30'; GW.TABS.model.render(); v = view();
+  ok('review: a model call that failed is not "read fine"', v.includes('page read; the model call failed') && !v.includes('>read fine<'));
+  ok('review: the near-miss cap is said', v.includes('Showing the first 1 of 13'));
+  ok('review: all three switches are named', v.includes('NON_ICP_BLOCK=false') && v.includes('NON_ICP_LLM_BLOCK=false') && v.includes('NON_ICP_LLM_META=false'));
+  ok('review: Booked and Their website are in the row details, since the rows drop them at mid widths', /id="mdl-md_2d1-d"[\s\S]*?>Booked</.test(v) && /id="mdlu-[^"]*-d"[\s\S]*?>Their website</.test(v));
+  GW.TABS.model._set(MODEL); GW.TABS.model.render(); v = view();
+  ok('review: with Meta withholding on, the Meta group says only what was held back', v.includes('Only the conversion events were withheld; nothing else about these leads changed.') && !v.includes('They booked.'));
+  GW.S.q = {};
+  /* 16. Visitors and SDR */
+  GW.show('visitors'); await ticks(20); v = view();
+  ok('review: the long place, network and zone lists are named scroll regions', v.includes('role="region" aria-label="Where they were"') && v.includes('role="region" aria-label="Networks"') && v.includes('role="region" aria-label="Time zones"'));
+  ok('review: the map button has no pressed state beside its changing label', v.includes('data-vis-map>') && !/data-vis-map aria-pressed/.test(v));
+  GW.show('sdr'); await ticks(20); v = view();
+  ok('review: the SDR date column says it is the newest QUALIFYING attempt', v.includes('Newest qualifying attempt (ET)') && !v.includes('Last attempt (ET)'));
+  fire('input', el({ 'data-sdr-q': '' }, { value: 'acme' })); await ticks();
+  ok('review: a search result is announced once the typing pauses', live() === '1 person matches the search', live());
+  fire('input', el({ 'data-sdr-q': '' }, { value: '' }));
+  /* 17. the words: website verdicts as the SERVER words them, and no false claims */
+  const wrlSrc = (fs.readFileSync(path.join(ROOT, 'index.js'), 'utf8').match(/function websiteReasonLabel\(reason\) \{[\s\S]*?\n\}/) || [])[0];
+  const wrl = wrlSrc && new Function('WEBSITE_REASON_LABELS', wrlSrc + '\nreturn websiteReasonLabel;')(servedCfg.labels.website);
+  const WIN = ['http_403', 'http_999', 'http_401', 'http_429', 'http_500', 'http_404', 'parked_confirmed', 'timeout', 'some_new_code', 'resolved'];
+  ok('review: every website verdict reads exactly as the server words it', wrl && WIN.every((r) => GW.L.website(r) === wrl(r)), WIN.map((r) => r + '=' + GW.L.website(r) + '|' + (wrl && wrl(r))).join('; '));
+  ok('review: the Meta chip for an unverified site never says "no website"', GW.L.metaShort('website') === 'site not verified');
+  ok('review: the model and website reasons claim nothing about booking or dialling', !/books|dialled/.test(GW.L.metaWhy('model')) && !/books|dialled/.test(GW.L.metaWhy('website')));
+  /* 18. structural: the guards a stubbed DOM cannot drive */
+  const leadsSrc = fs.readFileSync(path.join(ROOT, 'monitor', 'js', 'leads.js'), 'utf8'), coreSrc = fs.readFileSync(path.join(ROOT, 'monitor', 'js', 'core.js'), 'utf8');
+  ok('review: the change-log cache has no prototype', /var changes = Object\.create\(null\);/.test(leadsSrc));
+  ok('review: the search debounce is cancelled on leaving, and reload refuses any other tab', /function deactivate\(\) \{ G\.stop\('leads'\); root = null; clearTimeout\(tmr\); \}/.test(leadsSrc) && /function reload\(keepPage\) \{\s*var cur = tab\(\); if \(cur !== 'leads' && cur !== 'blocked'\) return;/.test(leadsSrc));
+  ok('review: a repaint never parks focus on a DISABLED control', /if \(n && n\.disabled && n\.parentNode/.test(coreSrc));
+  const layoutSrc = fs.readFileSync(path.join(ROOT, 'tools', 'check-monitor-layout.mjs'), 'utf8'), xcSrc = fs.readFileSync(path.join(ROOT, 'tools', 'crosscheck-monitor.mjs'), 'utf8');
+  ok('review: layout screenshots go OUTSIDE the repo by default, and the profile is thrown away', /const OUT = process\.env\.OUT \|\| join\(tmpdir\(\), 'gw-layout-shots'\);/.test(layoutSrc) && /mkdtempSync\(join\(tmpdir\(\)/.test(layoutSrc) && /process\.on\('exit', cleanup\)/.test(layoutSrc));
+  ok('review: the crosscheck kills Chrome and removes its profile on ANY exit', /mkdtempSync\(join\(tmpdir\(\)/.test(xcSrc) && /process\.on\('exit', cleanup\)/.test(xcSrc) && /process\.on\('unhandledRejection'/.test(xcSrc));
+  ok('review: .gitignore keeps a stray screenshot folder out of the repo', /^layout-shots\/$/m.test(fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8')));
+  ok('review: the layout check measures the mid-width band (1280)', /'360,390,414,768,1024,1280,1440'/.test(layoutSrc));
+  const cssR = fs.readFileSync(path.join(ROOT, 'monitor', 'app.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  ok('review: the Custom dates row spans only the columns that exist', /\.lfl\.dates \{[^}]*grid-column: 1 \/ -1;/.test(cssR) && !/\.lfl\.dates \{[^}]*span 2/.test(cssR));
+  ok('review: the card-view sort shows only where the header row is gone', /\.cardsort \{ display: none; \}\s*@container view \(max-width: 899px\) \{\s*\.cardsort \{ display: block; \}/.test(cssR));
+  ok('review: header sort buttons are 44px wide on a coarse pointer too', /\.sortb \{ min-height: 44px; min-width: 44px;/.test(cssR));
+  /* the nav checks below read the page as Partners left it, after a health
+     run that could not reach /monitor/health (the "toString" check above
+     opened Overview, which read health again) */
+  GW.show('partners'); await ticks(20); healthDown = true; await GW.TABS.health.run(); healthDown = false; await ticks(20);
 
   /* Hash, tabs, nav */
   ok('nav: every rebuilt tab is registered with activate and deactivate', ['overview', 'health', 'dropoff', 'dupes', 'lm', 'leads', 'blocked', 'sdr', 'model', 'visitors', 'partners'].every((t) => GW.TABS[t] && GW.TABS[t].activate && GW.TABS[t].deactivate && GW.TABS[t].title));

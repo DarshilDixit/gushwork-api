@@ -48,7 +48,8 @@
      caller hands it some (Partners opening "All leads, partner = X"); at boot
      the filters came from the link and are kept. */
   function show(tab, asked, q) {
-    if (!G.TABS[tab]) tab = 'overview';
+    /* own names only: "toString" from a link found Object's method and threw */
+    if (!Object.prototype.hasOwnProperty.call(G.TABS, tab)) tab = 'overview';
     if (current && current !== tab && G.TABS[current] && G.TABS[current].deactivate) G.TABS[current].deactivate();
     if (q) G.S.q = q; else if (current && current !== tab) G.S.q = {};
     current = tab; G.S.tab = tab; G.writeHash();
@@ -91,7 +92,16 @@
      fires resize with the same width, and redrawing then would thrash. */
   var rt = null;
   window.addEventListener('resize', function () { clearTimeout(rt); rt = setTimeout(function () { var w = window.innerWidth; if (w === lastW) return; lastW = w; if (current && G.TABS[current].render) G.TABS[current].render(); }, 150); });
-  window.addEventListener('hashchange', function () { var was = G.S.tab; if (!G.readHash()) return; if (G.S.tab !== was) show(G.S.tab, true, G.S.q); else if (current && G.TABS[current].render) G.TABS[current].render(); });
+  /* The hash now carries a tab's SERVER filters too (partner, days, page...),
+     so a new hash on the same tab has to fetch, not only repaint -- or the
+     controls show one filter over data read for another. */
+  window.addEventListener('hashchange', function () {
+    var was = G.S.tab, before = JSON.stringify(G.S.q); if (!G.readHash()) return;
+    if (G.S.tab !== was) { show(G.S.tab, true, G.S.q); return; }
+    var T = current && G.TABS[current]; if (!T) return;
+    if (T.load && JSON.stringify(G.S.q) !== before) { var p = T.load(); if (T.render) T.render(); p.then(function () { if (current === G.S.tab && T.render) T.render(); }); }
+    else if (T.render) T.render();
+  });
 
   G.readHash(); G.applyTheme(); lastW = window.innerWidth; show(G.S.tab);
 })(GW);

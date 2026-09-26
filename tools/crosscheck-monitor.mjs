@@ -25,7 +25,9 @@
    Run: PREVIEW_READY_FILE=... node tools/crosscheck-monitor.mjs
    ============================================================================ */
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const cfg = JSON.parse(readFileSync(process.env.PREVIEW_READY_FILE, 'utf8'));
 const BASE = `http://localhost:${cfg.port}`, TOKEN = cfg.token;
@@ -95,7 +97,15 @@ const OVERRIDE = `(() => { const P = ${JSON.stringify(P)}; const real = window.f
   } catch (e) {} return real(url, init); }; })();`;
 
 const PORT = 9400 + Math.floor(Math.random() * 50);
-const chrome = spawn('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', ['--headless=new', '--remote-debugging-port=' + PORT, '--user-data-dir=/tmp/xcheck-' + PORT, '--no-first-run', 'about:blank'], { stdio: 'ignore' });
+/* a throwaway profile, and Chrome killed and the profile removed on ANY
+   exit -- a throw half-way used to leave Chrome running with its debugging
+   port open and the token-bearing URL in its history */
+const PROFILE = mkdtempSync(join(tmpdir(), 'gw-xcheck-'));
+const chrome = spawn('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', ['--headless=new', '--remote-debugging-port=' + PORT, '--user-data-dir=' + PROFILE, '--no-first-run', 'about:blank'], { stdio: 'ignore' });
+const cleanup = () => { try { chrome.kill(); } catch {} try { rmSync(PROFILE, { recursive: true, force: true }); } catch {} };
+process.on('exit', cleanup);
+process.on('uncaughtException', (e) => { console.error(e); cleanup(); process.exit(2); });
+process.on('unhandledRejection', (e) => { console.error(e); cleanup(); process.exit(2); });
 let tg; for (let i = 0; i < 60; i++) { try { tg = await (await fetch(`http://127.0.0.1:${PORT}/json`)).json(); if (tg.length) break; } catch {} await sleep(250); }
 const ws = new WebSocket(tg.find((x) => x.type === 'page').webSocketDebuggerUrl); await new Promise((r) => ws.addEventListener('open', r));
 let id = 0; const pend = new Map();
@@ -164,7 +174,7 @@ N.vis = await ev(`(() => ({ cov: ['vis-leads', 'vis-addr', 'vis-place', 'vis-dis
 await settle('partners'); await sleep(800);
 N.partners = await ev(`(() => ({ cards: ['p-attn', 'p-domains', 'p-sfwait', 'p-leads', 'p-conv', 'p-qual'].map((i) => document.querySelector('[data-card="' + i + '"] .num').getAttribute('data-v')),
   funnel: [...document.querySelectorAll('.pfs .num')].map((e) => e.getAttribute('data-v')), domains: document.querySelectorAll('td.kcell[data-l="Company"]').length, partners: document.querySelectorAll('[data-x^="pp-"]').length }))()`);
-ws.close(); chrome.kill();
+ws.close(); cleanup();
 
 /* compare */
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
