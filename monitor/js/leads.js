@@ -186,11 +186,11 @@
       { label: 'Name', sort: s('name'), get: function (l) { return [l.first_name, l.last_name].filter(Boolean).join(' ') || '—'; } },
       { label: 'Company', sort: s('company'), get: function (l) { return l.company || '—'; } },
       { label: 'Sells to', sort: s('sell_to'), html: sellTo },
-      { label: 'Product', get: function (l) { return l.product || '—'; } },
+      { label: 'Product', opt: 1, get: function (l) { return l.product || '—'; } },
       { label: 'Stage', html: L.stageBadge },
-      { label: 'Enriched', html: function (l) { return (l.enriched_title || l.enriched_company_size || l.e_company) ? YES : NO; } },
+      { label: 'Enriched', opt: 1, html: function (l) { return (l.enriched_title || l.enriched_company_size || l.e_company) ? YES : NO; } },
       { label: 'Created (ET)', sort: s('created_at'), cls: 'm', get: function (l) { return created(l.created_at); } },
-      { label: 'Source', cls: 'm', get: source },
+      { label: 'Source', cls: 'mw', opt: 1, get: source },
     ];
   }
   function table(rows, ns, sort, emptyTitle, emptyBody) {

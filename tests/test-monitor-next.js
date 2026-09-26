@@ -311,6 +311,10 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     referrer: 'https://www.google.com/search?q=x', created_at: '2026-09-25T11:00:00Z' };
   const LEADS = { total: 4471, page: 2, pages: 179, leads: [LEAD_A, LEAD_B, LEAD_C] };
   const BLOCKED = { total: 51, page: 1, pages: 3, leads: [LEAD_A] };
+  const SDR = { total: 37, leads: [
+    { email: 'Ann@Acme.co', first_name: 'Ann', last_name: 'Lee', company: 'Acme Widgets', enriched_industry: 'Manufacturing', completed: true, created_at: '2026-09-24T12:00:00Z', ps_partner_name: 'Alpha Partners', hear_about_us_raw: 'a podcast', enriched_linkedin: 'javascript:alert(2)', phone: '+14155550134' },
+    { email: 'bo@zeta.io', first_name: 'Bo', company: 'Zeta', completed: false, created_at: '2026-09-23T12:00:00Z' },
+    { email: 'cy@omega.com', first_name: 'Cy', company: 'Omega', enriched_industry: 'Software', completed: false, created_at: '2026-09-22T12:00:00Z' }] };
   const CHANGES = { [SID_A]: { ok: true, changes: [{ field: 'sell_to', old_value: 'B2C', new_value: 'B2B (clarified from B2C)', attribution: 'ours_sell_to_clarified', source_route: '/partial', arrived_step: 1, booking_uid_present: false, changed_at: '2026-09-24T14:06:00Z' }] },
     [SID_B]: { ok: false, unavailable: true }, [SID_C]: { ok: true, changes: [] } };
   let healthDown = false;
@@ -324,6 +328,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     if (p === '/monitor/lm-leads') return LM_L;
     if (p === '/monitor/enrichment-coverage') return COV;
     if (p === '/monitor/metrics') return METRICS;
+    if (p === '/monitor/sdr') return SDR;
     if (p === '/monitor/leads') return q.nonicp === 'only' ? (q.internal === 'exclude' ? { total: 45, page: 1, pages: 2, leads: [] } : BLOCKED) : LEADS;
     if (p === '/monitor/filter-options') return { hearAbout: ['Podcast'], utmSource: ['facebook', 'google'], partners: [{ key: 'pk_77', name: null, email: 'p@partner.co' }] };
     if (p === '/monitor/lead-changes') return CHANGES[q.session_id] || { ok: true, changes: [] };
@@ -645,11 +650,33 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('blocked: "only ours" says so, and asks for no people figure', /<b>51<\/b> of our own test leads blocked/.test(v) && !b.calls.slice(bc1).some((c) => c.path === '/monitor/metrics'));
   fire('change', el({ 'data-blk': '' }, { value: '' })); await ticks(20);
 
+  /* ═══ PR C: SDR list ═══ */
+  GW.show('sdr'); await ticks(20); v = view();
+  ok('sdr: the count is PEOPLE, from the payload total', /<b>37<\/b> people to call/.test(v));
+  eq('sdr: one row per person in the payload', (v.match(/class="xb"/g) || []).length, 3);
+  ok('sdr: keyed by the lower-cased address, never the row index', v.includes('data-x="sdr-ann_40acme_2eco"'));
+  ok('sdr: the stage is Completed or Left on step 2', v.includes('>Completed<') && v.includes('>Left on step 2<') && !/>Step 1</.test(v));
+  ok('sdr: the source cell carries the partner AND what they came in saying', /<span class="badge b-neu">partner<\/span> Alpha Partners<br>a podcast/.test(v));
+  ok('sdr: a javascript: LinkedIn is never a link', !/href="javascript/i.test(v));
+  fire('input', el({ 'data-sdr-q': '' }, { value: '  ACME ' })); v = view();
+  ok('sdr: search is trimmed and case-blind, as the server does it', /<b>1<\/b> matches the search/.test(v) && (v.match(/class="xb"/g) || []).length === 1);
+  fire('click', el({ 'data-sdr-csv': '' }));
+  ok('sdr: the export carries the SAME trimmed term', /\/monitor\/sdr\?token=[^&]+&format=csv&search=ACME$/.test(String(b.window.location.href || '')), String(b.window.location.href || '').replace(/token=[^&]+/, 'token=***'));
+  fire('input', el({ 'data-sdr-q': '' }, { value: 'software' })); v = view();
+  ok('sdr: industry is searched too', /<b>1<\/b> matches the search/.test(v) && v.includes('cy@omega.com'));
+  fire('input', el({ 'data-sdr-q': '' }, { value: '' }));
+  /* THE PAIR IS NOW A TRIPLE: server, classic, new -- all four fields, all three copies */
+  const srv = (fs.readFileSync(path.join(ROOT, 'index.js'), 'utf8').match(/const SDR_SEARCH_COLUMNS = (\[[^\]]+\]);/) || [])[1];
+  const cls = (fs.readFileSync(path.join(ROOT, 'index.js'), 'utf8').match(/'var SDR_SEARCH_FIELDS=(\[[^\]]+\]);'/) || [])[1];
+  const nw = (fs.readFileSync(path.join(ROOT, 'monitor', 'js', 'sdr.js'), 'utf8').match(/var SDR_SEARCH_FIELDS = (\[[^\]]+\]);/) || [])[1];
+  const norm = (x) => x && JSON.stringify(eval(x).slice().sort());
+  ok('sdr: the search fields are the SAME in the server, the classic and the new tab', srv && cls && nw && norm(srv) === norm(cls) && norm(cls) === norm(nw) && JSON.stringify(GW.TABS.sdr._fields.slice().sort()) === norm(nw), [srv, cls, nw].join(' | '));
+
   /* Hash, tabs, nav */
-  ok('nav: every rebuilt tab is registered with activate and deactivate', ['overview', 'health', 'dropoff', 'dupes', 'lm', 'leads', 'blocked'].every((t) => GW.TABS[t] && GW.TABS[t].activate && GW.TABS[t].deactivate && GW.TABS[t].title));
-  ok('nav: switching tab writes the hash', /tab=blocked/.test(b.window.location.hash), b.window.location.hash);
+  ok('nav: every rebuilt tab is registered with activate and deactivate', ['overview', 'health', 'dropoff', 'dupes', 'lm', 'leads', 'blocked', 'sdr'].every((t) => GW.TABS[t] && GW.TABS[t].activate && GW.TABS[t].deactivate && GW.TABS[t].title));
+  ok('nav: switching tab writes the hash', /tab=sdr/.test(b.window.location.hash), b.window.location.hash);
   const navHtml = b.els['nav-side'] ? b.els['nav-side'].innerHTML : '';
-  ok('nav: the tabs not rebuilt link to the classic dashboard', /href="\/monitor\?token=[^"]*#tab=partners"/.test(navHtml) && /href="\/monitor\?token=[^"]*#tab=sdr"/.test(navHtml));
+  ok('nav: the tabs not rebuilt link to the classic dashboard', /href="\/monitor\?token=[^"]*#tab=partners"/.test(navHtml) && /href="\/monitor\?token=[^"]*#tab=model"/.test(navHtml));
   ok('nav: All leads and Blocked are rebuilt, no longer classic links', /data-tab="leads"/.test(navHtml) && /data-tab="blocked"/.test(navHtml) && !/href="\/monitor\?token=[^"]*#tab=leads"/.test(navHtml) && !/href="\/monitor\?token=[^"]*#tab=blocked"/.test(navHtml));
   ok('nav: a classic link says it leaves', /\(classic dashboard\)/.test(navHtml));
   /* the last health run could not reach /monitor/health: all nine server

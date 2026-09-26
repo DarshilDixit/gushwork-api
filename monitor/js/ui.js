@@ -104,14 +104,15 @@ GW.ui = (function (G) {
     var th = function (c) {
       var on = srt && c.sort && srt.key === c.sort, aria = on ? ' aria-sort="' + (srt.dir === 'asc' ? 'ascending' : 'descending') + '"' : '';
       var inner = c.sort && srt ? '<button class="sortb" ' + srt.attr + '="' + esc(c.sort) + '">' + esc(c.label) + (on ? (srt.dir === 'asc' ? ic('arrow-up') : ic('arrow-down')) : '') + '</button>' : esc(c.label);
-      return '<th' + (c.r ? ' class="r"' : '') + aria + '>' + inner + '</th>';
+      var thc = [c.r ? 'r' : '', c.opt ? 'opt' : ''].filter(Boolean).join(' ');
+      return '<th' + (thc ? ' class="' + thc + '"' : '') + aria + '>' + inner + '</th>';
     };
     var head = '<tr>' + (o.detail ? '<th class="xcell"><span class="sr-only">Details</span></th>' : '') + cols.map(th).join('') + '</tr>';
     var body = o.rows.map(function (r, i) {
       var key = keyOf(o, r, i);
       var cells = cols.map(function (c, ci) {
         var v = c.html ? c.html(r) : esc(c.get ? c.get(r) : r[c.k]);
-        var cls = [c.r ? 'r' : '', c.cls || '', ci === 0 ? 'lead-cell' : ''].filter(Boolean).join(' ');
+        var cls = [c.r ? 'r' : '', c.cls || '', c.opt ? 'opt' : '', ci === 0 ? 'lead-cell' : ''].filter(Boolean).join(' ');
         return '<td' + (cls ? ' class="' + cls + '"' : '') + ' data-l="' + esc(c.label) + '"><span class="cv">' + (v === '' ? '—' : v) + '</span></td>';
       }).join('');
       var nm = o.rowName ? o.rowName(r) : 'row ' + (i + 1);

@@ -20,7 +20,7 @@ const path = require('path');
 const DIR = path.join(__dirname, 'monitor');
 /* ORDER MATTERS: core defines GW, ui and chart build on it, health defines the
    check names the Overview's attention strip reads, app boots last. */
-const JS_ORDER = ['core.js', 'ui.js', 'chart.js', 'labels.js', 'health.js', 'overview.js', 'dropoff.js', 'dupes.js', 'lm.js', 'leads.js', 'app.js'];
+const JS_ORDER = ['core.js', 'ui.js', 'chart.js', 'labels.js', 'health.js', 'overview.js', 'dropoff.js', 'dupes.js', 'lm.js', 'leads.js', 'sdr.js', 'app.js'];
 /* The only files the asset route will ever send. An allowlist, never a path. */
 const ASSETS = {
   'Inter-VariableFont_opsz_wght.ttf': 'font/ttf',

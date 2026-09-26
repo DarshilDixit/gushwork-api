@@ -8,7 +8,7 @@
 (function (G) {
   var NAV = [
     { items: [['overview', 'Overview', 'house']] },
-    { label: 'Leads', items: [['leads', 'All leads', 'users'], ['sdr', 'SDR list', 'phone-call', 1], ['dropoff', 'Dropoff', 'funnel'], ['dupes', 'Duplicates', 'copy'], ['visitors', 'Visitors', 'globe-hemisphere-west', 1]] },
+    { label: 'Leads', items: [['leads', 'All leads', 'users'], ['sdr', 'SDR list', 'phone-call'], ['dropoff', 'Dropoff', 'funnel'], ['dupes', 'Duplicates', 'copy'], ['visitors', 'Visitors', 'globe-hemisphere-west', 1]] },
     { label: 'Lead quality', items: [['blocked', 'Blocked', 'prohibit'], ['model', 'Model', 'robot', 1]] },
     { label: 'Revenue', items: [['partners', 'Partners', 'handshake', 1], ['lm', 'Lead magnet', 'magnet']] },
     { label: 'System', items: [['health', 'System health', 'heartbeat']] },

@@ -16,6 +16,8 @@
      errors        a console error, an exception, or a failed request
      junk          "undefined", "NaN", "[object" or "Infinity" painted on screen
      fonts         a brand font that did not load
+     hscroll       a data table wider than its card, so its right-hand columns
+                   sit off the edge (Dropoff's period table scrolls on purpose)
      keys          real key presses: the skip link on the first Tab, focus
                    kept across a repaint, the drawer closing when focus leaves
 
@@ -84,6 +86,14 @@ const AUDIT = `(() => {
     if (el.closest('#drawer') && !document.getElementById('drawer').classList.contains('open')) continue;
     const r = el.getBoundingClientRect();
     if (r.width < 43.5 || r.height < 43.5) out.push(['tap', '"' + name(el) + '" is ' + Math.round(r.width) + 'x' + Math.round(r.height) + ' (needs 44x44)']);
+  }
+  /* A DATA TABLE WIDER THAN ITS CARD: the overflow audit above excuses
+     anything inside a scroller, which is exactly where a cut-off column
+     hides. The SDR list shipped its last column off the edge at 1440 and
+     passed every check. */
+  for (const w of document.querySelectorAll('#view .rt-wrap')) {
+    if (!vis(w) || hiddenAncestor(w)) continue;
+    if (w.scrollWidth > w.clientWidth + 1) out.push(['hscroll', 'a table is ' + (w.scrollWidth - w.clientWidth) + 'px wider than its card (' + (w.querySelector('th') ? [...w.querySelectorAll('thead th')].map((t) => t.textContent.trim()).filter(Boolean).slice(-2).join(', ') : '') + ' cut off)']);
   }
   for (const svg of document.querySelectorAll('#view .chart svg')) {
     const ts = [...svg.querySelectorAll('text')].map((x) => ({ x, r: x.getBoundingClientRect() })).filter((o) => o.r.width > 0);

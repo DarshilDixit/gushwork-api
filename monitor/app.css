@@ -330,6 +330,7 @@ input.field { min-width: 0; }
 .rt tr:last-child td { border-bottom: 0; }
 .rt td.r, .rt th.r { text-align: right; font-variant-numeric: tabular-nums; }
 .rt td.m { color: var(--ink-muted); white-space: nowrap; }
+.rt td.mw { color: var(--ink-muted); }   /* muted, but free to wrap -- a long source must not push the table past its card */
 .rt td.w { word-break: break-word; }
 .rt tbody tr.main:hover td { background: var(--row-hover); }
 .rt .xb { width: 28px; height: 28px; display: inline-grid; place-items: center; border-radius: var(--gw-radius-8); color: var(--icon); }
@@ -546,6 +547,13 @@ input.field { min-width: 0; }
   .rt td.m { white-space: normal; }
   .rt tr.detail td { display: block; padding: 0 var(--gw-space-12) var(--gw-space-12); }
   .rt tr.detail td::before { content: none; }
+}
+/* A table with more columns than a mid-width content column can hold drops
+   its OPTIONAL ones (marked opt) in the band where it is still a table; every
+   dropped value is in the row's detail, and below 900 each row is a card that
+   shows everything. */
+@container view (min-width: 900px) and (max-width: 1099px) {
+  .rt th.opt, .rt td.opt { display: none; }
 }
 @container view (min-width: 560px) and (max-width: 899px) {
   .rt tr.main { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--gw-space-24); }

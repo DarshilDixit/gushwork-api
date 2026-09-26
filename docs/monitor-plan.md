@@ -298,7 +298,14 @@ _(kept current as the work moves)_
     in 233 pages; Blocked shows 51 leads, 42 people and 45 leads excluding
     ours. Tests: painted numbers, markers, panel order, the change log's
     three states by the raw session_id, filters to the request, CSV.
-  - [ ] SDR list
+  - [x] **SDR list** (`sdr.js`). 1,027 people to call on live data. The
+    search fields are held equal across the server, the classic and the
+    new tab; the search is trimmed as the server does it; the export
+    carries the same term.
+  - [x] **Layout check gained `hscroll`:** a data table wider than its
+    card. It found the SDR list's cut-off last column at 1440. Columns
+    marked `opt` hide in the 900–1099px content band, their values still in
+    the row detail.
   - [ ] Model
   - [ ] Visitors
   - [ ] Partners
