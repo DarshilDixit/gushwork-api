@@ -743,6 +743,11 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   { const isrc = fs.readFileSync(path.join(ROOT, 'index.js'), 'utf8');
     ok('classic: its ours marker no longer says "counted in every total" either, and names what leaves them out',
        !isrc.includes('One of our own test submissions. Counted in every total') && isrc.includes('The Dropoff tab and the new dashboard\\\\u2019s Overview leave them out.')); }
+  /* "IN EVERY TOTAL" STOPPED BEING TRUE on 26 Sept: the Overview and
+     Dropoff leave our own test submissions out, blocked or not. The All
+     leads and Blocked tabs must not claim it anywhere. */
+  ok('leads: nothing on All leads or Blocked claims a lead is "in every total" any more',
+     !/every total/.test(fs.readFileSync(path.join(ROOT, 'monitor', 'js', 'leads.js'), 'utf8')) && /title="Blocked[^"]*Still counted as a lead\.">blocked</.test(v), (v.match(/title="Blocked[^"]*"/) || [''])[0]);
   ok('leads: the Meta chip is not repeated beside "blocked"', !/>Meta: blocked</.test(v) && />Meta: ours</.test(v) && />Meta: model</.test(v));
   ok('leads: a clarified B2B reads as B2B, the stored text kept', /B2B <span class="badge b-neu" title="B2B \(clarified from B2C\)">clarified<\/span>/.test(v));
   ok('leads: source is the ad click, else where they came from', v.includes('facebook / paid') && v.includes('from google.com') && !/>referral</.test(v));
