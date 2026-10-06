@@ -119,6 +119,8 @@ function gadsSettings(env = process.env) {
     excludedDomains:    listFromEnv(env.GADS_EXCLUDED_DOMAINS, GADS_DEFAULT_EXCLUDED_DOMAINS),
     excludedHosts:      listFromEnv(env.GADS_EXCLUDED_HOSTS, GADS_DEFAULT_EXCLUDED_HOSTS),
     excludeFreeEmail:   env.GADS_EXCLUDE_FREE_EMAIL === 'true',
+    /* OFF unless exactly 'true'. See GADS_CONSENT_GRANTED below. */
+    consentGranted:     env.GADS_CONSENT_GRANTED === 'true',
     credentialsB64:     env.GADS_SERVICE_ACCOUNT_JSON_B64 || '',
   };
 }
@@ -324,9 +326,25 @@ function chooseClickId(cands, firstSeen, bookedAt, now) {
 
 /* ONE click ID per event, by instruction -- even though Google's own guide
    recommends sending a gclid and a gbraid together when both exist. That
-   is a deliberate departure, recorded in the review card. No consent field:
-   what to claim there is a decision, not a default. */
-function buildGadsEvent({ sessionId, click, bookedAt, value, email, phone }) {
+   is a deliberate departure, recorded in the review card. */
+
+/* CONSENT IS A CLAIM, so it is a switch and not a default. With
+   GADS_CONSENT_GRANTED=true every event says the person granted both Ad User
+   Data and Ad Personalization -- what Lorenzo's sheet sends today. Off, the
+   field is ABSENT, never "denied" and never "unspecified": absent is what
+   shipped in PR 129, and Google's own guide warns that without it "it's
+   possible that your conversions won't be attributable".
+
+   Field names and values from the Data Manager reference, read 6 Oct 2026:
+   Consent is { "adUserData": ConsentStatus, "adPersonalization":
+   ConsentStatus }, ConsentStatus is CONSENT_GRANTED, CONSENT_DENIED or
+   CONSENT_STATUS_UNSPECIFIED. It can sit on the request or on each Event,
+   and "User-level consent overrides request-level consent" -- it goes on the
+   EVENT here, so it is part of the payload frozen at the claim and a retry
+   sends exactly what the first attempt sent. */
+const GADS_CONSENT_GRANTED = Object.freeze({ adUserData: 'CONSENT_GRANTED', adPersonalization: 'CONSENT_GRANTED' });
+
+function buildGadsEvent({ sessionId, click, bookedAt, value, email, phone, consentGranted = false }) {
   const ev = {
     adIdentifiers:  { [click.type]: click.value },
     eventTimestamp: etRfc3339(bookedAt),
@@ -339,6 +357,9 @@ function buildGadsEvent({ sessionId, click, bookedAt, value, email, phone }) {
   }
   const ids = googleUserIdentifiers({ email, phone });
   if (ids.length) ev.userData = { userIdentifiers: ids };
+  /* Strictly true: anything else, including the string 'true', leaves the
+     field out. A copy, so one event can never mutate another's consent. */
+  if (consentGranted === true) ev.consent = { ...GADS_CONSENT_GRANTED };
   return ev;
 }
 
@@ -555,7 +576,7 @@ function createGadsUploader(deps) {
     if (choice.skip) return { skip: choice.skip, detail: malformed ? `${malformed} malformed click ID(s)` : null };
     if (choice.wait) return { wait: choice.wait };
     const value = valueFor(lead);
-    const event = buildGadsEvent({ sessionId: lead.session_id, click: choice.pick, bookedAt: booked, value, email: lead.email, phone: lead.phone });
+    const event = buildGadsEvent({ sessionId: lead.session_id, click: choice.pick, bookedAt: booked, value, email: lead.email, phone: lead.phone, consentGranted: s.consentGranted });
     return { send: { event, click: choice.pick, value: event.conversionValue == null ? null : event.conversionValue, booked } };
   }
 
@@ -813,7 +834,8 @@ function startGadsUploadSweep(uploader, env = process.env, log = console) {
   }
   log.log(`[Google Ads] Conversion upload ON, ${s.validateOnly ? 'VALIDATE-ONLY (nothing is recorded by Google)' : 'SENDING FOR REAL'}, ` +
     `account ${s.customerId}, action ${s.conversionActionId}, cutover ${s.cutover ? s.cutover.toISOString() : 'UNSET — nothing will send'}, ` +
-    `free email ${s.excludeFreeEmail ? 'excluded' : 'included'}, sweep every ${GADS_SWEEP_INTERVAL_MS / 60000} min`);
+    `free email ${s.excludeFreeEmail ? 'excluded' : 'included'}, consent ${s.consentGranted ? 'GRANTED on every event' : 'not sent'}, ` +
+    `sweep every ${GADS_SWEEP_INTERVAL_MS / 60000} min`);
   const run = () => uploader.runSweep().catch((e) => log.warn('[Google Ads] Sweep error (non-blocking):', e && e.message));
   run();
   const t = setInterval(run, GADS_SWEEP_INTERVAL_MS);
@@ -839,6 +861,7 @@ module.exports = {
   clickCandidates,
   chooseClickId,
   buildGadsEvent,
+  GADS_CONSENT_GRANTED,
   buildIngestRequest,
   parseServiceAccount,
   createTokenSource,

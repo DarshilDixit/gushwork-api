@@ -254,6 +254,24 @@ function lead(over = {}) {
   ok('A10: a refused token is an AUTH error that names invalid_grant', tokErr && tokErr.kind === 'auth' && /invalid_grant/.test(tokErr.message));
   ok('A10: the error never carries the key', tokErr && !tokErr.message.includes('PRIVATE KEY') && !tokErr.message.includes(SA.private_key.slice(40, 80)));
 
+  // A11. Consent: a switch, off by default, exact Data Manager names and values
+  eq('A11: consent is OFF by default', G.gadsSettings({}).consentGranted, false);
+  eq('A11: a typo leaves it off', G.gadsSettings({ GADS_CONSENT_GRANTED: 'True' }).consentGranted, false);
+  eq('A11: only the exact string "true" turns it on', G.gadsSettings({ GADS_CONSENT_GRANTED: 'true' }).consentGranted, true);
+  const evOn = G.buildGadsEvent({ sessionId: 's-on', click: { type: 'gclid', value: GCLID }, bookedAt: NOW, value: 12000, email: 'x@acme.test', phone: '', consentGranted: true });
+  eq('A11: ON puts both consents on the event, GRANTED, with the reference\'s field names',
+     JSON.stringify(evOn.consent), '{"adUserData":"CONSENT_GRANTED","adPersonalization":"CONSENT_GRANTED"}');
+  const reqOn = G.buildIngestRequest(evOn, G.gadsSettings({ GADS_CONSENT_GRANTED: 'true' }), true);
+  eq('A11: ...and it reaches the request inside the event', JSON.stringify(reqOn.events[0].consent), '{"adUserData":"CONSENT_GRANTED","adPersonalization":"CONSENT_GRANTED"}');
+  ok('A11: ...on the event only, not duplicated at request level', !('consent' in reqOn));
+  const evOff = G.buildGadsEvent({ sessionId: 's-off', click: { type: 'gclid', value: GCLID }, bookedAt: NOW, value: 12000, email: 'x@acme.test', phone: '' });
+  ok('A11: OFF (the default) leaves the field ABSENT, not denied or unspecified', !('consent' in evOff));
+  ok('A11: OFF leaves it absent from the request too', !('consent' in G.buildIngestRequest(evOff, G.gadsSettings({}), true).events[0]));
+  ok('A11: a truthy string is not true', !('consent' in G.buildGadsEvent({ sessionId: 's', click: { type: 'gclid', value: GCLID }, bookedAt: NOW, value: null, email: 'x@acme.test', consentGranted: 'true' })));
+  evOn.consent.adUserData = 'CONSENT_DENIED';
+  eq('A11: each event gets its own copy, so one cannot change the next', G.buildGadsEvent({ sessionId: 's2', click: { type: 'gclid', value: GCLID }, bookedAt: NOW, value: null, email: 'x@acme.test', consentGranted: true }).consent.adUserData, 'CONSENT_GRANTED');
+  ok('A11: the shared constant is frozen', Object.isFrozen(G.GADS_CONSENT_GRANTED));
+
   /* ================================================================
      B. THE EXCLUSION RULES, WITH THE REAL FUNCTIONS FROM index.js
      ================================================================ */
@@ -332,6 +350,43 @@ function lead(over = {}) {
   ok('B2: the module never filters SQL on disqualified', !/disqualified\s+IS\s+(NOT\s+)?TRUE/i.test(modSrc));
   ok('B2: the module writes to no table but its own', !/(INSERT INTO|UPDATE|DELETE FROM)\s+(?!\$\{TABLE\})(?!gads_conversion_uploads)[a-z_]+/i.test(modSrc.replace(/\/\*[\s\S]*?\*\//g, '')));
   ok('B2: index.js still does not change INTERNAL_TEST_EMAILS for this', !/flighted|uprawmedia/.test(liftDecl('const INTERNAL_TEST_EMAILS') + liftDecl('const ELV_EXCLUDED_DOMAINS')));
+
+  // B4. Consent through evaluate(), with the real gates
+  const consOn = await uploaderWith().u.evaluate(lead(), G.gadsSettings({ GADS_CONSENT_GRANTED: 'true' }));
+  eq('B4: with the setting ON the event to send carries consent', consOn.send && consOn.send.event.consent && consOn.send.event.consent.adPersonalization, 'CONSENT_GRANTED');
+  const consOff = await uploaderWith().u.evaluate(lead(), G.gadsSettings({}));
+  ok('B4: with the setting OFF it does not', consOff.send && !('consent' in consOff.send.event));
+
+  // B5. The whole sweep, both ways, reading back the body that reaches Google
+  async function sweepBody(extraEnv) {
+    const sent = [];
+    const pool = { query: async (q, p) => {
+      const flat = String(q).replace(/\s+/g, ' ').trim();
+      if (/FROM leads l LEFT JOIN gads_conversion_uploads g/.test(flat)) return { rows: [{ ...lead({ session_id: '99999999-0000-4000-8000-000000000009', booked_at: new Date(NOW - 2 * D + 600000) }), upload_status: null }], rowCount: 1 };
+      if (/AS first_seen/.test(flat)) return { rows: [{ first_seen: firstSeenAt }], rowCount: 1 };
+      if (/^INSERT INTO gads_conversion_uploads .*RETURNING session_id/.test(flat)) return { rows: [{ session_id: p[0] }], rowCount: 1 };
+      return { rows: [], rowCount: 1 };
+    } };
+    const u = G.createGadsUploader({ pool, sourceSql: "'Google'",
+      isInternalLead: REAL.isInternalLead, isStagingSubmission: REAL.isStagingSubmission, isInternalSubmission: REAL.isInternalSubmission,
+      isWebsiteVerified: REAL.isWebsiteVerified, freeEmailMatch: REAL.freeEmailMatch, nonIcpFresh: async () => null, valueFor: REAL.gadsValueFor,
+      env: { GADS_UPLOAD_ENABLED: 'true', GADS_UPLOAD_CUTOVER: '2026-09-01T00:00:00-04:00', GADS_SERVICE_ACCOUNT_JSON_B64: SA_B64, ...extraEnv },
+      now: () => NOW, log: { log() {}, warn() {}, info() {} },
+      fetchImpl: async (url, opts) => {
+        if (url === SA.token_uri) return { ok: true, status: 200, json: async () => ({ access_token: 't', expires_in: 3600 }) };
+        sent.push(JSON.parse(opts.body));
+        return { ok: true, status: 200, json: async () => ({ requestId: 'v-x' }) };
+      } });
+    await u.runSweep();
+    return sent;
+  }
+  const bodiesOn = await sweepBody({ GADS_CONSENT_GRANTED: 'true' });
+  eq('B5: ON: one request left', bodiesOn.length, 1);
+  eq('B5: ON: the request body carries GRANTED for both', bodiesOn[0] && JSON.stringify(bodiesOn[0].events[0].consent), '{"adUserData":"CONSENT_GRANTED","adPersonalization":"CONSENT_GRANTED"}');
+  eq('B5: ON: still validate-only', bodiesOn[0] && bodiesOn[0].validateOnly, true);
+  const bodiesOff = await sweepBody({});
+  eq('B5: OFF: one request left', bodiesOff.length, 1);
+  ok('B5: OFF: the request body has NO consent anywhere', bodiesOff[0] && !JSON.stringify(bodiesOff[0]).includes('consent'), JSON.stringify(bodiesOff[0]));
 
   // B3. The sweep's switches
   const off = uploaderWith({});
