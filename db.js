@@ -385,6 +385,75 @@ async function initDB() {
     }
 
     /* -------------------------------------------------------
+       GOOGLE ADS CONVERSION UPLOADS -- one row per lead, ever
+
+       Written only by google-ads-conversions.js. The PRIMARY KEY is the
+       claim: a lead gets a row before any request leaves, by an INSERT that
+       only one process can win, and every later state change is a
+       conditional UPDATE on that row. Two sweeps, or a sweep racing a
+       deploy's boot run, therefore cannot both send one booking -- the same
+       rule PartnerStack's once-per-domain index enforces, and for the same
+       reason: an ad platform cannot be asked to forget a conversion.
+
+       payload is the exact event sent, frozen at the claim, so a retry after
+       a timeout sends identical bytes and the session id as the transaction
+       id makes it a duplicate Google discards rather than a second
+       conversion. It holds SHA-256 hashes of email and phone, never the
+       plain values.
+
+       TEXT, NOT JSONB, and that is the point of the column. JSONB stores an
+       object's keys in its own order, so a payload read back and
+       re-serialised is the same event in different bytes. Executed on 6 Oct
+       2026 against a temp table: the retry sent a reordered body. TEXT
+       keeps exactly what went out the first time.
+
+       session_id is UUID because leads.session_id is: a TEXT key here would
+       make every join to leads a text = uuid error.
+
+       OWN try/catch, like the table above. initDB throwing stops the app
+       booting, and an ad-signal table must never be the reason the form
+       is down. If this fails the uploader's queries fail, it alerts, and
+       every lead path carries on untouched. */
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS gads_conversion_uploads (
+          session_id          UUID PRIMARY KEY,
+          status              TEXT NOT NULL
+                              CHECK (status IN ('sending', 'sent', 'validated', 'skipped', 'failed_retryable', 'failed_permanent')),
+          skip_reason         TEXT,
+          skip_detail         TEXT,
+          click_id_type       TEXT,
+          click_id            TEXT,
+          click_field         TEXT,
+          click_first_seen_at TIMESTAMPTZ,
+          booked_at           TIMESTAMPTZ,
+          event_timestamp     TEXT,
+          conversion_value    NUMERIC,
+          currency            TEXT,
+          transaction_id      TEXT,
+          payload             TEXT,
+          cutover_at          TIMESTAMPTZ,
+          validate_only       BOOLEAN,
+          attempts            INT NOT NULL DEFAULT 0,
+          last_error          TEXT,
+          last_error_kind     TEXT,
+          request_id          TEXT,
+          claimed_at          TIMESTAMPTZ,
+          next_attempt_at     TIMESTAMPTZ,
+          sent_at             TIMESTAMPTZ,
+          created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS gads_conversion_uploads_due_idx
+          ON gads_conversion_uploads (status, next_attempt_at);
+      `);
+      console.log('[DB] Google Ads conversion-uploads table ready');
+    } catch (err) {
+      console.error('[DB] Google Ads conversion-uploads table init FAILED (non-fatal):', err.message);
+    }
+
+    /* -------------------------------------------------------
        EMAIL VERIFICATIONS — the ELV verdict, keyed by email
 
        /verify-email computed a rich verdict, returned it to the browser

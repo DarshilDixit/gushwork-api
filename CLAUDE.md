@@ -199,6 +199,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `db.js` | Schema + migrations. Runs on every boot; everything is `IF NOT EXISTS` |
 | `salesforce.js` | Lead upsert by email. Refresh-token OAuth |
 | `meta-capi.js` | Conversions API — `Lead`, `Schedule`, `StartTrial`, `Contact`. Also owns the product catalogue (`PRODUCTS`, `resolveProduct`), which `index.js` imports |
+| `google-ads-conversions.js` | Google Ads offline click conversions for booked Google Ads leads, through the **Data Manager API** (`events:ingest`), not the Google Ads API. Shaped like `meta-capi.js`; everything `index.js` owns is INJECTED into `createGadsUploader`. OFF and validate-only by default. Writes only `gads_conversion_uploads` |
 | `loops.js` | Loops.so contact push for the lead-magnet landing page |
 | `partnerstack.js` | PartnerStack API. TWO hosts and TWO auth schemes: `partnerlinks.io` conversion (Bearer tracking token) and `api.partnerstack.com` v2 partnerships + actions (Basic public:secret) |
 | `lead-magnet.js` | `/lm/*` routes. Separate table, deliberately not joined to `leads` |
@@ -211,6 +212,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `tools/re-enrich-apollo.js` | Re-runs the Apollo lookups that were REFUSED — the three out-of-credit windows (24 Jun, 3–10 Sept, 23 Sept on). Dry run by default: prices it (1 credit per person FOUND, 0 for no match), one lookup per address, copies from an earlier answer for the same address at zero cost, skips our own submissions. `--since`, `--limit`, `--apply`. **Stops at the first refusal.** Writes `enrichment_data` and the lead row exactly as `/enrich` does; never Salesforce, never the mirror. Lifts the parser out of `index.js`. Not mounted, not yet run |
 | `tools/sync-enrichment-out.js` | Carries re-enriched Apollo fields OUT to the AWS mirror (`gw_form_leads`, the dialer feed) and Salesforce, for the sessions `tools/re-enrich-apollo.js` rewrote since `--since`. **Fill-only**: writes a field only where the destination is blank, touches no other column, creates no row, never writes a converted Lead. Mirror by targeted `UPDATE ... WHERE session_id`, never `syncToAWS`. Salesforce field names from `salesforce.js`'s map, types and lengths from Salesforce's describe, writes through `updateSFLead`. Dry run by default; `--apply`, `--mirror`, `--salesforce`. Run once on 26 Sept 2026 after the backfill. Not mounted |
 | `tools/backfill-ip-coords.js` | Fills `ip_latitude` / `ip_longitude` for leads resolved BEFORE those columns existed — they have a city and no point, so they are complete in every table and invisible on the map. Only touches rows that already resolved and have no coordinates. Lifts `resolveIpGeo` out of `index.js`. Dry run by default; `--apply` writes. Run once on 23 Sept (17 rows). Not mounted |
+| `tools/gads-upload-dry-run.js` | What the Google Ads upload WOULD send over a window (default 90 days), and why each other booking is skipped. Runs the module's own `dryRun` with the real gates lifted out of `index.js`; `BEGIN TRANSACTION READ ONLY`, rolled back, and a fetch that throws. Counts only. `--days`, `--free-email`. Not mounted |
 | `tools/fire-alert.js` | Fires ONE real alert on purpose, to satisfy the fire-every-alert-path-once rule. Sends for real (Slack + email on a critical). Lifts `alertOps` out of `index.js` rather than reimplementing it, so what arrives is what production sends. Not mounted, not called by anything |
 | `monitor-next.js` | Builds and serves THE dashboard at `/monitor` (since PR D, 26 Sept 2026). `/monitor/next`, where it was built side by side, redirects there keeping its query. Reads `monitor/` once at boot and stitches one page behind the same token -- no build step. Also the token-gated font route, an allowlist, never a path. The OLD dashboard is `/monitor/classic` in `index.js`, kept one week as the fallback |
 | `monitor/` | The new dashboard's front end, in real files: `tokens.css` (the design system's tokens, copied verbatim from gushwork-design v1.49.0), `app.css` (both themes, components, responsive), `js/*.js` (classic scripts on one `GW` namespace, loaded in `JS_ORDER`), `icons/` (the Phosphor icons it uses, MIT), `fonts/` (Inter, Vert Grotesk Display) |
@@ -582,6 +584,14 @@ delete the file.
 - **`leads.ps_signup_recheck_at`** — when a verified PartnerStack conversion
   was last RE-checked, as opposed to `ps_signup_verified_at` which is when it
   was first seen to exist. Two observations, two columns.
+- **`gads_conversion_uploads`** — one row per lead the Google Ads upload has
+  decided about: `sent`, `validated` (checked by Google, recorded by nobody),
+  `skipped` with a `skip_reason`, `failed_retryable` or `failed_permanent`, or
+  `sending` while a request is out. **The primary key is the claim**: the row
+  exists before any request leaves, so two sweeps cannot both send a lead.
+  `payload` is the exact event sent, **TEXT and not JSONB** — JSONB reorders
+  keys, so a retry would send the same event in different bytes (measured on
+  a temp table). `session_id` is UUID because `leads.session_id` is.
 - **`lead_field_changes`** — append-only log of the seven identity fields
   (`email`, `company`, `website`, `phone`, `first_name`, `last_name`,
   `sell_to`) changing on a lead row, because both upserts are last-write-wins
@@ -2054,6 +2064,46 @@ is a decision for Darshil, not a quiet widening of his rule.
 `tests/test-batch2.js` §32 runs the real function over every stored phone
 shape and the hostile ones.
 
+**THE GOOGLE ADS CONVERSION UPLOAD — 6 Oct 2026, and its traps.**
+`google-ads-conversions.js` sends booked Google Ads leads to account
+5442288209, action 7825004775 ("CRM - Qualified Demo Request").
+
+- **Data Manager API, NOT the Google Ads API.** `UploadClickConversions`
+  refuses new adopters since 15 June 2026
+  (`CUSTOMER_NOT_ALLOWLISTED_FOR_THIS_FEATURE`), and this repo never adopted
+  it. Data Manager needs **no developer token** and the scope
+  `https://www.googleapis.com/auth/datamanager` — not `adwords`. Credential:
+  `GADS_SERVICE_ACCOUNT_JSON_B64`, the key of
+  `gads-conversion-uploader@gushwork-crm.iam.gserviceaccount.com`, which is a
+  user DIRECTLY on 5442288209, so no login account is sent.
+- **Off, then validate-only, by default.** `GADS_UPLOAD_ENABLED=true` turns
+  the sweep on; it stays validate-only (Google checks, records nothing) until
+  `GADS_UPLOAD_VALIDATE_ONLY=false`. **No `GADS_UPLOAD_CUTOVER` means nothing
+  sends**, and a cutover without its offset is refused — Lorenzo's sheet
+  covers everything before it, so the boundary must be exact.
+- **A validate-only 200 DOES check the action exists** (a made-up ID answers
+  404 `INVALID_CONVERSION_ACTION_ID`, which is permanent and alerts) but
+  proves nothing about the click: matching and the 6-hour rules only happen
+  on a real send.
+- **It skips more than Meta does, on purpose, and the lists are Google-only.**
+  Flighted and Upraw (`GADS_EXCLUDED_DOMAINS`) and any other `*.webflow.io`
+  or loopback host (`GADS_EXCLUDED_HOSTS`) are NOT in `INTERNAL_TEST_EMAILS`
+  or `ELV_EXCLUDED_DOMAINS`, because those also gate Meta, Salesforce and the
+  dialer. Both env lists EXTEND their defaults and cannot shrink them.
+- **`non_icp_llm_flagged` is read in CODE at upload time, never as a SQL
+  filter** — section 10f of `test-non-icp.js` forbids a flagged lead being
+  kept out of Salesforce, PartnerStack, the SDR list or the dialer. This is
+  an ad signal, like Meta, and it skips flagged leads whatever
+  `NON_ICP_LLM_META` says. The **fresh verdict read fails CLOSED** (waits a
+  sweep) — the opposite of the lead path, because an upload can wait and a
+  realtor sent to Google's bidder cannot be taken back.
+- **Phone is E.164 WITH the `+`.** Meta's `normalizePhone` strips it; reusing
+  it would hash a different string and match nobody, silently.
+- **Built inside `start()`, never at the top level** — it reads
+  `DROPOFF_SOURCE_SQL`, a `const`, which is the temporal-dead-zone break.
+- **Value is the product lookup, not `meta_predicted_ltv`**, which is empty
+  whenever Meta did not fire.
+
 **Booking arrives by three routes.** `/booking-confirmed` (browser-fired),
 `/booking-confirmed-webhook` (Cal), `/booking-confirmed-webhook-rh` (RevenueHero).
 Any change to booking behaviour has to be applied to all three. A fix on one is a
@@ -2510,14 +2560,17 @@ node tests/test-apollo.js            # BOOTS /enrich against every shape Apollo 
                                     #   tools/re-enrich-apollo.js against a stubbed database
 node tests/test-monitor-next.js      # BOOTS /monitor/next and /monitor/overview, and EVALUATES the new
                                     #   dashboard's served JS: painted numbers against the payload
+node tests/test-gads-upload.js      # the Google Ads upload: Google's normalisation, the click-ID choice,
+                                    #   every exclusion with the REAL index.js gates, and BOOTS the app
+                                    #   with the upload on to read back the one validate-only request
 
-node tests/measure.js --check   # or just this: runs all fourteen and checks the totals
+node tests/measure.js --check   # or just this: runs all fifteen and checks the totals
 node tests/test-batch1-db.js    # needs DATABASE_URL
 node tests/test-batch1-e2e.js   # boots the real server, needs DATABASE_URL
 ```
 
-**The fourteen dependency-free suites are the bar.** They run anywhere in about a
-second each — run all fourteen after any change to `index.js`, `lead-magnet.js`,
+**The fifteen dependency-free suites are the bar.** They run anywhere in about a
+second each — run all fifteen after any change to `index.js`, `lead-magnet.js`,
 or either form file, always. Do not install Postgres and do not point anything at
 the production database from a feature branch.
 
@@ -2542,9 +2595,9 @@ had actually been read.
 If the output is genuinely too long to read, that is a reason to fix the
 output, not to pipe it.
 
-**Seven of the fourteen BOOT A ROUTE** rather than reading source text —
+**Eight of the fifteen BOOT A ROUTE** rather than reading source text —
 `test-submit-gate`, `test-session-page-views`, `test-lead-field-changes`,
-`test-session-payload`, `test-apollo`, `test-monitor-next` and `test-non-icp-routes`. The last one goes furthest:
+`test-session-payload`, `test-apollo`, `test-monitor-next`, `test-gads-upload` and `test-non-icp-routes`. The last one goes furthest:
 it also **evaluates the dashboard's inline JavaScript** in a stubbed DOM and
 calls every tab loader, because three production breaks in one night were
 runtime behaviour no source assertion could see. They stub `pg` and `global.fetch` and drive the real
@@ -2557,7 +2610,7 @@ Tests read the real functions out of `index.js` rather than a copy. A test that
 exercises a duplicate of the source can pass while production is broken. Keep it
 that way.
 
-**All fourteen suites require `tests/crash-reporter.js` first, and it is not
+**All fifteen suites require `tests/crash-reporter.js` first, and it is not
 optional.** A suite that crashes prints a stack trace, zero `✗` lines and exits
 1 — which reads as a clean run to anything counting markers and as a caught
 mutation to anything counting exit codes. Three of the six did exactly that
