@@ -49,11 +49,12 @@ GW.TABS.sdr = (function (G) {
   function render() {
     if (!root || (G.current && G.current() !== 'sdr')) return;
     var d = data, rows = d ? (d.leads || []).filter(matches) : [], page = rows.slice(0, shown), more = rows.length - page.length, t = term();
-    var count = d ? '<b>' + fmt(d.total) + '</b> ' + G.plural(d.total, 'person', 'people') + ' to call' + (t ? ' · <b>' + fmt(rows.length) + '</b> ' + G.plural(rows.length, 'matches', 'match') + ' the search' : '') : '';
+    var agencyN = rows.filter(function (l) { return l.is_agency; }).length;
+    var count = d ? '<b>' + fmt(d.total) + '</b> ' + G.plural(d.total, 'person', 'people') + ' to call' + (t ? ' · <b>' + fmt(rows.length) + '</b> ' + G.plural(rows.length, 'matches', 'match') + ' the search' : '') + (agencyN ? ' · <b>' + fmt(agencyN) + '</b> ' + G.plural(agencyN, 'agency row', 'agency rows') + ' left out of the export' : '') : '';
     var head = '<section class="ph"><div class="ph-top"><h1 class="title" tabindex="-1">SDR list</h1><span class="readat">' + count + '</span></div>' +
       '<p class="lede">Everyone we could still call: B2B leads — and CRM leads, whatever they sell to — with no booking on any of their sessions. One row per person, showing their newest qualifying attempt. Blocked and disqualified leads are not on it.</p>' +
       (d ? '<div class="controls"><input class="field search" type="search" data-sdr-q placeholder="Search email, company, first name, industry" aria-label="Search the SDR list by email, company, first name or industry" value="' + esc(q) + '">' +
-        '<button class="btn" data-sdr-csv>' + G.ic('download-simple') + 'Export CSV' + (t ? ' (these ' + fmt(rows.length) + ')' : '') + '</button></div>' : '') + '</section>';
+        '<button class="btn" data-sdr-csv>' + G.ic('download-simple') + 'Export CSV' + (t ? ' (these ' + fmt(rows.length - agencyN) + ')' : '') + '</button></div>' : '') + '</section>';
     var body;
     if (!d && err) body = '<section class="card panel">' + U.unavailable('The SDR list', err) + '</section>';
     else if (!d) body = U.loading(5);
@@ -61,7 +62,10 @@ GW.TABS.sdr = (function (G) {
       '<section class="card">' + U.rtable({ ns: 'sdr', rows: page, key: function (l) { return String(l.email).toLowerCase(); }, rowName: function (l) { return l.email; },
         emptyTitle: t ? 'No one matches' : 'Nobody to call right now', emptyBody: t ? 'The search looks at email, company, first name and industry.' : 'Everyone qualifying has a booking.',
         cols: [
-          { label: 'Email', cls: 'ecell', html: function (l) { return '<span class="em">' + esc(l.email || '—') + '</span>'; } },
+          /* AGENCY rows (AGENCY_DOMAINS) are marked, never hidden: a person
+             sees the row and why, and the CSV -- what reaches a dialer --
+             leaves them out on the server. */
+          { label: 'Email', cls: 'ecell', html: function (l) { return (l.is_agency ? '<span class="badge b-neu" title="' + esc('An agency we work with (' + (l.agency_domain || 'agency') + '). Shown here, left out of the CSV export.') + '">agency</span> ' : '') + '<span class="em">' + esc(l.email || '—') + '</span>'; } },
           { label: 'Name', get: function (l) { return [l.first_name, l.last_name].filter(Boolean).join(' ') || '—'; } },
           { label: 'Company', get: function (l) { return l.company || '—'; } },
           { label: 'Source', html: source },

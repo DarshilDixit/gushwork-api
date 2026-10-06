@@ -54,6 +54,7 @@ const SUITES = [
   'test-apollo.js',
   'test-monitor-next.js',
   'test-gads-upload.js',
+  'test-agency-exclusions.js',
 ];
 
 const BASELINE = path.join(__dirname, '.baseline.json');

@@ -331,12 +331,16 @@ const R = (new Function(ruleSrc + `
          /ANY\(\$\$\{params\.length\}/.test(bfCode), bfCode.match(/emailClause[^\n]*/g));
 
       /* ── parseEmails ── */
-      const B = (new Function('pushToSalesforce', 'getSalesforceToken', 'fetch', 'setTimeout',
+      const B = (new Function('pushToSalesforce', 'getSalesforceToken', 'fetch', 'setTimeout', 'salesforceSkipReason',
         bfSrc + '\n return { runBackfill, parseEmails };'))(
         async () => ({ success: true, leadId: 'L1' }),
         async () => ({ accessToken: 't', instanceUrl: 'https://sf' }),
         async () => ({ ok: true, json: async () => ({ records: [] }) }),
-        (f) => f()
+        (f) => f(),
+        /* runBackfill now asks the SAME skip rule pushToSalesforce applies
+           (agency domains, 7 Oct 2026) -- a lifted function needs every name it
+           reads. The real one: pure, no network, no database. */
+        require('../salesforce').salesforceSkipReason
       );
       eq('backfill: parseEmails takes a comma string',
          B.parseEmails('A@x.com, b@y.com'), ['a@x.com', 'b@y.com']);
@@ -410,12 +414,16 @@ const R = (new Function(ruleSrc + `
       /* A dry run must not write, and must say which way each row would go. */
       {
         const pushes = [];
-        const B2 = (new Function('pushToSalesforce', 'getSalesforceToken', 'fetch', 'setTimeout',
+        const B2 = (new Function('pushToSalesforce', 'getSalesforceToken', 'fetch', 'setTimeout', 'salesforceSkipReason',
           bfSrc + '\n return { runBackfill };'))(
           async (p) => { pushes.push(p.email); return { success: true, leadId: 'L1' }; },
           async () => ({ accessToken: 't', instanceUrl: 'https://sf' }),
           async () => ({ ok: true, json: async () => ({ records: [] }) }),
-          (f) => f()
+          (f) => f(),
+        /* runBackfill now asks the SAME skip rule pushToSalesforce applies
+           (agency domains, 7 Oct 2026) -- a lifted function needs every name it
+           reads. The real one: pure, no network, no database. */
+        require('../salesforce').salesforceSkipReason
         );
         const out = await B2.runBackfill(mkPool([
           row('real@customer.com'),
@@ -434,12 +442,16 @@ const R = (new Function(ruleSrc + `
       /* The hard guard: a converted Lead is never touched. */
       {
         const pushes = [];
-        const B3 = (new Function('pushToSalesforce', 'getSalesforceToken', 'fetch', 'setTimeout',
+        const B3 = (new Function('pushToSalesforce', 'getSalesforceToken', 'fetch', 'setTimeout', 'salesforceSkipReason',
           bfSrc + '\n return { runBackfill };'))(
           async (p) => { pushes.push(p.email); return { success: true, leadId: 'L1' }; },
           async () => ({ accessToken: 't', instanceUrl: 'https://sf' }),
           async () => ({ ok: true, json: async () => ({ records: [{ Id: '00Q', IsConverted: true }] }) }),
-          (f) => f()
+          (f) => f(),
+        /* runBackfill now asks the SAME skip rule pushToSalesforce applies
+           (agency domains, 7 Oct 2026) -- a lifted function needs every name it
+           reads. The real one: pure, no network, no database. */
+        require('../salesforce').salesforceSkipReason
         );
         const out = await B3.runBackfill(mkPool([row('converted@customer.com')]),
                                          { emails: 'converted@customer.com' });
@@ -4525,8 +4537,12 @@ section12()
        /_sfRetryRunning/.test(sweep));
 
     /* ── 5. Both outcomes are recorded on the live path ──────────────── */
+    /* Since 7 Oct 2026 the .then also lets a SKIP (agency or our own,
+       salesforceSkipReason) through WITHOUT stamping it synced -- still one
+       success stamp, now never for a lead Salesforce does not have. The skip
+       itself is executed in tests/test-agency-exclusions.js. */
     ok('sfretry: /submit records a SUCCESS, not just a failure',
-       /\.then\(\(\) => markSalesforceSynced\(session_id\)\)/.test(idx2));
+       /\.then\(\(r\) => \{ if \(r && r\.skipped\) return; markSalesforceSynced\(session_id\); \}\)/.test(idx2));
     ok('sfretry: and records the failure with its classification',
        /markSalesforceFailed\(session_id, err\)/.test(idx2));
     ok('sfretry: marking is fire-and-forget — a lead never waits on bookkeeping',
