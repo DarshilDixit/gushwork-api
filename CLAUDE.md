@@ -142,6 +142,24 @@ Three things follow from that, and they are not negotiable:
    `NON_ICP_LLM_META`, because a lead we turn away that still feeds the
    algorithm a conversion is incoherent.
 
+   **And two more gate it by WHO the lead is, not what the business is.**
+   Our own test submissions (`internalLeadSuppressesMeta`, 19 Sept, five call
+   sites) and, since 7 Oct 2026, **agency domains — `META_EXCLUDED_DOMAINS`,
+   default `flighted.co,uprawmedia.com`**. The agency check lives INSIDE
+   `sendEvent` in `meta-capi.js`, which every Meta event passes through
+   (StartTrial, Lead, all three Schedule routes, and the lead magnet's
+   Contact), so no call site can miss it. It matches the email's domain OR
+   the website's host, exact or subdomain, never a substring; the env extends
+   the defaults and cannot shrink them. A skip returns `{ skipped }`, neither
+   a failure (no alert) nor a success (no streak reset), and
+   `meta_predicted_ltv` is not stamped for those leads. **Meta only:**
+   Salesforce, the mirror and the dialer still see agency leads, and
+   `INTERNAL_TEST_EMAILS` / `ELV_EXCLUDED_DOMAINS` are unchanged. The Google
+   upload has its own list, `GADS_EXCLUDED_DOMAINS`. Measured before it
+   shipped, by replaying the gates: 7 agency leads in 90 days fired about 7
+   StartTrial, 4 Lead and 3 Schedule. **The dashboard's "why was Meta
+   withheld" filter (`metaWithheldReason`) does not know this reason yet.**
+
    **Read `suppress_meta` off the verdict, never `blocked`.** A flagged
    lead is not blocked and still has to stop firing Meta when META is on.
    Three call sites read it: `/partial` (StartTrial), `/submit` (Lead), and
