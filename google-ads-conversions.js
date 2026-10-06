@@ -467,6 +467,115 @@ async function postIngest(fetchImpl, token, request, timeoutMs = GADS_REQUEST_TI
   }
 }
 
+/* ── After a real send: did Google actually keep it? ──────────────────── */
+
+/* A 200 FROM events:ingest IS NOT A CONVERSION. It means Google accepted the
+   request; matching the click happens afterwards, and the outcome is only
+   available from GET /v1/requestStatus:retrieve?requestId=... -- the same
+   shape Meta taught this repo, where a 200 carried an empty messages array
+   for months. Read on 7 Oct 2026 from the Data Manager reference:
+
+   - one entry per destination, in request order. We send ONE destination and
+     ONE event per request, so a request's status IS that event's result;
+   - requestStatus is PROCESSING, SUCCESS, FAILED or PARTIAL_SUCCESS;
+   - errorInfo.errorCounts[] and warningInfo.warningCounts[] carry
+     { recordCount, reason }, and are empty while PROCESSING;
+   - eventsIngestionStatus.recordCount is how many records Google received;
+   - "the status can only be retrieved for requests that succeed and don't
+     have validate_only=true" (Google's own 400, seen 6 Oct 2026), so a
+     validate-only row is never asked about.
+
+   The reference gives NO timing -- not how long PROCESSING lasts, not how
+   long a request ID stays retrievable -- so the checks back off and give up
+   after GADS_STATUS_GIVE_UP_MS with an alert, rather than guessing a number
+   and calling silence a success. */
+const DATA_MANAGER_STATUS_URL   = 'https://datamanager.googleapis.com/v1/requestStatus:retrieve';
+const GADS_STATUS_FIRST_CHECK_MS = 30 * 60 * 1000;
+const GADS_STATUS_BACKOFF_MS     = [30, 60, 180, 360, 720, 1440].map((m) => m * 60 * 1000);
+const GADS_STATUS_GIVE_UP_MS     = 7 * 24 * 60 * 60 * 1000;
+
+/* UNMATCHED: Google received the event and could not tie it to an ad click,
+   so it counts for nothing. The click-shaped reasons, and only those. */
+const GADS_UNMATCHED_REASONS = new Set([
+  'PROCESSING_ERROR_REASON_CLICK_NOT_FOUND',
+  'PROCESSING_ERROR_REASON_INVALID_CLICK',
+  'PROCESSING_ERROR_REASON_INVALID_OPERATING_ACCOUNT_FOR_CLICK',
+  'PROCESSING_ERROR_REASON_USER_ID_NOT_FOUND',
+  'PROCESSING_ERROR_REASON_USER_ID_NOT_FOUND_FOR_GCLID',
+  'PROCESSING_ERROR_REASON_MATCH_ID_NOT_FOUND',
+]);
+/* DUPLICATE: Google already holds this conversion -- our own earlier attempt
+   after a timeout, or another source with the same order ID. Not a loss of
+   the conversion, but still an event Google dropped, so it is recorded and
+   reported in its own words rather than folded into "dropped". */
+const GADS_DUPLICATE_REASONS = new Set([
+  'PROCESSING_ERROR_REASON_DUPLICATE_GCLID',
+  'PROCESSING_ERROR_REASON_DUPLICATE_TRANSACTION_ID',
+]);
+
+const countsByReason = (list) => {
+  const out = {};
+  for (const c of list || []) {
+    if (!c || !c.reason) continue;
+    out[c.reason] = (out[c.reason] || 0) + (Number(c.recordCount) || 0);
+  }
+  return out;
+};
+
+/* Google's reply -> our outcome, for a one-event request.
+     accepted               SUCCESS, one record, no warnings
+     accepted_with_warnings SUCCESS, one record, but parts of it were ignored
+     unmatched              failed for a click-shaped reason
+     duplicate              failed only because Google already has it
+     dropped                failed for any other reason, or "succeeded" with
+                            zero records received
+     processing             not final yet: ask again later
+     unreadable             no status we can read: ask again later, never
+                            treated as an answer */
+function classifyRequestStatus(body) {
+  const d = body && Array.isArray(body.requestStatusPerDestination) ? body.requestStatusPerDestination[0] : null;
+  if (!d || !d.requestStatus) return { final: false, outcome: 'unreadable', googleStatus: null, recordCount: null, errors: {}, warnings: {} };
+  const googleStatus = d.requestStatus;
+  const recordCount = d.eventsIngestionStatus && d.eventsIngestionStatus.recordCount != null ? Number(d.eventsIngestionStatus.recordCount) : null;
+  const errors = countsByReason(d.errorInfo && d.errorInfo.errorCounts);
+  const warnings = countsByReason(d.warningInfo && d.warningInfo.warningCounts);
+  const base = { googleStatus, recordCount, errors, warnings };
+  if (googleStatus === 'PROCESSING') return { ...base, final: false, outcome: 'processing' };
+  if (googleStatus === 'SUCCESS') {
+    /* "Check the record_count ... to confirm that the total number of records
+       received matches your expectations." One event went in; zero received
+       is an event that vanished, whatever the status word says. */
+    if (recordCount === 0) return { ...base, final: true, outcome: 'dropped' };
+    return { ...base, final: true, outcome: Object.keys(warnings).length ? 'accepted_with_warnings' : 'accepted' };
+  }
+  if (googleStatus === 'FAILED' || googleStatus === 'PARTIAL_SUCCESS') {
+    const reasons = Object.keys(errors);
+    if (reasons.some((r) => GADS_UNMATCHED_REASONS.has(r))) return { ...base, final: true, outcome: 'unmatched' };
+    if (reasons.length && reasons.every((r) => GADS_DUPLICATE_REASONS.has(r))) return { ...base, final: true, outcome: 'duplicate' };
+    return { ...base, final: true, outcome: 'dropped' };
+  }
+  return { ...base, final: false, outcome: 'unreadable' };
+}
+
+async function getRequestStatus(fetchImpl, token, requestId, timeoutMs = GADS_REQUEST_TIMEOUT_MS) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(DATA_MANAGER_STATUS_URL + '?requestId=' + encodeURIComponent(requestId), {
+      method: 'GET',
+      headers: { Authorization: 'Bearer ' + token },
+      signal: ctrl.signal,
+    });
+    let body = null;
+    try { body = await res.json(); } catch (e) { body = null; }
+    return { status: res.status, body };
+  } catch (e) {
+    return { status: 0, body: null, error: e && e.name === 'AbortError' ? 'timed out' : String(e && e.message || e) };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 /* ── The uploader ─────────────────────────────────────────────────────── */
 
 /* Columns the evaluation reads. Named once so the sweep, the retry re-read
@@ -750,11 +859,107 @@ function createGadsUploader(deps) {
     }
   }
 
+  /* ── After a real send: ask Google what became of each event ──
+     Only rows that were REALLY sent: status 'sent', validate_only false, a
+     request ID. A validate-only row cannot be asked about at all. */
+  const OUTCOME_ALERTS = {
+    unmatched: ['Conversion not matched to a click', 'Google received this booking but could not tie it to an ad click, so it counts for nothing in Google Ads.'],
+    duplicate: ['Conversion dropped as a duplicate', 'Google already holds this conversion. Usually an earlier attempt of ours after a timeout -- but if this booking was only ever sent once, another source (the sheet?) uploaded it too.'],
+    dropped:   ['Conversion dropped by Google', 'Google received the request but did not record the conversion.'],
+    unknown:   ['Conversion status never arrived', 'Google never reported a final status for this booking, so we do not know whether it counts.'],
+  };
+
+  async function recordStatusFinal(row, outcome, cls, note) {
+    /* CONDITIONAL on google_outcome IS NULL, and the alert fires only if THIS
+       write won -- so two overlapping sweeps can never alert twice for one
+       booking. */
+    const r = await pool.query(
+      `UPDATE ${TABLE} SET google_status = $2, google_outcome = $3, google_record_count = $4,
+              google_errors = $5, google_warnings = $6, google_status_attempts = google_status_attempts + 1,
+              google_status_checked_at = NOW(), google_status_final_at = NOW(), google_status_next_check_at = NULL,
+              google_status_last_error = $7, updated_at = NOW()
+        WHERE session_id = $1 AND google_outcome IS NULL`,
+      [row.session_id, cls.googleStatus || null, outcome, cls.recordCount == null ? null : cls.recordCount,
+        JSON.stringify(cls.errors || {}), JSON.stringify(cls.warnings || {}), note || null]);
+    if (r.rowCount !== 1) return false;
+    if (OUTCOME_ALERTS[outcome]) {
+      const [title, meaning] = OUTCOME_ALERTS[outcome];
+      const reasons = Object.keys(cls.errors || {}).map((x) => x.replace(/^PROCESSING_ERROR_REASON_/, '')).join(', ');
+      alertOps('warning', 'Google Ads', title, {
+        'Session': row.session_id,
+        'Booked': row.booked_at ? etRfc3339(row.booked_at) : 'unknown',
+        'Click': row.click_id_type || 'unknown',
+        'Google status': cls.googleStatus || 'none',
+        'Reason': reasons || note || 'none given',
+        'What this means': meaning,
+      });
+    }
+    return true;
+  }
+
+  async function scheduleStatusRetry(row, attemptsBefore, errText, cls) {
+    const wait = GADS_STATUS_BACKOFF_MS[Math.min(attemptsBefore, GADS_STATUS_BACKOFF_MS.length - 1)];
+    await pool.query(
+      `UPDATE ${TABLE} SET google_status = $2, google_status_attempts = google_status_attempts + 1,
+              google_status_checked_at = NOW(),
+              google_status_next_check_at = NOW() + ($3::bigint * INTERVAL '1 millisecond'),
+              google_status_last_error = $4, updated_at = NOW()
+        WHERE session_id = $1 AND google_outcome IS NULL`,
+      [row.session_id, (cls && cls.googleStatus) || null, wait, errText || null]);
+  }
+
+  async function runStatusChecks(s, tally) {
+    const due = await pool.query(
+      `SELECT session_id, request_id, sent_at, booked_at, click_id_type, google_status_attempts
+         FROM ${TABLE}
+        WHERE status = 'sent' AND validate_only IS FALSE AND request_id IS NOT NULL
+          AND google_outcome IS NULL
+          AND sent_at <= NOW() - ($1::bigint * INTERVAL '1 millisecond')
+          AND (google_status_next_check_at IS NULL OR google_status_next_check_at <= NOW())
+        ORDER BY sent_at
+        LIMIT ${GADS_BATCH_LIMIT}`,
+      [GADS_STATUS_FIRST_CHECK_MS]);
+    if (!due.rows.length) return;
+    let token;
+    try {
+      token = await getToken(s.credentialsB64);
+    } catch (e) {
+      recordFailure('Google Ads', 'status check', (e.kind === 'auth' ? 'Authentication failed: ' : '') + e.message);
+      return;
+    }
+    for (const row of due.rows) {
+      const attempts = Number(row.google_status_attempts) || 0;
+      const reply = await getRequestStatus(fetchImpl, token, row.request_id);
+      tally.status_checked++;
+      if (reply.status === 200) {
+        const cls = classifyRequestStatus(reply.body);
+        if (cls.final) {
+          if (await recordStatusFinal(row, cls.outcome, cls)) tally[`status_${cls.outcome}`] = (tally[`status_${cls.outcome}`] || 0) + 1;
+          continue;
+        }
+        if (now() - new Date(row.sent_at).getTime() > GADS_STATUS_GIVE_UP_MS) {
+          if (await recordStatusFinal(row, 'unknown', cls, `still ${cls.outcome} after ${Math.round(GADS_STATUS_GIVE_UP_MS / 86400000)} days`)) tally.status_unknown = (tally.status_unknown || 0) + 1;
+          continue;
+        }
+        await scheduleStatusRetry(row, attempts, null, cls);
+        continue;
+      }
+      const err = reply.body && reply.body.error;
+      const errText = `HTTP ${reply.status}${err && err.status ? ' ' + err.status : ''}${reply.error ? ': ' + reply.error : err && err.message ? ': ' + String(err.message).slice(0, 200) : ''}`;
+      if (reply.status === 401 || reply.status === 403) recordFailure('Google Ads', 'status check ' + row.session_id, errText);
+      if (now() - new Date(row.sent_at).getTime() > GADS_STATUS_GIVE_UP_MS) {
+        if (await recordStatusFinal(row, 'unknown', { googleStatus: null, errors: {}, warnings: {} }, errText)) tally.status_unknown = (tally.status_unknown || 0) + 1;
+        continue;
+      }
+      await scheduleStatusRetry(row, attempts, errText, null);
+    }
+  }
+
   let _configAlerted = '';
   async function runSweep() {
     if (running) return { busy: true };
     running = true;
-    const tally = { sent: 0, validated: 0, skipped: 0, waiting: 0, failed_retryable: 0, failed_permanent: 0 };
+    const tally = { sent: 0, validated: 0, skipped: 0, waiting: 0, failed_retryable: 0, failed_permanent: 0, status_checked: 0 };
     try {
       const s = gadsSettings(env);
       if (!s.enabled) return { off: true };
@@ -773,7 +978,10 @@ function createGadsUploader(deps) {
       _configAlerted = '';
       await runRetries(s, tally);
       await runNew(s, tally);
-      const moved = tally.sent + tally.validated + tally.skipped + tally.failed_retryable + tally.failed_permanent;
+      /* Last, and whatever the validate switch says: rows really sent earlier
+         still need their outcome even if sending has been switched back. */
+      await runStatusChecks(s, tally);
+      const moved = tally.sent + tally.validated + tally.skipped + tally.failed_retryable + tally.failed_permanent + tally.status_checked;
       if (moved) (log.log || log.info)(`[Google Ads] Sweep (${s.validateOnly ? 'validate-only' : 'REAL'}): ${JSON.stringify(tally)}`);
       return tally;
     } catch (err) {
@@ -823,7 +1031,7 @@ function createGadsUploader(deps) {
     return out;
   }
 
-  return { runSweep, dryRun, evaluate, gate };
+  return { runSweep, dryRun, evaluate, gate, runStatusChecks };
 }
 
 function startGadsUploadSweep(uploader, env = process.env, log = console) {
@@ -867,6 +1075,14 @@ module.exports = {
   createTokenSource,
   classifyIngestReply,
   postIngest,
+  classifyRequestStatus,
+  getRequestStatus,
+  GADS_UNMATCHED_REASONS,
+  GADS_DUPLICATE_REASONS,
+  GADS_STATUS_FIRST_CHECK_MS,
+  GADS_STATUS_BACKOFF_MS,
+  GADS_STATUS_GIVE_UP_MS,
+  DATA_MANAGER_STATUS_URL,
   CLICK_ID_FIELDS,
   CLICK_ID_TYPES,
   SKIP_REASONS,

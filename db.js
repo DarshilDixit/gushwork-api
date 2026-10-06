@@ -447,6 +447,27 @@ async function initDB() {
 
         CREATE INDEX IF NOT EXISTS gads_conversion_uploads_due_idx
           ON gads_conversion_uploads (status, next_attempt_at);
+
+        /* Added 7 Oct 2026: what Google did with each REAL send, from
+           requestStatus:retrieve. A 200 from events:ingest only means the
+           request was accepted; google_outcome is whether the conversion
+           was kept -- accepted, accepted_with_warnings, unmatched,
+           duplicate, dropped, or unknown when no final status ever came.
+           NULL until a real send has been checked, and it stays NULL for a
+           validate-only row, which Google will not report on at all.
+           ALTERs because the table is already in production; nullable or
+           defaulted, so existing rows need nothing. */
+        ALTER TABLE gads_conversion_uploads
+          ADD COLUMN IF NOT EXISTS google_status               TEXT,
+          ADD COLUMN IF NOT EXISTS google_outcome              TEXT,
+          ADD COLUMN IF NOT EXISTS google_record_count         INT,
+          ADD COLUMN IF NOT EXISTS google_errors               TEXT,
+          ADD COLUMN IF NOT EXISTS google_warnings             TEXT,
+          ADD COLUMN IF NOT EXISTS google_status_attempts      INT NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS google_status_checked_at    TIMESTAMPTZ,
+          ADD COLUMN IF NOT EXISTS google_status_next_check_at TIMESTAMPTZ,
+          ADD COLUMN IF NOT EXISTS google_status_final_at      TIMESTAMPTZ,
+          ADD COLUMN IF NOT EXISTS google_status_last_error    TEXT;
       `);
       console.log('[DB] Google Ads conversion-uploads table ready');
     } catch (err) {
