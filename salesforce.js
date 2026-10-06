@@ -8,6 +8,7 @@
 //   findSFLeadByEmail(email)         — find Lead ID by email
 //   updateSFLead(leadId, fields)     — update existing Lead
 // ============================================================
+const { agencyDomainMatch } = require('./agency-domains');
 
 let sfAccessToken = null;
 let sfInstanceUrl = null;
@@ -355,7 +356,39 @@ async function readSfBody(res) {
   }
 }
 
+/* ── LEADS THAT MUST NEVER BE WRITTEN TO SALESFORCE ─────────────────────
+   Checked INSIDE pushToSalesforce, because every Lead this service creates
+   or updates goes through it: /submit, the retry sweep, both booking safety
+   nets, and backfill-sf.js. A guard at the call sites would be five guards,
+   and the two safety nets already showed what that costs -- neither had the
+   internal-submission check /submit has.
+
+   AGENCY DOMAINS (agency-domains.js, AGENCY_DOMAINS, default Flighted and
+   Upraw): an agency lead is a real row on our side, but a Salesforce Lead
+   for it is an AE's time and a wrong inbound count -- Source_Bucket__c
+   recomputes on read, so each one is reported as inbound. Matched on the
+   email's domain or the website's host, exact or subdomain. The booking
+   safety nets carry no website, so there it is the email domain only.
+
+   A SKIP IS A RETURN, NEVER A THROW, and it is neither a success nor a
+   failure: { skipped, detail }. A throw would mark the lead failed and the
+   retry sweep would re-queue it and eventually alert; a plain resolve would
+   let /submit stamp sf_synced_at -- "in Salesforce" for a lead that is not.
+   Every caller checks .skipped. Nothing is written to Salesforce at all:
+   not a create, not an update to an existing record. */
+function salesforceSkipReason(payload = {}) {
+  const a = agencyDomainMatch({ email: payload.email, website: payload.website });
+  if (a) return { reason: 'agency', detail: `agency domain ${a.domain} (by ${a.via})` };
+  return null;
+}
+
 async function pushToSalesforce(payload) {
+  const skip = salesforceSkipReason(payload || {});
+  if (skip) {
+    /* The matched domain, never the address: this log is read by people. */
+    console.log(`[SF] ⏭ not sent to Salesforce — ${skip.detail}`);
+    return { skipped: skip.reason, detail: skip.detail };
+  }
   try {
     const lead = buildLeadFields(payload);
 
@@ -922,4 +955,4 @@ async function findEnrichmentByEmails(emails) {
   }
 }
 
-module.exports = { pushToSalesforce, findSFLeadByEmail, updateSFLead, updateOpportunityFields, getSalesforceToken, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails, SF_EMAIL_BATCH, sfConvertedLeadError, sfIsRetryable };
+module.exports = { pushToSalesforce, salesforceSkipReason, findSFLeadByEmail, updateSFLead, updateOpportunityFields, getSalesforceToken, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails, SF_EMAIL_BATCH, sfConvertedLeadError, sfIsRetryable };

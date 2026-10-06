@@ -14233,7 +14233,7 @@ async function runSalesforceRetrySweep() {
         `UPDATE leads SET sf_sync_attempts = COALESCE(sf_sync_attempts, 0) + 1, updated_at = NOW()
           WHERE session_id = $1`, [l.session_id]);
       try {
-        await pushToSalesforce({
+        const sfResult = await pushToSalesforce({
           first_name: l.first_name, last_name: l.last_name, email: l.email, phone: l.phone,
           company: l.company, website: l.website, sell_to: l.sell_to,
           product: (l.product_interest || l.product), about_business: l.about_business,
@@ -14253,6 +14253,21 @@ async function runSalesforceRetrySweep() {
           enriched_founded_year: l.enriched_founded_year,
           step_reached: 2, booked: !!l.booking_uid,
         });
+        /* A SKIP ENDS THE RETRIES WITHOUT CLAIMING SUCCESS. The lead failed
+           before (that is how it got here) and is now one Salesforce must
+           not have -- an agency domain. sf_synced_at stays NULL, because
+           Salesforce does not have it; sf_sync_retryable goes FALSE with the
+           reason in sf_sync_error, so this sweep stops selecting it rather
+           than spending its attempts and ending on a "Retries exhausted"
+           page about a lead nobody wants there. */
+        if (sfResult && sfResult.skipped) {
+          await pool.query(
+            `UPDATE leads SET sf_sync_retryable = FALSE, sf_sync_error = $2, updated_at = NOW()
+              WHERE session_id = $1`,
+            [l.session_id, `not sent: ${sfResult.detail}`]);
+          console.log(`[SF retry] ⏭ ${l.session_id} not sent — ${sfResult.detail}; taken off the retry queue`);
+          continue;
+        }
         markSalesforceSynced(l.session_id);
         console.log(`[SF retry] ✅ recovered ${l.email}`);
       } catch (err) {
@@ -15438,7 +15453,11 @@ app.post('/submit', async (req, res) => {
           /* BOTH OUTCOMES ARE RECORDED, not just the failure. A success stamp is
              what lets anyone ask which leads are missing from Salesforce, and it
              is what clears a lead out of the retry sweep once it lands. */
-          .then(() => markSalesforceSynced(session_id))
+          /* A SKIP (an agency domain, salesforceSkipReason) is recorded as
+             NEITHER: not synced, because Salesforce does not have it, and not
+             failed, because nothing failed and the retry sweep must not pick
+             it up. pushToSalesforce has already logged why. */
+          .then((r) => { if (r && r.skipped) return; markSalesforceSynced(session_id); })
           .catch(err => { console.warn('[/submit] SF push failed (non-blocking):', err.message); markSalesforceFailed(session_id, err); salesforceFailureAlert('lead', err, { 'Email': email, 'Stage': 'form completed' }); });
       }
 

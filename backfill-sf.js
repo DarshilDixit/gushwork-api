@@ -17,7 +17,7 @@
 // rows. An allow-list makes the blast radius the thing you actually asked for.
 // ============================================================
 
-const { pushToSalesforce, getSalesforceToken } = require('./salesforce');
+const { pushToSalesforce, getSalesforceToken, salesforceSkipReason } = require('./salesforce');
 
 const SKIP_EMAILS = ['b@g.ai'];
 const SKIP_DOMAINS = ['gushwork.ai'];
@@ -150,6 +150,17 @@ async function runBackfill(pool, opts = {}) {
       start_time: payload.start_time || null,
     };
 
+    /* The SAME rule pushToSalesforce applies, asked BEFORE the Salesforce
+       lookup, so a dry run says "would skip" rather than "would create" and
+       a real run spends no API call on a lead it will not send. */
+    const sfSkip = salesforceSkipReason(payload);
+    if (sfSkip) {
+      entry.action = `skipped — ${sfSkip.detail}`;
+      log.push(entry);
+      skipped++;
+      continue;
+    }
+
     // HARD GUARD: never touch converted leads — no create, no update
     const status = await sfLeadStatus(row.email);
     if (status === 'converted') {
@@ -184,7 +195,12 @@ async function runBackfill(pool, opts = {}) {
     } catch (err) {
       thrown = err;
     }
-    if (!thrown && result && result.success) {
+    if (!thrown && result && result.skipped) {
+      /* Belt and braces: the check above already caught it. Counted as a
+         skip, never as FAILED -- nothing went wrong. */
+      entry.action = `skipped — ${result.detail}`;
+      skipped++;
+    } else if (!thrown && result && result.success) {
       entry.action = 'pushed';
       entry.leadId = result.leadId;
       pushed++;
