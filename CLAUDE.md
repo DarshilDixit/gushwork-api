@@ -2103,6 +2103,14 @@ shape and the hostile ones.
   `DROPOFF_SOURCE_SQL`, a `const`, which is the temporal-dead-zone break.
 - **Value is the product lookup, not `meta_predicted_ltv`**, which is empty
   whenever Meta did not fire.
+- **Consent is a switch, `GADS_CONSENT_GRANTED`, off by default.** On, every
+  event carries `consent: { adUserData: CONSENT_GRANTED, adPersonalization:
+  CONSENT_GRANTED }` — the Data Manager reference's names, the same claim
+  Lorenzo's sheet makes. Off, the field is ABSENT, never denied. It sits on
+  the EVENT, so it is frozen with the payload: a row claimed before the
+  switch is flipped retries without it, while a `validated` row is rebuilt
+  when real sending starts and picks up the current setting. Validate-only
+  accepted it on 6 Oct 2026 (200).
 
 **Booking arrives by three routes.** `/booking-confirmed` (browser-fired),
 `/booking-confirmed-webhook` (Cal), `/booking-confirmed-webhook-rh` (RevenueHero).
