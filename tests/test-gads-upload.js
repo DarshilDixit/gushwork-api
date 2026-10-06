@@ -268,9 +268,9 @@ function lead(over = {}) {
   ok('A11: OFF (the default) leaves the field ABSENT, not denied or unspecified', !('consent' in evOff));
   ok('A11: OFF leaves it absent from the request too', !('consent' in G.buildIngestRequest(evOff, G.gadsSettings({}), true).events[0]));
   ok('A11: a truthy string is not true', !('consent' in G.buildGadsEvent({ sessionId: 's', click: { type: 'gclid', value: GCLID }, bookedAt: NOW, value: null, email: 'x@acme.test', consentGranted: 'true' })));
-  evOn.consent.adUserData = 'CONSENT_DENIED';
-  eq('A11: each event gets its own copy, so one cannot change the next', G.buildGadsEvent({ sessionId: 's2', click: { type: 'gclid', value: GCLID }, bookedAt: NOW, value: null, email: 'x@acme.test', consentGranted: true }).consent.adUserData, 'CONSENT_GRANTED');
-  ok('A11: the shared constant is frozen', Object.isFrozen(G.GADS_CONSENT_GRANTED));
+  /* Guarded: if consent were never sent, this must FAIL, not crash the suite. */
+  ok('A11: the event holds its own consent object, never the shared constant', !!evOn.consent && evOn.consent !== G.GADS_CONSENT_GRANTED);
+  ok('A11: the shared constant is frozen, so nothing can rewrite it for every event', Object.isFrozen(G.GADS_CONSENT_GRANTED));
 
   /* ================================================================
      B. THE EXCLUSION RULES, WITH THE REAL FUNCTIONS FROM index.js
