@@ -1,5 +1,6 @@
 // ============================================================
-// lead-magnet.js — Lead-magnet LP capture (150 buyer questions)
+// lead-magnet.js — Lead-magnet LP capture (/buyer-questions; the 150
+// buyer questions list until 7 Oct 2026, the 20-prompt AI visibility pack since)
 // ------------------------------------------------------------
 // FULLY ISOLATED from the /demo form system:
 //   • own table   — lead_magnet_leads   (never touches `leads`)
@@ -269,8 +270,25 @@ module.exports = function createLeadMagnetRouter(deps) {
       });
     }
 
-    if (!p.industry_category || !p.product_or_service || !p.sell_to) {
-      return res.status(400).json({ ok: false, message: 'Missing required fields.' });
+    /* Business email only, decided 7 Oct 2026 when the LP moved from the
+       150-questions list to the 20-prompt AI visibility pack: "just take
+       their business email" (Swapnil). The page refuses Gmail and the rest
+       before it gets here, from a much longer list than FREE_EMAIL_DOMAINS;
+       this is the backstop for anything that skips the page, same as
+       gateEmail above. It turns away a person, not a lead on the demo
+       form: lead_magnet_leads never reaches Salesforce or the dialer.
+
+       The website / industry / product / sell-to fields are gone from the
+       page, so they are no longer required. They used to be, and an
+       email-only page would have had every submission refused here with a
+       400 "Missing required fields". Old rows keep their values. */
+    if (isFree(p.email)) {
+      console.log(`[LM /submit] rejected ${p.email} — free_email`);
+      return res.status(422).json({
+        ok: false,
+        status: 'free_email',
+        message: 'Please use your work email, not a personal one like Gmail or Yahoo.',
+      });
     }
 
     p.step_reached = STEP.SUBMITTED;
@@ -278,14 +296,18 @@ module.exports = function createLeadMagnetRouter(deps) {
 
     try {
       /* Duplicate check runs BEFORE the upsert — after it, the row we
-         just wrote would match itself. Scoped to other sessions only. */
+         just wrote would match itself. Scoped to other sessions only.
+         Keyed on email alone since the page stopped asking for a product:
+         with product_or_service blank, "product_or_service = $2" compared
+         NULL to '' and never matched, so every double-tap would have fired
+         a second Contact. One pack, so one person is one request. */
       const dupe = await pool.query(
         `SELECT id FROM lead_magnet_leads
-          WHERE email = $1 AND product_or_service = $2
-            AND session_id <> $3 AND completed = true
+          WHERE email = $1
+            AND session_id <> $2 AND completed = true
             AND submitted_at > NOW() - INTERVAL '${DUPLICATE_WINDOW_MIN} minutes'
           LIMIT 1`,
-        [p.email, p.product_or_service, p.session_id]
+        [p.email, p.session_id]
       );
       const isDuplicate = dupe.rowCount > 0;
 
