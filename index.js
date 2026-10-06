@@ -10,6 +10,7 @@ const { pool, initDB } = require('./db');
 const { sendConversion, fetchPartnership, sendAction, fetchCustomer } = require('./partnerstack');
 const { pushToSalesforce, findSFLeadByEmail, updateSFLead, updateOpportunityFields, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails , sfIsRetryable} = require('./salesforce');
 const { pushFormEventsToMeta, pushStartTrialToMeta, resolveProduct, resolveEventProduct, predictedLtvFor, canonicalProductInterest, setMetaOutcomeReporter } = require('./meta-capi');
+const { createGadsUploader, startGadsUploadSweep } = require('./google-ads-conversions');
 const createLeadMagnetRouter = require('./lead-magnet');
 
 const app  = express();
@@ -1218,6 +1219,12 @@ const FAILURE_MONITORS = {
   /* The retry sweep itself failing is different from a lead failing to
      sync: it means the recovery mechanism is down, so nothing is healing. */
   'Salesforce sync': { alertAfter: 3, impact: 'The Salesforce retry sweep is not running, so a failed write is no longer healing itself. Leads that failed during an outage will stay missing until someone adds them by hand.' },
+  /* ADDED 6 Oct 2026 with the Google Ads conversion upload, BEFORE its first
+     recordFailure call, because a source with no entry here is a silent
+     no-op -- the 21 dead PartnerStack call sites above. Retryable send
+     failures come through here; a missing conversion action, exhausted
+     retries and "on but cannot run" call alertOps directly. */
+  'Google Ads': { alertAfter: 3, impact: 'Booked Google Ads leads are not reaching Google Ads as conversions, so bidding is optimising on less than it should. Nothing is lost: failed uploads retry, and the sweep resends anything not yet sent.' },
   'PartnerStack SF read': { alertAfter: 3, impact: 'Qualified demos cannot be read out of Salesforce, so the $50 qualification is not firing while this lasts. Nothing is lost: the poll retries every couple of minutes and the query has no date bound, so it picks up everything it missed once Salesforce answers again.' },
 };
 const FAILURE_BUFFER_TTL_MS = 6 * 60 * 60 * 1000; // stale failures expire, so a slow trickle never accumulates
@@ -1304,6 +1311,7 @@ const AUTH_FAILURE_GUIDANCE = {
   'Loops':      'Loops rejected the API key. Check LOOPS_API_KEY. Lead-magnet contacts are not reaching the mailing list.',
   'Salesforce': 'Salesforce rejected the session. The refresh token may be dead — check SF_REFRESH_TOKEN.',
   'AWS sync':   'AWS Postgres rejected the connection. Check the AWS_PG_* credentials.',
+  'Google Ads': 'Google rejected the service account. Check GADS_SERVICE_ACCOUNT_JSON_B64 (the key may have been deleted in gushwork-crm) and that gads-conversion-uploader@gushwork-crm.iam.gserviceaccount.com is still a user on Google Ads account 5442288209.',
   'Non-ICP model': 'Anthropic rejected the API key. Check ANTHROPIC_API_KEY and the account credit balance. The brand-domain list is unaffected and still blocking.',
 };
 
@@ -16640,6 +16648,43 @@ if (rhRouter && !RH_ALLOWED_ROUTERS.some((r) => r.toLowerCase() === rhRouter)) {
    ReferenceError at boot. */
 app.use(createLeadMagnetRouter({ pool, elvIsInternal, FREE_EMAIL_DOMAINS, recordFailure, recordSuccess, DASH_TZ }));
 
+/* ── Google Ads conversion upload: the two adapters it is handed ──────
+   The uploader lives in google-ads-conversions.js and is given these, so
+   it asks the SAME questions the rest of this file asks rather than a copy
+   of them. Built inside start(), never at the top level: DROPOFF_SOURCE_SQL
+   is a const declared thousands of lines above here, and reading a const
+   before its declaration is the temporal-dead-zone break CLAUDE.md records
+   from 11-12 Sept -- valid syntax, a crash at boot. */
+
+/* THE FRESH NON-ICP READ for Google. The brand-domain list first, because it
+   is deterministic and survives a site refusing our scraper, then the model
+   verdict table exactly as the booking-time Meta guard reads it. Unlike
+   that guard it does NOT swallow a throw: the uploader treats a failed read
+   as "try again next sweep", because an upload that can wait ten minutes
+   should not go out on a verdict nobody could read. */
+async function gadsNonIcpFresh({ email, website } = {}) {
+  const brand = nonIcpMatchHost(email) || nonIcpMatchHost(website);
+  if (brand) return { action: 'block', source: 'domain_list', domain: brand.domain };
+  const hit = await nonIcpLlmCachedVerdict({ email, website });
+  if (!hit) return null;
+  return { action: hit.action, source: hit.row.source, domain: hit.row.domain, business_type: hit.row.business_type };
+}
+
+/* The value Google is told this booking is worth: the product's predicted
+   value, resolved exactly as /submit resolves it for Meta. NOT
+   meta_predicted_ltv -- that column is empty whenever no Meta event fired
+   (about 28% of sendable Google bookings in the 30 days to 6 Oct 2026) and
+   is stamped for some internal leads Meta never received. An unknown
+   product returns null and the event carries no value at all. */
+function gadsValueFor(lead) {
+  return predictedLtvFor(resolveEventProduct({
+    page_url:         lead.page_url,
+    product_interest: lead.product_interest,
+    utm_campaign:     lead.offer_campaign || lead.utm_campaign,
+    utm_medium:       lead.offer_medium || lead.utm_medium,
+  }));
+}
+
 async function start() {
   try {
     await initDB();
@@ -16662,6 +16707,19 @@ async function start() {
       startNonIcpBookedRecheck();
       startNearMissDigest();
       startDropoffDigest();
+      /* OFF unless GADS_UPLOAD_ENABLED is 'true', and validate-only unless
+         GADS_UPLOAD_VALIDATE_ONLY is 'false'. Reads leads, writes only
+         gads_conversion_uploads; touches no lead, no Meta event, no
+         Salesforce record and no dialer row. */
+      startGadsUploadSweep(createGadsUploader({
+        pool,
+        sourceSql: DROPOFF_SOURCE_SQL,
+        isInternalLead, isStagingSubmission, isInternalSubmission,
+        isWebsiteVerified, freeEmailMatch,
+        nonIcpFresh: gadsNonIcpFresh,
+        valueFor: gadsValueFor,
+        alertOps, recordFailure, recordSuccess,
+      }));
     });
   } catch (err) { console.error('[GW API] Failed to start:', err); process.exit(1); }
 }
