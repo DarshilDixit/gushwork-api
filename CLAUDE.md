@@ -152,10 +152,23 @@ Three things follow from that, and they are not negotiable:
    the website's host, exact or subdomain, never a substring; the env extends
    the defaults and cannot shrink them. A skip returns `{ skipped }`, neither
    a failure (no alert) nor a success (no streak reset), and
-   `meta_predicted_ltv` is not stamped for those leads. **Meta only:**
-   Salesforce, the mirror and the dialer still see agency leads, and
-   `INTERNAL_TEST_EMAILS` / `ELV_EXCLUDED_DOMAINS` are unchanged. The Google
-   upload has its own list, `GADS_EXCLUDED_DOMAINS`. Measured before it
+   `meta_predicted_ltv` is not stamped for those leads.
+   `INTERNAL_TEST_EMAILS` / `ELV_EXCLUDED_DOMAINS` are unchanged.
+
+   **ONE AGENCY LIST SINCE 7 OCT 2026: `AGENCY_DOMAINS`** (`agency-domains.js`,
+   default `flighted.co,uprawmedia.com`). Meta, the Google upload, Salesforce
+   and the SDR list all read it; `META_EXCLUDED_DOMAINS` and
+   `GADS_EXCLUDED_DOMAINS` still work and EXTEND it for their own system
+   only, so with it unset every list is exactly what shipped before. Add an
+   agency to `AGENCY_DOMAINS`, not to one system's list. **Salesforce** skips
+   agency leads (and our own test submissions) INSIDE `pushToSalesforce`, so
+   `/submit`, the retry sweep, both booking safety nets and `backfill-sf.js`
+   are all covered; a skip is a RETURN (`{ skipped }`), recorded as neither
+   synced nor failed (the retry sweep takes it off the queue with
+   `sf_sync_retryable = false`). The **SDR list** marks agency rows and leaves
+   them out of its CSV. **Not** the AWS mirror and **not** the dialer:
+   `sdr-calling` keeps its own deny list (it already has both agencies, by
+   email domain only). Measured before it
    shipped, by replaying the gates: 7 agency leads in 90 days fired about 7
    StartTrial, 4 Lead and 3 Schedule. **The dashboard's "why was Meta
    withheld" filter (`metaWithheldReason`) does not know this reason yet.**
@@ -217,6 +230,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `db.js` | Schema + migrations. Runs on every boot; everything is `IF NOT EXISTS` |
 | `salesforce.js` | Lead upsert by email. Refresh-token OAuth |
 | `meta-capi.js` | Conversions API — `Lead`, `Schedule`, `StartTrial`, `Contact`. Also owns the product catalogue (`PRODUCTS`, `resolveProduct`), which `index.js` imports |
+| `agency-domains.js` | The ONE agency list, `AGENCY_DOMAINS` (default Flighted and Upraw), and the host-matching helpers every list uses: exact or subdomain, never a substring. Read by Meta, the Google upload, Salesforce and the SDR list |
 | `google-ads-conversions.js` | Google Ads offline click conversions for booked Google Ads leads, through the **Data Manager API** (`events:ingest`), not the Google Ads API. Shaped like `meta-capi.js`; everything `index.js` owns is INJECTED into `createGadsUploader`. OFF and validate-only by default. Writes only `gads_conversion_uploads` |
 | `loops.js` | Loops.so contact push for the lead-magnet landing page |
 | `partnerstack.js` | PartnerStack API. TWO hosts and TWO auth schemes: `partnerlinks.io` conversion (Bearer tracking token) and `api.partnerstack.com` v2 partnerships + actions (Basic public:secret) |
@@ -230,6 +244,7 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `tools/re-enrich-apollo.js` | Re-runs the Apollo lookups that were REFUSED — the three out-of-credit windows (24 Jun, 3–10 Sept, 23 Sept on). Dry run by default: prices it (1 credit per person FOUND, 0 for no match), one lookup per address, copies from an earlier answer for the same address at zero cost, skips our own submissions. `--since`, `--limit`, `--apply`. **Stops at the first refusal.** Writes `enrichment_data` and the lead row exactly as `/enrich` does; never Salesforce, never the mirror. Lifts the parser out of `index.js`. Not mounted, not yet run |
 | `tools/sync-enrichment-out.js` | Carries re-enriched Apollo fields OUT to the AWS mirror (`gw_form_leads`, the dialer feed) and Salesforce, for the sessions `tools/re-enrich-apollo.js` rewrote since `--since`. **Fill-only**: writes a field only where the destination is blank, touches no other column, creates no row, never writes a converted Lead. Mirror by targeted `UPDATE ... WHERE session_id`, never `syncToAWS`. Salesforce field names from `salesforce.js`'s map, types and lengths from Salesforce's describe, writes through `updateSFLead`. Dry run by default; `--apply`, `--mirror`, `--salesforce`. Run once on 26 Sept 2026 after the backfill. Not mounted |
 | `tools/backfill-ip-coords.js` | Fills `ip_latitude` / `ip_longitude` for leads resolved BEFORE those columns existed — they have a city and no point, so they are complete in every table and invisible on the map. Only touches rows that already resolved and have no coordinates. Lifts `resolveIpGeo` out of `index.js`. Dry run by default; `--apply` writes. Run once on 23 Sept (17 rows). Not mounted |
+| `tools/agency-exclusion-dry-run.js` | Read-only count of what the Salesforce exclusions (agency and ours) would stop over a window, how many already reached Salesforce, and agency rows on the SDR list. Uses the real `salesforceSkipReason` with the real `isInternalSubmission` lifted from `index.js`. Counts only. Not mounted |
 | `tools/gads-upload-dry-run.js` | What the Google Ads upload WOULD send over a window (default 90 days), and why each other booking is skipped. Runs the module's own `dryRun` with the real gates lifted out of `index.js`; `BEGIN TRANSACTION READ ONLY`, rolled back, and a fetch that throws. Counts only. `--days`, `--free-email`. Not mounted |
 | `tools/fire-alert.js` | Fires ONE real alert on purpose, to satisfy the fire-every-alert-path-once rule. Sends for real (Slack + email on a critical). Lifts `alertOps` out of `index.js` rather than reimplementing it, so what arrives is what production sends. Not mounted, not called by anything |
 | `monitor-next.js` | Builds and serves THE dashboard at `/monitor` (since PR D, 26 Sept 2026). `/monitor/next`, where it was built side by side, redirects there keeping its query. Reads `monitor/` once at boot and stitches one page behind the same token -- no build step. Also the token-gated font route, an allowlist, never a path. The OLD dashboard is `/monitor/classic` in `index.js`, kept one week as the fallback |
@@ -1752,7 +1767,7 @@ now refuse them:
 | System | Guard | Why |
 |---|---|---|
 | Meta CAPI (5 call sites) | `internalLeadSuppressesMeta` | a conversion tells Facebook to find more people like us |
-| Salesforce (`/submit`) | `isInternalLead` | `Source_Bucket__c` recomputes on read, so each junk Lead is reported as real inbound |
+| Salesforce (every Lead write, since 7 Oct 2026) | `isInternalSubmission`, handed to `pushToSalesforce` at boot | `Source_Bucket__c` recomputes on read, so each junk Lead is reported as real inbound. Until 7 Oct only `/submit` checked; the two booking safety nets did not |
 | AWS mirror (`syncToAWS`) | inside the function | `gw_form_leads` is the DIALER FEED — a row is a person somebody may ring |
 
 **The three harms are different and only the first is about signal.**
@@ -2602,14 +2617,17 @@ node tests/test-monitor-next.js      # BOOTS /monitor/next and /monitor/overview
 node tests/test-gads-upload.js      # the Google Ads upload: Google's normalisation, the click-ID choice,
                                     #   every exclusion with the REAL index.js gates, and BOOTS the app
                                     #   with the upload on to read back the one validate-only request
+node tests/test-agency-exclusions.js # agency and our own leads never reach Salesforce, on EVERY Lead path
+                                    #   (/submit, both safety nets BOOTED; the retry sweep and backfill
+                                    #   executed), and the SDR list's mark and CSV
 
-node tests/measure.js --check   # or just this: runs all fifteen and checks the totals
+node tests/measure.js --check   # or just this: runs all sixteen and checks the totals
 node tests/test-batch1-db.js    # needs DATABASE_URL
 node tests/test-batch1-e2e.js   # boots the real server, needs DATABASE_URL
 ```
 
-**The fifteen dependency-free suites are the bar.** They run anywhere in about a
-second each — run all fifteen after any change to `index.js`, `lead-magnet.js`,
+**The sixteen dependency-free suites are the bar.** They run anywhere in about a
+second each — run all sixteen after any change to `index.js`, `lead-magnet.js`,
 or either form file, always. Do not install Postgres and do not point anything at
 the production database from a feature branch.
 
@@ -2634,9 +2652,9 @@ had actually been read.
 If the output is genuinely too long to read, that is a reason to fix the
 output, not to pipe it.
 
-**Eight of the fifteen BOOT A ROUTE** rather than reading source text —
+**Nine of the sixteen BOOT A ROUTE** rather than reading source text —
 `test-submit-gate`, `test-session-page-views`, `test-lead-field-changes`,
-`test-session-payload`, `test-apollo`, `test-monitor-next`, `test-gads-upload` and `test-non-icp-routes`. The last one goes furthest:
+`test-session-payload`, `test-apollo`, `test-monitor-next`, `test-gads-upload`, `test-agency-exclusions` and `test-non-icp-routes`. The last one goes furthest:
 it also **evaluates the dashboard's inline JavaScript** in a stubbed DOM and
 calls every tab loader, because three production breaks in one night were
 runtime behaviour no source assertion could see. They stub `pg` and `global.fetch` and drive the real
@@ -2649,7 +2667,7 @@ Tests read the real functions out of `index.js` rather than a copy. A test that
 exercises a duplicate of the source can pass while production is broken. Keep it
 that way.
 
-**All fifteen suites require `tests/crash-reporter.js` first, and it is not
+**All sixteen suites require `tests/crash-reporter.js` first, and it is not
 optional.** A suite that crashes prints a stack trace, zero `✗` lines and exits
 1 — which reads as a clean run to anything counting markers and as a caught
 mutation to anything counting exit codes. Three of the six did exactly that
