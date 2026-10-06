@@ -8,7 +8,7 @@ const rateLimit = require('express-rate-limit');
 const { Pool }  = require('pg');
 const { pool, initDB } = require('./db');
 const { sendConversion, fetchPartnership, sendAction, fetchCustomer } = require('./partnerstack');
-const { pushToSalesforce, findSFLeadByEmail, updateSFLead, updateOpportunityFields, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails , sfIsRetryable} = require('./salesforce');
+const { pushToSalesforce, findSFLeadByEmail, updateSFLead, updateOpportunityFields, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails , sfIsRetryable, setSalesforceInternalCheck} = require('./salesforce');
 const { pushFormEventsToMeta, pushStartTrialToMeta, resolveProduct, resolveEventProduct, predictedLtvFor, canonicalProductInterest, setMetaOutcomeReporter, metaExcludedDomainMatch } = require('./meta-capi');
 const { createGadsUploader, startGadsUploadSweep } = require('./google-ads-conversions');
 const createLeadMagnetRouter = require('./lead-magnet');
@@ -1363,6 +1363,12 @@ function recordSuccess(source) {
    Success only, deliberately. Failures reach recordFailure through the
    call-site .catch, and reporting them from both places would double-count
    every one of them. */
+/* Salesforce skips our own test submissions with the SAME rule every other
+   outbound guard here uses. Handed in, not required; see salesforce.js.
+   isInternalSubmission is a function declaration, so it is hoisted, and it
+   only reads its lists when CALLED -- never during this line. */
+setSalesforceInternalCheck(isInternalSubmission);
+
 setMetaOutcomeReporter((outcome) => {
   if (outcome && outcome.ok) recordSuccess('Meta CAPI');
 });
