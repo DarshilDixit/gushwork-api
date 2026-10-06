@@ -232,6 +232,7 @@ not engineers. "Domain registered but no website on it", not `parked_confirmed`.
   "tests pass" are different statements.
 - When you're unsure whether something is a bug or intentional, ask. This codebase
   has a lot of deliberate-looking oddities that really are deliberate.
+- Never print the Google Ads key at `~/.config/gushwork/gads-sa.json`, or the value of any `GADS_` variable.
 
 ---
 
