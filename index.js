@@ -9,7 +9,7 @@ const { Pool }  = require('pg');
 const { pool, initDB } = require('./db');
 const { sendConversion, fetchPartnership, sendAction, fetchCustomer } = require('./partnerstack');
 const { pushToSalesforce, findSFLeadByEmail, updateSFLead, updateOpportunityFields, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails , sfIsRetryable} = require('./salesforce');
-const { pushFormEventsToMeta, pushStartTrialToMeta, resolveProduct, resolveEventProduct, predictedLtvFor, canonicalProductInterest, setMetaOutcomeReporter } = require('./meta-capi');
+const { pushFormEventsToMeta, pushStartTrialToMeta, resolveProduct, resolveEventProduct, predictedLtvFor, canonicalProductInterest, setMetaOutcomeReporter, metaExcludedDomainMatch } = require('./meta-capi');
 const { createGadsUploader, startGadsUploadSweep } = require('./google-ads-conversions');
 const createLeadMagnetRouter = require('./lead-magnet');
 
@@ -14883,7 +14883,10 @@ app.post('/partial', async (req, res) => {
 
        NULL is "no event was sent", never "we sent zero". */
     const _ltvFree = email ? freeEmailMatch(email.split('@')[1] || '') : null;
-    const metaWillFire = !nonIcp.suppress_meta && !disqualified && !!email && !_ltvFree;
+    /* ...and not an agency domain: sendEvent stops those (META_EXCLUDED_DOMAINS),
+       so stamping a value here would claim a send that never happened. */
+    const metaWillFire = !nonIcp.suppress_meta && !disqualified && !!email && !_ltvFree
+      && !metaExcludedDomainMatch({ email, website });
     const meta_predicted_ltv = metaWillFire
       ? predictedLtvFor(resolveEventProduct({ page_url, product_interest, utm_campaign: offer_campaign, utm_medium: offer_medium || utm_medium }))
       : null;
@@ -15055,7 +15058,7 @@ app.post('/partial', async (req, res) => {
     } else if (nonIcp.suppress_meta) {
       console.log(`[/partial] ⏭ StartTrial suppressed — non-ICP/${nonIcp.source} (${nonIcp.reason}): ${email}`);
     } else if (!disqualified && isBusinessEmail) {
-      pushStartTrialToMeta({session_id,email,sell_to,page_url,fbc,fbp,landing_page,product_interest,utm_campaign:offer_campaign,utm_medium:offer_medium||utm_medium}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => { console.warn('[/partial] Meta CAPI StartTrial failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (StartTrial)', err.message); });
+      pushStartTrialToMeta({session_id,email,website,sell_to,page_url,fbc,fbp,landing_page,product_interest,utm_campaign:offer_campaign,utm_medium:offer_medium||utm_medium}, {clientIpAddress:req.headers['x-forwarded-for']||req.ip||'',clientUserAgent:req.headers['user-agent']||''}).catch(err => { console.warn('[/partial] Meta CAPI StartTrial failed (non-blocking):', err.message); recordFailure('Meta CAPI', email + ' (StartTrial)', err.message); });
     } else if (!disqualified) {
       console.log(`[/partial] ⏭ StartTrial skipped — ${freeMatch && !freeMatch.exact ? `likely typo of free provider ${freeMatch.domain}` : 'free email domain'}: ${email}`);
     }
@@ -15212,7 +15215,8 @@ app.post('/submit', async (req, res) => {
        in the upsert, so /partial's value is never overwritten with null
        by a later call. */
     const meta_predicted_ltv = (!nonIcp.suppress_meta
-        && isWebsiteVerified({ website_check_failed, website_check_reason }))
+        && isWebsiteVerified({ website_check_failed, website_check_reason })
+        && !metaExcludedDomainMatch({ email, website }))
       ? predictedLtvFor(resolveEventProduct({ page_url, product_interest, utm_campaign: offer_campaign, utm_medium: offer_medium || utm_medium }))
       : null;
 

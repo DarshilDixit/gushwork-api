@@ -579,7 +579,61 @@ function buildEventData(eventName, payload, options = {}) {
 /**
  * Send a single event to Meta CAPI
  */
+/* ── AGENCY DOMAINS NEVER REACH META ───────────────────────────────────
+   Flighted and Upraw run our campaigns and submit the form while doing it.
+   Replayed through the real gates on 7 Oct 2026, the 90 days before fired
+   about 7 StartTrial, 4 Lead and 3 Schedule events for 7 agency leads --
+   each one telling Facebook to find more people like a media buyer.
+
+   CHECKED HERE, IN sendEvent, because every Meta event in the codebase
+   passes through it: StartTrial from /partial, Lead from /submit, Schedule
+   from all three booking routes, and Contact from the lead-magnet page. A
+   guard at the call sites would be six guards, and CLAUDE.md records what
+   happens to the sixth. normalizeClientIp lives here for the same reason.
+
+   META ONLY. Deliberately not ELV_EXCLUDED_DOMAINS, INTERNAL_TEST_EMAILS or
+   isInternalSubmission, which also decide Salesforce, the AWS mirror and the
+   dialer: an agency lead is still a real row an AE may want to see. The
+   Google Ads upload has its own list (GADS_EXCLUDED_DOMAINS) for the same
+   reason.
+
+   Matched exact-or-subdomain on the email's domain OR the website's host,
+   www. ignored, never a substring -- through the SAME two helpers the Google
+   upload uses, so the two lists cannot disagree about what "matches" means.
+   The env EXTENDS the defaults and cannot shrink them, so a typo in Railway
+   cannot quietly let an agency back in. */
+const { gadsHostOf: hostOf, gadsMatchList: matchList } = require('./google-ads-conversions');
+const META_DEFAULT_EXCLUDED_DOMAINS = ['flighted.co', 'uprawmedia.com'];
+
+function metaExcludedDomains(env = process.env) {
+  const extra = String(env.META_EXCLUDED_DOMAINS || '').split(',')
+    .map((x) => x.trim().toLowerCase().replace(/^www\./, '').replace(/\.$/, '')).filter(Boolean);
+  return [...new Set([...META_DEFAULT_EXCLUDED_DOMAINS, ...extra])];
+}
+
+/* { domain, via } when the lead's email domain or website is on the list,
+   otherwise null. Exported so index.js can keep meta_predicted_ltv honest:
+   that column claims a value was SENT, and must not for a lead this stops. */
+function metaExcludedDomainMatch({ email, website } = {}, env = process.env) {
+  const list = metaExcludedDomains(env);
+  const byEmail = matchList(hostOf(email), list);
+  if (byEmail) return { domain: byEmail, via: 'email' };
+  const bySite = matchList(hostOf(website), list);
+  if (bySite) return { domain: bySite, via: 'website' };
+  return null;
+}
+
 async function sendEvent(eventName, payload, options = {}) {
+  /* FIRST, before credentials or anything else, so it holds whatever else is
+     configured. Not a failure (no success:false, so throwIfAnyFailed raises
+     nothing and no Meta alert counts it) and not a success (no
+     reportOutcome, so it cannot reset the failure streak). */
+  const excluded = metaExcludedDomainMatch(payload || {});
+  if (excluded) {
+    console.log(`[Meta CAPI] ⏭ ${eventName} suppressed — agency domain ${excluded.domain} (by ${excluded.via}), META_EXCLUDED_DOMAINS: session ${(payload && payload.session_id) || 'unknown'}`);
+    return { skipped: 'agency_domain', eventName, domain: excluded.domain, via: excluded.via };
+  }
+
   const pixelId = process.env.META_PIXEL_ID;
   const accessToken = process.env.META_ACCESS_TOKEN;
 
@@ -777,4 +831,8 @@ module.exports = {
   PRODUCT_EXCLUDED_EVENTS,
   resolveProduct,
   buildEventData,
+  sendEvent,
+  metaExcludedDomainMatch,
+  metaExcludedDomains,
+  META_DEFAULT_EXCLUDED_DOMAINS,
 };

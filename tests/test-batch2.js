@@ -2434,6 +2434,76 @@ async function section12() {
        /pushContactToMeta\([\s\S]{0,1200}?\.catch\(/.test(lm));
     ok('capi: both /partial and /submit still record the failure they catch',
        (src.match(/recordFailure\('Meta CAPI'/g) || []).length === 5);
+
+    /* 8. AGENCY DOMAINS (META_EXCLUDED_DOMAINS) NEVER REACH META, for every
+       event, because the guard is in sendEvent, which all of them pass
+       through. Executed, not read: fetch counts what actually leaves. */
+    {
+      let metaCalls = 0;
+      global.fetch = async (url) => {
+        if (/graph\.facebook\.com/.test(String(url))) metaCalls++;
+        return { ok: true, json: async () => ({ events_received: 1 }) };
+      };
+      const reported = [];
+      META.setMetaOutcomeReporter((o) => reported.push(o));
+      const logs = [];
+      const run = async (fn, payload) => {
+        metaCalls = 0;
+        const l = console.log, w = console.warn, e = console.error;
+        console.log = (...a) => logs.push(a.join(' ')); console.warn = console.error = () => {};
+        const seen = [];
+        try { await fn(payload, {}).catch((err) => seen.push(err.message)); }
+        finally { console.log = l; console.warn = w; console.error = e; }
+        return { calls: metaCalls, seen };
+      };
+      const AGENCIES = [
+        ['by EMAIL domain (flighted.co)',          { email: 'pm@flighted.co' }],
+        ['by EMAIL domain, any case (Upraw)',      { email: 'Media@UprawMedia.com' }],
+        ['by WEBSITE domain (uprawmedia.com)',     { email: 'owner@acme.test', website: 'https://www.uprawmedia.com/case-studies' }],
+        ['by a WEBSITE subdomain (flighted.co)',   { email: 'owner@acme.test', website: 'clients.flighted.co' }],
+      ];
+      for (const [label, fnName, payload] of CASES) {
+        for (const [how, who] of AGENCIES) {
+          reported.length = 0;
+          const r = await run(META[fnName], { ...payload, ...who });
+          ok(`capi agency: ${label} ${how} — nothing reaches Meta`, r.calls === 0, String(r.calls));
+          ok(`capi agency: ${label} ${how} — and nothing alerts`, r.seen.length === 0, JSON.stringify(r.seen));
+          ok(`capi agency: ${label} ${how} — and it is not reported as a success`, reported.length === 0, JSON.stringify(reported));
+        }
+        const normal = await run(META[fnName], { ...payload, email: 'buyer@acme.test', website: 'acme.test' });
+        ok(`capi agency: ${label} — a normal lead STILL fires`, normal.calls >= 1 && normal.seen.length === 0, String(normal.calls));
+        const look = await run(META[fnName], { ...payload, email: 'x@notflighted.co', website: 'flighted.co.example.test' });
+        ok(`capi agency: ${label} — a lookalike domain is not an agency, and fires`, look.calls >= 1, String(look.calls));
+      }
+      ok('capi agency: the skip is logged with its reason',
+         logs.some((m) => /suppressed — agency domain flighted\.co \(by email\), META_EXCLUDED_DOMAINS/.test(m)) &&
+         logs.some((m) => /agency domain uprawmedia\.com \(by website\)/.test(m)));
+      const lq = console.log; console.log = () => {};
+      let direct;
+      try { direct = await META.sendEvent('Lead', { session_id: 's', email: 'pm@flighted.co', page_url: DEMO }); } finally { console.log = lq; }
+      ok('capi agency: sendEvent returns a SKIP, not success:false (which would count as a Meta failure)',
+         direct.skipped === 'agency_domain' && direct.success === undefined, JSON.stringify(direct));
+      eq('capi agency: the defaults are Flighted and Upraw', META.metaExcludedDomains({}).join(','), 'flighted.co,uprawmedia.com');
+      ok('capi agency: META_EXCLUDED_DOMAINS EXTENDS the list and cannot drop the defaults',
+         META.metaExcludedDomains({ META_EXCLUDED_DOMAINS: 'www.other-agency.test' }).join(',') === 'flighted.co,uprawmedia.com,other-agency.test');
+      ok('capi agency: an extra domain from the env is excluded too',
+         !!META.metaExcludedDomainMatch({ email: 'a@other-agency.test' }, { META_EXCLUDED_DOMAINS: 'other-agency.test' }));
+      eq('capi agency: no email and no website is never an agency', META.metaExcludedDomainMatch({}), null);
+      META.setMetaOutcomeReporter(null);
+
+      /* index.js: the payload, the value stamp, and nothing that bypasses sendEvent. */
+      ok('capi agency: /partial hands StartTrial the website, so a website match can stop it',
+         /pushStartTrialToMeta\(\{session_id,email,website,/.test(src));
+      ok('capi agency: /partial does not stamp meta_predicted_ltv for an agency lead',
+         /const metaWillFire = [^;]*!metaExcludedDomainMatch\(\{ email, website \}\);/.test(src));
+      ok('capi agency: /submit does not stamp meta_predicted_ltv for an agency lead',
+         /const meta_predicted_ltv = \(!nonIcp\.suppress_meta[\s\S]{0,160}!metaExcludedDomainMatch\(\{ email, website \}\)\)/.test(src));
+      ok('capi agency: nothing outside meta-capi.js talks to Meta directly',
+         !/graph\.facebook\.com/.test(src) && !/graph\.facebook\.com/.test(lm));
+      ok('capi agency: Meta-only -- not added to ELV_EXCLUDED_DOMAINS or INTERNAL_TEST_EMAILS (they gate Salesforce, the mirror and the dialer)',
+         !/flighted|uprawmedia/.test(between('const ELV_EXCLUDED_DOMAINS', ';')) &&
+         !/flighted|uprawmedia/.test(between('const INTERNAL_TEST_EMAILS', 'function isInternalLead')));
+    }
   } finally {
     global.fetch = realFetch;
     if (realPixel === undefined) delete process.env.META_PIXEL_ID; else process.env.META_PIXEL_ID = realPixel;
