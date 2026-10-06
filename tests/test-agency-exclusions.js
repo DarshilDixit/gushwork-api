@@ -283,7 +283,7 @@ const NORMAL       = { email: 'buyer@northwind-trading.test', website: 'northwin
       const { runBackfill: rb } = require(bfPath);
       const out = await rb(bfPool, { emails: [NORMAL.email], dry: false });
       const r = out.results.find((x) => x.email === NORMAL.email) || {};
-      ok('F2 backfill: a skip reported by the push itself is SKIPPED, never FAILED', /^skipped — agency domain stand-in\.test/.test(r.action || '') && out.summary.failed === 0 && out.summary.skipped === 1, JSON.stringify({ action: r.action, summary: out.summary }));
+      ok('F2 backfill: a skip reported by the push itself is SKIPPED, never FAILED', /^skipped — agency domain stand-in\.test/.test(r.action || '') && out.summary.failed === 0 && out.summary.skipped === out.summary.found && out.summary.found > 0, /* the stub returns every fixture row */ JSON.stringify({ action: r.action, summary: out.summary }));
     } finally {
       delete require.cache[bfPath];
       if (savedBf) require.cache[bfPath] = savedBf;
