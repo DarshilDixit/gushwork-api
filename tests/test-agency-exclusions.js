@@ -263,6 +263,34 @@ const NORMAL       = { email: 'buyer@northwind-trading.test', website: 'northwin
     eq(`F backfill ${dry ? 'DRY' : 'real'}: no Salesforce call is spent on an agency lead`, nonNormal.length, 0);
   }
 
+  /* F2. The after-push skip branch. The pre-check above asks the SAME rule,
+     so in practice a skip never reaches the push -- this branch is the net
+     for a future rule pushToSalesforce has and the pre-check does not. It is
+     reached here with a Salesforce stand-in whose push skips what the
+     pre-check let through, and it must count a SKIP, never a FAILED. */
+  {
+    const bfPath = require.resolve(path.join(ROOT, 'backfill-sf.js'));
+    const sfPath = require.resolve(path.join(ROOT, 'salesforce.js'));
+    const savedBf = require.cache[bfPath], savedSf = require.cache[sfPath];
+    delete require.cache[bfPath];
+    require.cache[sfPath] = { id: sfPath, filename: sfPath, loaded: true, exports: {
+      ...SF,
+      salesforceSkipReason: () => null,
+      pushToSalesforce: async () => ({ skipped: 'agency', detail: 'agency domain stand-in.test (by email)' }),
+      getSalesforceToken: SF.getSalesforceToken,
+    } };
+    try {
+      const { runBackfill: rb } = require(bfPath);
+      const out = await rb(bfPool, { emails: [NORMAL.email], dry: false });
+      const r = out.results.find((x) => x.email === NORMAL.email) || {};
+      ok('F2 backfill: a skip reported by the push itself is SKIPPED, never FAILED', /^skipped — agency domain stand-in\.test/.test(r.action || '') && out.summary.failed === 0 && out.summary.skipped === 1, JSON.stringify({ action: r.action, summary: out.summary }));
+    } finally {
+      delete require.cache[bfPath];
+      if (savedBf) require.cache[bfPath] = savedBf;
+      require.cache[sfPath] = savedSf;
+    }
+  }
+
   /* ================================================================
      G. /monitor/sdr, BOOTED
      ================================================================ */
