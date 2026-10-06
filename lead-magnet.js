@@ -177,6 +177,37 @@ const UPSERT_SQL = `
   RETURNING id, completed, capi_contact_sent
 `;
 
+/* What a Loops push left behind, written by /lm/submit and by the
+   dashboard's retry button through this one statement so the two cannot
+   drift.
+
+   Since 7 Oct 2026 the email is sent by the "20 prompts" Loop, which starts
+   on the lead_magnet_requested event, so a push whose event was accepted
+   also marks the lead delivered. Before that a person built each
+   150-questions list by hand and pressed Mark sent, and every lead the
+   automation had already emailed sat on the dashboard as Awaiting. It
+   means "handed to Loops with its trigger": Loops does not report the send
+   back, and a paused Loop would still accept the event. Never un-marks:
+   a retry that fails does not take back an earlier send, or a hand mark. */
+const LOOPS_RESULT_SQL = `
+  UPDATE lead_magnet_leads
+     SET loops_sent = $2, loops_sent_at = CASE WHEN $2 THEN NOW() ELSE loops_sent_at END,
+         loops_contact_id = COALESCE($3, loops_contact_id),
+         loops_error = $4,
+         delivered = delivered OR $5,
+         delivered_at = CASE WHEN $5 AND delivered_at IS NULL THEN NOW() ELSE delivered_at END,
+         delivery_note = CASE WHEN $5 AND delivery_note IS NULL THEN 'Sent by the Loops automation'
+                              ELSE delivery_note END,
+         updated_at = NOW()
+   WHERE id = $1`;
+const loopsResultArgs = (id, r) => [
+  id,
+  r.ok === true,
+  r.contactId || null,
+  r.ok ? (r.eventError || null) : (r.error || null),
+  r.ok === true && r.eventSent === true,
+];
+
 module.exports = function createLeadMagnetRouter(deps) {
   const { pool, elvIsInternal, FREE_EMAIL_DOMAINS } = deps;
   /* v5.5.0 — optional so this module still works standalone if the deps are
@@ -374,16 +405,7 @@ module.exports = function createLeadMagnetRouter(deps) {
           else recordFailure('Loops', p.email, (r && r.error) || 'unknown Loops error');
           return r;
         })
-        .then((r) =>
-          pool.query(
-            `UPDATE lead_magnet_leads
-                SET loops_sent = $2, loops_sent_at = CASE WHEN $2 THEN NOW() ELSE loops_sent_at END,
-                    loops_contact_id = COALESCE($3, loops_contact_id),
-                    loops_error = $4, updated_at = NOW()
-              WHERE id = $1`,
-            [row.id, r.ok === true, r.contactId || null, r.ok ? (r.eventError || null) : (r.error || null)]
-          )
-        )
+        .then((r) => pool.query(LOOPS_RESULT_SQL, loopsResultArgs(row.id, r)))
         .catch((err) => { console.warn('[LM] Loops push failed (non-blocking):', err.message); recordFailure('Loops', p.email, err.message); });
 
       sendWebhook({
@@ -695,13 +717,7 @@ module.exports = function createLeadMagnetRouter(deps) {
            FROM lead_magnet_leads WHERE id = $1 AND completed = true`, [id]);
       if (!rows.length) return res.status(404).json({ error: 'lead not found or not completed' });
       const r = await pushContactToLoops(rows[0]);
-      await pool.query(
-        `UPDATE lead_magnet_leads
-            SET loops_sent = $2, loops_sent_at = CASE WHEN $2 THEN NOW() ELSE loops_sent_at END,
-                loops_contact_id = COALESCE($3, loops_contact_id),
-                loops_error = $4, updated_at = NOW()
-          WHERE id = $1`,
-        [id, r.ok === true, r.contactId || null, r.ok ? (r.eventError || null) : (r.error || null)]);
+      await pool.query(LOOPS_RESULT_SQL, loopsResultArgs(id, r));
       res.json(r);
     } catch (err) {
       res.status(500).json({ error: err.message });
