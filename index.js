@@ -11,6 +11,7 @@ const { sendConversion, fetchPartnership, sendAction, fetchCustomer } = require(
 const { pushToSalesforce, findSFLeadByEmail, updateSFLead, updateOpportunityFields, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails , sfIsRetryable, setSalesforceInternalCheck} = require('./salesforce');
 const { pushFormEventsToMeta, pushStartTrialToMeta, resolveProduct, resolveEventProduct, predictedLtvFor, canonicalProductInterest, setMetaOutcomeReporter, metaExcludedDomainMatch } = require('./meta-capi');
 const { createGadsUploader, startGadsUploadSweep } = require('./google-ads-conversions');
+const { agencyDomainMatch } = require('./agency-domains');
 const createLeadMagnetRouter = require('./lead-magnet');
 
 const app  = express();
@@ -4173,6 +4174,18 @@ app.get('/monitor/sdr', async (req, res) => {
     `, searchParams);
 
     const leads = result.rows;
+    /* AGENCY ROWS ARE MARKED, NOT HIDDEN, ON SCREEN -- and left out of the
+       CSV, because the CSV is what reaches a dialer. Flighted and Upraw
+       (AGENCY_DOMAINS) run our campaigns; calling them is a wasted dial and
+       an awkward one. On the tab a human sees the row with a badge and can
+       decide; an import has no human in it. Matched on email or website,
+       exact or subdomain, through the same helper as Meta, Google and
+       Salesforce. The domain is carried so the badge can say which. */
+    for (const r of leads) {
+      const m = agencyDomainMatch({ email: r.email, website: r.website });
+      r.is_agency = !!m;
+      r.agency_domain = m ? m.domain : null;
+    }
 
     if (format === 'csv') {
       const cols = [
@@ -4186,14 +4199,17 @@ app.get('/monitor/sdr', async (req, res) => {
       ];
       const csv = [
         cols.join(','),
-        ...leads.map(r => cols.map(c => csvCell(r[c])).join(','))
+        ...leads.filter(r => !r.is_agency).map(r => cols.map(c => csvCell(r[c])).join(','))
       ].join('\n');
       res.setHeader('Content-Type', 'text/csv');
+      /* How many were left out, where a browser download does not show it
+         but anyone checking the request can. Never the addresses. */
+      res.setHeader('X-Agency-Rows-Excluded', String(leads.filter(r => r.is_agency).length));
       res.setHeader('Content-Disposition', `attachment; filename="sdr-list-${etDateOnly()}.csv"`);
       return res.send(csv);
     }
 
-    res.json({ total: leads.length, leads });
+    res.json({ total: leads.length, agency: leads.filter(r => r.is_agency).length, leads });
   } catch (err) {
     console.error('[/monitor/sdr]', err.message);
     res.status(500).json({ error: 'SDR query failed', detail: err.message });
