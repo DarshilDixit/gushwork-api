@@ -1505,6 +1505,117 @@ function liftClientJs(startMarker, endMarker) {
       }
     }
 
+    /* ============================================================
+       LM-EMAIL — /lm/submit takes a business email and nothing else.
+       7 Oct 2026: the /buyer-questions page dropped website, industry,
+       product and sell-to, and stopped accepting Gmail and the rest. Until
+       this change the route answered 400 "Missing required fields" to any
+       submit without the three fields, so an email-only page would have
+       lost every signup. These EXECUTE the real handler out of
+       lead-magnet.js against a stubbed pool, because a source assertion
+       cannot tell a reachable refusal from an unreachable one.
+       ============================================================ */
+    {
+      const Module = require('module');
+      const lmPath = path.join(__dirname, '..', 'lead-magnet.js');
+      const metaCalls = [], loopsCalls = [];
+      /* Stub the two outbound modules BEFORE lead-magnet.js is required:
+         it destructures them at load time, so a later swap would miss. */
+      const stub = (file, exports) => {
+        const p = require.resolve(path.join(__dirname, '..', file));
+        const m = new Module(p); m.filename = p; m.loaded = true; m.exports = exports;
+        require.cache[p] = m;
+      };
+      const realMeta = require.cache[require.resolve(path.join(__dirname, '..', 'meta-capi.js'))];
+      const realLoops = require.cache[require.resolve(path.join(__dirname, '..', 'loops.js'))];
+      stub('meta-capi.js', { pushContactToMeta: async (l) => { metaCalls.push(l); return {}; } });
+      stub('loops.js', {
+        pushContactToLoops: async (l) => { loopsCalls.push(l); return { ok: true }; },
+        ensureLoopsProperties: async () => ({ skipped: true }),
+        testLoopsKey: async () => ({ configured: false }),
+      });
+      delete require.cache[lmPath];
+      const dns = require('dns').promises;
+      const realMx = dns.resolveMx;
+      dns.resolveMx = async () => [{ exchange: 'mx.example', priority: 10 }];
+
+      let dupeRows = 0;
+      const queries = [];
+      const pool = { query: async (sql, params) => {
+        queries.push({ sql, params });
+        if (/FROM lead_magnet_leads\s+WHERE email = \$1/.test(sql)) return { rowCount: dupeRows, rows: [] };
+        if (/INSERT INTO lead_magnet_leads/.test(sql)) return { rows: [{ id: 7, completed: true, capi_contact_sent: false }] };
+        return { rowCount: 1, rows: [] };
+      } };
+      const router = require(lmPath)({
+        pool, elvIsInternal: () => false,
+        FREE_EMAIL_DOMAINS: ['gmail.com', 'yahoo.com'],
+      });
+      const layer = router.stack.find((l) => l.route && l.route.path === '/lm/submit' && l.route.methods.post);
+      const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+      const submit = async (body) => {
+        const res = { statusCode: 200, body: null, headersSent: false,
+          status(c) { this.statusCode = c; return this; },
+          json(b) { this.body = b; this.headersSent = true; return this; },
+          setHeader() {} };
+        /* No extra tick after this: the handler calls Meta and Loops
+           synchronously after res.json, so they are counted by the time it
+           resolves. A setImmediate here let an unawaited loadEnrichCoverage
+           from the health/ui block above reject (it was built without esc)
+           and crash the suite, which is a latent fault in that harness,
+           not in this route. */
+        await handler({ body, headers: { 'user-agent': 'test' }, ip: '' }, res);
+        return res;
+      };
+      const SID = '11111111-2222-4333-8444-555555555555';
+      const SID2 = '11111111-2222-4333-8444-666666666666';
+
+      /* A personal address is refused, and refused before anything is written. */
+      let r = await submit({ session_id: SID, email: 'Jo@Gmail.com' });
+      eq('lm-email: a gmail address is refused with 422', r.statusCode, 422);
+      eq('lm-email: and says why, as free_email', r.body && r.body.status, 'free_email');
+      ok('lm-email: the message asks for a work email in words',
+         /work email/.test(r.body && r.body.message), r.body && r.body.message);
+      ok('lm-email: nothing is written for a refused address',
+         !queries.some((q) => /INSERT INTO lead_magnet_leads/.test(q.sql)));
+      ok('lm-email: and no Meta Contact fires for it', metaCalls.length === 0);
+
+      /* A business email with NO other field goes through. */
+      r = await submit({ session_id: SID, email: 'jo@acme-industrial.com' });
+      eq('lm-email: a business email alone is accepted (was 400 Missing required fields)', r.statusCode, 200);
+      eq('lm-email: the reply is ok', r.body && r.body.ok, true);
+      ok('lm-email: the row is written', queries.some((q) => /INSERT INTO lead_magnet_leads/.test(q.sql)));
+      eq('lm-email: Meta Contact fires once for it', metaCalls.length, 1);
+      eq('lm-email: Loops is handed the contact once', loopsCalls.length, 1);
+      eq('lm-email: the website is still derived from the business email',
+         loopsCalls[0] && loopsCalls[0].website, 'https://acme-industrial.com');
+
+      /* The duplicate check no longer depends on a product the page does
+         not ask for. */
+      const dq = queries.find((q) => /FROM lead_magnet_leads\s+WHERE email = \$1/.test(q.sql));
+      ok('lm-email: the duplicate check does not read product_or_service',
+         dq && !/product_or_service/.test(dq.sql), dq && dq.sql);
+      eq('lm-email: and is keyed on email and this session only', dq && dq.params,
+         ['jo@acme-industrial.com', SID]);
+      dupeRows = 1;
+      r = await submit({ session_id: SID2, email: 'jo@acme-industrial.com' });
+      eq('lm-email: a second submit inside the window is marked duplicate', r.body && r.body.duplicate, true);
+      eq('lm-email: and fires no second Contact', metaCalls.length, 1);
+
+      /* The old gates still hold. */
+      r = await submit({ session_id: SID, email: 'not-an-email' });
+      eq('lm-email: a malformed address is still refused as invalid_syntax', r.body && r.body.status, 'invalid_syntax');
+      r = await submit({ session_id: 'nope', email: 'jo@acme-industrial.com' });
+      eq('lm-email: a bad session id is still a 400', r.statusCode, 400);
+
+      dns.resolveMx = realMx;
+      for (const [file, real] of [['meta-capi.js', realMeta], ['loops.js', realLoops]]) {
+        const p = require.resolve(path.join(__dirname, '..', file));
+        if (real) require.cache[p] = real; else delete require.cache[p];
+      }
+      delete require.cache[lmPath];
+    }
+
     /* ============================================================ */
     console.log('');
     if (failures.length) {
