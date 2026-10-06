@@ -602,25 +602,21 @@ function buildEventData(eventName, payload, options = {}) {
    upload uses, so the two lists cannot disagree about what "matches" means.
    The env EXTENDS the defaults and cannot shrink them, so a typo in Railway
    cannot quietly let an agency back in. */
-const { gadsHostOf: hostOf, gadsMatchList: matchList } = require('./google-ads-conversions');
-const META_DEFAULT_EXCLUDED_DOMAINS = ['flighted.co', 'uprawmedia.com'];
+/* Since 7 Oct 2026 the list is the SHARED agency list (agency-domains.js,
+   AGENCY_DOMAINS) and META_EXCLUDED_DOMAINS extends it for Meta only. With
+   AGENCY_DOMAINS unset the list is exactly what #132 shipped. */
+const { AGENCY_DEFAULT_DOMAINS, agencyDomainsPlus, domainMatch } = require('./agency-domains');
+const META_DEFAULT_EXCLUDED_DOMAINS = AGENCY_DEFAULT_DOMAINS;
 
 function metaExcludedDomains(env = process.env) {
-  const extra = String(env.META_EXCLUDED_DOMAINS || '').split(',')
-    .map((x) => x.trim().toLowerCase().replace(/^www\./, '').replace(/\.$/, '')).filter(Boolean);
-  return [...new Set([...META_DEFAULT_EXCLUDED_DOMAINS, ...extra])];
+  return agencyDomainsPlus(env.META_EXCLUDED_DOMAINS, env);
 }
 
 /* { domain, via } when the lead's email domain or website is on the list,
    otherwise null. Exported so index.js can keep meta_predicted_ltv honest:
    that column claims a value was SENT, and must not for a lead this stops. */
 function metaExcludedDomainMatch({ email, website } = {}, env = process.env) {
-  const list = metaExcludedDomains(env);
-  const byEmail = matchList(hostOf(email), list);
-  if (byEmail) return { domain: byEmail, via: 'email' };
-  const bySite = matchList(hostOf(website), list);
-  if (bySite) return { domain: bySite, via: 'website' };
-  return null;
+  return domainMatch({ email, website }, metaExcludedDomains(env));
 }
 
 async function sendEvent(eventName, payload, options = {}) {

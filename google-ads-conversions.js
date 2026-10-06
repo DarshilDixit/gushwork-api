@@ -39,6 +39,11 @@
    ============================================================ */
 
 const crypto = require('crypto');
+/* The host helpers now live in agency-domains.js, unchanged, so every agency
+   list in the repo matches the same way. Re-exported here under their old
+   names for the tests and tools that already use them. */
+const { hostOf: gadsHostOf, hostMatches: gadsHostMatches, matchList: gadsMatchList,
+  AGENCY_DEFAULT_DOMAINS, agencyDomainsPlus } = require('./agency-domains');
 
 const DATA_MANAGER_INGEST_URL = 'https://datamanager.googleapis.com/v1/events:ingest';
 const DATA_MANAGER_SCOPE      = 'https://www.googleapis.com/auth/datamanager';
@@ -56,7 +61,9 @@ const GADS_DEFAULT_CONVERSION_ACTION_ID = '7825004775';   // "CRM - Qualified De
    the dialer, and taking agencies out of those is a different decision to
    taking them out of Google's bidding signal. The env EXTENDS this list and
    never replaces it, so a typo in Railway cannot quietly let them back in. */
-const GADS_DEFAULT_EXCLUDED_DOMAINS = ['flighted.co', 'uprawmedia.com'];
+/* Since 7 Oct 2026 this IS the shared agency list (agency-domains.js);
+   GADS_EXCLUDED_DOMAINS extends it for Google only, AGENCY_DOMAINS for all. */
+const GADS_DEFAULT_EXCLUDED_DOMAINS = AGENCY_DEFAULT_DOMAINS;
 
 /* OTHER STAGING OR PREVIEW HOSTS, Google-only, matched exact-or-subdomain.
    Searched on 6 Oct 2026: the repo names one staging host,
@@ -116,7 +123,7 @@ function gadsSettings(env = process.env) {
     cutoverError:       cut.error,
     customerId:         String(env.GADS_CUSTOMER_ID || GADS_DEFAULT_CUSTOMER_ID).replace(/-/g, '').trim(),
     conversionActionId: String(env.GADS_CONVERSION_ACTION_ID || GADS_DEFAULT_CONVERSION_ACTION_ID).trim(),
-    excludedDomains:    listFromEnv(env.GADS_EXCLUDED_DOMAINS, GADS_DEFAULT_EXCLUDED_DOMAINS),
+    excludedDomains:    agencyDomainsPlus(env.GADS_EXCLUDED_DOMAINS, env),
     excludedHosts:      listFromEnv(env.GADS_EXCLUDED_HOSTS, GADS_DEFAULT_EXCLUDED_HOSTS),
     excludeFreeEmail:   env.GADS_EXCLUDE_FREE_EMAIL === 'true',
     /* OFF unless exactly 'true'. See GADS_CONSENT_GRANTED below. */
@@ -139,37 +146,6 @@ function gadsConfigProblems(s) {
 
 /* ── Hosts and domains ────────────────────────────────────────────────── */
 
-/* A host from an email, a URL or a bare domain: lowercase, no scheme, no
-   userinfo, no path, no port, no www, no trailing dot. Subdomains are KEPT,
-   because matching is exact-or-subdomain and collapsing first would make
-   "agents.flighted.co" and "flighted.co" the same string by accident
-   rather than by rule. Same stripping steps as nonIcpHostForms, without
-   its free-mailbox refusal (an agency could in principle sit on any host). */
-function gadsHostOf(raw) {
-  let h = String(raw == null ? '' : raw).trim().toLowerCase();
-  if (!h) return '';
-  if (h.includes('@') && !/^[a-z][a-z0-9+.-]*:\/\//.test(h)) h = h.slice(h.lastIndexOf('@') + 1);
-  h = h.replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
-       .replace(/^[^/@]*@/, '')
-       .split(/[/?#]/)[0]
-       .split(':')[0]
-       .replace(/^www\./, '')
-       .replace(/\.$/, '');
-  return h;
-}
-
-/* Exact or a real subdomain -- never a substring. "notflighted.co" and
-   "flighted.co.example.com" are not Flighted. Same rule as
-   hostMatchesDomain in index.js, which kept paycompass.com off the
-   brand-domain block list. */
-function gadsHostMatches(host, domain) {
-  if (!host || !domain) return false;
-  return host === domain || (host.length > domain.length && host.endsWith('.' + domain));
-}
-
-function gadsMatchList(host, list) {
-  return (list || []).find((d) => gadsHostMatches(host, d)) || null;
-}
 
 /* ── User data: email and phone, Google's normalisation ───────────────── */
 
