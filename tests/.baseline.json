@@ -1,6 +1,6 @@
 {
-  "savedAt": "2026-10-06T18:19:46.339Z",
-  "grandTotal": 5219,
+  "savedAt": "2026-10-06T18:38:36.572Z",
+  "grandTotal": 5262,
   "suites": {
     "test-batch1.js": 109,
     "test-batch2.js": 1147,
@@ -16,6 +16,6 @@
     "test-non-icp-routes.js": 576,
     "test-apollo.js": 85,
     "test-monitor-next.js": 441,
-    "test-gads-upload.js": 170
+    "test-gads-upload.js": 213
   }
 }

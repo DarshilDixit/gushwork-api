@@ -592,6 +592,10 @@ delete the file.
   `payload` is the exact event sent, **TEXT and not JSONB** — JSONB reorders
   keys, so a retry would send the same event in different bytes (measured on
   a temp table). `session_id` is UUID because `leads.session_id` is.
+  **`google_outcome` is what Google DID with a real send**, read back from
+  `requestStatus:retrieve`: `accepted`, `accepted_with_warnings`, `unmatched`,
+  `duplicate`, `dropped`, or `unknown` after 7 days with no final answer.
+  NULL until checked, and always NULL for a validate-only row.
 - **`lead_field_changes`** — append-only log of the seven identity fields
   (`email`, `company`, `website`, `phone`, `first_name`, `last_name`,
   `sell_to`) changing on a lead row, because both upserts are last-write-wins
@@ -2103,6 +2107,15 @@ shape and the hostile ones.
   `DROPOFF_SOURCE_SQL`, a `const`, which is the temporal-dead-zone break.
 - **Value is the product lookup, not `meta_predicted_ltv`**, which is empty
   whenever Meta did not fire.
+- **A 200 from `events:ingest` is NOT a conversion.** After every REAL send
+  the sweep asks `GET /v1/requestStatus:retrieve?requestId=…` (from 30 minutes
+  after, backing off to daily) and records the outcome per row. One event per
+  request is what makes a request's status that event's result. Unmatched,
+  duplicate, dropped and never-answered each alert once, as a warning; the
+  write that finalises a row is conditional, so two sweeps cannot alert twice.
+  Google's reference gives no timing for PROCESSING or for how long a request
+  ID stays readable, hence the 7-day give-up rather than a guessed number.
+  Validate-only requests cannot be asked about at all (Google's own 400).
 - **Consent is a switch, `GADS_CONSENT_GRANTED`, off by default.** On, every
   event carries `consent: { adUserData: CONSENT_GRANTED, adPersonalization:
   CONSENT_GRANTED }` — the Data Manager reference's names, the same claim

@@ -423,6 +423,119 @@ function lead(over = {}) {
   ok('B3: ...and says it is off', logs.some((m) => /Conversion upload is OFF/.test(m)));
 
   /* ================================================================
+     D. AFTER A REAL SEND: requestStatus:retrieve, per event
+     ================================================================ */
+  const dst = (st, extra = {}) => ({ requestStatusPerDestination: [{ destination: {}, requestStatus: st, eventsIngestionStatus: { recordCount: '1' }, ...extra }] });
+  const errOf = (...rs) => ({ errorInfo: { errorCounts: rs.map((r) => ({ recordCount: '1', reason: 'PROCESSING_ERROR_REASON_' + r })) } });
+
+  // D1. Google's reply -> our outcome
+  eq('D1: SUCCESS is accepted', G.classifyRequestStatus(dst('SUCCESS')).outcome, 'accepted');
+  eq('D1: SUCCESS with a warning is accepted_with_warnings', G.classifyRequestStatus(dst('SUCCESS', { warningInfo: { warningCounts: [{ recordCount: '1', reason: 'PROCESSING_WARNING_REASON_INTERNAL_ERROR' }] } })).outcome, 'accepted_with_warnings');
+  eq('D1: SUCCESS with ZERO records received is dropped', G.classifyRequestStatus({ requestStatusPerDestination: [{ requestStatus: 'SUCCESS', eventsIngestionStatus: { recordCount: '0' } }] }).outcome, 'dropped');
+  eq('D1: CLICK_NOT_FOUND is unmatched', G.classifyRequestStatus(dst('FAILED', errOf('CLICK_NOT_FOUND'))).outcome, 'unmatched');
+  eq('D1: INVALID_CLICK is unmatched', G.classifyRequestStatus(dst('FAILED', errOf('INVALID_CLICK'))).outcome, 'unmatched');
+  eq('D1: a click for another account is unmatched', G.classifyRequestStatus(dst('FAILED', errOf('INVALID_OPERATING_ACCOUNT_FOR_CLICK'))).outcome, 'unmatched');
+  eq('D1: PARTIAL_SUCCESS with CLICK_NOT_FOUND is unmatched', G.classifyRequestStatus(dst('PARTIAL_SUCCESS', errOf('CLICK_NOT_FOUND'))).outcome, 'unmatched');
+  eq('D1: DUPLICATE_TRANSACTION_ID alone is duplicate', G.classifyRequestStatus(dst('FAILED', errOf('DUPLICATE_TRANSACTION_ID'))).outcome, 'duplicate');
+  eq('D1: DUPLICATE_GCLID alone is duplicate', G.classifyRequestStatus(dst('FAILED', errOf('DUPLICATE_GCLID'))).outcome, 'duplicate');
+  eq('D1: a duplicate PLUS another reason is dropped, not excused', G.classifyRequestStatus(dst('FAILED', errOf('DUPLICATE_GCLID', 'EVENT_TOO_OLD'))).outcome, 'dropped');
+  eq('D1: EVENT_TOO_OLD is dropped', G.classifyRequestStatus(dst('FAILED', errOf('EVENT_TOO_OLD'))).outcome, 'dropped');
+  eq('D1: FAILED with no reason given is dropped', G.classifyRequestStatus(dst('FAILED')).outcome, 'dropped');
+  ok('D1: PROCESSING is not final', G.classifyRequestStatus(dst('PROCESSING')).final === false);
+  ok('D1: an empty reply is unreadable and NOT final', (() => { const c = G.classifyRequestStatus({}); return c.outcome === 'unreadable' && c.final === false; })());
+  ok('D1: an unknown status word is unreadable and NOT final', (() => { const c = G.classifyRequestStatus(dst('SOMETHING_NEW')); return c.outcome === 'unreadable' && c.final === false; })());
+  eq('D1: counts are summed per reason', JSON.stringify(G.classifyRequestStatus({ requestStatusPerDestination: [{ requestStatus: 'FAILED', errorInfo: { errorCounts: [{ recordCount: '2', reason: 'R' }, { recordCount: '1', reason: 'R' }] } }] }).errors), '{"R":3}');
+
+  // D2-D6. The checks, driven through the uploader with a stub pool and a stub Google
+  function statusRig({ rows, replies, finalRowCount = () => 1, env = {}, tokenFails = false }) {
+    const R = { queries: [], gets: [], alerts: [], failures: [], finals: [], retries: [] };
+    const pool = { query: async (q, p) => {
+      const flat = String(q).replace(/\s+/g, ' ').trim();
+      R.queries.push({ sql: flat, params: p || [] });
+      if (/FROM gads_conversion_uploads WHERE status = 'sent'/.test(flat)) return { rows, rowCount: rows.length };
+      if (/google_status_final_at = NOW\(\)/.test(flat)) { R.finals.push(p); return { rows: [], rowCount: finalRowCount(p[0]) }; }
+      if (/google_status_next_check_at = NOW\(\) \+/.test(flat)) { R.retries.push(p); return { rows: [], rowCount: 1 }; }
+      return { rows: [], rowCount: 0 };
+    } };
+    const u = G.createGadsUploader({ pool, sourceSql: "'Google'",
+      isInternalLead: REAL.isInternalLead, isStagingSubmission: REAL.isStagingSubmission, isInternalSubmission: REAL.isInternalSubmission,
+      isWebsiteVerified: REAL.isWebsiteVerified, freeEmailMatch: REAL.freeEmailMatch, nonIcpFresh: async () => null, valueFor: REAL.gadsValueFor,
+      alertOps: (sev, srcName, title, d) => R.alerts.push({ sev, title, d }),
+      recordFailure: (srcName, id, e) => R.failures.push({ srcName, id, e }),
+      env: { GADS_UPLOAD_ENABLED: 'true', GADS_UPLOAD_CUTOVER: '2026-09-01T00:00:00-04:00', GADS_SERVICE_ACCOUNT_JSON_B64: SA_B64, ...env },
+      now: () => NOW, log: { log() {}, warn() {}, info() {} },
+      fetchImpl: async (url, opts) => {
+        if (url === SA.token_uri) return tokenFails ? { ok: false, status: 400, json: async () => ({ error: 'invalid_grant' }) } : { ok: true, status: 200, json: async () => ({ access_token: 'st', expires_in: 3600 }) };
+        if (String(url).startsWith(G.DATA_MANAGER_STATUS_URL)) {
+          R.gets.push({ url, opts });
+          const rid = decodeURIComponent(String(url).split('requestId=')[1]);
+          const r = replies[rid] || { status: 400, body: { error: { status: 'INVALID_ARGUMENT' } } };
+          return { ok: r.status < 300, status: r.status, json: async () => r.body };
+        }
+        throw new Error('unexpected ' + url);
+      } });
+    return { u, R };
+  }
+  const srow = (sid, rid, over = {}) => ({ session_id: sid, request_id: rid, sent_at: new Date(NOW - 2 * H), booked_at: new Date(NOW - 3 * H), click_id_type: 'gclid', google_status_attempts: 0, ...over });
+  const rig = statusRig({
+    rows: [srow('s-ok', 'r/ok'), srow('s-um', 'r-um'), srow('s-dup', 'r-dup'), srow('s-drop', 'r-drop'), srow('s-proc', 'r-proc'), srow('s-500', 'r-500'), srow('s-raced', 'r-raced')],
+    replies: { 'r/ok': { status: 200, body: dst('SUCCESS') }, 'r-um': { status: 200, body: dst('FAILED', errOf('CLICK_NOT_FOUND')) },
+      'r-dup': { status: 200, body: dst('FAILED', errOf('DUPLICATE_TRANSACTION_ID')) }, 'r-drop': { status: 200, body: dst('FAILED', errOf('INTERNAL_ERROR')) },
+      'r-proc': { status: 200, body: dst('PROCESSING') }, 'r-500': { status: 500, body: { error: { status: 'INTERNAL', message: 'x' } } },
+      'r-raced': { status: 200, body: dst('FAILED', errOf('CLICK_NOT_FOUND')) } },
+    finalRowCount: (sid) => (sid === 's-raced' ? 0 : 1),
+  });
+  const tallyD = await rig.u.runSweep();
+  const selS = rig.R.queries.find((q) => /FROM gads_conversion_uploads WHERE status = 'sent'/.test(q.sql));
+  ok('D2: only REAL sends are asked about (sent, validate_only false, a request ID)', selS && /status = 'sent' AND validate_only IS FALSE AND request_id IS NOT NULL/.test(selS.sql) && /google_outcome IS NULL/.test(selS.sql));
+  /* The literal, not the module's own constant: comparing a value with itself
+     let a mutation to 0 minutes survive. */
+  eq('D2: ...and only once they are 30 minutes old', selS && selS.params[0], 30 * 60 * 1000);
+  ok('D2: the check runs even while the uploader is validate-only (rows sent earlier still need an outcome)', !!selS && G.gadsSettings({}).validateOnly === true);
+  const g0 = rig.R.gets[0];
+  ok('D2: it is a GET to requestStatus:retrieve with the request ID URL-encoded', g0 && g0.opts.method === 'GET' && g0.url === G.DATA_MANAGER_STATUS_URL + '?requestId=r%2Fok');
+  eq('D2: ...with the bearer token', g0 && g0.opts.headers.Authorization, 'Bearer st');
+  eq('D2: every due row was asked once', rig.R.gets.length, 7);
+  const finalFor = (sid) => rig.R.finals.find((p) => p[0] === sid);
+  eq('D3: SUCCESS recorded as accepted', finalFor('s-ok') && finalFor('s-ok')[2], 'accepted');
+  eq('D3: CLICK_NOT_FOUND recorded as unmatched', finalFor('s-um') && finalFor('s-um')[2], 'unmatched');
+  ok('D3: ...with the reason stored', finalFor('s-um') && /CLICK_NOT_FOUND/.test(finalFor('s-um')[4]));
+  eq('D3: a duplicate recorded as duplicate', finalFor('s-dup') && finalFor('s-dup')[2], 'duplicate');
+  eq('D3: another failure recorded as dropped', finalFor('s-drop') && finalFor('s-drop')[2], 'dropped');
+  ok('D3: PROCESSING is NOT final -- a later check is scheduled', !finalFor('s-proc') && rig.R.retries.some((p) => p[0] === 's-proc' && p[1] === 'PROCESSING'));
+  ok('D3: an HTTP 500 is NOT final -- the error is kept and a later check scheduled', !finalFor('s-500') && rig.R.retries.some((p) => p[0] === 's-500' && /HTTP 500/.test(p[3])));
+  eq('D3: the first retry waits 30 minutes', (rig.R.retries.find((p) => p[0] === 's-proc') || [])[2], 30 * 60000);
+  const titles = rig.R.alerts.map((a) => a.title).sort();
+  eq('D4: one alert each for unmatched, duplicate and dropped -- none for accepted, processing or a 500',
+     titles.join(' | '), ['Conversion dropped as a duplicate', 'Conversion dropped by Google', 'Conversion not matched to a click'].sort().join(' | '));
+  ok('D4: the alerts are warnings, from Google Ads, naming the session and the reason',
+     rig.R.alerts.every((a) => a.sev === 'warning') && rig.R.alerts.some((a) => a.d.Session === 's-um' && a.d.Reason === 'CLICK_NOT_FOUND'));
+  ok('D4: a row another sweep already finalised (rowCount 0) does NOT alert again', !rig.R.alerts.some((a) => a.d.Session === 's-raced'));
+  ok('D4: the alert carries no email, phone or click ID', rig.R.alerts.every((a) => !JSON.stringify(a.d).includes('@') && !JSON.stringify(a.d).includes(GCLID)));
+  ok('D4: the sweep tally counts the checks', tallyD.status_checked === 7 && tallyD.status_unmatched === 1, JSON.stringify(tallyD));
+
+  // D5. Give up after 7 days, loudly
+  const old = statusRig({ rows: [srow('s-old', 'r-old', { sent_at: new Date(NOW - 8 * D) }), srow('s-old500', 'r-old500', { sent_at: new Date(NOW - 8 * D) })],
+    replies: { 'r-old': { status: 200, body: dst('PROCESSING') }, 'r-old500': { status: 503, body: null } } });
+  await old.u.runSweep();
+  ok('D5: still PROCESSING after 7 days -> unknown', old.R.finals.some((p) => p[0] === 's-old' && p[2] === 'unknown'));
+  ok('D5: still failing to answer after 7 days -> unknown', old.R.finals.some((p) => p[0] === 's-old500' && p[2] === 'unknown'));
+  eq('D5: ...and both alert "status never arrived"', old.R.alerts.filter((a) => a.title === 'Conversion status never arrived').length, 2);
+
+  // D6. Credentials
+  const noTok = statusRig({ rows: [srow('s-x', 'r-x')], replies: {}, tokenFails: true });
+  await noTok.u.runSweep();
+  eq('D6: a refused token asks Google nothing', noTok.R.gets.length, 0);
+  ok('D6: ...and reaches recordFailure as an authentication failure', noTok.R.failures.some((f) => f.srcName === 'Google Ads' && /Authentication failed/.test(f.e)));
+  const auth403 = statusRig({ rows: [srow('s-403', 'r-403')], replies: { 'r-403': { status: 403, body: { error: { status: 'PERMISSION_DENIED' } } } } });
+  await auth403.u.runSweep();
+  ok('D6: a 403 on the status check reaches recordFailure (which pages on 403)', auth403.R.failures.some((f) => /HTTP 403 PERMISSION_DENIED/.test(f.e)));
+  ok('D6: ...and the row is retried, not finalised', !auth403.R.finals.length && auth403.R.retries.length === 1);
+  const none = statusRig({ rows: [], replies: {} });
+  await none.u.runSweep();
+  ok('D6: nothing due -> no token request, no GET', none.R.gets.length === 0);
+
+  /* ================================================================
      C. THE REAL APP, BOOTED WITH THE UPLOAD ON
      ================================================================ */
   const PORT = 41263;
