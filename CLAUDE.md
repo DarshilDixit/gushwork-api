@@ -238,7 +238,7 @@ not engineers. "Domain registered but no website on it", not `parked_confirmed`.
 
 ## Where the background lives
 
-On 7 Oct 2026 this file was cut from about 172k characters to about 113k, under the 150k load limit, by MOVING history, measurements and worked examples into `docs/background/`, word for word, never deleting them. Every warning that moved left a one-line rule behind, in place, with a link to its background. When you add to this file, put the rule in this file and the story in `docs/background/`.
+On 7 Oct 2026 this file was cut from about 172k characters to about 122k, under the 150k load limit, by MOVING history, measurements and worked examples into `docs/background/`, word for word, never deleting them. Every warning that moved left a one-line rule behind, in place, with a link to its background. When you add to this file, put the rule in this file and the story in `docs/background/`.
 
 - `docs/background/non-icp.md`: The non-ICP block's name-only fallback, floors and history; the `disqualified` audit's three waves; the async Schedule guard
 - `docs/background/meta.md`: The `x-forwarded-for` bug Meta was sent, and how it was proved
@@ -247,10 +247,9 @@ On 7 Oct 2026 this file was cut from about 172k characters to about 113k, under 
 - `docs/background/attribution.md`: The shared cookie namespace, the in-app browser loss, and the Salesforce `Source_Bucket__c` formula fixes
 - `docs/background/testing.md`: Source assertions vs runtime, the confident zero, the SQL that passed six suites, the hand-run API read that nearly double-paid
 - `docs/background/alerting.md`: Apollo out-of-credit refusals, how Meta CAPI failures reach `recordFailure`, the four Meta auth codes
-- `docs/background/dashboard.md`: The PR D switch and its build rules, Visitors (tiles, circles, networks, IP columns), the row-builder id bug, Model tab and Blocked counts, the CSV phone measurements
+- `docs/background/dashboard.md`: Visitors (tiles, circles, networks, IP columns), the row-builder id bug, Model tab and Blocked counts, the CSV phone measurements
 - `docs/background/internal-test-submissions.md`: Why our own submissions stopped leaving the building, `b@g.ai`, the staging host
 - `docs/background/dropoff-and-digest.md`: "Left on step 2", the source fields, leads vs people, the bucket-as-text bug, the weekly digest
-- `docs/background/google-ads.md`: The full Google Ads upload notes: API choice, flags, exclusions, read-back, consent
 - `docs/background/partnerstack.md`: Partner identity, the revenue-gaps queue, the poller and its intervals, `sf_state`, `Partner_Source__c`, eligibility rules (a) and (b). The handover is still `docs/partnerstack.md`
 - `docs/background/definitions.md`: The two completed-not-submitted populations, the internal-submissions measurement, the `/careers` session rows
 
@@ -294,7 +293,7 @@ Three things follow from that, and they are not negotiable:
       into one enumerated `business_type`; exactly two of those block,
       `real_estate` and `insurance`. Stamped with `non_icp_source='llm'`.
 
-   **The model layer has a second, weaker input since 23 Sept: `NON_ICP_NAME_FALLBACK`** (default OFF, **`true` in Railway**). It runs ONLY when the scrape failed and judges the domain name alone, with its own floor (**0.85**, against 0.75 for a page), its own `non_icp_source='llm_name_only'` and prompt version; `unknown` returns null. One floor per kind of evidence, for block AND Meta, picked only by `nonIcpFloorFor(source)`, and read at decision time so a floor change reaches the cache at once. Name-only verdicts are cached six hours, not 180 days. The cache is keyed by DOMAIN, never the company field the visitor typed. **Neither mechanism replaces the other and the brand list is NOT being retired.** Authorised by Swapnil on 11 Sept 2026; it reverses two written positions in the Non-ICP doc (`docs/tickets/non-icp-v1-block.md`). Measurements and history: `docs/background/non-icp.md`.
+   **The model layer has a second, weaker input since 23 Sept: `NON_ICP_NAME_FALLBACK`** (default OFF, **`true` in Railway**). It runs ONLY when the scrape failed and judges the domain name alone, with its own floor, its own `non_icp_source='llm_name_only'` and prompt version; `unknown` returns null. **Its floor is 0.85, set by Darshil on 26 Sept 2026, down from a provisional 0.9** (a page verdict's floor is 0.75). **One floor per kind of evidence serves BOTH block and Meta**, picked only by `nonIcpFloorFor(source)`: until 26 Sept the Meta-only read used the page floor for every verdict, so `hernandezins.com`, insurance at 0.82 from the letters "ins", still withheld Meta. Blocking is read at decision time from the type and its floor, as well as from the stored `blocking` column, so a floor change reaches the cache at once. Name-only verdicts are cached six hours, not 180 days. The cache is keyed by DOMAIN, never the company field the visitor typed. **Neither mechanism replaces the other and the brand list is NOT being retired**; an earlier version of the V1 ticket said it would be, and the CORRECTION section at the end of `docs/tickets/non-icp-v1-block.md` records why that was wrong. **The non-ICP block as a whole** was authorised by Swapnil on 11 Sept 2026 and reverses two written positions in the Non-ICP doc (same ticket). Measurements and history: `docs/background/non-icp.md`.
 
    Everything else here still holds. The block **fails open** on any throw,
    timeout or cold cache, it checks the warehouse customer tables first so a
@@ -1020,9 +1019,9 @@ ADDRESS is written on every call because it costs no network; only the
 network half is rationed. **Two writes, not one** — a geo outage must not
 lose the address too.
 
-**The model layer's four traps.** (1) **Blocking is decided in CODE from the enum (`NON_ICP_BUSINESS_TYPES`), never by the model**: the output schema has no `blocking` field and a model-supplied one is ignored. (2) **Never key a block on the free-text `category`**, which holds 65 spellings of real estate and insurance; `business_type` is a closed enum. (3) **Page text is untrusted**: it goes in a user message inside `<untrusted_page_text>`, never the system prompt, stripped and capped at 12k chars, and the guardrails aim at accidental false blocks (the floor, the known-customer bypass checked BEFORE any block, the Slack evidence quote). (4) **The verdict is a CACHE READ at decision time**: no scrape, no model call, no timeout; warming rides the `/non-icp-check` calls the form already makes, so neither form file changes. Background: `docs/background/non-icp.md`.
+**The model layer's four traps.** (1) **Blocking is decided in CODE from the enum (`NON_ICP_BUSINESS_TYPES`), never by the model**: the output schema has no `blocking` field and a model-supplied one is ignored. (2) **Never key a block on the free-text `category`**, which holds 65 spellings of real estate and insurance; `business_type` is a closed enum. (3) **Page text is untrusted, and the schema is not the defence**: it goes in a user message inside `<untrusted_page_text>`, never the system prompt, markup stripped and capped at 12k chars, and the guardrails aim at accidental false blocks (the floor, the known-customer bypass checked BEFORE any block, the Slack evidence quote). (4) **The verdict is a CACHE READ at decision time**: no scrape, no model call, no network, and no time-out-and-let-the-lead-through path, because a lead reaching the calendar only because our own request was slow is the failure this design prevents; warming rides the `/non-icp-check` calls the form already makes, so neither form file changes. Background: `docs/background/non-icp.md`.
 
-**The brand-list block's three traps.** (1) `partnerStackCustomerKey` collapses subdomains, so `nonIcpHostForms` matches the full host too, or every subdomain entry on `NON_ICP_DOMAINS` is dead while looking live. (2) **`non_icp_blocked` is STICKY in all three upserts** (`IS TRUE OR EXCLUDED.non_icp_blocked IS TRUE`): an `= EXCLUDED` lets a realtor clear their own block with the "actually we're B2B" button. (3) **Never match a brand domain by substring**, only exact or subdomain; the false matches are pinned as negative fixtures in `tests/test-non-icp.js`. Background: `docs/background/non-icp.md`.
+**The brand-list block's three traps.** (1) `partnerStackCustomerKey` collapses subdomains, so `nonIcpHostForms` matches the full host too, or every subdomain entry on `NON_ICP_DOMAINS` is dead while looking live. (2) **`non_icp_blocked` is STICKY in all three upserts** (`leads.non_icp_blocked IS TRUE OR EXCLUDED.non_icp_blocked IS TRUE`), and a test pins all three sites: `/partial` re-fires all through step 1, and an `= EXCLUDED` lets a realtor clear their own block with the "actually we're B2B" button, which calls `savePartial(1)` again. (3) **Never match a brand domain by substring**, only exact or subdomain; the false matches are pinned as negative fixtures in `tests/test-non-icp.js`. Background: `docs/background/non-icp.md`.
 
 **And the scope is narrower than "non-ICP" sounds.** V1 is national real-estate
 brokerage and insurance carrier brands only. Financial advisors (Edward Jones,
@@ -1260,7 +1259,97 @@ have fired. Nothing in the UI calls it; run it with
 feed it data. A reader who greps for a single `/monitor` handler expecting to find
 everything will miss most of it.
 
-**The dashboard is `/monitor` since PR D (26 Sept 2026); the old one is `/monitor/classic`, kept one week**, and removing it is its own PR (four suites still fetch it by name). `/monitor/next` 302s to `/monitor` keeping its query. **Read `docs/monitor-plan.md` first.** The build's rules (last week's bars line up by POSITION; every theme alias in both themes; no date from the viewer's clock; every colour a token; every icon in `monitor/icons`; every repaint through `GW.paint`; plain tables through `U.grid`, `.rt` rules child-scoped; 44px targets and nothing floating; run `tools/preview-monitor.js` and `tools/check-monitor-layout.mjs` before asking for a merge under `monitor/`) and how `overviewReport` defines each number: `docs/background/dashboard.md`.
+**THE DASHBOARD IS `/monitor` SINCE PR D (26 Sept 2026), AND THE OLD ONE IS
+`/monitor/classic` FOR ONE WEEK.** It was built side by side at
+`/monitor/next`: five tabs in PR B (Overview, System health, Dropoff,
+Duplicates, Lead magnet) and six in PR C (All leads, Blocked, SDR list,
+Model, Visitors, Partners).
+
+- **`/monitor/next` now 302-redirects to `/monitor`, keeping its query.** The
+  browser keeps the `#tab=...` fragment across a redirect, so old bookmarks
+  still land on their tab.
+- **The classic is one click away** in the sidebar footer, and it says on the
+  page that it is the fallback. It still honours `#tab=`.
+- **Removing it is its own PR**, a week after the switch deploys. It is fed by
+  its own inline JS in `index.js`. Four suites still fetch it by name
+  (`test-non-icp-routes`, `test-lead-field-changes`, `test-apollo`,
+  `test-monitor-next`), and three regions use its route as a marker, so the
+  removal PR must move or retire those tests.
+- **The running plan, decisions and progress are in `docs/monitor-plan.md`.**
+
+- **Numbers come from the existing routes, plus ONE new read,
+  `overviewReport` / `/monitor/overview`**, which applies one definition set
+  to every window: "completed" is `submitted_at`; booked is AS OF the window's
+  end; disqualified and blocked are the DROPOFF LADDER (`DROPOFF_STAGE_SQL`);
+  **sessions** (form_sessions rows, never "page loads" -- that label was 6-13%
+  short of the page loads it named) exclude `BOT_RE`; the funnel drops
+  webhook-origin leads. **Overview and Dropoff agree exactly in Leads mode,
+  and in People mode only when Dropoff's window is that one week** -- Dropoff
+  places a person in the period they FIRST arrived within its whole window.
+  Both are right; the Dropoff tab says so under its table. Every window is cut in ET wall-clock
+  terms inside SQL, so "the same point last week" survives a DST change. It
+  takes `db` as an argument and writes nothing, which is what lets the
+  preview lift it; its two model-flag COUNTERS are named in
+  `test-non-icp.js` 10f with reasons. **`duplicatesReport` is lifted the same
+  way**: a route the branch CHANGES must never be proxied to production in
+  the preview, or the screenshots show the old query and read as evidence.
+- **Last week's bars line up by POSITION, never by date.** The server keys the
+  comparison week by its own dates (the 14th-20th); the first build looked
+  them up with this week's (the 21st-27th), so every grey bar was a confident
+  zero under a "Last week" legend and every test passed -- because a
+  zero-height bar is still a `<path d="">`. The test now counts bars WITH a
+  shape and reads the value back out of the painted table.
+- **Every theme alias is declared in BOTH `[data-theme]` blocks** -- a test
+  compares the two sets, because a missing dark alias silently keeps its
+  light value. **No calendar date from the viewer's clock**: all formatting
+  goes through `Intl` with `GW.TZ`; a test forbids `getFullYear`/`getMonth`/
+  `getDate`/`getHours` in `monitor/js`. **Every colour is a token** in
+  `app.css`; a test forbids raw hex outside comments. **Every icon the code
+  asks for must be in `monitor/icons`**; a missing one renders as nothing.
+- **Text contrast is measured, not taken from the spec.** Light muted text is
+  neutral-600 (5.0:1), not the design system's neutral-500 (3.4:1, under the
+  4.5 floor); focus is solid brand blue, because the token ring (primary at
+  40% alpha) is under 3:1 everywhere. Both declared to Utsav.
+- **Every repaint goes through `GW.paint`**, which puts keyboard focus, a
+  text field's caret and every open row back after the HTML is replaced. A
+  tab that assigns `innerHTML` directly drops focus to the page body on
+  every refresh -- every 60 seconds on Today.
+- **PR C adds no server route and changes none.** Its six tabs render
+  routes that already existed, unchanged; the server's label maps
+  (`WEBSITE_REASON_LABELS`, `META_WITHHELD_LABELS`) travel in the page
+  config, so there is no third copy to drift. Partner revenue gaps moved
+  from its own spot onto Partners.
+- **Plain tables go through `U.grid`, and the rtable card rules are
+  CHILD-scoped.** Both were found only when the layout check was made to
+  measure plain tables and to open rows. Visitors, the Partners gaps list
+  and Model ran up to 277px past their card on a phone, scrolling sideways
+  with the last column cut off; and the card rules, written as descendant
+  selectors, restyled every table nested in an expanded row, so the lead's
+  change log kept a header row above cells stacked with no labels.
+  `U.grid` names each cell's column so a plain table stacks, labelled,
+  below 560; the `.rt` rules are `.rt > tbody > tr > td`; a test forbids
+  the descendant form. **A new plain table goes through `U.grid`** -- a
+  test fails on a hand-built `class="tbl"` anywhere but the chart's own
+  table view.
+- **`tools/crosscheck-monitor.mjs` is the number-for-number check against
+  the classic.** Each payload is fetched ONCE and served to BOTH pages
+  through a fetch override, so a lead arriving between two reads cannot
+  make them differ; it also checks the partitions every filter must keep
+  against the live total. It prints numbers and pass/fail only. Run it
+  against the preview after any change to how a tab reads its payload.
+- **The map follows the theme.** Esri Canvas light and dark basemaps, both
+  checked by downloading tiles at three zooms. What shows past the edge of
+  the world on a short map is `--map-sea`, the tiles' own ocean colour,
+  sampled, so it reads as sea rather than a gap. Fractional zoom was tried
+  to remove that band and rejected: it draws seams between tiles.
+- **Touch targets are 44px** below 1024 wide or on any coarse pointer, and
+  **nothing floats over content** -- the design system's phone dock was
+  dropped for that rule, and theme and refresh live in the drawer instead.
+- **Two tools replace "it looked fine on my laptop"**:
+  `tools/preview-monitor.js` (the branch against live data, read-only) and
+  `tools/check-monitor-layout.mjs` (every width, both themes, fails on
+  layout). The test suite sees numbers; the layout check sees layout. Run
+  both before asking for a merge of anything under `monitor/`.
 
 **Eleven tabs as of 25 Sept** on the OLD dashboard — the list lives in `showTab`, and `Dropoff`
 is the newest. A tab needs a `t-<name>` button, a `tp-<name>` panel, an entry
@@ -1302,7 +1391,62 @@ of the All leads and SDR exports (the routes both dashboards call). Decided
 
 Why: 2,669 of 2,676 stored phones start with "+". A spreadsheet still reads a number-only cell as a number, which is accepted; splitting on `;` in some locales is an open decision for Darshil. Background: `docs/background/dashboard.md`.
 
-**The Google Ads conversion upload** (`google-ads-conversions.js`, 6 Oct 2026) uses the **Data Manager API, not the Google Ads API**: no developer token, the `datamanager` scope, credential `GADS_SERVICE_ACCOUNT_JSON_B64`. It is OFF, then validate-only, by default, and with no `GADS_UPLOAD_CUTOVER` nothing sends. Its own lists (`GADS_EXCLUDED_DOMAINS`, `GADS_EXCLUDED_HOSTS`) gate Google only and only extend their defaults. Value is the product lookup, not `meta_predicted_ltv`. `non_icp_llm_flagged` is read in CODE at upload time, never as a SQL filter, and the fresh verdict read fails CLOSED. Phone is E.164 WITH the `+`. Build it inside `start()` (the TDZ break). A 200 from `events:ingest` is not a conversion: the outcome is read back from `requestStatus:retrieve`. Consent is `GADS_CONSENT_GRANTED`, absent when off, never denied. The full notes: `docs/background/google-ads.md`.
+**THE GOOGLE ADS CONVERSION UPLOAD — 6 Oct 2026, and its traps.**
+`google-ads-conversions.js` sends booked Google Ads leads to account
+5442288209, action 7825004775 ("CRM - Qualified Demo Request").
+
+- **Data Manager API, NOT the Google Ads API.** `UploadClickConversions`
+  refuses new adopters since 15 June 2026
+  (`CUSTOMER_NOT_ALLOWLISTED_FOR_THIS_FEATURE`), and this repo never adopted
+  it. Data Manager needs **no developer token** and the scope
+  `https://www.googleapis.com/auth/datamanager` — not `adwords`. Credential:
+  `GADS_SERVICE_ACCOUNT_JSON_B64`, the key of
+  `gads-conversion-uploader@gushwork-crm.iam.gserviceaccount.com`, which is a
+  user DIRECTLY on 5442288209, so no login account is sent.
+- **Off, then validate-only, by default.** `GADS_UPLOAD_ENABLED=true` turns
+  the sweep on; it stays validate-only (Google checks, records nothing) until
+  `GADS_UPLOAD_VALIDATE_ONLY=false`. **No `GADS_UPLOAD_CUTOVER` means nothing
+  sends**, and a cutover without its offset is refused — Lorenzo's sheet
+  covers everything before it, so the boundary must be exact.
+- **A validate-only 200 DOES check the action exists** (a made-up ID answers
+  404 `INVALID_CONVERSION_ACTION_ID`, which is permanent and alerts) but
+  proves nothing about the click: matching and the 6-hour rules only happen
+  on a real send.
+- **It skips more than Meta does, on purpose, and the lists are Google-only.**
+  Flighted and Upraw (`GADS_EXCLUDED_DOMAINS`) and any other `*.webflow.io`
+  or loopback host (`GADS_EXCLUDED_HOSTS`) are NOT in `INTERNAL_TEST_EMAILS`
+  or `ELV_EXCLUDED_DOMAINS`, because those also gate Meta, Salesforce and the
+  dialer. Both env lists EXTEND their defaults and cannot shrink them.
+- **`non_icp_llm_flagged` is read in CODE at upload time, never as a SQL
+  filter** — section 10f of `test-non-icp.js` forbids a flagged lead being
+  kept out of Salesforce, PartnerStack, the SDR list or the dialer. This is
+  an ad signal, like Meta, and it skips flagged leads whatever
+  `NON_ICP_LLM_META` says. The **fresh verdict read fails CLOSED** (waits a
+  sweep) — the opposite of the lead path, because an upload can wait and a
+  realtor sent to Google's bidder cannot be taken back.
+- **Phone is E.164 WITH the `+`.** Meta's `normalizePhone` strips it; reusing
+  it would hash a different string and match nobody, silently.
+- **Built inside `start()`, never at the top level** — it reads
+  `DROPOFF_SOURCE_SQL`, a `const`, which is the temporal-dead-zone break.
+- **Value is the product lookup, not `meta_predicted_ltv`**, which is empty
+  whenever Meta did not fire.
+- **A 200 from `events:ingest` is NOT a conversion.** After every REAL send
+  the sweep asks `GET /v1/requestStatus:retrieve?requestId=…` (from 30 minutes
+  after, backing off to daily) and records the outcome per row. One event per
+  request is what makes a request's status that event's result. Unmatched,
+  duplicate, dropped and never-answered each alert once, as a warning; the
+  write that finalises a row is conditional, so two sweeps cannot alert twice.
+  Google's reference gives no timing for PROCESSING or for how long a request
+  ID stays readable, hence the 7-day give-up rather than a guessed number.
+  Validate-only requests cannot be asked about at all (Google's own 400).
+- **Consent is a switch, `GADS_CONSENT_GRANTED`, off by default.** On, every
+  event carries `consent: { adUserData: CONSENT_GRANTED, adPersonalization:
+  CONSENT_GRANTED }` — the Data Manager reference's names, the same claim
+  Lorenzo's sheet makes. Off, the field is ABSENT, never denied. It sits on
+  the EVENT, so it is frozen with the payload: a row claimed before the
+  switch is flipped retries without it, while a `validated` row is rebuilt
+  when real sending starts and picks up the current setting. Validate-only
+  accepted it on 6 Oct 2026 (200).
 
 **Booking arrives by three routes.** `/booking-confirmed` (browser-fired),
 `/booking-confirmed-webhook` (Cal), `/booking-confirmed-webhook-rh` (RevenueHero).
