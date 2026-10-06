@@ -15,11 +15,11 @@ Meta.**
    - **Added that you set the 0.85 floor on 26 Sept 2026**, down from a
      provisional 0.9.
    - **Added that one floor per kind of evidence serves both block and
-     Meta**, with  as the case (insurance at 0.82 from the
+     Meta**, with `hernandezins.com` as the case (insurance at 0.82 from the
      letters "ins", which still withheld Meta).
    - **Added a pointer to the CORRECTION section** at the end of the V1 ticket.
    - **One more fix beyond your list, inside the same rule:** blocking is read
-     from the type and floor "as well as from the stored  column".
+     from the type and floor "as well as from the stored `blocking` column".
      My review had flagged that phrase as dropped.
 2. **Rule at line 1022, the model layer's four traps.**
    - **Trap three now says "and the schema is not the defence"**, and
@@ -27,27 +27,28 @@ Meta.**
    - **Trap four now says "no network"**, and that "no timeout" means no
      time-out-and-let-the-lead-through path, with the reason.
 3. **Rule at line 1024, the brand-list traps.**
-   - **The full SQL is back:** .
-   - **Added that a test pins all three sites**, and that  re-fires
+   - **The full SQL is back:** `leads.non_icp_blocked IS TRUE OR
+     EXCLUDED.non_icp_blocked IS TRUE`.
+   - **Added that a test pins all three sites**, and that `/partial` re-fires
      all through step 1. Also added that the B2B button calls
-      again.
+     `savePartial(1)` again.
 4. **The Google Ads block is restored word for word** (old lines 2104–2160),
    replacing its one-line rule.
    - **That brings back every item on my omissions list:** the cutover offset
      and Lorenzo's sheet, the two switch names, validate-only proving nothing
-     about the click, "skips flagged leads whatever  says",
-     the section 10f reason, Meta's  trap, one event per
+     about the click, "skips flagged leads whatever `NON_ICP_LLM_META` says",
+     the section 10f reason, Meta's `normalizePhone` trap, one event per
      request, validate-only read-backs answering 400, the deliberately
      separate exclusion lists, and consent frozen into each payload.
-   - ** is deleted**, along with its index
+   - **`docs/background/google-ads.md` is deleted**, along with its index
      entry.
 5. **The new-dashboard block is restored word for word** (old lines
    1876–1967), replacing its one-line rule. The 44px condition is in it as
    written: "below 1024 wide or on any coarse pointer". That section came out
-   of , and its index entry no longer mentions
+   of `docs/background/dashboard.md`, and its index entry no longer mentions
    PR D.
 6. **The index intro now says "about 122k"** instead of "about 113k".
-   **Nothing else in CLAUDE.md changed:**  shows 8 lines removed,
+   **Nothing else in CLAUDE.md changed:** `git diff` shows 8 lines removed,
    and every added line is one of the above.
 
 **Size: 122,171 characters, over your 120k cap, by your choice.** Restoring
