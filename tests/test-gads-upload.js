@@ -488,7 +488,9 @@ function lead(over = {}) {
   const tallyD = await rig.u.runSweep();
   const selS = rig.R.queries.find((q) => /FROM gads_conversion_uploads WHERE status = 'sent'/.test(q.sql));
   ok('D2: only REAL sends are asked about (sent, validate_only false, a request ID)', selS && /status = 'sent' AND validate_only IS FALSE AND request_id IS NOT NULL/.test(selS.sql) && /google_outcome IS NULL/.test(selS.sql));
-  eq('D2: ...and only once they are 30 minutes old', selS && selS.params[0], G.GADS_STATUS_FIRST_CHECK_MS);
+  /* The literal, not the module's own constant: comparing a value with itself
+     let a mutation to 0 minutes survive. */
+  eq('D2: ...and only once they are 30 minutes old', selS && selS.params[0], 30 * 60 * 1000);
   ok('D2: the check runs even while the uploader is validate-only (rows sent earlier still need an outcome)', !!selS && G.gadsSettings({}).validateOnly === true);
   const g0 = rig.R.gets[0];
   ok('D2: it is a GET to requestStatus:retrieve with the request ID URL-encoded', g0 && g0.opts.method === 'GET' && g0.url === G.DATA_MANAGER_STATUS_URL + '?requestId=r%2Fok');
