@@ -357,7 +357,14 @@ function lead(over = {}) {
   const ncut = await noCutU.runSweep();
   ok('B3: ON with no cutover -> nothing is sent, and it says why', (ncut.problems || []).some((p) => /CUTOVER/.test(p)) && noCut.length === 1);
   const logs = [];
-  eq('B3: startGadsUploadSweep with the switch off starts nothing', G.startGadsUploadSweep({ runSweep() { throw new Error('must not run'); } }, {}, { log: (m) => logs.push(m), warn() {} }), null);
+  /* A rejecting runSweep, not a throwing one: if the switch were wrongly ON
+     the sweep would START, and that has to read as a failed assertion here,
+     not crash the suite (which measure.js counts as UNMEASURED). */
+  let started;
+  try { started = G.startGadsUploadSweep({ runSweep: async () => { throw new Error('must not run'); } }, {}, { log: (m) => logs.push(m), warn() {} }); }
+  catch (e) { started = 'threw: ' + e.message; }
+  if (started && typeof started === 'object') clearInterval(started);
+  eq('B3: startGadsUploadSweep with the switch off starts nothing', started, null);
   ok('B3: ...and says it is off', logs.some((m) => /Conversion upload is OFF/.test(m)));
 
   /* ================================================================
