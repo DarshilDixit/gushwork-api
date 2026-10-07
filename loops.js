@@ -149,6 +149,7 @@ async function pushContactToLoops(lead) {
        contact still exists and is on the list, so this is reported but not
        treated as a total failure — he can re-trigger from Loops. */
     let eventError = null;
+    let eventSent = false;
     if (process.env.LOOPS_SEND_EVENT !== 'false') {
       const ev = await loopsFetch('/events/send', 'POST', {
         email: lead.email,
@@ -164,11 +165,18 @@ async function pushContactToLoops(lead) {
       if (!ev.ok) {
         eventError = `events/send HTTP ${ev.status}: ${(ev.text || '').slice(0, 160)}`;
         console.warn('[Loops] event failed for', lead.email, '—', eventError);
+      } else {
+        eventSent = true;
       }
     }
 
     console.log(`[Loops] ✅ ${lead.email} pushed${listId ? ' + added to list' : ''}${eventError ? ' (event failed)' : ''}`);
-    return { ok: true, contactId, eventError };
+    /* eventSent is what lead-magnet.js marks a lead "sent" on: since 7 Oct
+       2026 the email goes out from the "20 prompts" Loop, which starts on
+       this event. A contact on the list without the event gets no email,
+       and with LOOPS_SEND_EVENT=false no event leaves at all, so neither
+       may read as sent. */
+    return { ok: true, contactId, eventError, eventSent };
   } catch (err) {
     const msg = err.name === 'AbortError' ? 'timeout after 10s' : err.message;
     console.error('[Loops] ✗', lead.email, msg);

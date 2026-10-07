@@ -1529,8 +1529,9 @@ function liftClientJs(startMarker, endMarker) {
       const realMeta = require.cache[require.resolve(path.join(__dirname, '..', 'meta-capi.js'))];
       const realLoops = require.cache[require.resolve(path.join(__dirname, '..', 'loops.js'))];
       stub('meta-capi.js', { pushContactToMeta: async (l) => { metaCalls.push(l); return {}; } });
+      let loopsReply = { ok: true, eventSent: true, contactId: 'c_1' };
       stub('loops.js', {
-        pushContactToLoops: async (l) => { loopsCalls.push(l); return { ok: true }; },
+        pushContactToLoops: async (l) => { loopsCalls.push(l); return loopsReply; },
         ensureLoopsProperties: async () => ({ skipped: true }),
         testLoopsKey: async () => ({ configured: false }),
       });
@@ -1607,6 +1608,83 @@ function liftClientJs(startMarker, endMarker) {
       eq('lm-email: a malformed address is still refused as invalid_syntax', r.body && r.body.status, 'invalid_syntax');
       r = await submit({ session_id: 'nope', email: 'jo@acme-industrial.com' });
       eq('lm-email: a bad session id is still a 400', r.statusCode, 400);
+
+      /* ── LM-SENT: a lead the Loops automation emailed reads as sent.
+         7 Oct 2026: the first real signup to the 20-prompts pack sat on the
+         dashboard as Awaiting, because "sent" was a button a person pressed
+         after building the 150-questions list by hand. The Loop sends the
+         email now, so an accepted trigger event marks the lead delivered.
+         The Loops push is fire-and-forget, so its UPDATE lands a few
+         microtasks after the handler returns; flush those (and only those:
+         a macrotask here lets the health/ui block's stray rejection fire). */
+      const flush = async () => { for (let i = 0; i < 10; i++) await null; };
+      const loopsUpdate = () => queries.filter((q) => /SET loops_sent = \$2/.test(q.sql)).pop();
+      const sentRun = async (reply, sid) => {
+        loopsReply = reply; dupeRows = 0; queries.length = 0;
+        await submit({ session_id: sid, email: 'kim@acme-industrial.com' });
+        await flush();
+        return loopsUpdate();
+      };
+      let u = await sentRun({ ok: true, eventSent: true, contactId: 'c_9' }, SID);
+      ok('lm-sent: the Loops result is written', !!u);
+      eq('lm-sent: an accepted trigger event marks the lead delivered', u && u.params[4], true);
+      ok('lm-sent: and says who sent it', u && /'Sent by the Loops automation'/.test(u.sql));
+      ok('lm-sent: delivered is only ever OR-ed on, so a failed retry cannot take back a send',
+         u && /delivered = delivered OR \$5/.test(u.sql), u && u.sql);
+      ok('lm-sent: a hand-written delivery note is never overwritten',
+         u && /WHEN \$5 AND delivery_note IS NULL/.test(u.sql));
+      u = await sentRun({ ok: true, eventSent: false, eventError: 'events/send HTTP 400: bad' }, SID2);
+      eq('lm-sent: contact pushed but the event refused is NOT delivered (no Loop runs)', u && u.params[4], false);
+      eq('lm-sent: and the event error is kept for the dashboard', u && u.params[3], 'events/send HTTP 400: bad');
+      u = await sentRun({ ok: true, eventSent: false, eventError: null }, SID);
+      eq('lm-sent: no event sent at all (LOOPS_SEND_EVENT=false) is NOT delivered', u && u.params[4], false);
+      u = await sentRun({ ok: false, error: 'contacts/update HTTP 401' }, SID2);
+      eq('lm-sent: a refused push is NOT delivered', u && u.params[4], false);
+
+      /* The dashboard's retry button goes through the same statement. */
+      const rlayer = router.stack.find((l) => l.route && l.route.path === '/monitor/lm-loops-retry/:id');
+      const retry = rlayer.route.stack[rlayer.route.stack.length - 1].handle;
+      const retryPool = pool.query;
+      pool.query = async (sql, params) => {
+        if (/FROM lead_magnet_leads WHERE id = \$1 AND completed = true/.test(sql))
+          return { rows: [{ id: 41, email: 'kim@acme-industrial.com' }] };
+        return retryPool(sql, params);
+      };
+      loopsReply = { ok: true, eventSent: true, contactId: 'c_41' }; queries.length = 0;
+      await retry({ params: { id: '41' }, query: {}, headers: {} },
+                  { status() { return this; }, json() { return this; }, setHeader() {} });
+      u = loopsUpdate();
+      eq('lm-sent: the retry button marks a now-accepted lead delivered too', u && [u.params[0], u.params[4]], [41, true]);
+      pool.query = retryPool;
+
+      /* The flag itself, from the REAL loops.js against a stubbed Loops. */
+      {
+        const lp = require.resolve(path.join(__dirname, '..', 'loops.js'));
+        const stubbed = require.cache[lp];
+        delete require.cache[lp];
+        const realLoopsMod = require(lp);
+        const saved = { key: process.env.LOOPS_API_KEY, ev: process.env.LOOPS_SEND_EVENT, fetch: global.fetch };
+        process.env.LOOPS_API_KEY = 'test-key';
+        let evStatus = 200;
+        global.fetch = async (url) => {
+          const isEvent = /events\/send/.test(url);
+          const status = isEvent ? evStatus : 200;
+          return { ok: status < 400, status, text: async () => (isEvent ? '{"success":' + (status < 400) + '}' : '{"id":"c_77"}') };
+        };
+        const lead = { id: 1, email: 'kim@acme-industrial.com' };
+        let res = await realLoopsMod.pushContactToLoops(lead);
+        eq('loops: an accepted event reports eventSent', [res.ok, res.eventSent, res.contactId], [true, true, 'c_77']);
+        evStatus = 400;
+        res = await realLoopsMod.pushContactToLoops(lead);
+        eq('loops: a refused event reports eventSent false, with the error', [res.ok, res.eventSent, /HTTP 400/.test(res.eventError || '')], [true, false, true]);
+        evStatus = 200; process.env.LOOPS_SEND_EVENT = 'false';
+        res = await realLoopsMod.pushContactToLoops(lead);
+        eq('loops: with events switched off nothing reports as sent', [res.ok, res.eventSent], [true, false]);
+        global.fetch = saved.fetch;
+        if (saved.key === undefined) delete process.env.LOOPS_API_KEY; else process.env.LOOPS_API_KEY = saved.key;
+        if (saved.ev === undefined) delete process.env.LOOPS_SEND_EVENT; else process.env.LOOPS_SEND_EVENT = saved.ev;
+        require.cache[lp] = stubbed;
+      }
 
       dns.resolveMx = realMx;
       for (const [file, real] of [['meta-capi.js', realMeta], ['loops.js', realLoops]]) {
