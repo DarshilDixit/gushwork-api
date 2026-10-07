@@ -22,7 +22,7 @@ not report the actual send back, and a paused Loop still accepts the event.
 **Verified:** full bar, bare: 16 suites, 5435 assertions, 0 failed
 (test-batch-a 356 to 369, re-baselined). The new checks execute both routes
 and the real `loops.js`. Mutations: ignoring eventSent CAUGHT, `loops.js`
-always reporting sent CAUGHT. The retry-route mutation was **not run**. The
+always reporting sent CAUGHT, and (run after the first version of this card, which said it was not run) the retry button put back on its old statement CAUGHT. The
 statement was PREPAREd on Railway read-only, typed and untyped.
 
 **Not done:** row 140 stays "Awaiting" (only new signups get marked). Press
