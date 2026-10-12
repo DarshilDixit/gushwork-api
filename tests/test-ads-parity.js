@@ -582,6 +582,15 @@ const P = build(popup);
        lead-estimator drip decides nothing -- 29 leads over 90 days. */
     eq(`router: ${label} ignores a CRM-shaped campaign that is not an ad`,
        runRouter(src, undefined, { crmAttr: '6804', campaign: 'crm-newsletter', medium: 'social' }), '6138');
+    /* L2O AND O2C, ADDED 12 OCT 2026. Driven through the router, because
+       the whole point is which team books. Any case, any medium. */
+    for (const camp of ['FLI__Prospecting__O2C__CBO', 'FLI__L2O__Search', 'gw_o2c_us', 'l2o'])
+      eq(`router: ${label} routes campaign ${camp} to the CRM router`,
+         runRouter(src, undefined, { crmAttr: '6804', campaign: camp, medium: 'paid' }), '6804');
+    eq(`router: ${label} routes an L2O campaign with no medium to the CRM router`,
+       runRouter(src, undefined, { crmAttr: '6804', campaign: 'L2O', medium: '' }), '6804');
+    eq(`router: ${label} still keeps the default on a brand campaign`,
+       runRouter(src, undefined, { crmAttr: '6804', campaign: 'UR_G_S_US_BR_Brand-tIS', medium: 'cpc' }), '6138');
     /* A BARE CAMPAIGN ID IS NOT AN AEO CAMPAIGN, and it is not a CRM one
        either -- it decides nothing and the selector does the asking. */
     eq(`router: ${label} keeps the default on an unreadable campaign`,

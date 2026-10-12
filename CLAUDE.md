@@ -1104,6 +1104,8 @@ inside SQL, always. `tests/test-batch2.js` section 13 lints for it.
 stored column and the Meta event cannot disagree. Today `PRODUCT_PATHS` is
 `{'/ai-demo': 'crm', '/ai-crm': 'crm', '/order-to-cash': 'crm', '/lead-to-order': 'crm'}`; everything else is `aeo`.
 
+**A campaign whose name contains `l2o` or `o2c` (any case, any medium) is a CRM campaign everywhere**: `campaignOffer` in `meta-capi.js`, `gushwork-form.js` and `gushwork-form-popup.js` (three byte-identical copies) returns `crm` for it before the medium gate, so `/demo` routes it to the CRM team and tags it `crm`. These are the campaign names for `/lead-to-order` and `/order-to-cash` (Swapnil, 12 Oct 2026); the words are matched anywhere in the name, not as whole tokens.
+
 `/ai-crm` and `/ai-demo` both resolve `crm`, so swapping `/ai-crm`'s content into `/ai-demo` changes nothing here. Why a default beats an allowlist (82% tagged against 99.7%): `docs/background/product-and-forms.md`.
 
 **Adding a product** means one entry in `PRODUCT_PATHS` and one in

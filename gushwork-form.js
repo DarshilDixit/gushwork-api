@@ -1,6 +1,9 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.18.1  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.18.2  (/demo PAGE VERSION - thru github/jsdlivr)
 
+  v5.18.2 — a campaign naming L2O or O2C (any case, any medium) is a CRM
+  campaign, so it routes to the CRM team on /demo and is tagged crm. The
+  two campaigns for the new Lead to Order and Order to Cash landers.
   v5.18.1 — /order-to-cash and /lead-to-order join B2C_ALLOWED_PATHS. They
   are CRM product ad landers like /ai-crm: a B2C or Mixed answer must not
   dead-end a prospect on a page that sells the CRM product.
@@ -724,8 +727,17 @@
 
     function campaignOffer(utm_campaign, utm_medium) {
       var m = String(utm_medium == null ? '' : utm_medium).trim().toLowerCase();
-      if (OFFER_AD_MEDIUMS.indexOf(m) === -1) return OFFER_SELECTOR;
       var c = String(utm_campaign == null ? '' : utm_campaign).trim().toLowerCase();
+      /* L2O AND O2C, ADDED 12 OCT 2026. Lead to Order and Order to Cash are
+         the two campaigns for the new CRM landers, and the campaign name
+         is what tells us which team books the call: Swapnil asked that
+         both words appear in them. Matched anywhere in the name, in any
+         case, and BEFORE the medium gate -- the name alone is the signal
+         for these two, so a medium Flighted tags differently, or a cookie
+         that kept the campaign but lost the medium, cannot send the
+         booking to the wrong team. */
+      if (c.indexOf('l2o') !== -1 || c.indexOf('o2c') !== -1) return OFFER_CRM;
+      if (OFFER_AD_MEDIUMS.indexOf(m) === -1) return OFFER_SELECTOR;
       /* Empty, a bare id, or a macro the ad platform never filled in.
          Measured over 90 days: 17 leads arrive as 120241181781830373 and
          6 as {{campaign.name}}. */
@@ -3464,7 +3476,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.18.1 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.18.2 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
