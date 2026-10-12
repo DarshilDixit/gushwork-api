@@ -1157,8 +1157,8 @@ function finish() {
      read. Both entries are the CRM product: /ai-crm is the rebuilt page
      that will replace /ai-demo's content, and until that swap happens
      both are live and both must resolve the same way. */
-  eq('product: the mapped exceptions are exactly the two CRM pages',
-     META.PRODUCT_PATHS, { '/ai-demo': 'crm', '/ai-crm': 'crm' });
+  eq('product: the mapped exceptions are exactly the four CRM pages',
+     META.PRODUCT_PATHS, { '/ai-demo': 'crm', '/ai-crm': 'crm', '/order-to-cash': 'crm', '/lead-to-order': 'crm' });
   ok('product: the default is aeo', META.DEFAULT_PRODUCT === 'aeo');
   ok('product: every mapped path names a real product',
      Object.values(META.PRODUCT_PATHS).every((s) => s in META.PRODUCTS));
@@ -3707,6 +3707,19 @@ async function section12() {
     /* And nothing near it opened by accident. */
     ok(`27: ${tag} still refuses B2C on /ai-crm-pricing`,    run('/ai-crm-pricing', '', '') === false);
     ok(`27: ${tag} still refuses B2C on /aeo`,               run('/aeo', '', '') === false);
+
+    /* ── /order-to-cash and /lead-to-order, ADDED 12 OCT 2026 ──
+       Two more CRM product ad landers, duplicated from /ai-crm. Same
+       reasoning: one product whoever arrives, most traffic campaign-free,
+       so every journey must pass the gate. */
+    for (const p of ['/order-to-cash', '/lead-to-order']) {
+      ok(`27: ${tag} allows B2C on ${p} direct`,            run(p, '', '') === true);
+      ok(`27: ${tag} allows B2C on ${p} from a CRM ad`,     run(p, 'CRM-Offer', 'paid') === true);
+      ok(`27: ${tag} allows B2C on ${p} from an AEO ad`,    run(p, 'TOF', 'paid') === true);
+      ok(`27: ${tag} allows B2C on ${p}/ with a trailing slash`, run(p + '/', '', '') === true);
+      ok(`27: ${tag} allows B2C on ${p.toUpperCase()} uppercased`, run(p.toUpperCase(), '', '') === true);
+      ok(`27: ${tag} still refuses B2C on ${p}-pricing`,    run(p + '-pricing', '', '') === false);
+    }
   }
 
   /* ── /ai-crm IS A CRM PAGE TO THE SERVER TOO ──────────────────
@@ -3732,6 +3745,22 @@ async function section12() {
      META.resolveProduct({ page_url: '/ai-crm', utm_campaign: 'FLI__Prospecting__TOF__CBO', utm_medium: 'paid' }), 'crm');
   eq('27: brand search on /ai-crm still resolves crm',
      META.resolveProduct({ page_url: '/ai-crm', utm_campaign: 'UR_G_S_US_BR_Brand-tIS', utm_medium: 'cpc' }), 'crm');
+  /* ── /order-to-cash and /lead-to-order, ADDED 12 OCT 2026 ────── */
+  for (const p of ['/order-to-cash', '/lead-to-order']) {
+    for (const [label, url] of [
+      ['plain',          'https://www.gushwork.ai' + p],
+      ['trailing slash', 'https://www.gushwork.ai' + p + '/'],
+      ['uppercased',     'https://www.gushwork.ai' + p.toUpperCase()],
+      ['with a query',   'https://www.gushwork.ai' + p + '?utm_campaign=x'],
+      ['bare path',      p],
+    ]) {
+      eq(`27: ${p} resolves crm (${label})`, META.resolveProduct({ page_url: url }), 'crm');
+      eq(`27: ${p} event slug is crm (${label})`, META.resolveEventProduct({ page_url: url }), 'crm');
+    }
+    eq(`27: an AEO campaign on ${p} still resolves crm`,
+       META.resolveProduct({ page_url: p, utm_campaign: 'FLI__Prospecting__TOF__CBO', utm_medium: 'paid' }), 'crm');
+    eq(`27: ${p}-pricing does NOT match by prefix`, META.resolveProduct({ page_url: p + '-pricing' }), 'aeo');
+  }
   /* Nothing adjacent moved. */
   eq('27: /ai-demo is untouched',   META.resolveProduct({ page_url: '/ai-demo' }), 'crm');
   eq('27: /demo is untouched',      META.resolveProduct({ page_url: '/demo' }), 'aeo');
