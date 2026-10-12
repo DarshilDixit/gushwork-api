@@ -319,8 +319,17 @@ const OFFER_AD_MEDIUMS = ['paid', 'cpc'];
 
 function campaignOffer(utm_campaign, utm_medium) {
   const m = String(utm_medium == null ? '' : utm_medium).trim().toLowerCase();
-  if (!OFFER_AD_MEDIUMS.includes(m)) return OFFER_SELECTOR;
   const c = String(utm_campaign == null ? '' : utm_campaign).trim().toLowerCase();
+  /* L2O AND O2C, ADDED 12 OCT 2026. Lead to Order and Order to Cash are
+     the two campaigns for the new CRM landers, and the campaign name
+     is what tells us which team books the call: Swapnil asked that
+     both words appear in them. Matched anywhere in the name, in any
+     case, and BEFORE the medium gate -- the name alone is the signal
+     for these two, so a medium Flighted tags differently, or a cookie
+     that kept the campaign but lost the medium, cannot send the
+     booking to the wrong team. */
+  if (c.includes('l2o') || c.includes('o2c')) return OFFER_CRM;
+  if (!OFFER_AD_MEDIUMS.includes(m)) return OFFER_SELECTOR;
   /* Empty, a bare id, or a template macro the ad platform never filled in. */
   if (!c || /^[0-9]+$/.test(c) || c.includes('{{') || c.includes('}}')) return OFFER_SELECTOR;
   if (c.includes('crm'))   return OFFER_CRM;

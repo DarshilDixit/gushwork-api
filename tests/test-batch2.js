@@ -3541,6 +3541,16 @@ async function section12() {
     ['FLI__Prospecting__Broad__CBO',                       'paid',  'aeo',      'Broad must NOT read as brand'],
     /* CRM outranks brand, matching the order in the request. */
     ['UR_G_S_US_BR_Brand-CRM-Offer',                       'cpc',   'crm',      'crm is tested before brand'],
+    /* L2O AND O2C, ADDED 12 OCT 2026. The campaign names for the Lead to
+       Order and Order to Cash landers. Any case, anywhere in the name. */
+    ['FLI__Prospecting__O2C__CBO',                         'paid',  'crm',      'Order to Cash campaign, Meta'],
+    ['FLI__Prospecting__L2O__CBO',                         'paid',  'crm',      'Lead to Order campaign, Meta'],
+    ['UR_G_S_US_L2O_Brand',                                'cpc',   'crm',      'L2O outranks brand, as crm does'],
+    ['gw_o2c_search_us',                                   'cpc',   'crm',      'lower case'],
+    ['l2o-launch',                                         'paid',  'crm',      'lower case, hyphenated'],
+    ['O2C',                                                'social','crm',      'any medium: the name alone decides'],
+    ['L2O',                                                '',      'crm',      'a cookie that kept the campaign and lost the medium'],
+    ['l2o',                                                null,    'crm',      'no medium captured at all'],
   ];
 
   for (const [name, fn] of impls)
@@ -3762,6 +3772,13 @@ async function section12() {
     eq(`27: ${p}-pricing does NOT match by prefix`, META.resolveProduct({ page_url: p + '-pricing' }), 'aeo');
   }
   /* Nothing adjacent moved. */
+  /* L2O / O2C ON /demo, ADDED 12 OCT 2026: the page is AEO, the campaign
+     is not, and the campaign decides. Also on a lowercase name. */
+  for (const c of ['FLI__Prospecting__O2C__CBO', 'FLI__L2O__Search', 'gw_l2o_us', 'o2c'])
+    eq(`27: /demo with campaign ${c} resolves crm`,
+       META.resolveProduct({ page_url: 'https://www.gushwork.ai/demo', utm_campaign: c, utm_medium: 'paid' }), 'crm');
+  eq('27: /demo with a plain AEO campaign still resolves aeo',
+     META.resolveProduct({ page_url: 'https://www.gushwork.ai/demo', utm_campaign: 'FLI__Prospecting__TOF__CBO', utm_medium: 'paid' }), 'aeo');
   eq('27: /ai-demo is untouched',   META.resolveProduct({ page_url: '/ai-demo' }), 'crm');
   eq('27: /demo is untouched',      META.resolveProduct({ page_url: '/demo' }), 'aeo');
   eq('27: /aeo is untouched',       META.resolveProduct({ page_url: '/aeo' }), 'aeo');
