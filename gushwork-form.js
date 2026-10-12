@@ -1,6 +1,9 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.18.0  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.18.1  (/demo PAGE VERSION - thru github/jsdlivr)
 
+  v5.18.1 — /order-to-cash and /lead-to-order join B2C_ALLOWED_PATHS. They
+  are CRM product ad landers like /ai-crm: a B2C or Mixed answer must not
+  dead-end a prospect on a page that sells the CRM product.
   v5.18.0 — the offer survives a lost session: an internal referrer that
   still carries the campaign now decides it, because the cookie meant to
   do that has never once fired in production. See offerFromReferrer.
@@ -507,7 +510,7 @@
        Matched against the PATHNAME, lowercased, trailing slash stripped --
        the same normalisation resolveProduct does, so /ai-demo/ and
        /AI-Demo cannot disagree with the server about what they are. */
-    const B2C_ALLOWED_PATHS = ['/ai-demo', '/ai-crm'];
+    const B2C_ALLOWED_PATHS = ['/ai-demo', '/ai-crm', '/order-to-cash', '/lead-to-order'];
 
     /* ── WHAT DO YOU NEED? ────────────────────────────────────────
        /demo ONLY. The page is a bad proxy for intent: somebody who saw
@@ -3461,7 +3464,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.18.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.18.1 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

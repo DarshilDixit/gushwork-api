@@ -2523,6 +2523,9 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
 
      DRIVEN ACROSS JOURNEYS because the failure was journey-dependent --
      the page half-worked from a CRM ad and failed everywhere else. */
+  /* ADDED 12 OCT 2026: /order-to-cash and /lead-to-order are CRM ad landers
+     duplicated from /ai-crm, so the same end-to-end assertions run on each. */
+  for (const pg of ['ai-crm', 'order-to-cash', 'lead-to-order'])
   for (const [label, campaign, medium] of [
     ['direct',        '',                                 ''],
     ['CRM ad',        'FLI__Prospecting__CRM-Offer__CBO',  'paid'],
@@ -2537,30 +2540,30 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
         session_id: '00000000-0000-4000-8000-0000000000f' + ((campaign.length % 8) + 1),
         email: 'x@cleanbiz.test', website: 'https://cleanbiz.test', company: 'Clean',
         first_name: 'A', last_name: 'B', sell_to: 'B2C',
-        page_url: 'https://www.gushwork.ai/ai-crm',
+        page_url: 'https://www.gushwork.ai/' + pg,
         utm_campaign: campaign, utm_medium: medium,
       }),
     });
     await sleep(600);
     const ins = S.writes.find((w) => /INSERT INTO leads \(/.test(w.flat));
     const cols = ins ? boundCols(ins) : {};
-    ok(`ai-crm[${label}]: stored product is crm`, cols.product === 'crm', String(cols.product));
+    ok(`${pg}[${label}]: stored product is crm`, cols.product === 'crm', String(cols.product));
     /* The page never asks the question, so this stays "we never asked". */
-    ok(`ai-crm[${label}]: product_interest stays null`,
+    ok(`${pg}[${label}]: product_interest stays null`,
        cols.product_interest === null || cols.product_interest === undefined,
        JSON.stringify(cols.product_interest));
     const lead = S.metaPayloads.find((x) => (x.data || []).some((e) => e.event_name === 'Lead'));
     const ev = lead && lead.data.find((e) => e.event_name === 'Lead');
-    ok(`ai-crm[${label}]: Meta content_ids are ["crm"]`,
+    ok(`${pg}[${label}]: Meta content_ids are ["crm"]`,
        !!ev && JSON.stringify(ev.custom_data.content_ids) === JSON.stringify(['crm']),
        JSON.stringify(ev && ev.custom_data && ev.custom_data.content_ids));
-    ok(`ai-crm[${label}]: predicted_ltv is the CRM number, 5000`,
+    ok(`${pg}[${label}]: predicted_ltv is the CRM number, 5000`,
        ev && ev.custom_data && ev.custom_data.predicted_ltv === 5000,
        String(ev && ev.custom_data && ev.custom_data.predicted_ltv));
     /* THE SERVER BELIEVES THE BOOLEAN IT IS HANDED. The gate is
        client-side, so this asserts the server does not invent a
        disqualification of its own for a B2C answer on a CRM page. */
-    ok(`ai-crm[${label}]: a B2C answer is not disqualified server-side`,
+    ok(`${pg}[${label}]: a B2C answer is not disqualified server-side`,
        cols.disqualified === false || cols.disqualified === 'false',
        String(cols.disqualified));
   }

@@ -209,6 +209,12 @@ const PRODUCT_PATHS = {
      by its Webflow attribute, and still missing from this catalogue -- so
      every lead from it was being stored as aeo. */
   '/ai-crm': 'crm',
+  /* /order-to-cash and /lead-to-order are CRM product ad landers (Webflow
+     drafts built from the design hub, duplicated from /ai-crm, routed to
+     the CRM team by data-rh-router 6804). They sell the CRM product, so
+     they are mapped here rather than left to fall through to aeo. */
+  '/order-to-cash': 'crm',
+  '/lead-to-order': 'crm',
 };
 const DEFAULT_PRODUCT = 'aeo';
 

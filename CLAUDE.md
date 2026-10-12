@@ -483,7 +483,7 @@ Project-Settings republish never touches. Two were found stale on 10 Sept, both
 invisible from inside this repo:
 
 ```bash
-for p in /demo /ai-demo /aeo /ai-crm /start /start-now /lead-gen /seo-leads \
+for p in /demo /ai-demo /aeo /ai-crm /order-to-cash /lead-to-order /start /start-now /lead-gen /seo-leads \
          /consulting-lead-generation /consulting-seo-services \
          /financial-services-lead-generation /financial-services-seo \
          /manufacturing-lead-generation /manufacturing-seo-services; do
@@ -1102,7 +1102,7 @@ inside SQL, always. `tests/test-batch2.js` section 13 lints for it.
 `PRODUCTS`, `PRODUCT_PATHS`, `DEFAULT_PRODUCT` and `resolveProduct` live in
 `meta-capi.js` and are imported by `index.js` — one catalogue, so the
 stored column and the Meta event cannot disagree. Today `PRODUCT_PATHS` is
-`{'/ai-demo': 'crm', '/ai-crm': 'crm'}`; everything else is `aeo`.
+`{'/ai-demo': 'crm', '/ai-crm': 'crm', '/order-to-cash': 'crm', '/lead-to-order': 'crm'}`; everything else is `aeo`.
 
 `/ai-crm` and `/ai-demo` both resolve `crm`, so swapping `/ai-crm`'s content into `/ai-demo` changes nothing here. Why a default beats an allowlist (82% tagged against 99.7%): `docs/background/product-and-forms.md`.
 
