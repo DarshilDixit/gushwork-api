@@ -16720,8 +16720,15 @@ async function gadsNonIcpFresh({ email, website } = {}) {
    meta_predicted_ltv -- that column is empty whenever no Meta event fired
    (about 28% of sendable Google bookings in the 30 days to 6 Oct 2026) and
    is stamped for some internal leads Meta never received. An unknown
-   product returns null and the event carries no value at all. */
+   product returns null and the event carries no value at all.
+
+   NO VALUE UNLESS GADS_SEND_VALUE=true, decided 13 Oct 2026: the 12000 /
+   5000 / 15000 are guesses, Google keeps a sent value for good (it cannot
+   be edited afterwards), and Lorenzo (Upraw) sets a flat default value on
+   the new action for uploads that carry none. Meta still gets its separate
+   predicted_ltv; none of this touches Meta. */
 function gadsValueFor(lead) {
+  if (process.env.GADS_SEND_VALUE !== 'true') return null;
   return predictedLtvFor(resolveEventProduct({
     page_url:         lead.page_url,
     product_interest: lead.product_interest,

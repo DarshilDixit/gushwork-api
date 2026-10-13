@@ -74,6 +74,7 @@ function liftFn(decl) {
   for (let m = j; m < src.length; m++) { if (src[m] === '{') d++; else if (src[m] === '}') { d--; if (!d) { j = m; break; } } }
   return src.slice(i + 1, j + 1);
 }
+const REAL_ENV = {};
 const REAL = new Function('process', 'predictedLtvFor', 'resolveEventProduct', [
   liftDecl('const FREE_EMAIL_DOMAINS'),
   liftFn('function damerauLevenshtein'),
@@ -88,7 +89,7 @@ const REAL = new Function('process', 'predictedLtvFor', 'resolveEventProduct', [
   liftFn('function isWebsiteVerified'),
   liftFn('function gadsValueFor'),
   'return { freeEmailMatch, isInternalLead, isStagingSubmission, isInternalSubmission, isWebsiteVerified, gadsValueFor };',
-].join('\n'))({ env: {} }, META.predictedLtvFor, META.resolveEventProduct);
+].join('\n'))({ env: REAL_ENV }, META.predictedLtvFor, META.resolveEventProduct);
 
 /* ── fixtures ─────────────────────────────────────────────────────────── */
 const NOW = Date.UTC(2026, 9, 6, 16, 0, 0);              // 6 Oct 2026, 12:00 ET
@@ -336,12 +337,19 @@ function lead(over = {}) {
   eq('B: no click ID', await why({ page_url: 'https://www.gushwork.ai/demo' }), 'no_click_id');
   const reason = await uploaderWith().u.gate(lead({ email: 'pat@flighted.co', website: 'acme.test' }), S0);
   eq('B: the recorded detail names the matched domain', reason && reason.detail, 'email domain matches flighted.co');
+  /* Default: NO value, so the flat default Lorenzo sets on the action applies. */
+  const sendN = await uploaderWith().u.evaluate(lead({ product_interest: 'crm' }), S0);
+  ok('B: by default an upload carries NO value and no currency', sendN.send && sendN.send.value === null && !('conversionValue' in sendN.send.event) && !('currency' in sendN.send.event), JSON.stringify(sendN.send && sendN.send.event));
+  REAL_ENV.GADS_SEND_VALUE = 'yes';
+  ok('B: anything but the exact string true still sends no value', (await uploaderWith().u.evaluate(lead(), S0)).send.value === null);
+  REAL_ENV.GADS_SEND_VALUE = 'true';
   const sendV = await uploaderWith().u.evaluate(lead({ product_interest: 'crm' }), S0);
-  eq('B: the value comes from the product lookup (CRM -> 5000), not meta_predicted_ltv', sendV.send && sendV.send.value, 5000);
+  eq('B: with GADS_SEND_VALUE=true the value comes from the product lookup (CRM -> 5000), not meta_predicted_ltv', sendV.send && sendV.send.value, 5000);
   const sendA = await uploaderWith().u.evaluate(lead(), S0);
-  eq('B: an AEO /demo lead is 12000', sendA.send && sendA.send.value, 12000);
+  eq('B: with GADS_SEND_VALUE=true an AEO /demo lead is 12000', sendA.send && sendA.send.value, 12000);
   const sendU = await uploaderWith().u.evaluate(lead({ page_url: 'not a url?gclid=' + GCLID }), S0);
   ok('B: an unreadable page sends NO value (unknown product)', sendU.send && sendU.send.value === null && !('conversionValue' in sendU.send.event), JSON.stringify(sendU.send && sendU.send.event));
+  delete REAL_ENV.GADS_SEND_VALUE;   // back to the default for every later section
 
   console.log = quietLog;
 
