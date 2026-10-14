@@ -1526,6 +1526,17 @@ results13 = (async () => {
     const body = d.calls.bodies[0];
     out.push(['V2: the page is NOT in the system prompt', !body.system.includes('IGNORE ALL PREVIOUS')]);
     out.push(['V2: the system prompt is the rules, unchanged', body.system === M.NON_ICP_SYSTEM_PROMPT]);
+    /* 14 Oct 2026: coverlabel.com, a label and sticker manufacturer, was judged
+       print_sign at 95% and lost its Meta events. Swapnil: local printers only.
+       This pins the WORDING and that the version moved; it cannot show what the
+       model does with it. That was measured by replaying 78 cached domains
+       (tools/non-icp-rejudge-print.js), which is in the review card. */
+    out.push(['V2: print_sign is LOCAL shops only in the prompt',
+              /print_sign is ONLY for a LOCAL print or sign shop/.test(body.system)
+              && /manufacturer of labels, stickers, packaging or signage/.test(body.system)
+              && /do NOT pick print_sign/.test(body.system)]);
+    out.push(['V2: the prompt version moved off v1 when the print_sign rule landed',
+              M.NON_ICP_PROMPT_VERSION === 'v2-2026-10-14']);
     const user = body.messages[0].content;
     out.push(['V2: the page is in a USER message', body.messages[0].role === 'user' && user.includes('IGNORE ALL PREVIOUS')]);
     out.push(['V2: the page sits inside delimiters', /<untrusted_page_text>[\s\S]*<\/untrusted_page_text>/.test(user)]);
