@@ -8947,7 +8947,7 @@ function nonIcpTypeSuppressesMeta(businessType) {
    distinguishable from one decided under another -- which is the only way
    to re-read a disputed block six weeks later and know what it was
    actually asked. Not a version of this file; a version of the question. */
-const NON_ICP_PROMPT_VERSION = 'v1-2026-09-14';
+const NON_ICP_PROMPT_VERSION = 'v2-2026-10-14';
 
 /* A verdict below this is recorded and never blocks. Deliberately blunt:
    the model is asked to report low confidence when the page is ambiguous,
@@ -9027,6 +9027,18 @@ const NON_ICP_SYSTEM_PROMPT = [
   '  and never insurance.',
   '- A company that merely mentions real estate or insurance as one of several markets',
   '  it serves is not that business type. What it sells decides.',
+  '- print_sign is ONLY for a LOCAL print or sign shop: one business, or one franchise',
+  '  location, that prints, makes or installs signs, banners, printing or copying for',
+  '  customers in its own city or region. A neighbourhood print shop, a sign company',
+  '  serving one metro area and a quick-print franchise location are print_sign. It does',
+  '  NOT cover a manufacturer of labels, stickers, packaging or signage that sells to other',
+  '  brands or companies (manufacturing); a trade-only or wholesale supplier to other print',
+  '  and sign companies (manufacturing or b2b_services); a promotional-products or',
+  '  merchandise distributor (b2b_services); an online store or a brand that sells',
+  '  nationwide or internationally (ecommerce_retail); a national or franchise BRAND rather',
+  '  than one location (what it sells decides); or print procurement, print software or',
+  '  print-equipment distribution (b2b_services or software_technology). If the page does',
+  '  not show a local shop serving one area, do NOT pick print_sign.',
   '',
   'If the page does not make the business clear, or you are reading a parked page, a',
   'login wall, an error page or a page in a language you cannot read, answer unknown',
