@@ -499,11 +499,20 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   /* The Blocked tab's second read: blocked people who submitted again. */
   let REPEATS = { as_of: '2026-10-15T12:00:00Z', min_staff: 200, rows: [
     { email: 'maya@spgish.test', name: 'Maya Lee', domain: 'spgish.test', attempts: 3, first_at: '2026-09-28T18:30:00Z', last_at: '2026-10-09T18:30:00Z', source: 'llm', business_type: 'insurance', confidence: 0.97, company_size: 300,
-      title: 'Digital Marketing Manager', seniority: 'manager', departments: 'master_marketing', reasons: ['tried_again', 'large'] },
+      title: 'Digital Marketing Manager', seniority: 'manager', departments: 'master_marketing', reasons: ['tried_again', 'large'],
+      utm_source: 'google', utm_medium: 'cpc', utm_campaign: 'UR_G_S_US_BR_Brand-tIS', hear_about_us: 'Google Ads', referrer: 'https://www.google.com/' },
     { email: 'pat@remax.com', name: null, domain: 'remax.com', attempts: 2, first_at: '2026-10-01T10:00:00Z', last_at: '2026-10-06T10:00:00Z', source: 'domain_list', business_type: null, confidence: null, company_size: null,
-      title: null, seniority: null, departments: null, reasons: ['tried_again'] },
+      title: null, seniority: null, departments: null, reasons: ['tried_again'],
+      utm_source: null, utm_medium: null, utm_campaign: null, hear_about_us: null, referrer: 'https://l.facebook.com/' },
     { email: 'sean@bigco.test', name: 'Sean Lee', domain: 'bigco.test', attempts: 1, first_at: '2026-10-15T14:00:00Z', last_at: '2026-10-15T14:00:00Z', source: 'llm', business_type: 'real_estate', confidence: 0.88, company_size: 1200,
-      title: 'Vice President of Leasing', seniority: 'vp', departments: 'master_operations', reasons: ['large'] }] };
+      title: 'Vice President of Leasing', seniority: 'vp', departments: 'master_operations', reasons: ['large'],
+      utm_source: 'facebook', utm_medium: 'paid', utm_campaign: 'FLI__Prospecting__Core', hear_about_us: 'Facebook (Paid)', referrer: 'https://facebook.com/' },
+    { email: 'agnes@agentco.test', name: 'Agnes Fox', domain: 'agentco.test', attempts: 1, first_at: '2026-10-14T14:00:00Z', last_at: '2026-10-14T14:00:00Z', source: 'llm', business_type: 'real_estate', confidence: 0.98, company_size: 1200,
+      title: 'Licensed Real Estate Agent', seniority: 'entry', departments: 'master_operations', reasons: ['large'],
+      utm_source: 'facebook', utm_medium: 'paid', utm_campaign: null, hear_about_us: null, referrer: null },
+    { email: 'tiny@mini.test', name: 'Tia Mini', domain: 'mini.test', attempts: 2, first_at: '2026-10-13T14:00:00Z', last_at: '2026-10-14T09:00:00Z', source: 'llm', business_type: 'insurance', confidence: 0.97, company_size: 2,
+      title: 'President', seniority: 'vp', departments: null, reasons: ['tried_again'],
+      utm_source: null, utm_medium: null, utm_campaign: null, hear_about_us: null, referrer: null }] };
   let repDown = false;
   /* The release routes: what is already released, what a release would clear, and whether the write fails. */
   let RELEASED = { as_of: 'x', rows: [{ domain: 'old-release.test', note: 'insurance group', released_by: 'dashboard', released_at: '2026-10-14T15:00:00Z', leads: 2 }] };
@@ -892,8 +901,8 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   /* THREE SECTIONS, IN THE ORDER A PERSON WORKS: what needs deciding, the full list, then the housekeeping. */
   ok('review: "Needs a look" is the FIRST section, then the leads, then the released list', /id="blk-review"/.test(v) && v.indexOf('id="blk-review"') < v.indexOf('id="blk-list"') && v.indexOf('id="blk-list"') < v.indexOf('id="rel-list"'), [v.indexOf('id="blk-review"'), v.indexOf('id="blk-list"'), v.indexOf('id="rel-list"')].join(','));
   ok('review: the first section carries the accent, the list and the released list do not', /class="card panel look" id="blk-review"/.test(v) && !/class="card panel look" id="blk-list"/.test(v) && /class="card panel quiet" id="rel-list"/.test(v));
-  ok('review: each section has its own heading with a count where there is one', /Needs a look<\/h2>[\s\S]{0,260}<span class="badge b-warn">3<\/span>/.test(v) && /Blocked leads<\/h2>/.test(v) && /Released companies<\/h2>/.test(v));
-  ok('review: a map of the page, with a count on each section, scrolls rather than navigates', /<nav class="jumps" aria-label="Sections on this tab">/.test(v) && /data-jump="blk-review">Needs a look<span class="badge b-warn">3<\/span>/.test(v) && /data-jump="blk-list">Blocked leads<span class="badge b-neu">51<\/span>/.test(v) && /data-jump="rel-list">Released companies<span class="badge b-neu">1<\/span>/.test(v));
+  ok('review: each section has its own heading with a count where there is one', /Needs a look<\/h2>[\s\S]{0,260}<span class="badge b-warn">5<\/span>/.test(v) && /Blocked leads<\/h2>/.test(v) && /Released companies<\/h2>/.test(v));
+  ok('review: a map of the page, with a count on each section, scrolls rather than navigates', /<nav class="jumps" aria-label="Sections on this tab">/.test(v) && /data-jump="blk-review">Needs a look<span class="badge b-warn">5<\/span>/.test(v) && /data-jump="blk-list">Blocked leads<span class="badge b-neu">51<\/span>/.test(v) && /data-jump="rel-list">Released companies<span class="badge b-neu">1<\/span>/.test(v));
   const jc0 = b.calls.length, hash0 = String(b.window.location.hash);
   fire('click', el({ 'data-jump': 'blk-list' })); await ticks();
   ok('review: a jump button reads nothing, writes nothing and leaves the address alone', b.calls.length === jc0 && String(b.window.location.hash) === hash0);
@@ -905,6 +914,44 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('review: the ROLE is shown, title over level and department (Swapnil: "is he an agent?")', /<span class="a">Digital Marketing Manager<\/span><span class="b">manager · marketing<\/span>/.test(v) && /<span class="a">Vice President of Leasing<\/span><span class="b">vp · operations<\/span>/.test(v));
   ok('review: no title from Apollo says so instead of leaving a blank', /<span class="na">No title from Apollo<\/span>/.test(v));
   ok('review: the reasons are badges, a person can have both', /Tried 3×<\/span><span class="badge b-neu">300 staff<\/span>/.test(v) && /<span class="badge b-warn">Tried 2×<\/span>/.test(v) && /<span class="badge b-neu">1,200 staff<\/span>/.test(v));
+  /* THE ROLE HINT: highlight the likely buyers; a hint, never a decision */
+  const rv = v.slice(v.indexOf('id="blk-review"'), v.indexOf('id="blk-list"'));
+  const rHint = (...a) => GW.leadRows.roleHint(...a);
+  ok('hint: the real titles from our own blocked data, buyers (VP, CMO, Director, Product/Marketing Manager, VP Benefits)',
+     rHint('Vice President of Leasing', 'vp', 'master_operations', 1200) === 'buyer' && rHint('Chief Marketing Officer', 'c_suite', 'c_suite, marketing', 33) === 'buyer'
+     && rHint('Director, Healthcare Reform Program Management', 'director', 'master_information_technology', 98000) === 'buyer' && rHint('Product Manager (Growth)', 'manager', 'product_management, master_marketing', 900) === 'buyer'
+     && rHint('Digital Marketing Manager', 'manager', 'master_marketing', 300) === 'buyer' && rHint('Vice President Employee Benefits / Senior Consultant', 'vp', 'master_human_resources, consulting', 11000) === 'buyer');
+  ok('hint: ...and agent-type titles, even at a huge company',
+     ['Insurance Agent', 'Agent', 'Licensed Real Estate Agent', 'Luxury Property Specialist', 'Partner, Realtor', 'Insurance Broker', 'Agent Intern', 'Producer / Operations', 'Owner and Broker in Charge', 'Broker | Owner | Realtor | Property Manager DRE #01940919']
+       .every((t) => rHint(t, 'entry', 'master_operations', 1200) === 'agent'));
+  ok('hint: agent words win over level, so "CEO / Mortgage Broker" is an agent', rHint('CEO / Mortgage Broker', 'c_suite', 'c_suite, master_operations', 63) === 'agent');
+  ok('hint: a "President" of a 2-person agency is NOT a buyer (the size line), and neither is the 2-person Managing Director', rHint('President', 'vp', null, 2) === null && rHint('Managing Director', 'director', null, 2) === null);
+  ok('hint: the same title at an unknown size is still a buyer (Apollo not knowing is not a reason to hide it)', rHint('Vice President', 'vp', null, null) === 'buyer');
+  ok('hint: owners, founders and partners get NO hint, they are the people we block', rHint('Owner', 'owner', 'master_operations', 40) === null && rHint('Founder & CEO', 'founder', 'c_suite', 40) === null);
+  ok('hint: no title, level or department gives null, never a guess', rHint(null, null, null, 300) === null && rHint('', '', '', null) === null);
+  ok('hint: a marketing department alone is enough', rHint('Growth Lead', 'senior', 'master_marketing', 120) === 'buyer');
+  ok('review: likely buyers are TINTED rows, agents and the rest are not', (rv.match(/<tr class="buyer">/g) || []).length === 2 && (rv.match(/<tr>/g) || []).length === 1 + 3 /* the header row, then the three that are not buyers */, (rv.match(/<tr[^>]*>/g) || []).join(' '));
+  ok('review: the badge says "Likely buyer" on those two and "Agent-type title" on the agent, nothing on the rest', (rv.match(/>Likely buyer</g) || []).length === 2 && (rv.match(/>Agent-type title</g) || []).length === 1);
+  ok('review: the badge says it is a hint, not a decision, in its tooltip', /title="A hint, not a decision: not an agent-type title/.test(rv));
+  ok('review: the footer says a green row is a hint', /a green row is a hint that the person looks like a buyer/.test(rv) && /It is a hint, not a decision/.test(rv));
+  ok('review: a filter, Everyone and Likely buyers, with the counts', /data-nlf="all" aria-pressed="true">Everyone<span>5<\/span>/.test(rv) && /data-nlf="buyer" aria-pressed="false">Likely buyers<span>2<\/span>/.test(rv), (rv.match(/<div class="pills"[\s\S]{0,300}/) || [''])[0]);
+  /* WHERE THEY CAME FROM */
+  ok('review: "Came from" shows the ad source and medium over how they heard of us', rv.includes('<span class="a">google / cpc</span><span class="b">Heard: Google Ads</span>') && rv.includes('<span class="a">facebook / paid</span><span class="b">Heard: Facebook (Paid)</span>'));
+  ok('review: the campaign name is in the tooltip (a branded search says Brand)', /title="Campaign: UR_G_S_US_BR_Brand-tIS"/.test(rv) && /title="Campaign: FLI__Prospecting__Core"/.test(rv));
+  ok('review: with no ad source it falls back to the referrer, and says Unknown when there is nothing', rv.includes('<span class="a">from l.facebook.com</span>') && /<span class="na">Unknown<\/span>/.test(rv));
+  ok('review: the last try sits under the reasons, not in a column of its own', !/>Last try \(ET\)</.test(rv) && />Why it is here</.test(rv) && /<span class="badge b-warn">Tried 3×<\/span>[\s\S]{0,120}<span class="b">Oct 9, 2026/.test(rv), (rv.match(/Tried 3×[\s\S]{0,140}/) || [''])[0]);
+  /* the filter, driven */
+  const nlf0 = b.calls.length;
+  fire('click', el({ 'data-nlf': 'buyer' })); await ticks(); let rv2 = view(); rv2 = rv2.slice(rv2.indexOf('id="blk-review"'), rv2.indexOf('id="blk-list"'));
+  ok('review: Likely buyers shows only the two buyers, and reads nothing new from the server', (rv2.match(/<tr class="buyer">/g) || []).length === 2 && !rv2.includes('agnes@') && !rv2.includes('tiny@') && !rv2.includes('pat@') && b.calls.length === nlf0);
+  ok('review: ...and the button says it is pressed', /data-nlf="buyer" aria-pressed="true"/.test(rv2) && /data-nlf="all" aria-pressed="false"/.test(rv2));
+  const keepR = REPEATS;
+  REPEATS = { as_of: 'x', min_staff: 200, rows: keepR.rows.filter((r) => /agnes|pat@/.test(r.email)) }; await GW.TABS.blocked.load(); GW.TABS.blocked.render(); let rv3 = view();
+  ok('review: with the filter on and no buyers, a plain sentence, not an empty table', /No likely buyers right now/.test(rv3) && /data-nlf="buyer" aria-pressed="true"/.test(rv3));
+  REPEATS = keepR; fire('click', el({ 'data-nlf': 'all' })); await GW.TABS.blocked.load(); GW.TABS.blocked.render(); v = view();
+  /* the main list tints a likely buyer too */
+  const ml = v.slice(v.indexOf('id="blk-list"'), v.indexOf('id="rel-list"'));
+  ok('blocked list: the VP of Leasing row is tinted and badged, like the rows above it', /<tr class="main buyer">/.test(ml) && />Likely buyer</.test(ml), (ml.match(/<tr class="main[^"]*">/g) || []).join(' '));
   ok('review: a first-time large company (no tries) is listed and shows NO "Tried" badge', /Vice President of Leasing[\s\S]{0,600}1,200 staff/.test(v) && !/Tried 1×/.test(v));
   ok('repeats: a model block says what it judged, with its confidence', v.includes('Insurance · 97%'));
   ok('repeats: a brand-list block says so, with no made-up confidence', v.includes('Brand list') && !/Brand list · /.test(v));
