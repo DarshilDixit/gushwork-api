@@ -909,6 +909,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   const planCalls = b.calls.slice(relPlanFrom).filter((c) => c.path === '/monitor/non-icp-release-plan');
   ok('release: Release reads the plan for THAT company, as a GET', planCalls.length === 1 && planCalls[0].q.domain === 'spgish.test' && planCalls[0].method === 'GET', JSON.stringify(planCalls.map((c) => c.q)));
   ok('release: the box says exactly how many leads and people it will unblock', /Release spgish\.test\?/.test(v) && /<b>3<\/b> blocked leads from <b>1<\/b> person \(0 already booked\) will stop being blocked/.test(v), (v.match(/id="rel-confirm"[\s\S]{0,700}/) || [''])[0].replace(/\s+/g, ' '));
+  ok('release: the box says the follow-up email is switched off, in words', /automatic "finish booking" follow-up email is switched off/.test(v), (v.match(/id="rel-confirm"[\s\S]{0,900}/) || [''])[0].replace(/\s+/g, ' '));
   ok('release: ...says what it does NOT do', /does <b>not<\/b> send them to Salesforce and does <b>not<\/b> message them/.test(v) && /Slack is told/.test(v));
   ok('release: it offers a note, a Confirm and a Cancel', /data-rel-note/.test(v) && /data-rel-go/.test(v) && /data-rel-cancel/.test(v));
   ok('release: opening it WROTE NOTHING', posts().length === rel0);

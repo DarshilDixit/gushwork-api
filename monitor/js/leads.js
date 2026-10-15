@@ -448,7 +448,7 @@
         body = '<p class="lnote">' + (l.leads
             ? '<b>' + fmt(l.blocked) + '</b> blocked ' + G.plural(l.blocked, 'lead') + ' from <b>' + fmt(l.people) + '</b> ' + G.plural(l.people, 'person', 'people') + ' (' + fmt(l.booked) + ' already booked) will stop being blocked.'
             : 'No blocked leads from this company right now. This only stops it being blocked in future.') +
-          ' From now on this company is never blocked, and its Meta events are no longer held back. It does <b>not</b> send them to Salesforce and does <b>not</b> message them: a person replies.</p>' +
+          ' From now on this company is never blocked, and its Meta events are no longer held back. Their automatic "finish booking" follow-up email is switched off, for these leads and any new ones from this company, because a person replies. It does <b>not</b> send them to Salesforce and does <b>not</b> message them.</p>' +
           '<p class="lnote">Slack is told when you confirm, because this page cannot say who clicked.</p>' +
           '<div class="ackf">' + (relErr ? '<span class="badge b-bad">' + esc(relErr) + '</span>' : '') +
           '<input class="field" data-rel-note value="' + esc(relNote) + '" placeholder="Why (optional)" aria-label="Why ' + esc(pl.domain) + ' is being released" maxlength="300"' + (relBusy ? ' disabled' : '') + '>' +

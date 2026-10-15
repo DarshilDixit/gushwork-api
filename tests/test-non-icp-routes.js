@@ -54,7 +54,9 @@ const S = { fetches: [], slackPayloads: [], leadRow: null, writes: [], psBlocked
             exempt: [], tries: null, repeatRows: [], enrich: null,
             /* the release routes: what a release would clear, what the UPDATE reports,
                what the DELETE reports, and the released list */
-            relCounts: null, relCleared: null, unrelRemoved: null, releasedRows: [] };
+            relCounts: null, relCleared: null, unrelRemoved: null, releasedRows: [],
+            /* the follow-up cron: the leads its SELECT returns, and every email the stubbed mail transport was asked to send */
+            cronLeads: [], emails: [] };
 
 /* ── stub pg ──────────────────────────────────────────────────────
    Both pools (Railway and the AWS warehouse) come through here.
@@ -200,6 +202,10 @@ function stubQuery(q, params) {
   if (/^SELECT \* FROM enrichment_data WHERE session_id=\$1/.test(flat)) {
     return { rows: S.enrich ? [S.enrich] : [], rowCount: S.enrich ? 1 : 0 };
   }
+  /* The follow-up cron's one big SELECT: whatever the scenario says is eligible. */
+  if (/^SELECT l\.session_id, l\.email, l\.first_name, l\.last_name, l\.company, l\.website/.test(flat)) {
+    return { rows: S.cronLeads || [], rowCount: (S.cronLeads || []).length };
+  }
   /* The release plan's verdict read: the cached row, if it is for the domain asked about. */
   if (/^SELECT business_type, confidence::float AS confidence, source, checked_at FROM non_icp_domain_verdicts WHERE domain = \$1/.test(flat)) {
     const rows = S.verdict && S.verdict.domain === (params || [])[0] ? [S.verdict] : [];
@@ -273,6 +279,8 @@ class StubPool {
 const origLoad = Module._load;
 Module._load = function (request) {
   if (request === 'pg') return { Pool: StubPool, Client: StubClient, types: { setTypeParser() {} } };
+  /* A mail transport that only RECORDS, so a scenario can say who was and was not emailed. */
+  if (request === 'nodemailer') return { createTransport() { return { sendMail: async (o) => { S.emails.push(o); return { messageId: '<stub@test>' }; }, close() {} }; } };
   return origLoad.apply(this, arguments);
 };
 
@@ -352,7 +360,7 @@ const post = async (p, body) => {
   let j = null; try { j = await r.json(); } catch (_) {}
   return { status: r.status, body: j };
 };
-const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; S.dropoffInternal = null; S.dropoffRows = null; S.dropoffSources = null; S.stickySource = null; S.exempt = []; S.tries = null; S.repeatRows = []; S.enrich = null; S.relCounts = null; S.relCleared = null; S.unrelRemoved = null; S.releasedRows = []; };
+const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; S.dropoffInternal = null; S.dropoffRows = null; S.dropoffSources = null; S.stickySource = null; S.exempt = []; S.tries = null; S.repeatRows = []; S.enrich = null; S.relCounts = null; S.relCleared = null; S.unrelRemoved = null; S.releasedRows = []; S.cronLeads = []; S.emails = []; };
 const metaFired      = () => S.fetches.some((u) => /graph\.facebook\.com/.test(u));
 const salesforceHit  = () => S.fetches.some((u) => /\/sobjects\//.test(u));
 const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') || true);
@@ -2022,8 +2030,11 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     const stmts = S.writes.map((w) => w.flat.split(' ').slice(0, 3).join(' '));
     ok('RELEASE: in ONE transaction, BEGIN then INSERT then UPDATE then COMMIT', ['BEGIN', 'INSERT INTO non_icp_exemptions', 'UPDATE leads SET', 'COMMIT'].every((x, i) => stmts.indexOf(x) !== -1 && (i === 0 || stmts.indexOf(x) > stmts.indexOf(['BEGIN', 'INSERT INTO non_icp_exemptions', 'UPDATE leads SET', 'COMMIT'][i - 1]))), stmts.join(' | '));
     const ins = S.writes.find((w) => /^INSERT INTO non_icp_exemptions/.test(w.flat));
+    const upd = S.writes.find((w) => /^UPDATE leads SET non_icp_blocked = FALSE/.test(w.flat));
+    ok('RELEASE: the same UPDATE switches off the automatic follow-up email (the 15 Oct SPG incident)', !!upd && /loops_sent = TRUE/.test(upd.flat), upd && upd.flat);
     ok('RELEASE: recorded as "dashboard" with the note', ins && ins.params[0] === 'specialtyprogramgroup.com' && ins.params[1] === 'insurance group, wants AEO' && ins.params[2] === 'dashboard', JSON.stringify(ins && ins.params));
     const slack = JSON.stringify(S.slackPayloads);
+    ok('RELEASE: the Slack post says the follow-up email was switched off', /automatic follow-up email switched off/.test(slack), slack.slice(0, 300));
     ok('RELEASE: Slack is told (the dashboard link is shared, so the post is the record)', /Company released from the Blocked tab/.test(slack) && /specialtyprogramgroup\.com/.test(slack) && /cannot say who did it/.test(slack) && /insurance group, wants AEO/.test(slack), slack.slice(0, 200));
 
     reset();
@@ -2049,6 +2060,34 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     reset(); S.releasedRows = [{ domain: 'specialtyprogramgroup.com', note: 'n', released_by: 'dashboard', released_at: '2026-10-15T10:00:00Z', leads: 3 }];
     r = await GET('/monitor/non-icp-released?token=stub'); j = await r.json();
     ok('RELEASED list: each company with when, by, note and how many leads', r.status === 200 && j.rows.length === 1 && j.rows[0].domain === 'specialtyprogramgroup.com' && j.rows[0].leads === 3 && j.rows[0].released_by === 'dashboard', JSON.stringify(j));
+  }
+  {
+    /* THE FOLLOW-UP CRON, DRIVEN. specialtyprogramgroup.com's contact was replied to by hand and
+       then emailed "you did not finish booking" three times. A released company is never emailed,
+       new drop-offs included; its "did not book" Slack post still fires. */
+    const cronLead = (n, email, website) => ({ session_id: '00000000-0000-4000-8000-0000000000d' + n, email, first_name: 'Pat', last_name: 'X',
+      company: 'Co', website, sell_to: 'B2B', created_at: new Date(Date.now() - 6 * 3600 * 1000).toISOString(), completed: true, disqualified: false, followup_attempts: 0 });
+    const runCron = async (leads, exempt) => {
+      reset(); S.cronLeads = leads; S.exempt = exempt || [];
+      process.env.GMAIL_USER = 'sender@test'; process.env.GMAIL_APP_PASSWORD = 'stub';
+      const r = await realFetch(BASE + '/cron/send-partials', { method: 'POST' });
+      delete process.env.GMAIL_USER; delete process.env.GMAIL_APP_PASSWORD;
+      return r;
+    };
+    const followUps = () => S.emails.filter((m) => m.subject === 'Re: Gushwork Demo');
+    let r = await runCron([cronLead(1, 'buyer@acme.com', 'acme.com')]);
+    ok('CRON control: an ordinary drop-off IS emailed', r.status === 200 && followUps().length === 1 && followUps()[0].to === 'buyer@acme.com', JSON.stringify(S.emails.map((m) => m.to)));
+    ok('CRON control: ...and marked done with an attempt counted', S.writes.some((w) => /UPDATE leads SET loops_sent=true, followup_attempts=\$2/.test(w.flat)));
+    r = await runCron([cronLead(2, 'maya@specialtyprogramgroup.com', 'https://www.specialtyprogramgroup.com/')], ['specialtyprogramgroup.com']);
+    ok('CRON: a released company is NOT emailed', r.status === 200 && followUps().length === 0, JSON.stringify(S.emails.map((m) => m.to)));
+    ok('CRON: ...but its "did not book" Slack post still fires, so a person sees them start again', /Did Not Book/.test(JSON.stringify(S.slackPayloads)), JSON.stringify(S.slackPayloads).slice(0, 160));
+    ok('CRON: ...and it is marked done, with NO attempt counted, so it neither retries nor counts as stuck', S.writes.some((w) => /^UPDATE leads SET loops_sent=true WHERE session_id=\$1/.test(w.flat)) && !S.writes.some((w) => /followup_attempts=\$2/.test(w.flat)));
+    r = await runCron([cronLead(3, 'someone@gmail.com', 'specialtyprogramgroup.com')], ['specialtyprogramgroup.com']);
+    ok('CRON: released through the WEBSITE side too (a personal email with their company site)', followUps().length === 0, JSON.stringify(S.emails.map((m) => m.to)));
+    r = await runCron([cronLead(4, 'buyer@acme.com', 'acme.com'), cronLead(5, 'maya@specialtyprogramgroup.com', 'specialtyprogramgroup.com')], ['specialtyprogramgroup.com']);
+    ok('CRON: in ONE run, only the released company is skipped', followUps().length === 1 && followUps()[0].to === 'buyer@acme.com', JSON.stringify(S.emails.map((m) => m.to)));
+    r = await runCron([cronLead(6, 'maya@specialtyprogramgroup.com', 'specialtyprogramgroup.com')], []);
+    ok('CRON control: the SAME lead with the company NOT released is emailed', followUps().length === 1, JSON.stringify(S.emails.map((m) => m.to)));
   }
   {
     /* THE DASHBOARD'S READ. */

@@ -12,7 +12,7 @@
    thing the dashboard cannot: release a shared brand-list domain, with
    --allow-brand.
 
-   WHAT --apply DOES, in one transaction per company:
+   WHAT --apply DOES, in one transaction per company (and see loops_sent below):
      1. adds the company to non_icp_exemptions, so from then on neither the
         brand list nor the model blocks, flags or withholds Meta for it (the
         live server picks it up within a minute);
@@ -21,6 +21,10 @@
         blocked anywhere that reads the column.
    It keeps non_icp_reason and non_icp_source on those leads, as the record of
    what decided.
+   3. sets loops_sent = true on those leads. WITHOUT THIS the automatic
+      "you did not finish booking" cron emails them, because a cleared lead
+      looks like any other drop-off. On 15 Oct 2026 it sent the SPG contact
+      three of them, hours after a person had replied by hand.
 
    WHAT IT DOES NOT DO, said plainly:
      - it does NOT push the leads to Salesforce (a blocked lead never went).
@@ -147,7 +151,8 @@ async function main() {
     }
     if (apply) {
       console.log('The live server picks the release up within a minute.');
-      console.log('Not done by this tool: Salesforce (backfill-sf.js), the AWS mirror, Meta, a Slack post, and telling the person. A human replies.');
+      console.log('Their automatic follow-up email is switched off (loops_sent), so the person is not emailed "finish booking". A human replies.');
+      console.log('Not done by this tool: Salesforce (backfill-sf.js), the AWS mirror, Meta, a Slack post, and telling the person.');
     } else {
       console.log('Add --apply to do it. Add --list to see who they are.');
     }
