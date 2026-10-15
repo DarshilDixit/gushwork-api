@@ -1777,6 +1777,57 @@ function slackTruncate(text, max = SLACK_ABOUT_MAX) {
    -- an SDR reading it can neither agree nor disagree. "Matched kw.com" can be
    checked against the person's actual company in one glance, which is exactly
    how paycompass.com would have been caught had substring matching shipped. */
+/* ── THE ROLE HINT: ONE function, on the server ────────────────────────
+   Says "looks like a buyer" or "agent-type title" for a blocked person, WITH
+   the reason in words. A HINT, NEVER A DECISION: it blocks, releases and
+   un-blocks nobody, and a person still reads the row. It exists because the
+   first question about any blocked lead is "agent or buyer?" (Swapnil, on
+   inlandgroup.com).
+
+   ONE COPY, here. /monitor/leads attaches it to every row it returns and
+   /monitor/non-icp-review uses it to decide who is listed, so the dashboard
+   only DISPLAYS the answer. It was a second copy in the browser until 16 Oct
+   2026, which cannot be filtered or counted across pages the server serves.
+
+   AGENT-TYPE: the title says agent, broker, realtor, associate, specialist,
+   producer, licensed, loan officer, advisor or intern. Checked FIRST, so
+   "CEO / Mortgage Broker" is an agent whatever the level.
+   LIKELY BUYER: a title is present, it is not agent-type, Apollo KNOWS the
+   company's size and it is 20 or more, and the person is at a corporate level
+   (VP, director, head, C-suite, manager) or in marketing or growth.
+
+   TWO WEAKNESSES FIXED ON 16 OCT 2026. A level with NO TITLE and a title at a
+   company of UNKNOWN size both used to count as a buyer. Unknown size means
+   Apollo has no company record, which is usually a tiny agency, and a blank
+   title cannot be read as agent or not: three "CEO"/"Vice President" rows and
+   three title-less C-suite rows were highlighted on that basis alone. Neither
+   is a hint now.
+
+   OWNERS, FOUNDERS, PARTNERS AND PRESIDENTS get NO hint, deliberately: a
+   franchise or captive agency owner shows the PARENT's headcount ("Allstate
+   Agency Owner" reads 54,000 staff), so a size test cannot tell them from a
+   real executive. They are the people the block is for. */
+const NON_ICP_AGENT_TITLE = /\b(agent|broker|realtor|associate|specialist|producer|licensed|loan officer|advisor|adviser|intern)\b/i;
+const NON_ICP_LEVEL_LABEL = { vp: 'VP level', director: 'Director level', head: 'Head-of level', c_suite: 'C-suite level', manager: 'Manager level' };
+const NON_ICP_BUYER_MIN_STAFF = 20;
+function nonIcpRoleHint(title, seniority, departments, size) {
+  const none = { hint: null, reason: null };
+  const t = String(title == null ? '' : title).trim();
+  if (!t) return none;                                   // nothing to read
+  const m = NON_ICP_AGENT_TITLE.exec(t);
+  if (m) return { hint: 'agent', reason: 'the title says "' + m[1].toLowerCase() + '"' };
+  const n = Number(size);
+  /* A reason for NO hint too: 70 untitled-or-unhinted rows with a blank would read as "forgotten". */
+  if (!(n > 0)) return { hint: null, reason: 'no company size from Apollo' };
+  if (n < NON_ICP_BUYER_MIN_STAFF) return { hint: null, reason: 'company under ' + NON_ICP_BUYER_MIN_STAFF + ' staff' };
+  const s = String(seniority == null ? '' : seniority).trim();
+  const why = [];
+  if (Object.prototype.hasOwnProperty.call(NON_ICP_LEVEL_LABEL, s)) why.push(NON_ICP_LEVEL_LABEL[s]);
+  if (/marketing|growth/.test(String(departments == null ? '' : departments).toLowerCase())) why.push('marketing or growth role');
+  if (!why.length) return { hint: null, reason: (s ? s.replace(/_/g, ' ') + ' level' : 'no level from Apollo') + ', not a corporate or marketing role' };
+  return { hint: 'buyer', reason: why.join(', ') + ' · ' + n.toLocaleString('en-US') + ' staff · not an agent-type title' };
+}
+
 /* THE PERSON'S ROLE, as Apollo has it, for the blocked-lead post. The first
    question anyone asks of a large-company block is "is this an AGENT or a
    buyer?" (Swapnil, on inlandgroup.com, 15 Oct 2026: a VP of Leasing at a
@@ -3817,6 +3868,19 @@ app.get('/monitor/leads', async (req, res) => {
   const websiteCheck = req.query.websiteCheck || 'all';
   const repeatAttempts = req.query.repeatAttempts || 'all';
   const partner      = req.query.partner      || null;
+  /* A LIST OF ADDRESSES, for the Blocked tab's "Likely buyers" view: the dashboard
+     asks /monitor/non-icp-review who looks like a buyer and passes those addresses
+     here, so the list is filtered and PAGED by the server like every other filter.
+     The hint itself lives in one place (nonIcpRoleHint). Capped and validated: it
+     is bound as one text[] parameter, never written into the SQL. */
+  let emailList = null;
+  if (req.query.emails) {
+    const parts = String(req.query.emails).split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+    if (parts.length > 300 || parts.some((x) => x.length > 254 || !/^[^\s,@]+@[^\s,@]+$/.test(x))) {
+      return res.status(400).json({ error: 'emails must be up to 300 comma-separated addresses' });
+    }
+    emailList = parts;
+  }
   /* 'all' means no filter. '__none' is its own option because an untagged
      lead is a real state — a page_url resolveProduct could not read — and
      folding it into "all" would make it unfindable. */
@@ -3882,6 +3946,7 @@ app.get('/monitor/leads', async (req, res) => {
   if (product === '__none') conditions.push(`l.product IS NULL`);
   else if (product && product !== 'all') { params.push(product); conditions.push(`l.product = $${params.length}`); }
   if (utmSource) { params.push(utmSource); conditions.push(`l.utm_source = $${params.length}`); }
+  if (emailList) { params.push(emailList); conditions.push(`LOWER(l.email) = ANY($${params.length}::text[])`); }
   if (hearAbout) { params.push(`%${hearAbout.toLowerCase()}%`); conditions.push(`LOWER(COALESCE(l.hear_about_us,'')) LIKE $${params.length}`); }
 
   if (enrichment === 'yes') {
@@ -4091,6 +4156,10 @@ app.get('/monitor/leads', async (req, res) => {
          same function the filter's SQL is derived from. NULL means no
          Meta event was withheld for this lead. */
       meta_withheld_reason: metaWithheldReason(r),
+      /* The role hint, from the ONE function (nonIcpRoleHint): the dashboard
+         displays it and never recomputes it. role_hint is 'buyer', 'agent' or
+         null; role_reason says why in words. Never a decision. */
+      ...(() => { const h = nonIcpRoleHint(r.enriched_title, r.enriched_seniority, r.enriched_departments, r.enriched_company_size); return { role_hint: h.hint, role_reason: h.reason }; })(),
     }));
 
     res.json({ total, page, pages: Math.ceil(total / limit), leads: leadRows });
@@ -14163,52 +14232,60 @@ app.get('/monitor/overview', async (req, res) => {
 });
 
 /* ── Blocked people who NEED A LOOK ───────────────────────────────────
-   The Blocked tab's first section, and the same two reasons the Slack post
-   tags people for: the person TRIED AGAIN, or a MODEL-judged company is large
-   (NON_ICP_REVIEW_MIN_STAFF). Neither changes who is blocked; both are where a
-   wrong block is likeliest. specialtyprogramgroup.com's contact tried three
-   times and wrote in; inlandgroup.com (1,200 staff, a VP of Leasing) was
-   blocked on a first try. Slack says so at the moment it happens; this is the
-   same list on the dashboard, so it is still there on Monday.
+   The Blocked tab's first section. THREE reasons, the first two the same ones
+   the Slack post tags people for: the person TRIED AGAIN, a MODEL-judged
+   company is LARGE (NON_ICP_REVIEW_MIN_STAFF), or their ROLE looks like a
+   buyer (nonIcpRoleHint). None changes who is blocked; all are where a wrong
+   block is likeliest. specialtyprogramgroup.com's contact tried three times and
+   wrote in; inlandgroup.com (a VP of Leasing, 1,200 staff) was blocked on a
+   first try. Slack says so at the moment it happens; this is the same list on
+   the dashboard, so it is still there on Monday.
+
+   THE THIRD REASON MAKES THIS LIST THE HOME OF EVERY LIKELY BUYER, not only the
+   ones who also tried twice or work somewhere big: on 15 Oct 2026, 7 of the 11
+   likely buyers among 157 blocked people were in none of the other two, so a
+   "likely buyers" filter inside the section showed 4 and the header could only
+   say "5". It also returns TOTALS over everybody, so the page can say "N of M
+   blocked people look like buyers".
 
    BY EMAIL, NOT BY COMPANY. farmersagent.com and allstate.com are shared by
    thousands of agents, so a count by domain read as nine tries from "one
-   company" when it was nine different people. Counts distinct SESSIONS of an
-   address that were blocked AND submitted. The large-company reason applies
-   only to MODEL blocks (the brand list is a hard block by design), exactly as
-   the Slack post does.
+   company" when it was nine different people. "Tried again" counts distinct
+   SESSIONS of an address that were blocked AND submitted; "large" applies only
+   to MODEL blocks that submitted (the brand list is a hard block by design),
+   exactly as the Slack post does; the buyer reason needs neither.
 
    Our own test submissions are left out (a test against a brand domain is not
    somebody coming back), with IS NOT TRUE because the clause is NULL for a lead
    with no email. A released company drops out by itself: the release clears the
-   block on its leads. Each row carries the person's ROLE (Apollo's title,
-   seniority and department) because the first question about any of them is
-   "is this an agent or a buyer?". Takes db so a test or the preview can hand it
-   a read-only connection; writes nothing. */
+   block on its leads. Each row carries the person's ROLE and the hint with its
+   reason, and where they came from. Takes db so a test or the preview can hand
+   it a read-only connection; writes nothing. */
 async function nonIcpReviewReport(db) {
   const params = [];
   const internal = internalLeadSqlClause('l.email', 'l.page_url', params);
-  params.push(NON_ICP_REVIEW_MIN_STAFF);
-  const minStaff = '$' + params.length;
   const r = await db.query(`
     SELECT lower(l.email)                                              AS email,
            (ARRAY_AGG(NULLIF(trim(concat_ws(' ', l.first_name, l.last_name)), '') ORDER BY l.created_at DESC)
               FILTER (WHERE NULLIF(trim(concat_ws(' ', l.first_name, l.last_name)), '') IS NOT NULL))[1] AS name,
            (ARRAY_AGG(l.non_icp_reason ORDER BY l.created_at DESC))[1] AS domain,
-           COUNT(DISTINCT l.session_id)::int                           AS attempts,
+           COUNT(DISTINCT l.session_id) FILTER (WHERE l.submitted_at IS NOT NULL)::int AS attempts,
+           bool_or(l.submitted_at IS NOT NULL)                         AS submitted,
            MIN(l.created_at)                                           AS first_at,
            MAX(l.created_at)                                           AS last_at,
            MAX(l.non_icp_source)                                       AS source,
            bool_or(l.non_icp_source LIKE 'llm%')                       AS model_blocked,
            MAX(v.business_type)                                        AS business_type,
            MAX(v.confidence)::float                                    AS confidence,
-           MAX(CASE WHEN l.enriched_company_size ~ '^[0-9]+$' THEN l.enriched_company_size::int END) AS company_size,
-           (ARRAY_AGG(l.enriched_title ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.enriched_title, '') IS NOT NULL))[1]       AS title,
-           (ARRAY_AGG(l.enriched_seniority ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.enriched_seniority, '') IS NOT NULL))[1] AS seniority,
-           (ARRAY_AGG(l.enriched_departments ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.enriched_departments, '') IS NOT NULL))[1] AS departments,
-           /* WHERE THEY CAME FROM, the latest non-empty answer: the ad source and medium, the campaign, what they
-              said when asked how they heard of us, and the referrer. The Blocked tab shows these beside the role
-              so "a VP who found us on a branded search" reads in one line. */
+           /* THE SAME FIELDS /monitor/leads reads, the lead row first and the enrichment record behind it, so the
+              hint on a person here and on their row in the list below it cannot disagree. */
+           MAX(CASE WHEN COALESCE(l.enriched_company_size, e.enriched_company_size) ~ '^[0-9]+$' THEN COALESCE(l.enriched_company_size, e.enriched_company_size)::int END) AS company_size,
+           (ARRAY_AGG(COALESCE(l.enriched_title, e.enriched_title) ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(COALESCE(l.enriched_title, e.enriched_title), '') IS NOT NULL))[1]       AS title,
+           (ARRAY_AGG(COALESCE(l.enriched_seniority, e.enriched_seniority) ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(COALESCE(l.enriched_seniority, e.enriched_seniority), '') IS NOT NULL))[1] AS seniority,
+           (ARRAY_AGG(COALESCE(l.enriched_departments, e.enriched_departments) ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(COALESCE(l.enriched_departments, e.enriched_departments), '') IS NOT NULL))[1] AS departments,
+           /* WHERE THEY CAME FROM, the latest non-empty answer of each: what they were recorded as hearing of us
+              by (the form fills this from the ad or the referrer, which is why it is set where the ad source
+              was lost to an in-app browser), the ad source and medium, the campaign, and the referrer. */
            (ARRAY_AGG(l.utm_source ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.utm_source, '') IS NOT NULL))[1]       AS utm_source,
            (ARRAY_AGG(l.utm_medium ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.utm_medium, '') IS NOT NULL))[1]       AS utm_medium,
            (ARRAY_AGG(l.utm_campaign ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.utm_campaign, '') IS NOT NULL))[1]   AS utm_campaign,
@@ -14216,36 +14293,40 @@ async function nonIcpReviewReport(db) {
            (ARRAY_AGG(l.referrer ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.referrer, '') IS NOT NULL))[1]           AS referrer
       FROM leads l
       LEFT JOIN non_icp_domain_verdicts v ON v.domain = l.non_icp_reason
+      LEFT JOIN enrichment_data e ON e.session_id = l.session_id
      WHERE l.non_icp_blocked IS TRUE
-       AND l.submitted_at IS NOT NULL
        AND l.email IS NOT NULL AND l.email <> ''
        AND (${internal}) IS NOT TRUE
      GROUP BY lower(l.email)
-    HAVING COUNT(DISTINCT l.session_id) >= 2
-        OR (bool_or(l.non_icp_source LIKE 'llm%')
-            AND MAX(CASE WHEN l.enriched_company_size ~ '^[0-9]+$' THEN l.enriched_company_size::int END) >= ${minStaff})
-     ORDER BY MAX(l.created_at) DESC, COUNT(DISTINCT l.session_id) DESC
-     LIMIT 50`, params);
-  return {
-    as_of: new Date().toISOString(),
-    min_staff: NON_ICP_REVIEW_MIN_STAFF,
-    rows: r.rows.map((x) => {
-      const attempts = Number(x.attempts) || 0;
-      const size = x.company_size == null ? null : Number(x.company_size);
-      const reasons = [];
-      if (attempts >= 2) reasons.push('tried_again');
-      if (x.model_blocked === true && size !== null && size >= NON_ICP_REVIEW_MIN_STAFF) reasons.push('large');
-      return {
-        email: x.email, name: x.name || null, domain: x.domain, attempts, first_at: x.first_at, last_at: x.last_at,
-        source: x.source || null, business_type: x.business_type || null,
-        confidence: x.confidence == null ? null : Number(x.confidence),
-        company_size: size, title: x.title || null, seniority: x.seniority || null, departments: x.departments || null,
-        utm_source: x.utm_source || null, utm_medium: x.utm_medium || null, utm_campaign: x.utm_campaign || null,
-        hear_about_us: x.hear_about_us || null, referrer: x.referrer || null,
-        reasons,
-      };
-    }),
-  };
+     ORDER BY MAX(l.created_at) DESC
+     LIMIT 5000`, params);
+  const totals = { people: 0, buyers: 0, agents: 0, no_title: 0 };
+  const rows = [], buyerEmails = [];
+  for (const x of r.rows) {
+    const attempts = Number(x.attempts) || 0;
+    const size = x.company_size == null ? null : Number(x.company_size);
+    const h = nonIcpRoleHint(x.title, x.seniority, x.departments, size);
+    totals.people++;
+    if (!x.title) totals.no_title++;
+    if (h.hint === 'buyer') { totals.buyers++; buyerEmails.push(x.email); }
+    if (h.hint === 'agent') totals.agents++;
+    const reasons = [];
+    if (attempts >= 2) reasons.push('tried_again');
+    if (x.model_blocked === true && x.submitted === true && size !== null && size >= NON_ICP_REVIEW_MIN_STAFF) reasons.push('large');
+    if (h.hint === 'buyer') reasons.push('buyer');
+    if (!reasons.length) continue;
+    rows.push({
+      email: x.email, name: x.name || null, domain: x.domain, attempts, first_at: x.first_at, last_at: x.last_at,
+      source: x.source || null, business_type: x.business_type || null,
+      confidence: x.confidence == null ? null : Number(x.confidence),
+      company_size: size, title: x.title || null, seniority: x.seniority || null, departments: x.departments || null,
+      role_hint: h.hint, role_reason: h.reason,
+      utm_source: x.utm_source || null, utm_medium: x.utm_medium || null, utm_campaign: x.utm_campaign || null,
+      hear_about_us: x.hear_about_us || null, referrer: x.referrer || null,
+      reasons,
+    });
+  }
+  return { as_of: new Date().toISOString(), min_staff: NON_ICP_REVIEW_MIN_STAFF, totals, buyer_emails: buyerEmails.slice(0, 300), rows: rows.slice(0, 100) };
 }
 
 app.get('/monitor/non-icp-review', async (req, res) => {
@@ -14313,16 +14394,36 @@ app.post('/monitor/non-icp-unrelease', async (req, res) => {
     res.json({ ok: true, ...r });
   } catch (err) { nonIcpReleaseFail(res, err, 'non-icp-unrelease'); }
 });
+/* The released-companies list, for the Blocked tab. Takes db so the preview can hand it a read-only connection;
+   writes nothing. Per released company: how many leads and people, how many TIMES the form was submitted, and
+   where the latest lead came from. This is where somebody checks "was releasing them right?", and where a
+   person arrived from is part of the answer. */
+async function nonIcpReleasedReport(db) {
+  const r = await db.query(
+    `SELECT e.domain, e.note, e.released_by, e.released_at,
+            s.leads, s.people, s.tries, s.utm_source, s.utm_medium, s.utm_campaign, s.hear_about_us, s.referrer
+       FROM non_icp_exemptions e
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*)::int AS leads, COUNT(DISTINCT lower(l.email))::int AS people,
+                COUNT(DISTINCT l.session_id) FILTER (WHERE l.submitted_at IS NOT NULL)::int AS tries,
+                (ARRAY_AGG(l.utm_source ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.utm_source, '') IS NOT NULL))[1]       AS utm_source,
+                (ARRAY_AGG(l.utm_medium ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.utm_medium, '') IS NOT NULL))[1]       AS utm_medium,
+                (ARRAY_AGG(l.utm_campaign ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.utm_campaign, '') IS NOT NULL))[1]   AS utm_campaign,
+                (ARRAY_AGG(l.hear_about_us ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.hear_about_us, '') IS NOT NULL))[1] AS hear_about_us,
+                (ARRAY_AGG(l.referrer ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.referrer, '') IS NOT NULL))[1]           AS referrer
+           FROM leads l WHERE l.non_icp_reason = e.domain) s ON true
+      ORDER BY e.released_at DESC LIMIT 100`);
+  return { as_of: new Date().toISOString(), rows: r.rows.map((x) => ({
+    domain: x.domain, note: x.note || null, released_by: x.released_by || null, released_at: x.released_at,
+    leads: Number(x.leads) || 0, people: Number(x.people) || 0, tries: Number(x.tries) || 0,
+    utm_source: x.utm_source || null, utm_medium: x.utm_medium || null, utm_campaign: x.utm_campaign || null,
+    hear_about_us: x.hear_about_us || null, referrer: x.referrer || null })) };
+}
 app.get('/monitor/non-icp-released', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const r = await pool.query(
-      `SELECT e.domain, e.note, e.released_by, e.released_at,
-              (SELECT COUNT(*)::int FROM leads l WHERE l.non_icp_reason = e.domain) AS leads
-         FROM non_icp_exemptions e ORDER BY e.released_at DESC LIMIT 100`);
-    res.json({ as_of: new Date().toISOString(), rows: r.rows.map((x) => ({
-      domain: x.domain, note: x.note || null, released_by: x.released_by || null, released_at: x.released_at, leads: Number(x.leads) || 0 })) });
+    res.json(await nonIcpReleasedReport(pool));
   } catch (err) {
     console.error('[/monitor/non-icp-released]', err.message);
     res.status(500).json({ error: 'Released list failed', detail: err.message });

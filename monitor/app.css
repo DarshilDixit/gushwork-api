@@ -315,6 +315,8 @@ input.field { min-width: 0; }
 .c2 { display: flex; flex-direction: column; align-items: flex-start; gap: var(--gw-space-4); text-align: left; min-width: 0; }
 .c2 .a { color: var(--ink); font: var(--gw-text-body-14-med); overflow-wrap: anywhere; }
 .c2 .b { color: var(--ink-muted); font: var(--gw-text-body-12-reg); overflow-wrap: anywhere; }
+/* "Came from" holds a short channel label ("Facebook (Paid)"): break it at the space, never mid-word. "anywhere" lets the column shrink to one letter, which is how "Faceboo / k (Paid)" was painted at 1280. */
+.c2.from .a, .c2.from .b { overflow-wrap: break-word; }
 
 /* ── Funnel, channels ──────────────────────────────────────────────────── */
 .funnel { display: flex; flex-direction: column; gap: var(--gw-space-12); }

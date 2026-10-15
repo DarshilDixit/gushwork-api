@@ -54,7 +54,7 @@ const S = { fetches: [], slackPayloads: [], leadRow: null, writes: [], psBlocked
             exempt: [], tries: null, repeatRows: [], enrich: null,
             /* the release routes: what a release would clear, what the UPDATE reports,
                what the DELETE reports, and the released list */
-            relCounts: null, relCleared: null, unrelRemoved: null, releasedRows: [],
+            relCounts: null, relCleared: null, unrelRemoved: null, releasedRows: [], pageRows: [],
             /* the follow-up cron: the leads its SELECT returns, and every email the stubbed mail transport was asked to send */
             cronLeads: [], emails: [] };
 
@@ -214,7 +214,7 @@ function stubQuery(q, params) {
   /* The release routes' statements, matched before the broader exemptions branch. */
   if (/^DELETE FROM non_icp_exemptions/.test(flat)) return { rows: [], rowCount: S.unrelRemoved == null ? 1 : S.unrelRemoved };
   if (/^UPDATE leads SET non_icp_blocked = FALSE, non_icp_llm_flagged = FALSE/.test(flat)) return { rows: [], rowCount: S.relCleared == null ? 3 : S.relCleared };
-  if (/FROM non_icp_exemptions e ORDER BY e\.released_at DESC/.test(flat)) return { rows: S.releasedRows || [], rowCount: (S.releasedRows || []).length };
+  if (/FROM non_icp_exemptions e\b[\s\S]*ORDER BY e\.released_at DESC/.test(flat)) return { rows: S.releasedRows || [], rowCount: (S.releasedRows || []).length };
   if (/^SELECT COUNT\(\*\)::int AS leads, COUNT\(DISTINCT lower\(email\)\)::int AS people/.test(flat)) {
     return { rows: [S.relCounts || { leads: 3, people: 1, blocked: 3, booked: 0 }], rowCount: 1 };
   }
@@ -227,8 +227,12 @@ function stubQuery(q, params) {
   if (/SELECT COUNT\(DISTINCT session_id\)::int AS n, MIN\(created_at\) AS first_at FROM leads WHERE non_icp_blocked IS TRUE/.test(flat)) {
     return { rows: [{ n: S.tries == null ? 1 : S.tries, first_at: '2026-10-01T10:00:00.000Z' }], rowCount: 1 };
   }
-  if (/GROUP BY lower\(l\.email\) HAVING COUNT\(DISTINCT l\.session_id\) >= 2/.test(flat)) {
+  if (/GROUP BY lower\(l\.email\)\s+ORDER BY MAX\(l\.created_at\) DESC/.test(flat)) {
     return { rows: S.repeatRows || [], rowCount: (S.repeatRows || []).length };
+  }
+  /* The All leads / Blocked page query: whatever rows the scenario hands it (the COUNT beside it still falls to the generic branch). */
+  if (/^SELECT\s+l\.session_id, l\.email, l\.first_name, l\.last_name, l\.phone/.test(flat)) {
+    return { rows: S.pageRows || [], rowCount: (S.pageRows || []).length };
   }
   /* Aggregates (/monitor/metrics runs a dozen) must return ONE row, not zero.
      Every field is read through `parseInt(x) || 0`, so an empty object yields
@@ -360,7 +364,7 @@ const post = async (p, body) => {
   let j = null; try { j = await r.json(); } catch (_) {}
   return { status: r.status, body: j };
 };
-const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; S.dropoffInternal = null; S.dropoffRows = null; S.dropoffSources = null; S.stickySource = null; S.exempt = []; S.tries = null; S.repeatRows = []; S.enrich = null; S.relCounts = null; S.relCleared = null; S.unrelRemoved = null; S.releasedRows = []; S.cronLeads = []; S.emails = []; };
+const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; S.dropoffInternal = null; S.dropoffRows = null; S.dropoffSources = null; S.stickySource = null; S.exempt = []; S.tries = null; S.repeatRows = []; S.enrich = null; S.relCounts = null; S.relCleared = null; S.unrelRemoved = null; S.releasedRows = []; S.pageRows = []; S.cronLeads = []; S.emails = []; };
 const metaFired      = () => S.fetches.some((u) => /graph\.facebook\.com/.test(u));
 const salesforceHit  = () => S.fetches.some((u) => /\/sobjects\//.test(u));
 const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') || true);
@@ -2065,9 +2069,13 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     r = await POSTJ('/monitor/non-icp-unrelease?token=stub', { domain: 'acme.com' }); j = await r.json();
     ok('UNRELEASE: undoing something never released removes 0 and says nothing in Slack', j.removed === 0 && S.slackPayloads.length === 0, JSON.stringify(j));
 
-    reset(); S.releasedRows = [{ domain: 'specialtyprogramgroup.com', note: 'n', released_by: 'dashboard', released_at: '2026-10-15T10:00:00Z', leads: 3 }];
+    reset(); S.releasedRows = [{ domain: 'specialtyprogramgroup.com', note: 'n', released_by: 'dashboard', released_at: '2026-10-15T10:00:00Z', leads: 3, people: '1', tries: '3', utm_source: 'google', utm_medium: 'cpc', utm_campaign: null, hear_about_us: 'Google Ads', referrer: '' }];
     r = await GET('/monitor/non-icp-released?token=stub'); j = await r.json();
     ok('RELEASED list: each company with when, by, note and how many leads', r.status === 200 && j.rows.length === 1 && j.rows[0].domain === 'specialtyprogramgroup.com' && j.rows[0].leads === 3 && j.rows[0].released_by === 'dashboard', JSON.stringify(j));
+    ok('RELEASED list: ...and how many PEOPLE and how many times the form was SUBMITTED (counts are numbers)', j.rows[0].people === 1 && j.rows[0].tries === 3, JSON.stringify(j.rows[0]));
+    ok('RELEASED list: ...and where they came from, with an empty source as null', j.rows[0].hear_about_us === 'Google Ads' && j.rows[0].utm_source === 'google' && j.rows[0].referrer === null && j.rows[0].utm_campaign === null, JSON.stringify(j.rows[0]));
+    const relSql = S.writes.find((w) => /FROM non_icp_exemptions e\b/.test(w.flat));
+    ok('RELEASED list: tries are SUBMITTED sessions, counted per company, in SQL', !!relSql && /COUNT\(DISTINCT l\.session_id\) FILTER \(WHERE l\.submitted_at IS NOT NULL\)/.test(relSql.flat) && /l\.non_icp_reason = e\.domain/.test(relSql.flat));
   }
   {
     /* THE FOLLOW-UP CRON, DRIVEN. specialtyprogramgroup.com's contact was replied to by hand and
@@ -2098,41 +2106,84 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     ok('CRON control: the SAME lead with the company NOT released is emailed', followUps().length === 1, JSON.stringify(S.emails.map((m) => m.to)));
   }
   {
-    /* THE DASHBOARD'S READ. */
+    /* THE DASHBOARD'S READ, over EVERY blocked person since 16 Oct 2026. The SQL returns one raw row per person and
+       the CODE decides who is listed and why, so these fixtures are raw rows, including people who are NOT listed. */
     reset();
+    const person = (o) => Object.assign({ name: null, attempts: 1, submitted: true, first_at: '2026-10-15T14:00:00Z', last_at: '2026-10-15T14:00:00Z', source: 'llm', model_blocked: true,
+      business_type: 'insurance', confidence: 0.9, company_size: null, title: null, seniority: null, departments: null,
+      utm_source: null, utm_medium: null, utm_campaign: null, hear_about_us: null, referrer: null }, o);
     S.repeatRows = [
-      { email: 'maya@spgish.test', name: 'Maya Lee', domain: 'spgish.test', attempts: 3, first_at: '2026-09-28T18:30:00Z', last_at: '2026-10-09T18:30:00Z', source: 'llm', model_blocked: true, business_type: 'insurance', confidence: 0.97, company_size: 300,
+      person({ email: 'maya@spgish.test', name: 'Maya Lee', domain: 'spgish.test', attempts: 3, first_at: '2026-09-28T18:30:00Z', last_at: '2026-10-09T18:30:00Z', confidence: 0.97, company_size: 300,
         title: 'Digital Marketing Manager', seniority: 'manager', departments: 'master_marketing',
-        utm_source: 'google', utm_medium: 'cpc', utm_campaign: 'UR_G_S_US_BR_Brand-tIS', hear_about_us: 'Google Ads', referrer: 'https://www.google.com/' },
-      { email: 'pat@kw.com', name: null, domain: 'kw.com', attempts: '2', first_at: '2026-10-01T10:00:00Z', last_at: '2026-10-06T10:00:00Z', source: 'domain_list', model_blocked: false, business_type: null, confidence: null, company_size: 88000, title: null, seniority: null, departments: null },
-      { email: 'sean@bigco.test', name: 'Sean Lee', domain: 'bigco.test', attempts: 1, first_at: '2026-10-15T14:00:00Z', last_at: '2026-10-15T14:00:00Z', source: 'llm', model_blocked: true, business_type: 'real_estate', confidence: 0.88, company_size: 1200,
-        title: 'Vice President of Leasing', seniority: 'vp', departments: 'master_operations' },
-      { email: 'edge@mid.test', name: null, domain: 'mid.test', attempts: 1, first_at: '2026-10-15T14:00:00Z', last_at: '2026-10-15T14:00:00Z', source: 'llm', model_blocked: true, business_type: 'insurance', confidence: 0.9, company_size: 199, title: null, seniority: null, departments: null }];
+        utm_source: 'google', utm_medium: 'cpc', utm_campaign: 'UR_G_S_US_BR_Brand-tIS', hear_about_us: 'Google Ads', referrer: 'https://www.google.com/' }),
+      person({ email: 'pat@kw.com', domain: 'kw.com', attempts: '2', first_at: '2026-10-01T10:00:00Z', last_at: '2026-10-06T10:00:00Z', source: 'domain_list', model_blocked: false, business_type: null, confidence: null, company_size: 88000 }),
+      person({ email: 'sean@bigco.test', name: 'Sean Lee', domain: 'bigco.test', business_type: 'real_estate', confidence: 0.88, company_size: 1200, title: 'Vice President of Leasing', seniority: 'vp', departments: 'master_operations' }),
+      person({ email: 'edge@mid.test', domain: 'mid.test', company_size: 199 }),
+      person({ email: 'exact@mid.test', domain: 'exact.test', company_size: 200 }),
+      person({ email: 'agent@farmers.test', domain: 'farmers.test', source: 'domain_list', model_blocked: false, business_type: null, confidence: null, company_size: 54000, title: 'Allstate Agency Owner / Insurance Agent', seniority: 'owner' }),
+      person({ email: 'ceo@tiny.test', domain: 'tiny.test', title: 'CEO', seniority: 'c_suite' }),
+      person({ email: 'csuite@blank.test', domain: 'blank.test', company_size: 500, seniority: 'c_suite', departments: 'c_suite' }),
+      person({ email: 'dir@unsubmitted.test', domain: 'unsub.test', attempts: 0, submitted: false, company_size: 5000, title: 'Director of Marketing', seniority: 'director', departments: 'master_marketing' })];
     const unauth = await realFetch(BASE + '/monitor/non-icp-review');
     ok('REPEAT/dashboard: the route is token-gated', unauth.status === 401, String(unauth.status));
     const okr = await realFetch(BASE + '/monitor/non-icp-review?token=stub');
     const body = await okr.json();
-    ok('REPEAT/dashboard: answers with the people who need a look', okr.status === 200 && body.rows.length === 4 && body.min_staff === 200, JSON.stringify(body).slice(0, 200));
+    const byEmail = (e) => (body.rows || []).find((r) => r.email === e) || {};
+    ok('REPEAT/dashboard: answers with only the people who need a look, in the order the SQL gave them', okr.status === 200 && body.min_staff === 200 && JSON.stringify(body.rows.map((r) => r.email)) === JSON.stringify(['maya@spgish.test', 'pat@kw.com', 'sean@bigco.test', 'exact@mid.test', 'csuite@blank.test', 'dir@unsubmitted.test']), JSON.stringify((body.rows || []).map((r) => r.email)));
+    const maya = byEmail('maya@spgish.test');
     ok('REPEAT/dashboard: a person carries email, company, tries, judgment and size',
-       body.rows[0].email === 'maya@spgish.test' && body.rows[0].domain === 'spgish.test' && body.rows[0].attempts === 3 &&
-       body.rows[0].business_type === 'insurance' && body.rows[0].confidence === 0.97 && body.rows[0].company_size === 300, JSON.stringify(body.rows[0]));
-    ok('REPEAT/dashboard: counts are numbers, nulls stay null', body.rows[1].attempts === 2 && body.rows[1].confidence === null && body.rows[1].title === null, JSON.stringify(body.rows[1]));
-    ok('REVIEW: every person carries name and ROLE (title, seniority, department)', body.rows[0].name === 'Maya Lee' && body.rows[0].title === 'Digital Marketing Manager' && body.rows[0].seniority === 'manager' && body.rows[0].departments === 'master_marketing', JSON.stringify(body.rows[0]));
-    ok('REVIEW: every person carries WHERE THEY CAME FROM (ad source, medium, campaign, heard-about-us, referrer)', body.rows[0].utm_source === 'google' && body.rows[0].utm_medium === 'cpc' && body.rows[0].utm_campaign === 'UR_G_S_US_BR_Brand-tIS' && body.rows[0].hear_about_us === 'Google Ads' && body.rows[0].referrer === 'https://www.google.com/', JSON.stringify(body.rows[0]));
-    ok('REVIEW: ...and an empty source is null, never an empty string', body.rows[1].utm_source === null && body.rows[1].hear_about_us === null && body.rows[1].referrer === null, JSON.stringify(body.rows[1]));
-    ok('REVIEW: the reasons are decided in code, a person can have both', JSON.stringify(body.rows[0].reasons) === JSON.stringify(['tried_again', 'large']), JSON.stringify(body.rows[0].reasons));
-    ok('REVIEW: a brand-list block is "tried again" only, NEVER "large", however big (88,000 staff)', JSON.stringify(body.rows[1].reasons) === JSON.stringify(['tried_again']), JSON.stringify(body.rows[1].reasons));
-    ok('REVIEW: a first-time MODEL block at 1,200 staff is "large" only', JSON.stringify(body.rows[2].reasons) === JSON.stringify(['large']), JSON.stringify(body.rows[2].reasons));
-    ok('REVIEW: the line is exactly 200 (199 staff is neither reason)', JSON.stringify(body.rows[3].reasons) === JSON.stringify([]), JSON.stringify(body.rows[3].reasons));
+       maya.email === 'maya@spgish.test' && maya.domain === 'spgish.test' && maya.attempts === 3 && maya.business_type === 'insurance' && maya.confidence === 0.97 && maya.company_size === 300, JSON.stringify(maya));
+    ok('REPEAT/dashboard: counts are numbers, nulls stay null', byEmail('pat@kw.com').attempts === 2 && byEmail('pat@kw.com').confidence === null && byEmail('pat@kw.com').title === null, JSON.stringify(byEmail('pat@kw.com')));
+    ok('REVIEW: every person carries name and ROLE (title, seniority, department)', maya.name === 'Maya Lee' && maya.title === 'Digital Marketing Manager' && maya.seniority === 'manager' && maya.departments === 'master_marketing', JSON.stringify(maya));
+    ok('REVIEW: every person carries WHERE THEY CAME FROM (ad source, medium, campaign, heard-about-us, referrer)', maya.utm_source === 'google' && maya.utm_medium === 'cpc' && maya.utm_campaign === 'UR_G_S_US_BR_Brand-tIS' && maya.hear_about_us === 'Google Ads' && maya.referrer === 'https://www.google.com/', JSON.stringify(maya));
+    ok('REVIEW: ...and an empty source is null, never an empty string', byEmail('pat@kw.com').utm_source === null && byEmail('pat@kw.com').hear_about_us === null && byEmail('pat@kw.com').referrer === null, JSON.stringify(byEmail('pat@kw.com')));
+    ok('REVIEW: the reasons are decided in code, and a person can have all three', JSON.stringify(maya.reasons) === JSON.stringify(['tried_again', 'large', 'buyer']), JSON.stringify(maya.reasons));
+    ok('REVIEW: a brand-list block is "tried again" only, NEVER "large", however big (88,000 staff)', JSON.stringify(byEmail('pat@kw.com').reasons) === JSON.stringify(['tried_again']), JSON.stringify(byEmail('pat@kw.com').reasons));
+    ok('REVIEW: a first-time MODEL block at 1,200 staff is "large", and its VP title is a "buyer"', JSON.stringify(byEmail('sean@bigco.test').reasons) === JSON.stringify(['large', 'buyer']), JSON.stringify(byEmail('sean@bigco.test').reasons));
+    ok('REVIEW: the line is exactly 200 (200 staff is "large", 199 staff is neither reason and is not listed)', JSON.stringify(byEmail('exact@mid.test').reasons) === JSON.stringify(['large']) && !byEmail('edge@mid.test').email, JSON.stringify(byEmail('exact@mid.test')));
+    ok('REVIEW: a person who never SUBMITTED is not "large", but a buyer-type role lists them anyway (the third reason needs neither)', JSON.stringify(byEmail('dir@unsubmitted.test').reasons) === JSON.stringify(['buyer']), JSON.stringify(byEmail('dir@unsubmitted.test')));
+    ok('REVIEW: the role hint rides on each row, WITH its reason in words', maya.role_hint === 'buyer' && maya.role_reason === 'Manager level, marketing or growth role · 300 staff · not an agent-type title' && byEmail('sean@bigco.test').role_reason === 'VP level · 1,200 staff · not an agent-type title', JSON.stringify([maya.role_reason, byEmail('sean@bigco.test').role_reason]));
+    ok('REVIEW: no title means NO hint and NO role reason (nothing to read), even for a C-suite level at 500 staff', byEmail('csuite@blank.test').role_hint === null && byEmail('csuite@blank.test').role_reason === null && JSON.stringify(byEmail('csuite@blank.test').reasons) === JSON.stringify(['large']), JSON.stringify(byEmail('csuite@blank.test')));
+    ok('REVIEW: TOTALS cover EVERY blocked person, listed or not (9 people, 3 buyers, 1 agent, 4 with no title)',
+       JSON.stringify(body.totals) === JSON.stringify({ people: 9, buyers: 3, agents: 1, no_title: 4 }), JSON.stringify(body.totals));
+    ok('REVIEW: it names every buyer\'s address for the main list\'s filter, in one list', JSON.stringify(body.buyer_emails) === JSON.stringify(['maya@spgish.test', 'sean@bigco.test', 'dir@unsubmitted.test']), JSON.stringify(body.buyer_emails));
     reset();
     const none = await (await realFetch(BASE + '/monitor/non-icp-review?token=stub')).json();
-    ok('REPEAT/dashboard: nobody back is an empty list, not an error', Array.isArray(none.rows) && none.rows.length === 0, JSON.stringify(none));
+    ok('REPEAT/dashboard: nobody blocked is an empty list and zero totals, not an error', Array.isArray(none.rows) && none.rows.length === 0 && none.totals.people === 0 && none.totals.buyers === 0 && Array.isArray(none.buyer_emails) && none.buyer_emails.length === 0, JSON.stringify(none));
     const q = S.writes.find((w) => /GROUP BY lower\(l\.email\)/.test(w.flat));
     ok('REPEAT/dashboard: our own test submissions are left out, with IS NOT TRUE', !!q && /\) IS NOT TRUE/.test(q.flat), q && q.flat.slice(0, 200));
-    ok('REPEAT/dashboard: counts distinct SESSIONS of an address that SUBMITTED', !!q && /COUNT\(DISTINCT l\.session_id\) >= 2/.test(q.flat) && /l\.submitted_at IS NOT NULL/.test(q.flat));
-    ok('REVIEW: the large-company reason is for MODEL blocks only, in SQL as well as in code', !!q && /OR \(bool_or\(l\.non_icp_source LIKE 'llm%'\)/.test(q.flat), q && q.flat.slice(q.flat.indexOf('HAVING'), q.flat.indexOf('HAVING') + 260));
-    ok('REVIEW: the source fields are read as the LATEST NON-EMPTY answer', !!q && ['utm_source', 'utm_medium', 'utm_campaign', 'hear_about_us', 'referrer'].every((c) => new RegExp("ARRAY_AGG\\(l\\." + c + " ORDER BY l\\.created_at DESC\\) FILTER \\(WHERE NULLIF\\(l\\." + c + ", ''\\) IS NOT NULL\\)").test(q.flat)), q && q.flat.slice(0, 0));
-    ok('REVIEW: the staff line is bound as a parameter (200 by default), not written into the SQL', !!q && q.params[q.params.length - 1] === 200 && /MAX\(CASE WHEN l\.enriched_company_size ~ '\^\[0-9\]\+\$' THEN l\.enriched_company_size::int END\) >= \$\d/.test(q.flat), q && JSON.stringify(q.params).slice(-40));
+    ok('REPEAT/dashboard: counts distinct SESSIONS of an address that SUBMITTED', !!q && /COUNT\(DISTINCT l\.session_id\) FILTER \(WHERE l\.submitted_at IS NOT NULL\)/.test(q.flat));
+    ok('REVIEW: it reads EVERY blocked person (no HAVING: the code decides who is listed, so the totals can cover everybody)', !!q && !/HAVING/.test(q.flat) && /l\.non_icp_blocked IS TRUE/.test(q.flat));
+    ok('REVIEW: the large-company reason is for MODEL blocks only, in the data the code reads', !!q && /bool_or\(l\.non_icp_source LIKE 'llm%'\)\s+AS model_blocked/.test(q.flat));
+    ok('REVIEW: the source fields are read as the LATEST NON-EMPTY answer', !!q && ['utm_source', 'utm_medium', 'utm_campaign', 'hear_about_us', 'referrer'].every((c) => new RegExp("ARRAY_AGG\\(l\\." + c + " ORDER BY l\\.created_at DESC\\) FILTER \\(WHERE NULLIF\\(l\\." + c + ", ''\\) IS NOT NULL\\)").test(q.flat)));
+    ok('REVIEW: the role fields read the lead row FIRST and the enrichment record behind it, like the list beside it does (so the two hints cannot disagree)',
+       !!q && /LEFT JOIN enrichment_data e ON e\.session_id = l\.session_id/.test(q.flat) && ['enriched_title', 'enriched_seniority', 'enriched_departments', 'enriched_company_size'].every((c) => q.flat.includes('COALESCE(l.' + c + ', e.' + c + ')')), q && q.flat.slice(0, 0));
+
+    /* THE MAIN LIST: the same hint on every row, and a filter by address list, both on the SERVER. */
+    reset();
+    const LR = (o) => Object.assign({ session_id: '00000000-0000-4000-8000-0000000000b' + String(Math.random()).slice(2, 4), email: 'x@y.test', enriched_title: null, enriched_seniority: null, enriched_departments: null, enriched_company_size: null, created_at: '2026-10-10T10:00:00Z' }, o);
+    S.pageRows = [
+      LR({ email: 'vp@acme.test', enriched_title: 'Vice President of Leasing', enriched_seniority: 'vp', enriched_departments: 'master_operations', enriched_company_size: '1200' }),
+      LR({ email: 'agent@acme.test', enriched_title: 'Insurance Agent', enriched_seniority: 'owner', enriched_company_size: '90000' }),
+      LR({ email: 'ceo@unknownsize.test', enriched_title: 'CEO', enriched_seniority: 'c_suite', enriched_company_size: null }),
+      LR({ email: 'blank@x.test', enriched_seniority: 'c_suite', enriched_company_size: '500' }),
+      LR({ email: 'tiny@x.test', enriched_title: 'Marketing Manager', enriched_seniority: 'manager', enriched_departments: 'master_marketing', enriched_company_size: '8' })];
+    const lj = await (await realFetch(BASE + '/monitor/leads?token=stub&page=1&nonicp=only')).json();
+    const lrow = (e) => (lj.leads || []).find((r) => r.email === e) || {};
+    ok('LEADS: every row carries role_hint and role_reason from the ONE server function', lj.leads && lj.leads.length === 5 && lrow('vp@acme.test').role_hint === 'buyer' && /^VP level/.test(lrow('vp@acme.test').role_reason) && lrow('agent@acme.test').role_hint === 'agent' && lrow('agent@acme.test').role_reason === 'the title says "agent"', JSON.stringify(lj.leads && lj.leads.map((r) => [r.email, r.role_hint, r.role_reason])));
+    ok('LEADS: a CEO at an UNKNOWN-size company is NOT a likely buyer (fix: unknown size is usually a tiny agency)', lrow('ceo@unknownsize.test').role_hint === null && lrow('ceo@unknownsize.test').role_reason === 'no company size from Apollo', JSON.stringify(lrow('ceo@unknownsize.test')));
+    ok('LEADS: a C-suite level with NO TITLE is not a likely buyer (fix: a blank title cannot be read as agent or not)', lrow('blank@x.test').role_hint === null && lrow('blank@x.test').role_reason === null, JSON.stringify(lrow('blank@x.test')));
+    ok('LEADS: a marketing manager at 8 staff is not a likely buyer, and the reason says why', lrow('tiny@x.test').role_hint === null && lrow('tiny@x.test').role_reason === 'company under 20 staff', JSON.stringify(lrow('tiny@x.test')));
+    reset();
+    await realFetch(BASE + '/monitor/leads?token=stub&page=1&nonicp=only&emails=' + encodeURIComponent('Maya@Spgish.test, sean@bigco.test'));
+    const eq1 = S.writes.find((w) => /FROM leads l WHERE true/.test(w.flat) && /ANY\(\$\d+::text\[\]\)/.test(w.flat));
+    ok('LEADS: an emails filter is ONE bound text[] parameter (lower-cased, trimmed), never written into the SQL', !!eq1 && /LOWER\(l\.email\) = ANY\(\$\d+::text\[\]\)/.test(eq1.flat) && eq1.params.some((p) => Array.isArray(p) && JSON.stringify(p) === JSON.stringify(['maya@spgish.test', 'sean@bigco.test'])) && !/spgish/.test(eq1.flat), eq1 && JSON.stringify(eq1.params));
+    const badE = await realFetch(BASE + '/monitor/leads?token=stub&emails=' + encodeURIComponent("a@b.test,'; DROP TABLE leads;--"));
+    const manyE = await realFetch(BASE + '/monitor/leads?token=stub&emails=' + encodeURIComponent(Array.from({ length: 301 }, (_, i) => 'p' + i + '@x.test').join(',')));
+    ok('LEADS: a malformed address, or more than 300, is a 400 and runs no query', badE.status === 400 && manyE.status === 400);
+    reset();
+    await realFetch(BASE + '/monitor/leads?token=stub&page=1&nonicp=only');
+    ok('LEADS: with no emails parameter there is NO address condition (the list is unfiltered)', !S.writes.some((w) => /ANY\(\$\d+::text\[\]\)/.test(w.flat)));
   }
 
   /* All three booking routes must REFUSE, not merely suppress Schedule.

@@ -2934,6 +2934,33 @@ results13 = (async () => {
   }
 })().then(() => {}, (e) => { ok('release: the section completed', false, e && e.stack); });
 
+/* ── THE ROLE HINT, EXECUTED (16 Oct 2026). One function on the server; the browser only displays it. ── */
+{
+  const H = (new Function(between('const NON_ICP_AGENT_TITLE', "/* THE PERSON'S ROLE, as Apollo has it") + '\nreturn { nonIcpRoleHint, NON_ICP_BUYER_MIN_STAFF };'))();
+  const hint = (...a) => H.nonIcpRoleHint(...a).hint;
+  const reason = (...a) => H.nonIcpRoleHint(...a).reason;
+  ok('role hint: the real titles from our own blocked data are buyers (VP, CMO, Director, Product / Marketing Manager, VP Benefits)',
+     hint('Vice President of Leasing', 'vp', 'master_operations', 1200) === 'buyer' && hint('Chief Marketing Officer', 'c_suite', 'c_suite, marketing', 33) === 'buyer'
+     && hint('Director, Healthcare Reform Program Management', 'director', 'master_information_technology', 98000) === 'buyer' && hint('Product Manager (Growth)', 'manager', 'product_management, master_marketing', 900) === 'buyer'
+     && hint('Digital Marketing Manager', 'manager', 'master_marketing', 300) === 'buyer' && hint('Vice President Employee Benefits / Senior Consultant', 'vp', 'master_human_resources, consulting', 11000) === 'buyer');
+  ok('role hint: agent-type titles are agents, even at a huge company',
+     ['Insurance Agent', 'Agent', 'Licensed Real Estate Agent', 'Luxury Property Specialist', 'Partner, Realtor', 'Insurance Broker', 'Agent Intern', 'Producer / Operations', 'Owner and Broker in Charge', 'Broker | Owner | Realtor | Property Manager DRE #01940919']
+       .every((t) => hint(t, 'entry', 'master_operations', 1200) === 'agent'));
+  ok('role hint: agent words win over level, so "CEO / Mortgage Broker" is an agent', hint('CEO / Mortgage Broker', 'c_suite', 'c_suite, master_operations', 63) === 'agent' && reason('CEO / Mortgage Broker', 'c_suite', null, 63) === 'the title says "broker"');
+  ok('role hint: a word inside another word is NOT an agent word ("Management Associates" is, "Agentic AI Lead" is not)', hint('Agentic AI Lead', 'director', 'master_engineering', 200) === 'buyer' && hint('Management Associate', 'entry', null, 200) === 'agent');
+  ok('role hint: a "President" of a 2-person agency is NOT a buyer (the size line), and the reason says so', hint('President', 'vp', null, 2) === null && reason('President', 'vp', null, 2) === 'company under 20 staff');
+  /* THE TWO WEAKNESSES FIXED ON 16 OCT 2026 */
+  ok('role hint FIX 1a: a title at a company of UNKNOWN size is NOT a buyer (it used to be); the reason says so', hint('Vice President', 'vp', null, null) === null && hint('CEO', 'c_suite', null, undefined) === null && hint('CEO', 'c_suite', null, '') === null && reason('Vice President', 'vp', null, null) === 'no company size from Apollo');
+  ok('role hint FIX 1b: a level with NO TITLE is NOT a buyer (it used to be), and there is no reason, because there is nothing to read', hint(null, 'c_suite', 'c_suite', 500) === null && hint('', 'vp', 'master_marketing', 500) === null && hint('   ', 'director', null, 500) === null && reason(null, 'c_suite', null, 500) === null);
+  ok('role hint: owners, founders and partners get NO hint at a big company either, and the reason names the level (they are the people we block)', hint('Owner', 'owner', 'master_operations', 400) === null && hint('Founder & CEO', 'founder', 'c_suite', 400) === null && /^owner level, not a corporate or marketing role$/.test(reason('Owner', 'owner', 'master_operations', 400)));
+  ok('role hint: a marketing department alone is enough, and the reason says "marketing or growth role"', hint('Growth Lead', 'senior', 'master_marketing', 120) === 'buyer' && /marketing or growth role/.test(reason('Growth Lead', 'senior', 'master_marketing', 120)));
+  ok('role hint: a titled person with no level says "no level from Apollo"', reason('Operations', null, null, 300) === 'no level from Apollo, not a corporate or marketing role');
+  ok('role hint: the line is 20 staff, exactly: 19 is not a buyer, 20 is', hint('Director', 'director', null, 19) === null && hint('Director', 'director', null, 20) === 'buyer' && H.NON_ICP_BUYER_MIN_STAFF === 20);
+  ok('role hint: the size reads as a number whether Apollo handed over text or a number', hint('Director', 'director', null, '1200') === 'buyer' && hint('Director', 'director', null, 'many') === null);
+  ok('role hint: the reason carries level, size and the agent check, in one sentence', reason('Vice President of Leasing', 'vp', 'master_operations', 1200) === 'VP level · 1,200 staff · not an agent-type title');
+  ok('role hint: nothing throws on garbage', (() => { try { return [undefined, null, 5, {}, []].every((x) => H.nonIcpRoleHint(x, x, x, x).hint === null); } catch (e) { return false; } })());
+}
+
 /* ============================================================ */
 results7
   .then((rows) => { for (const [n, c, x] of rows) ok(n, c, x); return results8; })
