@@ -1777,11 +1777,63 @@ function slackTruncate(text, max = SLACK_ABOUT_MAX) {
    -- an SDR reading it can neither agree nor disagree. "Matched kw.com" can be
    checked against the person's actual company in one glance, which is exactly
    how paycompass.com would have been caught had substring matching shipped. */
+/* WHO GETS PINGED when a blocked lead needs a human look. Slack user IDs, in
+   Railway (NON_ICP_REVIEW_MENTION_IDS, comma separated), NOT in this file: the
+   repo is public. Anything that is not shaped like a Slack ID is dropped, so
+   the variable cannot smuggle other text, a channel mention or an @here into a
+   message. Unset means nobody is tagged and the post is otherwise unchanged. */
+function nonIcpReviewMentions() {
+  return String(process.env.NON_ICP_REVIEW_MENTION_IDS || '').split(',')
+    .map((x) => x.trim()).filter((x) => /^[UW][A-Z0-9]{6,}$/.test(x))
+    .map((x) => `<@${x}>`).join(' ');
+}
+/* A MODEL-JUDGED COMPANY THIS BIG IS WHERE A WRONG BLOCK COSTS THE MOST.
+   specialtyprogramgroup.com had 300 staff, a marketing team and a budget, and
+   was blocked like a one-person agent. The brand list is a hard block by
+   design and never triggers this; only the model's judgment does. 200 is a
+   starting point, from the 11 model-blocked domains that large in the first
+   five weeks. */
+const NON_ICP_REVIEW_MIN_STAFF = Number(process.env.NON_ICP_REVIEW_MIN_STAFF) > 0 ? Number(process.env.NON_ICP_REVIEW_MIN_STAFF) : 200;
+
 function slackNonIcpBlocked(d) {
   const name = [d.first_name, d.last_name].filter(Boolean).join(' ');
   const blocks = [];
-  blocks.push(bHeader('🚫 Lead Blocked — Non-ICP'));
+  /* A SECOND TRY FROM THE SAME PERSON IS THE BEST SIGNAL WE HAVE THAT THE
+     BLOCK IS WRONG, and until now it looked exactly like a first one.
+     specialtyprogramgroup.com's contact tried three times and wrote in to ask
+     why nobody had replied. attempts counts distinct sessions of this EMAIL
+     that were blocked and submitted, this one included, so 2 or more means
+     they came back. By email and not by company, because farmersagent.com and
+     allstate.com are shared by thousands of different agents and a count by
+     domain would read as one person retrying. */
+  const repeat = Number(d.attempts) >= 2;
+  const large  = d.large_company === true && Number(d.company_staff) > 0;
+  /* THE TWO REASONS A HUMAN SHOULD LOOK, and either one tags the people in
+     NON_ICP_REVIEW_MENTION_IDS. Neither changes who is blocked. */
+  const look = repeat || large;
+  const mentions = look ? nonIcpReviewMentions() : '';
+  const release = 'If this company should not be blocked: `node tools/non-icp-release.js ' + (d.matched_domain || 'domain.com') +
+    '` shows what it would do, and `--apply` does it.';
+  blocks.push(bHeader(repeat ? '🔁 Blocked person tried again — Non-ICP'
+                    : large  ? '👀 Large company blocked — Non-ICP'
+                    :          '🚫 Lead Blocked — Non-ICP'));
   blocks.push(bDivider());
+  if (repeat) {
+    blocks.push(bSection(
+      (mentions ? mentions + '\n' : '') +
+      `*Attempt ${Number(d.attempts)} from this person*` +
+      (d.first_attempt ? ` _(first on ${new Date(d.first_attempt).toISOString().slice(0, 10)})_` : '') +
+      '\nA second try usually means we got it wrong, or they did not understand the page. They deserve a human reply either way. ' + release
+    ));
+  }
+  if (large) {
+    blocks.push(bSection(
+      (mentions && !repeat ? mentions + '\n' : '') +
+      `*Large company: about ${Number(d.company_staff).toLocaleString('en-US')} staff.* ` +
+      'We block any insurance or real estate company, but one this size may be a real prospect ' +
+      '(specialtyprogramgroup.com had 300 staff and was one). A quick look is worth it. ' + release
+    ));
+  }
 
   /* THE MATCH AND THE WEBSITE, TOGETHER AND FIRST.
 
@@ -1874,7 +1926,7 @@ function slackNonIcpBlocked(d) {
         '`NON_ICP_BLOCK=false` on Railway turns the whole thing off without a deploy.'
   ));
   sendSlack(blocks,
-    `🚫 Lead blocked (non-ICP): ${d.email || name || 'unknown'} — matched ${d.matched_domain || 'unknown'}`);
+    `${mentions ? mentions + ' ' : ''}${repeat ? '🔁 Blocked person tried again' : large ? '👀 Large company blocked' : '🚫 Lead blocked'} (non-ICP): ${d.email || name || 'unknown'} — matched ${d.matched_domain || 'unknown'}`);
 }
 
 /* ── The FLAGGED-not-blocked post ────────────────────────────────────
@@ -8699,6 +8751,12 @@ async function nonIcpVerdict({ email, website } = {}) {
        exclusion ELV health and PartnerStack already use. */
     if (isPartnerStackTestEmail(email)) return { blocked: false, reason: 'test_email' };
 
+    /* A COMPANY A PERSON HAS RELEASED comes before BOTH mechanisms, brand
+       list included: a captive agent we decided to talk to is exactly the
+       case a list cannot know about. See nonIcpExemptDomains. */
+    const released = await nonIcpExemptDomainFor({ email, website });
+    if (released) return { blocked: false, reason: 'exempt', matched_domain: released };
+
     /* ── MECHANISM 1: the brand domain list. FIRST, ALWAYS. ───────────
        Cheap, deterministic, re-derivable by a human, and -- the reason the
        order matters -- it still works when the site will not load. The two
@@ -9596,6 +9654,49 @@ function nonIcpCandidateDomains({ email, website } = {}) {
   return out;
 }
 
+/* ── Companies a person has RELEASED ─────────────────────────────────
+   specialtyprogramgroup.com was blocked three times in two weeks, the
+   visitor wrote in to ask why nobody had replied, and the only remedy on
+   offer was NON_ICP_LLM_BLOCK=false, which stops ALL model blocking. A row
+   in non_icp_exemptions says: whatever the brand list or the model says,
+   this company is not blocked, flagged or withheld from Meta.
+
+   READ THROUGH ONE FUNCTION, used where every decision is made:
+   nonIcpVerdict (the form, /partial, /submit), nonIcpLlmCachedVerdict (the
+   late-verdict sweep, the Schedule guard and the Google upload all read
+   the verdict through it) and the warm path (so a released company is not
+   re-scraped and re-judged for nothing).
+
+   KEPT FOR A MINUTE, not read per lead: the table is a handful of rows and
+   this is on the lead path. If the read fails the LAST GOOD SET is kept, so
+   a database blip does not un-release anybody; on a cold start with a
+   failing database the set is empty, which means a released company is
+   blocked again until the read works. That is the one direction this fails
+   closed, and it is a person's decision being briefly ignored, not a lead
+   being invented.
+
+   A lead is exempt if EITHER its website's company or its email's company
+   is released: the person belongs to that company. */
+/* An env var only so a test can set it to 0; production leaves it alone. */
+const NON_ICP_EXEMPT_TTL_MS = process.env.NON_ICP_EXEMPT_TTL_MS == null ? 60 * 1000 : Number(process.env.NON_ICP_EXEMPT_TTL_MS);
+let _nonIcpExempt = { at: 0, set: new Set() };
+async function nonIcpExemptDomains() {
+  if (Date.now() - _nonIcpExempt.at < NON_ICP_EXEMPT_TTL_MS) return _nonIcpExempt.set;
+  try {
+    const r = await pool.query('SELECT domain FROM non_icp_exemptions');
+    _nonIcpExempt = { at: Date.now(), set: new Set(r.rows.map((x) => x.domain)) };
+  } catch (err) {
+    console.warn('[non-ICP] could not read exemptions — keeping the last good list:', err && err.message);
+    _nonIcpExempt = { at: Date.now(), set: _nonIcpExempt.set };   // retry after the TTL, not on every lead
+  }
+  return _nonIcpExempt.set;
+}
+async function nonIcpExemptDomainFor({ email, website } = {}) {
+  const set = await nonIcpExemptDomains();
+  if (!set.size) return null;
+  return nonIcpCandidateDomains({ email, website }).find((d) => set.has(d)) || null;
+}
+
 /* ── The warm path ───────────────────────────────────────────────────
    NEVER AWAITED BY ANYTHING ON THE LEAD PATH. Called from
    /non-icp-check, which the form already fires on email blur at step 1,
@@ -9731,6 +9832,7 @@ function warmNonIcpLlm({ email, website } = {}) {
   for (const domain of warmDomains) {
     if (_nonIcpLlmInFlight.has(domain)) continue;
     const p = (async () => {
+      if ((await nonIcpExemptDomains()).has(domain)) return;   // released: nothing will read the answer
       const cached = await nonIcpReadVerdictRow(domain);
       if (cached) { _nonIcpLlmStats.cacheHits++; return; }   // fresh enough, nothing to do
       /* CACHE HIT RATE AND WARM DURATION are the two numbers that say
@@ -9831,6 +9933,11 @@ function warmNonIcpLlm({ email, website } = {}) {
    "this domain is fine" and is not "this domain is bad". It blocks
    nobody and it flags nobody. */
 async function nonIcpLlmCachedVerdict({ email, website } = {}) {
+  /* RELEASED COMPANIES ARE INVISIBLE HERE. The late-verdict sweep, the Schedule
+     guard and the Google upload all read the verdict through this function, so
+     checking only in nonIcpVerdict would let a released company be re-stamped
+     blocked the moment it booked. */
+  if (await nonIcpExemptDomainFor({ email, website })) return null;
   let metaOnly = null;
   for (const domain of nonIcpCandidateDomains({ email, website })) {
     const row = await nonIcpReadVerdictRow(domain);
@@ -13943,6 +14050,67 @@ app.get('/monitor/overview', async (req, res) => {
   }
 });
 
+/* ── Blocked people who TRIED AGAIN ───────────────────────────────────
+   A person blocked twice or more is the likeliest wrong block we have: they
+   did not take no for an answer. specialtyprogramgroup.com's contact tried
+   three times and wrote in. Slack says so at the moment it happens
+   (slackNonIcpBlocked); this is the same list on the dashboard, so it is
+   still there on Monday.
+
+   BY EMAIL, NOT BY COMPANY. farmersagent.com and allstate.com are shared by
+   thousands of agents, so a count by domain read as nine tries from "one
+   company" when it was nine different people. Counts distinct SESSIONS of an
+   address that were blocked AND submitted. Our own test submissions are left
+   out (a test against a brand domain is not somebody coming back), with IS NOT
+   TRUE because the clause is NULL for a lead with no email. A released
+   company drops out by itself: tools/non-icp-release.js clears the block on
+   its leads. Takes db so a test or the preview can hand it a read-only
+   connection; writes nothing. */
+async function nonIcpRepeatsReport(db) {
+  const params = [];
+  const internal = internalLeadSqlClause('l.email', 'l.page_url', params);
+  const r = await db.query(`
+    SELECT lower(l.email)                                              AS email,
+           (ARRAY_AGG(l.non_icp_reason ORDER BY l.created_at DESC))[1] AS domain,
+           COUNT(DISTINCT l.session_id)::int                           AS attempts,
+           MIN(l.created_at)                                           AS first_at,
+           MAX(l.created_at)                                           AS last_at,
+           MAX(l.non_icp_source)                                       AS source,
+           MAX(v.business_type)                                        AS business_type,
+           MAX(v.confidence)::float                                    AS confidence,
+           MAX(CASE WHEN l.enriched_company_size ~ '^[0-9]+$' THEN l.enriched_company_size::int END) AS company_size
+      FROM leads l
+      LEFT JOIN non_icp_domain_verdicts v ON v.domain = l.non_icp_reason
+     WHERE l.non_icp_blocked IS TRUE
+       AND l.submitted_at IS NOT NULL
+       AND l.email IS NOT NULL AND l.email <> ''
+       AND (${internal}) IS NOT TRUE
+     GROUP BY lower(l.email)
+    HAVING COUNT(DISTINCT l.session_id) >= 2
+     ORDER BY MAX(l.created_at) DESC, COUNT(DISTINCT l.session_id) DESC
+     LIMIT 50`, params);
+  return {
+    as_of: new Date().toISOString(),
+    rows: r.rows.map((x) => ({
+      email: x.email, domain: x.domain, attempts: Number(x.attempts) || 0, first_at: x.first_at, last_at: x.last_at,
+      source: x.source || null, business_type: x.business_type || null,
+      confidence: x.confidence == null ? null : Number(x.confidence),
+      company_size: x.company_size == null ? null : Number(x.company_size),
+    })),
+  };
+}
+
+app.get('/monitor/non-icp-repeats', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    res.json(await nonIcpRepeatsReport(pool));
+  } catch (err) {
+    console.error('[/monitor/non-icp-repeats]', err.message);
+    res.status(500).json({ error: 'Repeat attempts report failed', detail: err.message });
+  }
+});
+
 app.get('/monitor/non-icp', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
@@ -15507,7 +15675,29 @@ app.post('/submit', async (req, res) => {
          a pure string comparison. */
       const emailSide   = nonIcpMatchHost(email);
       const websiteSide = nonIcpMatchHost(website);
+      /* HOW MANY TIMES THIS PERSON (this email) HAS BEEN BLOCKED AND SUBMITTED,
+         this one included (the row above is already written). Never throws: a
+         failed count just posts the normal message. Our own test submissions
+         are not counted, or every test against a brand domain would read as
+         somebody coming back. */
+      let tries = null;
+      if (email && !isInternalSubmission(email, page_url)) {
+        try {
+          const t = await pool.query(
+            `SELECT COUNT(DISTINCT session_id)::int AS n, MIN(created_at) AS first_at
+               FROM leads WHERE non_icp_blocked IS TRUE AND submitted_at IS NOT NULL AND lower(email) = lower($1)`,
+            [email]);
+          tries = { n: t.rows[0] && t.rows[0].n, first: t.rows[0] && t.rows[0].first_at };
+        } catch (err) { console.warn('[/submit] could not count blocked attempts:', err.message); }
+      }
+      /* A MODEL-JUDGED company with 200+ staff (Apollo, read off this session's
+         enrichment). Never the brand list, never one of our own tests. */
+      const staff = Number(String(enrich.enriched_company_size || '').replace(/[^0-9]/g, '')) || null;
+      const largeCompany = nonIcpSourceIsModel(nonIcpSource) && staff !== null
+        && staff >= NON_ICP_REVIEW_MIN_STAFF && !isInternalSubmission(email, page_url);
       slackNonIcpBlocked({ stage: 'submit', matched_domain: nonIcpReason,
+        attempts: tries ? tries.n : null, first_attempt: tries ? tries.first : null,
+        large_company: largeCompany, company_staff: staff,
         matched_label: NON_ICP_DOMAINS[nonIcpReason] || null,
         matched_in_email: !!emailSide, matched_in_website: !!websiteSide,
         /* The model fields come off the fresh verdict rather than the row:

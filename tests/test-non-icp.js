@@ -1805,7 +1805,7 @@ results13 = (async () => {
       const scope = (new Function('process', '_nonIcpLlmStats', 'nonIcpReadVerdictRow',
         'nonIcpWriteVerdictRow', 'nonIcpClassifyDomain', 'recordFailure', 'recordSuccess',
         'nonIcpCandidateDomains', 'isPartnerStackTestEmail', 'NON_ICP_LLM_ENABLED', 'console',
-        'NON_ICP_BLOCK_ENABLED', 'nonIcpMatchHost',
+        'NON_ICP_BLOCK_ENABLED', 'nonIcpMatchHost', 'nonIcpExemptDomains',
         /* nonIcpSpeculativeDomain lives in this block and needs both of
            these. Real implementations, not stubs: a stub would let the
            speculative-domain rules drift from the free-mail list they
@@ -1821,6 +1821,8 @@ results13 = (async () => {
         (src2) => calls.successes.push(src2),
         () => ['x.test'], () => false, true, { log() {}, warn() {} },
         opts.v1Hit === true, () => (opts.v1Hit ? { domain: 'kw.com' } : null),
+        /* the released-companies list: empty unless a scenario sets opts.exempt */
+        async () => new Set(opts.exempt || []),
         M.freeEmailMatch, M.partnerStackCustomerKey);
       return { scope, calls, stats };
     };
@@ -1894,8 +1896,18 @@ results13 = (async () => {
     }
 
 
+    /* A RELEASED COMPANY IS NOT RE-JUDGED. Nothing reads the answer, so a scrape
+       and a model call per blur would be spent on a row no decision uses. The
+       control below is the same call with the company NOT released. */
+    let w = mkW({ source: 'llm', business_type: 'insurance', blocking: true, confidence: 0.9, model_id: 'm' }, { exempt: ['x.test'] });
+    w.scope.warmNonIcpLlm({ email: 'a@x.test' }); await wait();
+    out.push(['warm: a RELEASED company is not classified and nothing is written', w.stats.ok === 0 && w.calls.written.length === 0 && w.stats.cacheMisses === 0, JSON.stringify(w.stats)]);
+    w = mkW({ source: 'llm', business_type: 'insurance', blocking: true, confidence: 0.9, model_id: 'm' }, { exempt: ['other.test'] });
+    w.scope.warmNonIcpLlm({ email: 'a@x.test' }); await wait();
+    out.push(['warm control: a company that is NOT released is still classified', w.stats.ok === 1 && w.calls.written.length === 1, JSON.stringify(w.stats)]);
+
     /* A landed verdict. */
-    let w = mkW({ source: 'llm', business_type: 'insurance', blocking: true, confidence: 0.9, model_id: 'm' });
+    w = mkW({ source: 'llm', business_type: 'insurance', blocking: true, confidence: 0.9, model_id: 'm' });
     w.scope.warmNonIcpLlm({ email: 'a@x.test' }); await wait();
     out.push(['warm: a landed verdict increments ok', w.stats.ok === 1 && w.stats.errored === 0, JSON.stringify(w.stats)]);
     out.push(['warm: …and calls recordSuccess so the streak resets',
@@ -2726,6 +2738,77 @@ results13 = (async () => {
     eq(`industry(${name}): remembering an off-list value does nothing`, t.win.location.href, '/thank-you?attendeeName=Dawn');
   }
 }
+
+/* ============================================================
+   RELEASED COMPANIES. A company a person has released is not blocked,
+   flagged or withheld from Meta. The exemption list is read through ONE
+   function and applied where every decision is made.
+   ============================================================ */
+(async function releasedCompanies() {
+  const lifted = liftSrc + '\n' +
+    between('function nonIcpCandidateDomains', '/* ── The warm path');
+  const make = (pool, env) => (new Function('pool', 'process', 'console',
+    lifted + '\nreturn { nonIcpExemptDomains, nonIcpExemptDomainFor, nonIcpCandidateDomains };'
+  ))(pool, { env: env || {} }, { log() {}, warn() {} });
+  const poolOf = (rows) => { const p = { calls: 0, rows, fail: false, query: async () => { p.calls++; if (p.fail) throw new Error('db down'); return { rows: p.rows.map((d) => ({ domain: d })) }; } }; return p; };
+
+  /* 1. what is exempt */
+  {
+    const pool = poolOf(['specialtyprogramgroup.com', 'kw.com']);
+    const X = make(pool, { NON_ICP_EXEMPT_TTL_MS: '0' });
+    eq('release: the company on the WEBSITE is released', await X.nonIcpExemptDomainFor({ email: 'a@gmail.com', website: 'https://www.specialtyprogramgroup.com/about' }), 'specialtyprogramgroup.com');
+    eq('release: the company on the EMAIL is released', await X.nonIcpExemptDomainFor({ email: 'maya@specialtyprogramgroup.com', website: '' }), 'specialtyprogramgroup.com');
+    eq('release: a subdomain is the same company', await X.nonIcpExemptDomainFor({ email: 'x@agents.kw.com', website: '' }), 'kw.com');
+    eq('release: another company is NOT released', await X.nonIcpExemptDomainFor({ email: 'x@remax.com', website: 'remax.com' }), null);
+    eq('release: a free mailbox with no website is not released', await X.nonIcpExemptDomainFor({ email: 'x@gmail.com', website: '' }), null);
+    eq('release: a lookalike is not the same company', await X.nonIcpExemptDomainFor({ email: 'x@notkw.com', website: '' }), null);
+    const empty = make(poolOf([]), { NON_ICP_EXEMPT_TTL_MS: '0' });
+    eq('release: an empty list releases nobody', await empty.nonIcpExemptDomainFor({ email: 'x@kw.com', website: '' }), null);
+  }
+  /* 2. the cache: a minute in production, so the lead path does not pay a query per lead */
+  {
+    const pool = poolOf(['kw.com']);
+    const X = make(pool, {});
+    await X.nonIcpExemptDomainFor({ email: 'x@kw.com' }); await X.nonIcpExemptDomainFor({ email: 'y@kw.com' }); await X.nonIcpExemptDomainFor({ email: 'z@remax.com' });
+    eq('release/cache: three leads cost ONE read', pool.calls, 1);
+  }
+  /* 3. a failing database must not un-release anybody who was already released */
+  {
+    const pool = poolOf(['kw.com']);
+    const X = make(pool, { NON_ICP_EXEMPT_TTL_MS: '0' });
+    eq('release/failure: read once while healthy', await X.nonIcpExemptDomainFor({ email: 'x@kw.com' }), 'kw.com');
+    pool.fail = true;
+    eq('release/failure: a read that THROWS keeps the last good list', await X.nonIcpExemptDomainFor({ email: 'x@kw.com' }), 'kw.com');
+    const cold = make(Object.assign(poolOf(['kw.com']), { fail: true }), { NON_ICP_EXEMPT_TTL_MS: '0' });
+    eq('release/failure: cold start with a dead database releases nobody (the one direction this fails closed)', await cold.nonIcpExemptDomainFor({ email: 'x@kw.com' }), null);
+  }
+  /* 4. applied at EVERY decision point, not only the form's. The late-verdict
+        sweep, the Schedule guard and the Google upload all read the verdict
+        through nonIcpLlmCachedVerdict, so a check missing there lets a
+        released company be re-stamped blocked the moment it books. */
+  {
+    const verdictFn = between('async function nonIcpVerdict(', 'function nonIcpStamp');
+    const iExempt = verdictFn.indexOf('nonIcpExemptDomainFor');
+    ok('release: nonIcpVerdict asks BEFORE the brand list', iExempt > -1 && iExempt < verdictFn.indexOf('MECHANISM 1'));
+    ok('release: ...and returns not-blocked with reason exempt', /if \(released\) return \{ blocked: false, reason: 'exempt'/.test(verdictFn));
+    const cachedFn = between('async function nonIcpLlmCachedVerdict(', 'let metaOnly');
+    ok('release: nonIcpLlmCachedVerdict returns null for a released company FIRST (sweep, Schedule guard, Google upload)', /if \(await nonIcpExemptDomainFor\(\{ email, website \}\)\) return null;/.test(cachedFn));
+    const warmFn = between('function warmNonIcpLlm(', 'const cached = await nonIcpReadVerdictRow(domain)');
+    ok('release: the warm path skips a released company instead of re-judging it', /\(await nonIcpExemptDomains\(\)\)\.has\(domain\)/.test(warmFn));
+  }
+  /* 5. the table, and the tool that writes it */
+  {
+    ok('release: the table is created by the server on boot (db.js)', /CREATE TABLE IF NOT EXISTS non_icp_exemptions \(\s+domain\s+TEXT PRIMARY KEY/.test(dbsrc));
+    const tool = require('fs').readFileSync(path.join(__dirname, '..', 'tools', 'non-icp-release.js'), 'utf8');
+    const applyBlocks = tool.split(/\n/).filter((l) => /INSERT INTO non_icp_exemptions|UPDATE leads SET non_icp_blocked = FALSE/.test(l));
+    ok('release/tool: it only writes inside `if (apply)`', applyBlocks.length === 2 && /if \(apply\) \{\s+await client\.query\(\s+`INSERT INTO non_icp_exemptions/.test(tool) );
+    ok('release/tool: dry run is the default', /const apply = process\.argv\.includes\('--apply'\)/.test(tool));
+    ok('release/tool: it refuses --apply before the table exists', /if \(apply\) throw new Error\('non_icp_exemptions does not exist yet/.test(tool));
+    ok('release/tool: it keys the domain through partnerStackCustomerKey like everything else here', /M\.partnerStackCustomerKey\(raw\)/.test(tool));
+    ok('release/tool: it clears the model flag too, so the Schedule guard stops withholding Meta', /non_icp_llm_flagged = FALSE/.test(tool));
+    ok('release/tool: a shared brand-list domain is REFUSED without --allow-brand', /if \(apply\) throw new Error\(`\$\{d\} is a brand-list domain\. Nothing was done\./.test(tool) && /const allowBrand = process\.argv\.includes\('--allow-brand'\)/.test(tool));
+  }
+})().then(() => {}, (e) => { ok('release: the section completed', false, e && e.stack); });
 
 /* ============================================================ */
 results7

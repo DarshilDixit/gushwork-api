@@ -48,7 +48,10 @@ const S = { fetches: [], slackPayloads: [], leadRow: null, writes: [], psBlocked
             /* /monitor/non-icp's two inputs, set per scenario. null means
                "this suite is not driving the report", so every other
                scenario keeps the stub's existing behaviour. */
-            reportLeads: null, reportVerdicts: null, metaPayloads: [] };
+            reportLeads: null, reportVerdicts: null, metaPayloads: [],
+            /* released domains (non_icp_exemptions), the "tries" count the
+               blocked-lead post reads, and the dashboard's repeat rows */
+            exempt: [], tries: null, repeatRows: [], enrich: null };
 
 /* ── stub pg ──────────────────────────────────────────────────────
    Both pools (Railway and the AWS warehouse) come through here.
@@ -190,6 +193,22 @@ function stubQuery(q, params) {
       : { rows: [], rowCount: 0 };
   }
   if (/^SELECT booking_uid FROM leads/.test(flat))  return { rows: [{ booking_uid: null }], rowCount: 1 };
+  /* What /submit reads to see the company size Apollo found for this session. */
+  if (/^SELECT \* FROM enrichment_data WHERE session_id=\$1/.test(flat)) {
+    return { rows: S.enrich ? [S.enrich] : [], rowCount: S.enrich ? 1 : 0 };
+  }
+  /* The three reads the release-and-repeat change adds. Matched BEFORE the
+     generic COUNT branch below, which would answer each with an empty row. */
+  if (/FROM non_icp_exemptions/.test(flat)) {
+    const rows = (S.exempt || []).map((d) => ({ domain: d }));
+    return { rows, rowCount: rows.length };
+  }
+  if (/SELECT COUNT\(DISTINCT session_id\)::int AS n, MIN\(created_at\) AS first_at FROM leads WHERE non_icp_blocked IS TRUE/.test(flat)) {
+    return { rows: [{ n: S.tries == null ? 1 : S.tries, first_at: '2026-10-01T10:00:00.000Z' }], rowCount: 1 };
+  }
+  if (/GROUP BY lower\(l\.email\) HAVING COUNT\(DISTINCT l\.session_id\) >= 2/.test(flat)) {
+    return { rows: S.repeatRows || [], rowCount: (S.repeatRows || []).length };
+  }
   /* Aggregates (/monitor/metrics runs a dozen) must return ONE row, not zero.
      Every field is read through `parseInt(x) || 0`, so an empty object yields
      zeros -- but an empty ROW SET makes rows[0] undefined and the route 500s
@@ -289,6 +308,12 @@ Object.assign(process.env, {
   SF_CLIENT_ID: 'stub', SF_CLIENT_SECRET: 'stub', SF_REFRESH_TOKEN: 'stub',
   META_ACCESS_TOKEN: 'stub', META_PIXEL_ID: '1234567890',
   ELV_API_KEY: 'stub',
+  /* Released companies are cached for a minute in production. 0 here, so a
+     scenario that sets S.exempt is read on the very next request. */
+  NON_ICP_EXEMPT_TTL_MS: '0',
+  /* Who is tagged when a blocked lead needs a human look. The last entry is
+     deliberately NOT a Slack id, to prove it is dropped and cannot inject text. */
+  NON_ICP_REVIEW_MENTION_IDS: 'U0TESTAAA1, W0TESTBBB2, here, @channel, <!everyone>',
   /* Without this the conversion stops inside sendConversion with 'no_token'
      and the CONTROL below passes for the wrong reason -- it would look like
      the guard worked when nothing had been sent by anyone. */
@@ -312,7 +337,7 @@ const post = async (p, body) => {
   let j = null; try { j = await r.json(); } catch (_) {}
   return { status: r.status, body: j };
 };
-const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; S.dropoffInternal = null; S.dropoffRows = null; S.dropoffSources = null; S.stickySource = null; };
+const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; S.dropoffInternal = null; S.dropoffRows = null; S.dropoffSources = null; S.stickySource = null; S.exempt = []; S.tries = null; S.repeatRows = []; S.enrich = null; };
 const metaFired      = () => S.fetches.some((u) => /graph\.facebook\.com/.test(u));
 const salesforceHit  = () => S.fetches.some((u) => /\/sobjects\//.test(u));
 const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') || true);
@@ -1839,6 +1864,142 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     ok('LLM/submit: NO PartnerStack conversion was sent',
        !S.fetches.some((u) => /partnerlinks\.io/.test(u)),
        S.fetches.filter((u) => /partnerlinks/.test(u)).join(','));
+  }
+
+  /* ========================================================
+     RELEASE AND REPEAT. A company a person has released is not
+     blocked by the brand list OR the model, and a blocked person who
+     comes back is called out in Slack and on the dashboard.
+
+     specialtyprogramgroup.com, 300 staff, was blocked three times in
+     two weeks and its contact wrote in. Each control below is the SAME
+     request with the release removed, so a test cannot pass because the
+     lead was never going to be blocked.
+     ======================================================== */
+  {
+    reset(); S.verdict = VROW();
+    const ctl = await post('/non-icp-check', { email: 'gary@garyrockwellinsurance.test', website: 'garyrockwellinsurance.test' });
+    ok('RELEASE control: without a release, the model verdict blocks', ctl.body && ctl.body.blocked === true, JSON.stringify(ctl.body));
+    reset(); S.verdict = VROW(); S.exempt = ['garyrockwellinsurance.test'];
+    const chk = await post('/non-icp-check', { email: 'gary@garyrockwellinsurance.test', website: 'garyrockwellinsurance.test' });
+    ok('RELEASE: a released company is NOT blocked at /non-icp-check', chk.body && chk.body.blocked === false && chk.body.industry === null, JSON.stringify(chk.body));
+    reset(); S.verdict = VROW(); S.exempt = ['garyrockwellinsurance.test'];
+    const rel = await post('/submit', { session_id: '00000000-0000-4000-8000-0000000000b1',
+      email: 'gary@garyrockwellinsurance.test', website: 'garyrockwellinsurance.test',
+      first_name: 'Gary', last_name: 'Rockwell', company: 'Gary Rockwell Insurance',
+      phone: '+15551234567', sell_to: 'B2B', page_url: 'https://www.gushwork.ai/demo' });
+    await sleep(700);
+    ok('RELEASE/submit: the response does NOT send them to /thank-you', rel.body && rel.body.non_icp_blocked === false, JSON.stringify(rel.body));
+    ok('RELEASE/submit: no blocked-lead post in Slack', !/Lead Blocked|tried again/.test(JSON.stringify(S.slackPayloads)), JSON.stringify(S.slackPayloads).slice(0, 160));
+    ok('RELEASE/submit: Meta Lead fires again, as for any other lead', metaFired(), 'no graph.facebook.com call');
+  }
+  {
+    /* THE BRAND LIST TOO: a captive agent we decided to talk to is exactly the
+       case a list cannot know about. And only THAT company is released. */
+    reset(); S.exempt = ['kw.com'];
+    const kw = await post('/non-icp-check', { email: 'agent@kw.com', website: '' });
+    ok('RELEASE: the brand list is overridden for a released brand domain', kw.body && kw.body.blocked === false, JSON.stringify(kw.body));
+    const other = await post('/non-icp-check', { email: 'agent@remax.com', website: '' });
+    ok('RELEASE: a DIFFERENT brand domain is still blocked', other.body && other.body.blocked === true, JSON.stringify(other.body));
+    reset(); S.exempt = ['kw.com'];
+    const viaWeb = await post('/non-icp-check', { email: 'someone@gmail.com', website: 'www.kw.com' });
+    ok('RELEASE: released through the WEBSITE side too', viaWeb.body && viaWeb.body.blocked === false, JSON.stringify(viaWeb.body));
+  }
+  {
+    /* THE REPEAT BANNER. tries is the stub's answer to "how many sessions of
+       this email were blocked and submitted", this one included. */
+    reset(); S.verdict = VROW(); S.tries = 3;
+    await post('/submit', { session_id: '00000000-0000-4000-8000-0000000000b2',
+      email: 'gary@garyrockwellinsurance.test', website: 'garyrockwellinsurance.test',
+      first_name: 'Gary', last_name: 'Rockwell', company: 'Gary Rockwell Insurance',
+      phone: '+15551234567', sell_to: 'B2B', page_url: 'https://www.gushwork.ai/demo' });
+    await sleep(700);
+    const again = JSON.stringify(S.slackPayloads);
+    ok('REPEAT: the post says the person tried again', /Blocked person tried again/.test(again), again.slice(0, 200));
+    ok('REPEAT: it says which attempt', /Attempt 3 from this person/.test(again), again.slice(0, 300));
+    ok('REPEAT: it names the first try', /first on 2026-10-01/.test(again));
+    ok('REPEAT: it gives the release command for THAT company', /non-icp-release\.js garyrockwellinsurance\.test/.test(again), again.slice(0, 400));
+    ok('REPEAT: it is still ONE post, not two', S.slackPayloads.filter((p) => /Blocked person tried again|Lead Blocked/.test(JSON.stringify(p))).length === 1);
+    ok('REPEAT: it still carries the evidence a human needs', /independent insurance agency serving Ohio/.test(again));
+    ok('REPEAT: it TAGS the people in NON_ICP_REVIEW_MENTION_IDS, in the message and in the notification text',
+       /<@U0TESTAAA1>/.test(again) && /<@W0TESTBBB2>/.test(again) && /"text":"<@U0TESTAAA1> <@W0TESTBBB2> /.test(again), again.slice(0, 160));
+    ok('REPEAT: anything that is not a Slack id is DROPPED (no @here, @channel or @everyone)', !/<!here>|<!channel>|<!everyone>|@channel|@here/.test(again), again.slice(0, 200));
+
+    reset(); S.verdict = VROW(); S.tries = 1;
+    await post('/submit', { session_id: '00000000-0000-4000-8000-0000000000b3',
+      email: 'gary@garyrockwellinsurance.test', website: 'garyrockwellinsurance.test',
+      first_name: 'Gary', last_name: 'Rockwell', company: 'Gary Rockwell Insurance',
+      phone: '+15551234567', sell_to: 'B2B', page_url: 'https://www.gushwork.ai/demo' });
+    await sleep(700);
+    const first = JSON.stringify(S.slackPayloads);
+    ok('REPEAT control: a FIRST attempt keeps the normal header', /Lead Blocked/.test(first) && !/tried again|Attempt \d/.test(first), first.slice(0, 200));
+    ok('REPEAT control: a first attempt tags NOBODY (the ping is for cases that need a look)', !/<@/.test(first), first.slice(0, 200));
+  }
+  {
+    /* A LARGE MODEL-JUDGED COMPANY. specialtyprogramgroup.com: 300 staff. The
+       brand list is a hard block by design and must NEVER trigger this. */
+    const submitLarge = async (n, enrich, extra) => {
+      reset(); S.verdict = VROW(); S.tries = 1; S.enrich = enrich;
+      await post('/submit', Object.assign({ session_id: '00000000-0000-4000-8000-0000000000c' + n,
+        email: 'gary@garyrockwellinsurance.test', website: 'garyrockwellinsurance.test',
+        first_name: 'Gary', last_name: 'Rockwell', company: 'Gary Rockwell Insurance',
+        phone: '+15551234567', sell_to: 'B2B', page_url: 'https://www.gushwork.ai/demo' }, extra || {}));
+      await sleep(700);
+      return JSON.stringify(S.slackPayloads);
+    };
+    let t = await submitLarge(1, { enriched_company_size: '300' });
+    ok('LARGE: a 300-person model-judged company is called out', /Large company blocked/.test(t) && /about 300 staff/.test(t), t.slice(0, 220));
+    ok('LARGE: it tags the same people', /<@U0TESTAAA1>/.test(t) && /<@W0TESTBBB2>/.test(t), t.slice(0, 200));
+    ok('LARGE: it says who to look at and how to release', /non-icp-release\.js garyrockwellinsurance\.test/.test(t) && /specialtyprogramgroup\.com had 300 staff/.test(t));
+    ok('LARGE: it is still ONE post and still blocked, the lead is not let through', S.slackPayloads.length >= 1 && S.slackPayloads.filter((p) => /Large company blocked|Lead Blocked/.test(JSON.stringify(p))).length === 1 && !metaFired());
+    t = await submitLarge(2, { enriched_company_size: '200' });
+    ok('LARGE: the boundary is INCLUSIVE (200 staff is in)', /Large company blocked/.test(t), t.slice(0, 160));
+    t = await submitLarge(3, { enriched_company_size: '199' });
+    ok('LARGE control: 199 staff is NOT called out and tags nobody', /Lead Blocked/.test(t) && !/Large company/.test(t) && !/<@/.test(t), t.slice(0, 200));
+    t = await submitLarge(4, null);
+    ok('LARGE control: no Apollo answer is NOT called out', /Lead Blocked/.test(t) && !/Large company/.test(t), t.slice(0, 160));
+    t = await submitLarge(5, { enriched_company_size: '1,200 employees' });
+    ok('LARGE: a size written with a comma or words is still read', /about 1,200 staff/.test(t), t.slice(0, 200));
+    /* THE BRAND LIST NEVER TRIGGERS IT, however big. */
+    reset(); S.tries = 1; S.enrich = { enriched_company_size: '88000' };
+    await post('/submit', { session_id: '00000000-0000-4000-8000-0000000000c6',
+      email: 'agent@exprealty.com', website: 'exprealty.com', first_name: 'A', last_name: 'Gent',
+      company: 'eXp Realty', phone: '+15550001111', sell_to: 'B2B', page_url: 'https://www.gushwork.ai/demo' });
+    await sleep(700);
+    const brand = JSON.stringify(S.slackPayloads);
+    ok('LARGE control: a BRAND-LIST block is never "large", however big (hard block by design)', /Lead Blocked/.test(brand) && !/Large company/.test(brand) && !/<@/.test(brand), brand.slice(0, 200));
+    /* BOTH reasons at once: one post, both lines, one tag. */
+    reset(); S.verdict = VROW(); S.tries = 2; S.enrich = { enriched_company_size: '300' };
+    await post('/submit', { session_id: '00000000-0000-4000-8000-0000000000c7',
+      email: 'gary@garyrockwellinsurance.test', website: 'garyrockwellinsurance.test',
+      first_name: 'Gary', last_name: 'Rockwell', company: 'Gary Rockwell Insurance',
+      phone: '+15551234567', sell_to: 'B2B', page_url: 'https://www.gushwork.ai/demo' });
+    await sleep(700);
+    const both = JSON.stringify(S.slackPayloads);
+    ok('BOTH: tried again AND large gives one post carrying both lines', /Blocked person tried again/.test(both) && /Attempt 2 from this person/.test(both) && /about 300 staff/.test(both) && S.slackPayloads.filter((p) => /Blocked person tried again/.test(JSON.stringify(p))).length === 1, both.slice(0, 200));
+    ok('BOTH: the people are tagged ONCE, not twice', (both.match(/<@U0TESTAAA1>/g) || []).length === 2 /* the section and the notification text */, String((both.match(/<@U0TESTAAA1>/g) || []).length));
+  }
+  {
+    /* THE DASHBOARD'S READ. */
+    reset();
+    S.repeatRows = [
+      { email: 'maya@spgish.test', domain: 'spgish.test', attempts: 3, first_at: '2026-09-28T18:30:00Z', last_at: '2026-10-09T18:30:00Z', source: 'llm', business_type: 'insurance', confidence: 0.97, company_size: 300 },
+      { email: 'pat@kw.com', domain: 'kw.com', attempts: '2', first_at: '2026-10-01T10:00:00Z', last_at: '2026-10-06T10:00:00Z', source: 'domain_list', business_type: null, confidence: null, company_size: null }];
+    const unauth = await realFetch(BASE + '/monitor/non-icp-repeats');
+    ok('REPEAT/dashboard: the route is token-gated', unauth.status === 401, String(unauth.status));
+    const okr = await realFetch(BASE + '/monitor/non-icp-repeats?token=stub');
+    const body = await okr.json();
+    ok('REPEAT/dashboard: answers with the people who came back', okr.status === 200 && body.rows.length === 2, JSON.stringify(body).slice(0, 200));
+    ok('REPEAT/dashboard: a person carries email, company, tries, judgment and size',
+       body.rows[0].email === 'maya@spgish.test' && body.rows[0].domain === 'spgish.test' && body.rows[0].attempts === 3 &&
+       body.rows[0].business_type === 'insurance' && body.rows[0].confidence === 0.97 && body.rows[0].company_size === 300, JSON.stringify(body.rows[0]));
+    ok('REPEAT/dashboard: counts are numbers, nulls stay null', body.rows[1].attempts === 2 && body.rows[1].company_size === null && body.rows[1].confidence === null, JSON.stringify(body.rows[1]));
+    reset();
+    const none = await (await realFetch(BASE + '/monitor/non-icp-repeats?token=stub')).json();
+    ok('REPEAT/dashboard: nobody back is an empty list, not an error', Array.isArray(none.rows) && none.rows.length === 0, JSON.stringify(none));
+    const q = S.writes.find((w) => /GROUP BY lower\(l\.email\)/.test(w.flat));
+    ok('REPEAT/dashboard: our own test submissions are left out, with IS NOT TRUE', !!q && /\) IS NOT TRUE/.test(q.flat), q && q.flat.slice(0, 200));
+    ok('REPEAT/dashboard: counts distinct SESSIONS of an address that SUBMITTED', !!q && /COUNT\(DISTINCT l\.session_id\) >= 2/.test(q.flat) && /l\.submitted_at IS NOT NULL/.test(q.flat));
   }
 
   /* All three booking routes must REFUSE, not merely suppress Schedule.
