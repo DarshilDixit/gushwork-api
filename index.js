@@ -7188,6 +7188,9 @@ app.post('/non-icp-check', async (req, res) => {
       blocked:        v.blocked === true,
       matched_domain: v.blocked ? v.reason : null,
       label:          v.blocked ? v.label  : null,
+      /* 'real_estate' | 'insurance' | null, for the /thank-you copy. The form
+         carries it on the redirect; see nonIcpIndustryOf. */
+      industry:       nonIcpIndustryOf(v),
       /* THE ONLY NEW FIELD, and the form holds the calendar on it. True
          means a scrape and a model call are running for one of this
          lead's domains right now, so an answer is seconds away and worth
@@ -8510,6 +8513,39 @@ const NON_ICP_DOMAINS = {
   'brightway.com':         'Brightway Insurance',
 };
 
+/* WHICH INDUSTRY a brand-list entry is, for the /thank-you page that tells a
+   turned-away visitor what we do not serve yet ("real estate" or "insurance").
+   The list above is ONE object and only its section comments say which half
+   is which, so the insurance half is named here. tests/test-non-icp.js parses
+   the source and requires this set to equal exactly the keys under the
+   Insurance comment, so adding a carrier to one place and not the other fails
+   the bar rather than sending an insurance agent to a page that says "real
+   estate". Everything NOT in this set, and every prefix rule, is real estate. */
+const NON_ICP_INSURANCE_DOMAINS = new Set([
+  'statefarm.com',
+  'allstate.com',
+  'agents.allstate.com',
+  'allstateagencies.com',
+  'farmers.com',
+  'agents.farmers.com',
+  'farmersagent.com',
+  'farmersagency.com',
+  'amfam.com',
+  'goosehead.com',
+  'newyorklife.com',
+  'ft.newyorklife.com',
+  'nyl.com',
+  'geico.com',
+  'bankerslife.com',
+  'healthmarkets.com',
+  'healthmarketsjax.com',
+  'ushadvisors.com',
+  'goldencare.com',
+  'globelife.com',
+  'ailife.com',
+  'brightway.com',
+]);
+
 /* Regional franchise suffixes that cannot be enumerated. Matched as a LABEL
    PREFIX on the registrable domain, never as a substring of the whole host --
    'bhhs' as a substring would hit anything containing those four letters. */
@@ -8579,6 +8615,56 @@ function nonIcpMatchHost(rawHostOrUrl) {
     if (firstLabel.startsWith(p.prefix)) return { domain: key, label: p.label };
   }
   return null;
+}
+
+/* WHICH INDUSTRY a turned-away visitor is in, for the /thank-you page, which
+   tells them what we do not serve yet. Only two industries ever block, so
+   only two answers exist; anything else is null and the page falls back to
+   wording that names no industry. NEVER a free-text label: the value rides
+   the redirect as a query parameter and the page matches it against this
+   exact pair, so nothing a model or a visitor typed can reach the screen. */
+const NON_ICP_THANKYOU_INDUSTRIES = ['real_estate', 'insurance'];
+
+/* A brand-list domain or prefix rule -> its industry. Prefix rules (bhhs,
+   berkshirehathaway) are Berkshire Hathaway HomeServices, which is real
+   estate. */
+function nonIcpBrandIndustry(domain) {
+  if (!domain || typeof domain !== 'string') return null;
+  if (NON_ICP_INSURANCE_DOMAINS.has(domain)) return 'insurance';
+  if (Object.prototype.hasOwnProperty.call(NON_ICP_DOMAINS, domain)) return 'real_estate';
+  const firstLabel = domain.split('.')[0];
+  if (NON_ICP_PREFIXES.some((p) => firstLabel.startsWith(p.prefix))) return 'real_estate';
+  return null;
+}
+
+/* From a verdict object (what /non-icp-check has in hand). A model block
+   carries its business_type; a brand-list block carries the matched domain. */
+function nonIcpIndustryOf(v) {
+  if (!v || v.blocked !== true) return null;
+  if (NON_ICP_THANKYOU_INDUSTRIES.includes(v.business_type)) return v.business_type;
+  if (v.source === 'domain_list') return nonIcpBrandIndustry(v.reason);
+  return null;
+}
+
+/* From the domain stamped on a lead row (what /submit has after the sticky
+   OR, which can be a block decided at step 1). Brand list first, no I/O;
+   otherwise one read of the verdict cache. FAILS TO NULL: this only chooses
+   a sentence on a page, so a slow or failed read must never cost the response
+   it rides on. */
+async function nonIcpIndustryForDomain(domain) {
+  const brand = nonIcpBrandIndustry(domain);
+  if (brand) return brand;
+  if (!domain) return null;
+  try {
+    const r = await withTimeout(
+      pool.query('SELECT business_type FROM non_icp_domain_verdicts WHERE domain = $1', [domain]),
+      1500, 'non-icp industry lookup');
+    const t = r.rows[0] && r.rows[0].business_type;
+    return NON_ICP_THANKYOU_INDUSTRIES.includes(t) ? t : null;
+  } catch (err) {
+    console.warn('[non-ICP] industry lookup failed — page will name no industry:', err && err.message);
+    return null;
+  }
 }
 
 /* The verdict, for one lead. Pure except for the customer-domain cache read.
@@ -15567,7 +15653,10 @@ app.post('/submit', async (req, res) => {
        the client-side /non-icp-check never ran or failed open. The browser is
        not trusted to enforce anything -- everything above has already been
        suppressed server-side -- this only decides which screen they see. */
-    res.json({ ok: true, non_icp_blocked: nonIcpBlocked, non_icp_reason: nonIcpReason });
+    /* The industry rides along so the /thank-you page can name it. Only looked
+       up for a blocked lead, so an ordinary submit pays nothing for it. */
+    const nonIcpIndustry = nonIcpBlocked ? await nonIcpIndustryForDomain(nonIcpReason) : null;
+    res.json({ ok: true, non_icp_blocked: nonIcpBlocked, non_icp_reason: nonIcpReason, non_icp_industry: nonIcpIndustry });
 
     // Off the critical path on purpose — the lead is no longer waiting.
     /* The address is ours and is written unconditionally; the PLACE comes

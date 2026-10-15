@@ -329,12 +329,18 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     ok('route: a brokerage email is blocked', blocked.body && blocked.body.blocked === true, JSON.stringify(blocked.body));
     ok('route: it names the matched domain', blocked.body && blocked.body.matched_domain === 'kw.com', JSON.stringify(blocked.body));
     ok('route: it carries the label', blocked.body && blocked.body.label === 'Keller Williams', JSON.stringify(blocked.body));
+    /* The /thank-you page names the industry from this field. A brokerage is
+       real estate; a carrier is insurance; a clean lead has none. */
+    ok('route: a brokerage block names its industry, real_estate', blocked.body && blocked.body.industry === 'real_estate', JSON.stringify(blocked.body));
+    const carrier = await post('/non-icp-check', { email: 'agent@farmers.com', website: '' });
+    ok('route: a carrier block names its industry, insurance', carrier.body && carrier.body.blocked === true && carrier.body.industry === 'insurance', JSON.stringify(carrier.body));
 
     const web = await post('/non-icp-check', { email: 'someone@gmail.com', website: 'claudiapgomez.kw.com' });
     ok('route: a free email with a brokerage WEBSITE is blocked', web.body && web.body.blocked === true, JSON.stringify(web.body));
 
     const clean = await post('/non-icp-check', { email: 'someone@acme.com', website: 'acme.com' });
     ok('route: a clean lead is not blocked', clean.body && clean.body.blocked === false, JSON.stringify(clean.body));
+    ok('route: a clean lead carries NO industry', clean.body && clean.body.industry === null, JSON.stringify(clean.body));
 
     /* The five substring false positives, over the wire this time. */
     for (const d of ['paycompass.com', 'charleslegalpl.com', 'theimagecreatornm.com', 'krevera.com', 'ceterainvestors.com']) {
@@ -403,6 +409,8 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
        r.body && r.body.non_icp_blocked === true, JSON.stringify(r.body));
     ok('submit: response names the matched domain',
        r.body && r.body.non_icp_reason === 'kw.com', JSON.stringify(r.body));
+    ok('submit: response names the industry, for the /thank-you copy',
+       r.body && r.body.non_icp_industry === 'real_estate', JSON.stringify(r.body));
     ok('submit: Meta Lead did NOT fire', !metaFired());
     ok('submit: Salesforce was NOT called', !salesforceHit(),
        S.fetches.filter((u) => /salesforce/.test(u)).join(','));
@@ -1773,6 +1781,7 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     const r = await post('/non-icp-check', { email: 'gary@garyrockwellinsurance.test', website: 'garyrockwellinsurance.test' });
     ok('LLM: /non-icp-check blocks on a model verdict alone', r.body && r.body.blocked === true, JSON.stringify(r.body));
     ok('LLM: …and names the domain it judged', r.body && r.body.matched_domain === 'garyrockwellinsurance.test');
+    ok('LLM: …and the industry it judged, from business_type', r.body && r.body.industry === 'insurance', JSON.stringify(r.body));
     /* The control that matters: the same domain with a COLD cache must
        not block. Otherwise the assertion above could be passing on the
        brand list or on some unrelated default. */

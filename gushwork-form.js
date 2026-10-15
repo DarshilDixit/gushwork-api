@@ -1,5 +1,9 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.18.2  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.19.0  (/demo PAGE VERSION - thru github/jsdlivr)
+
+  v5.19.0 — /thank-you can name the industry we do not serve yet. The
+  server's non-ICP answers now carry 'real_estate' or 'insurance'; the form
+  remembers it and adds industry= to the redirect. Nothing else moves.
 
   v5.18.2 — a campaign naming L2O or O2C (any case, any medium) is a CRM
   campaign, so it routes to the CRM team on /demo and is tagged crm. The
@@ -2562,9 +2566,11 @@
           }, NET_TIMEOUT_MS.nonIcp);
           if (!res.ok) return { blocked: false, status: 'backend_error', pending: false };
           const data = await res.json();
+          if (data.blocked === true) rememberNonIcpIndustry(data.industry);
           return {
             blocked:        data.blocked === true,
             matched_domain: data.matched_domain || null,
+            industry:       cleanNonIcpIndustry(data.industry),
             status:         'ok',
             /* "a scrape and a model call are running for this lead right
                now". Absent on an older backend, which reads as false and
@@ -2628,10 +2634,37 @@
       return first || last || '';
     }
 
+    /* /thank-you says which industry we do not serve yet ("real estate" or
+       "insurance"), from an industry query parameter.
+
+       ONLY THOSE TWO VALUES TRAVEL. The page matches the parameter against the
+       same pair and ignores anything else, so a hand-edited URL can put
+       nothing of its own on the screen, and this side drops anything that is
+       not on the list rather than trusting the server to have sent only those.
+
+       It is REMEMBERED the moment a blocked answer arrives, not read off the
+       verdict at redirect time, because one of the four redirects fires from
+       the calendar hold with no verdict in hand, and a hold that has already
+       seen the answer should not lose it on the way out. A visitor with no
+       industry (a server that predates the field, a block with no known
+       industry) gets the page's industry-free wording, never a blank. */
+    var NON_ICP_INDUSTRIES = ['real_estate', 'insurance'];
+    var _nonIcpIndustry = '';
+    function cleanNonIcpIndustry(x) {
+      return NON_ICP_INDUSTRIES.indexOf(x) !== -1 ? x : null;
+    }
+    function rememberNonIcpIndustry(x) {
+      var c = cleanNonIcpIndustry(x);
+      if (c) _nonIcpIndustry = c;
+    }
+
     function redirectNonIcp(v) {
       var name = nonIcpAttendeeName();
-      var url  = NON_ICP_REDIRECT
-        + (name ? '?attendeeName=' + encodeURIComponent(name) : '');
+      var industry = cleanNonIcpIndustry(v && v.industry) || _nonIcpIndustry;
+      var params = [];
+      if (name) params.push('attendeeName=' + encodeURIComponent(name));
+      if (industry) params.push('industry=' + encodeURIComponent(industry));
+      var url  = NON_ICP_REDIRECT + (params.length ? '?' + params.join('&') : '');
       console.log('[GW] Non-ICP — redirecting to ' + url
         + (v && v.matched_domain ? ' (matched ' + v.matched_domain + ')' : ''));
       window.location.href = url;
@@ -3147,7 +3180,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
            has fired by now; the redirect gets them off the page before they
            can pick a slot. */
         if (submitRes && submitRes.non_icp_blocked === true) {
-          redirectNonIcp({ matched_domain: submitRes.non_icp_reason });
+          redirectNonIcp({ matched_domain: submitRes.non_icp_reason, industry: submitRes.non_icp_industry });
           return;
         }
 
@@ -3476,7 +3509,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.18.2 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.19.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
