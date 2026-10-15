@@ -29,6 +29,20 @@ Nothing told a human that the same person kept coming back.
    leads: person, company, tries, last try, what we judged, staff. Its own read, so
    if it fails the leads still draw.
 
+5. **A human is TAGGED when a blocked lead needs a look.** Two triggers, each on the
+   same single Slack post, neither changing who is blocked: the same person tried
+   again, or a MODEL-judged company has 200 or more staff (Apollo, read at submit).
+   Who is tagged lives in Railway, not in this public repo:
+   `NON_ICP_REVIEW_MENTION_IDS` (comma-separated Slack user IDs; anything not shaped
+   like an ID is dropped, so it cannot carry `@here` or `@channel`). **Unset means
+   nobody is tagged.** `NON_ICP_REVIEW_MIN_STAFF` (default 200) moves the size line.
+   The brand list is a hard block by design and NEVER triggers the large-company look.
+   Why 200: 11 model-blocked domains were that big in the first five weeks, about one
+   every three days, so tagging two people is a handful of pings a week, not a flood.
+   The ones that big included specialtyprogramgroup.com (300), a 230-person brokerage,
+   and national carriers (Anthem 98,000, USI 11,000), so size alone cannot say wrong
+   block; it says "look".
+
 **By person, not by company, and that was measured:** my first version counted by
 company domain. Against production it showed `farmersagent.com` at 9 "tries" and
 `allstate.com` at 8, which are different agents, not one person retrying. Counting
@@ -51,6 +65,12 @@ brand list. Nothing is released until someone runs the tool.
   returned 16 people, SPG's contact at 3). The tool's dry run against production
   for specialtyprogramgroup.com: 3 leads, 1 person, 0 booked, and for
   farmersagent.com: refused without `--allow-brand`.
+- The tagging and the large-company look, over HTTP with controls: both tagged ids appear in
+  the message AND the notification text; a first attempt tags nobody; 200 staff is in and
+  199 is out; no Apollo answer is not called out; a brand-list block of 88,000 staff is not
+  called out; a size written "1,200 employees" is read; tried-again plus large is one post
+  with both lines and one tag. Three more mutations, all CAUGHT: ids not filtered to Slack-id
+  shape, the boundary off by one, brand-list blocks allowed to read as large.
 - Six mutations, all CAUGHT: release not applied in `nonIcpVerdict`, not applied in
   the shared reader, warm path re-judging, the repeat banner never shown, the
   dashboard counting our own tests, the Blocked tab dropping the panel.
@@ -77,5 +97,9 @@ brand list. Nothing is released until someone runs the tool.
 - **If the database cannot be read on a cold start, a released company is blocked
   again until it can.** A failing read mid-run keeps the last good list. That is the
   one direction this fails closed.
+- **Setting the tag list is a Railway change, not part of this PR.** After the merge:
+  `railway variables --service gushwork-api --set "NON_ICP_REVIEW_MENTION_IDS=<ids>"`. Until then nobody is tagged.
+- **The tag has never fired in real Slack.** A mention in an incoming-webhook post should
+  notify the person; I have asserted the text, not seen the ping arrive.
 - **Brand-list repeaters appear in the panel** (an Allstate agent who tried four
   times). That is intended: a person who keeps trying deserves a reply.
