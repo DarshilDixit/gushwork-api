@@ -236,7 +236,7 @@
   function cameFrom(r) {
     var f = fromParts(r);
     if (f.main === 'Unknown' && !f.sub) return '<span class="na">Unknown</span>';
-    return '<span class="c2"' + (f.tip ? ' title="' + esc(f.tip) + '"' : '') + '><span class="a">' + esc(f.main) + '</span>' + (f.sub ? '<span class="b">' + esc(f.sub) + '</span>' : '') + '</span>';
+    return '<span class="c2 from"' + (f.tip ? ' title="' + esc(f.tip) + '"' : '') + '><span class="a">' + esc(f.main) + '</span>' + (f.sub ? '<span class="b">' + esc(f.sub) + '</span>' : '') + '</span>';
   }
   /* AN EMAIL OR A DOMAIN BREAKS AT @ . - _, not mid-word: a soft break after each, so a narrow column wraps
      "kert.leblanc.b3cz@" / "statefarm.com" instead of "statefar" / "m.com". Escaped first. */

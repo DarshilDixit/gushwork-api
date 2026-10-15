@@ -170,3 +170,14 @@ would put a visible apostrophe inside bullet lists in `about_business`, so it
 is a decision for Darshil, not a quiet widening of his rule.
 `tests/test-batch2.js` §32 runs the real function over every stored phone
 shape and the hostile ones.
+
+## The Blocked tab's likely-buyer hint (16 Oct 2026)
+
+The hint was first a browser function (merged in PR 147) and counted only the 26 people in "Needs a look": on 15 Oct, 11 of 157 blocked people looked like buyers and 7 of them were in neither of that section's other two reasons, so the section's own filter said 4. It now lives in `nonIcpRoleHint` in `index.js`, because a filter over a list the SERVER pages cannot be done in the browser.
+
+Two weaknesses came out with the move, both measured on the same 15 Oct data: a level with no title (three C-suite rows) and a title at a company of unknown size (three "CEO" and "Vice President" rows) both used to count as buyers. Unknown size means Apollo has no company record, usually a tiny agency, and a blank title cannot be read as agent or not. Neither is a hint now, and the count fell from 11 to 6. The review feed also reads the enrichment record behind the lead row, as the list does, so a person's hint is the same in both places; that moved 12 people from "no title" to a titled row (agents 27 to 33).
+
+Known leftover: the hint is per ROW in the list and per PERSON (latest non-empty answer) in the review feed, so one person with two rows enriched differently can read "Likely buyer" on one and "No hint" on the other (Member Benefits, a CMO with a level on one row and none on the other).
+
+Where they came from: `hear_about_us` is set on 181 of 183 blocked leads and `utm_source` is missing on 33, so the form's channel label leads and the ad source sits under it. Free text (`sadsad`, `Testingggg`, a lower-case `facebook`) is shown as typed.
+
