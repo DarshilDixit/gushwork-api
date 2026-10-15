@@ -51,6 +51,7 @@ const liftSrc = [
 
 const M = (new Function(liftSrc + `
   return { NON_ICP_DOMAINS, NON_ICP_PREFIXES, hostMatchesDomain, nonIcpMatchHost,
+           NON_ICP_INSURANCE_DOMAINS, nonIcpBrandIndustry, nonIcpIndustryOf,
            partnerStackCustomerKey, registrableDomain, nonIcpHostForms,
            /* nonIcpSpeculativeDomain needs the real one -- a stub would let
               the speculative-domain rules drift from the free-mail list
@@ -1245,9 +1246,9 @@ const results10d = (async () => {
     /* /thank-you greets the visitor from attendeeName. Without it a blocked
        lead reads "Thank you, !". */
     ok(`${name}: the redirect carries attendeeName`,
-       s.includes("'?attendeeName=' + encodeURIComponent(name)"));
+       s.includes("params.push('attendeeName=' + encodeURIComponent(name))"));
     ok(`${name}: attendeeName is omitted when there is no name`,
-       /var url  = NON_ICP_REDIRECT\s*\+ \(name \? '\?attendeeName='/.test(s));
+       /if \(name\) params\.push\('attendeeName='/.test(s));
     ok(`${name}: the name is URL-encoded`, s.includes('encodeURIComponent(name)'));
     /* STEP 1 DETECTS BUT MUST NOT REDIRECT (changed 11 Sept 2026). The lead
        completes the form so we capture website, company and phone -- four of
@@ -2640,6 +2641,91 @@ results13 = (async () => {
   }
   return out;
 })();
+
+/* ============================================================
+   THANK-YOU INDUSTRY. /thank-you tells a turned-away visitor which industry
+   we do not serve yet, so the server has to say which one they are in.
+   ============================================================ */
+{
+  /* The insurance half of the brand list is a SEPARATE set, because the list
+     is one object and only its section comment says which half is which.
+     Parse the SOURCE and require the set to equal the keys under that
+     comment, so a carrier added to the list and not the set fails here
+     instead of sending an insurance agent to a page that says real estate. */
+  const listSrc = between('const NON_ICP_DOMAINS = {', '\n};');
+  const afterIns = listSrc.slice(listSrc.indexOf('Insurance: national carrier'));
+  const insKeys = [...afterIns.matchAll(/^\s*'([^']+)'\s*:/gm)].map((m) => m[1]);
+  const reKeys  = [...listSrc.slice(0, listSrc.indexOf('Insurance: national carrier')).matchAll(/^\s*'([^']+)'\s*:/gm)].map((m) => m[1]);
+  ok('industry: the insurance section was found and is not empty', insKeys.length > 10, String(insKeys.length));
+  ok('industry: the real-estate section was found and is not empty', reKeys.length > 10, String(reKeys.length));
+  eq('industry: the insurance set is EXACTLY the keys under the Insurance comment',
+     [...M.NON_ICP_INSURANCE_DOMAINS].sort(), insKeys.slice().sort());
+  ok('industry: every list entry is in exactly one industry',
+     Object.keys(M.NON_ICP_DOMAINS).every((d) => M.nonIcpBrandIndustry(d) === (M.NON_ICP_INSURANCE_DOMAINS.has(d) ? 'insurance' : 'real_estate')));
+  ok('industry: no real-estate key is in the insurance set', reKeys.every((d) => !M.NON_ICP_INSURANCE_DOMAINS.has(d)));
+  eq('industry: kw.com is real estate',            M.nonIcpBrandIndustry('kw.com'), 'real_estate');
+  eq('industry: farmers.com is insurance',         M.nonIcpBrandIndustry('farmers.com'), 'insurance');
+  eq('industry: a bhhs prefix match is real estate', M.nonIcpBrandIndustry('bhhsrmr.com'), 'real_estate');
+  eq('industry: an unknown domain is null',        M.nonIcpBrandIndustry('acme.com'), null);
+  eq('industry: a prototype key is NOT a brand',   M.nonIcpBrandIndustry('constructor'), null);
+  eq('industry: empty and non-strings are null',   [M.nonIcpBrandIndustry(''), M.nonIcpBrandIndustry(null), M.nonIcpBrandIndustry(42)], [null, null, null]);
+
+  /* From a verdict object. */
+  eq('industry: a model block reads business_type, insurance',   M.nonIcpIndustryOf({ blocked: true, source: 'llm', business_type: 'insurance' }), 'insurance');
+  eq('industry: a model block reads business_type, real_estate', M.nonIcpIndustryOf({ blocked: true, source: 'llm_name_only', business_type: 'real_estate' }), 'real_estate');
+  eq('industry: a brand-list block reads the matched domain',    M.nonIcpIndustryOf({ blocked: true, source: 'domain_list', reason: 'allstate.com' }), 'insurance');
+  eq('industry: a NOT-blocked verdict has none, whatever its type', M.nonIcpIndustryOf({ blocked: false, business_type: 'insurance' }), null);
+  eq('industry: a flagged print shop has none (only two industries block)', M.nonIcpIndustryOf({ blocked: true, source: 'llm', business_type: 'print_sign' }), null);
+  eq('industry: a model-written label is never passed through', M.nonIcpIndustryOf({ blocked: true, source: 'llm', business_type: '<script>x</script>' }), null);
+  eq('industry: null verdict is null', M.nonIcpIndustryOf(null), null);
+
+  /* The form side. Both files carry the SAME small block, and the redirect
+     appends industry only from the allowlisted pair. */
+  for (const [name, f] of [['gushwork-form.js', formSrc], ['gushwork-form-popup.js', popupSrc]]) {
+    ok(`industry: ${name} allowlists exactly the two industries`, /var NON_ICP_INDUSTRIES = \['real_estate', 'insurance'\];/.test(f));
+    ok(`industry: ${name} remembers it only from a BLOCKED answer`, /if \(data\.blocked === true\) rememberNonIcpIndustry\(data\.industry\);/.test(f));
+    ok(`industry: ${name} puts it on the redirect, encoded`, /params\.push\('industry=' \+ encodeURIComponent\(industry\)\)/.test(f));
+    ok(`industry: ${name} hands the /submit industry to the backstop redirect`, /industry: submitRes\.non_icp_industry/.test(f));
+  }
+
+  /* EXECUTE the real redirect, in both files, rather than trusting the text.
+     The URLs below are exactly what a visitor is sent to. */
+  for (const [name, f] of [['gushwork-form.js', formSrc], ['gushwork-form-popup.js', popupSrc]]) {
+    const region = between('    var NON_ICP_INDUSTRIES', '      window.location.href = url;\n    }', f)
+                 + '      window.location.href = url;\n    }';
+    const build = (first, last) => {
+      const win = { location: { href: '' } };
+      const fn = new Function('window', 'formState', 'console', "const NON_ICP_REDIRECT = '/thank-you';\n"
+        + 'function nonIcpAttendeeName(){ var f=(formState.first_name||"").trim(), l=(formState.last_name||"").trim(); return f||l||""; }\n'
+        + region + '\nreturn { redirectNonIcp, rememberNonIcpIndustry, cleanNonIcpIndustry };');
+      const api = fn(win, { first_name: first, last_name: last }, { log() {} });
+      return { win, api };
+    };
+    let t = build('Dawn', '');
+    t.api.redirectNonIcp({ industry: 'insurance' });
+    eq(`industry(${name}): name and industry both ride the redirect`, t.win.location.href, '/thank-you?attendeeName=Dawn&industry=insurance');
+    t = build('', '');
+    t.api.redirectNonIcp({ industry: 'real_estate' });
+    eq(`industry(${name}): industry alone, no name`, t.win.location.href, '/thank-you?industry=real_estate');
+    t = build('Dawn', '');
+    t.api.redirectNonIcp({ matched_domain: 'kw.com' });
+    eq(`industry(${name}): no industry leaves the old URL exactly as it was`, t.win.location.href, '/thank-you?attendeeName=Dawn');
+    t = build('', '');
+    t.api.redirectNonIcp({});
+    eq(`industry(${name}): nothing to add gives the bare path`, t.win.location.href, '/thank-you');
+    t = build('Dawn', '');
+    t.api.redirectNonIcp({ industry: '<script>alert(1)</script>' });
+    eq(`industry(${name}): a value off the list is DROPPED, not forwarded`, t.win.location.href, '/thank-you?attendeeName=Dawn');
+    t = build('Dawn', '');
+    t.api.rememberNonIcpIndustry('insurance');
+    t.api.redirectNonIcp({ matched_domain: null });
+    eq(`industry(${name}): the calendar-hold redirect (no verdict in hand) still carries the remembered industry`, t.win.location.href, '/thank-you?attendeeName=Dawn&industry=insurance');
+    t = build('Dawn', '');
+    t.api.rememberNonIcpIndustry('print_sign');
+    t.api.redirectNonIcp({});
+    eq(`industry(${name}): remembering an off-list value does nothing`, t.win.location.href, '/thank-you?attendeeName=Dawn');
+  }
+}
 
 /* ============================================================ */
 results7
