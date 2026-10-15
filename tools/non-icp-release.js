@@ -28,6 +28,12 @@
    --list adds each lead's email, step and date, because a human has to reply
    to them. --apply writes. --note "why" and --by "name" are recorded.
 
+   A RELEASE IS PER DOMAIN, SO A SHARED DOMAIN IS A BIG ONE. farmersagent.com
+   and allstate.com belong to thousands of agents; releasing one lifts the
+   block for every one of them, for good. So a domain on the brand list is
+   REFUSED unless you add --allow-brand, and the dry run says why. A company's
+   own domain (specialtyprogramgroup.com) is the normal case.
+
    The domain is keyed through partnerStackCustomerKey, lifted out of
    index.js, exactly like every other non-ICP key, so agents.farmers.com and
    farmers.com are one company and a free mailbox is refused.
@@ -70,6 +76,7 @@ function argValue(flag) {
 async function main() {
   const apply = process.argv.includes('--apply');
   const list = process.argv.includes('--list');
+  const allowBrand = process.argv.includes('--allow-brand');
   const note = argValue('--note');
   const by = argValue('--by');
   const flagValues = new Set([note, by].filter(Boolean));
@@ -117,7 +124,13 @@ async function main() {
         console.log(v.rows[0]
           ? `   cached verdict: ${v.rows[0].business_type} ${v.rows[0].confidence} (${v.rows[0].source}), checked ${String(v.rows[0].checked_at).slice(0, 10)}`
           : '   no cached verdict');
-        if (brand) console.log(`   NOTE: this domain is on the brand list (${brand}). The release overrides the list for this company only.`);
+        if (brand) {
+          console.log(`   WARNING: this domain is on the brand list (${brand}) and is shared by MANY people. Releasing it lifts the block for ALL of them, for good.`);
+          if (!allowBrand) {
+            if (apply) throw new Error(`${d} is a brand-list domain. Nothing was done. If you really mean to release every ${brand} address, add --allow-brand.`);
+            console.log('   --apply will REFUSE this one unless you add --allow-brand.');
+          }
+        }
         console.log(`   leads that ${apply ? 'were' : 'would be'} unblocked: ${row.leads} (${row.people} ${row.people === 1 ? 'person' : 'people'}), ${row.blocked} blocked, ${row.booked} already booked`);
         if (list && row.leads) {
           const l = await client.query(`SELECT email, created_at, step_reached, (booking_uid IS NOT NULL) AS booked ${sel} ORDER BY created_at`, [d]);

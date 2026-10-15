@@ -2806,6 +2806,7 @@ results13 = (async () => {
     ok('release/tool: it refuses --apply before the table exists', /if \(apply\) throw new Error\('non_icp_exemptions does not exist yet/.test(tool));
     ok('release/tool: it keys the domain through partnerStackCustomerKey like everything else here', /M\.partnerStackCustomerKey\(raw\)/.test(tool));
     ok('release/tool: it clears the model flag too, so the Schedule guard stops withholding Meta', /non_icp_llm_flagged = FALSE/.test(tool));
+    ok('release/tool: a shared brand-list domain is REFUSED without --allow-brand', /if \(apply\) throw new Error\(`\$\{d\} is a brand-list domain\. Nothing was done\./.test(tool) && /const allowBrand = process\.argv\.includes\('--allow-brand'\)/.test(tool));
   }
 })().then(() => {}, (e) => { ok('release: the section completed', false, e && e.stack); });
 
