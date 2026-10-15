@@ -51,7 +51,7 @@ const S = { fetches: [], slackPayloads: [], leadRow: null, writes: [], psBlocked
             reportLeads: null, reportVerdicts: null, metaPayloads: [],
             /* released domains (non_icp_exemptions), the "tries" count the
                blocked-lead post reads, and the dashboard's repeat rows */
-            exempt: [], tries: null, repeatRows: [] };
+            exempt: [], tries: null, repeatRows: [], enrich: null };
 
 /* ── stub pg ──────────────────────────────────────────────────────
    Both pools (Railway and the AWS warehouse) come through here.
@@ -193,6 +193,10 @@ function stubQuery(q, params) {
       : { rows: [], rowCount: 0 };
   }
   if (/^SELECT booking_uid FROM leads/.test(flat))  return { rows: [{ booking_uid: null }], rowCount: 1 };
+  /* What /submit reads to see the company size Apollo found for this session. */
+  if (/^SELECT \* FROM enrichment_data WHERE session_id=\$1/.test(flat)) {
+    return { rows: S.enrich ? [S.enrich] : [], rowCount: S.enrich ? 1 : 0 };
+  }
   /* The three reads the release-and-repeat change adds. Matched BEFORE the
      generic COUNT branch below, which would answer each with an empty row. */
   if (/FROM non_icp_exemptions/.test(flat)) {
@@ -307,6 +311,9 @@ Object.assign(process.env, {
   /* Released companies are cached for a minute in production. 0 here, so a
      scenario that sets S.exempt is read on the very next request. */
   NON_ICP_EXEMPT_TTL_MS: '0',
+  /* Who is tagged when a blocked lead needs a human look. The last entry is
+     deliberately NOT a Slack id, to prove it is dropped and cannot inject text. */
+  NON_ICP_REVIEW_MENTION_IDS: 'U0TESTAAA1, W0TESTBBB2, here, @channel, <!everyone>',
   /* Without this the conversion stops inside sendConversion with 'no_token'
      and the CONTROL below passes for the wrong reason -- it would look like
      the guard worked when nothing had been sent by anyone. */
@@ -330,7 +337,7 @@ const post = async (p, body) => {
   let j = null; try { j = await r.json(); } catch (_) {}
   return { status: r.status, body: j };
 };
-const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; S.dropoffInternal = null; S.dropoffRows = null; S.dropoffSources = null; S.stickySource = null; S.exempt = []; S.tries = null; S.repeatRows = []; };
+const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; S.dropoffInternal = null; S.dropoffRows = null; S.dropoffSources = null; S.stickySource = null; S.exempt = []; S.tries = null; S.repeatRows = []; S.enrich = null; };
 const metaFired      = () => S.fetches.some((u) => /graph\.facebook\.com/.test(u));
 const salesforceHit  = () => S.fetches.some((u) => /\/sobjects\//.test(u));
 const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') || true);
@@ -1914,6 +1921,9 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     ok('REPEAT: it gives the release command for THAT company', /non-icp-release\.js garyrockwellinsurance\.test/.test(again), again.slice(0, 400));
     ok('REPEAT: it is still ONE post, not two', S.slackPayloads.filter((p) => /Blocked person tried again|Lead Blocked/.test(JSON.stringify(p))).length === 1);
     ok('REPEAT: it still carries the evidence a human needs', /independent insurance agency serving Ohio/.test(again));
+    ok('REPEAT: it TAGS the people in NON_ICP_REVIEW_MENTION_IDS, in the message and in the notification text',
+       /<@U0TESTAAA1>/.test(again) && /<@W0TESTBBB2>/.test(again) && /"text":"<@U0TESTAAA1> <@W0TESTBBB2> /.test(again), again.slice(0, 160));
+    ok('REPEAT: anything that is not a Slack id is DROPPED (no @here, @channel or @everyone)', !/<!here>|<!channel>|<!everyone>|@channel|@here/.test(again), again.slice(0, 200));
 
     reset(); S.verdict = VROW(); S.tries = 1;
     await post('/submit', { session_id: '00000000-0000-4000-8000-0000000000b3',
@@ -1923,6 +1933,51 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     await sleep(700);
     const first = JSON.stringify(S.slackPayloads);
     ok('REPEAT control: a FIRST attempt keeps the normal header', /Lead Blocked/.test(first) && !/tried again|Attempt \d/.test(first), first.slice(0, 200));
+    ok('REPEAT control: a first attempt tags NOBODY (the ping is for cases that need a look)', !/<@/.test(first), first.slice(0, 200));
+  }
+  {
+    /* A LARGE MODEL-JUDGED COMPANY. specialtyprogramgroup.com: 300 staff. The
+       brand list is a hard block by design and must NEVER trigger this. */
+    const submitLarge = async (n, enrich, extra) => {
+      reset(); S.verdict = VROW(); S.tries = 1; S.enrich = enrich;
+      await post('/submit', Object.assign({ session_id: '00000000-0000-4000-8000-0000000000c' + n,
+        email: 'gary@garyrockwellinsurance.test', website: 'garyrockwellinsurance.test',
+        first_name: 'Gary', last_name: 'Rockwell', company: 'Gary Rockwell Insurance',
+        phone: '+15551234567', sell_to: 'B2B', page_url: 'https://www.gushwork.ai/demo' }, extra || {}));
+      await sleep(700);
+      return JSON.stringify(S.slackPayloads);
+    };
+    let t = await submitLarge(1, { enriched_company_size: '300' });
+    ok('LARGE: a 300-person model-judged company is called out', /Large company blocked/.test(t) && /about 300 staff/.test(t), t.slice(0, 220));
+    ok('LARGE: it tags the same people', /<@U0TESTAAA1>/.test(t) && /<@W0TESTBBB2>/.test(t), t.slice(0, 200));
+    ok('LARGE: it says who to look at and how to release', /non-icp-release\.js garyrockwellinsurance\.test/.test(t) && /specialtyprogramgroup\.com had 300 staff/.test(t));
+    ok('LARGE: it is still ONE post and still blocked, the lead is not let through', S.slackPayloads.length >= 1 && S.slackPayloads.filter((p) => /Large company blocked|Lead Blocked/.test(JSON.stringify(p))).length === 1 && !metaFired());
+    t = await submitLarge(2, { enriched_company_size: '200' });
+    ok('LARGE: the boundary is INCLUSIVE (200 staff is in)', /Large company blocked/.test(t), t.slice(0, 160));
+    t = await submitLarge(3, { enriched_company_size: '199' });
+    ok('LARGE control: 199 staff is NOT called out and tags nobody', /Lead Blocked/.test(t) && !/Large company/.test(t) && !/<@/.test(t), t.slice(0, 200));
+    t = await submitLarge(4, null);
+    ok('LARGE control: no Apollo answer is NOT called out', /Lead Blocked/.test(t) && !/Large company/.test(t), t.slice(0, 160));
+    t = await submitLarge(5, { enriched_company_size: '1,200 employees' });
+    ok('LARGE: a size written with a comma or words is still read', /about 1,200 staff/.test(t), t.slice(0, 200));
+    /* THE BRAND LIST NEVER TRIGGERS IT, however big. */
+    reset(); S.tries = 1; S.enrich = { enriched_company_size: '88000' };
+    await post('/submit', { session_id: '00000000-0000-4000-8000-0000000000c6',
+      email: 'agent@exprealty.com', website: 'exprealty.com', first_name: 'A', last_name: 'Gent',
+      company: 'eXp Realty', phone: '+15550001111', sell_to: 'B2B', page_url: 'https://www.gushwork.ai/demo' });
+    await sleep(700);
+    const brand = JSON.stringify(S.slackPayloads);
+    ok('LARGE control: a BRAND-LIST block is never "large", however big (hard block by design)', /Lead Blocked/.test(brand) && !/Large company/.test(brand) && !/<@/.test(brand), brand.slice(0, 200));
+    /* BOTH reasons at once: one post, both lines, one tag. */
+    reset(); S.verdict = VROW(); S.tries = 2; S.enrich = { enriched_company_size: '300' };
+    await post('/submit', { session_id: '00000000-0000-4000-8000-0000000000c7',
+      email: 'gary@garyrockwellinsurance.test', website: 'garyrockwellinsurance.test',
+      first_name: 'Gary', last_name: 'Rockwell', company: 'Gary Rockwell Insurance',
+      phone: '+15551234567', sell_to: 'B2B', page_url: 'https://www.gushwork.ai/demo' });
+    await sleep(700);
+    const both = JSON.stringify(S.slackPayloads);
+    ok('BOTH: tried again AND large gives one post carrying both lines', /Blocked person tried again/.test(both) && /Attempt 2 from this person/.test(both) && /about 300 staff/.test(both) && S.slackPayloads.filter((p) => /Blocked person tried again/.test(JSON.stringify(p))).length === 1, both.slice(0, 200));
+    ok('BOTH: the people are tagged ONCE, not twice', (both.match(/<@U0TESTAAA1>/g) || []).length === 2 /* the section and the notification text */, String((both.match(/<@U0TESTAAA1>/g) || []).length));
   }
   {
     /* THE DASHBOARD'S READ. */

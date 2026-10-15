@@ -1777,6 +1777,24 @@ function slackTruncate(text, max = SLACK_ABOUT_MAX) {
    -- an SDR reading it can neither agree nor disagree. "Matched kw.com" can be
    checked against the person's actual company in one glance, which is exactly
    how paycompass.com would have been caught had substring matching shipped. */
+/* WHO GETS PINGED when a blocked lead needs a human look. Slack user IDs, in
+   Railway (NON_ICP_REVIEW_MENTION_IDS, comma separated), NOT in this file: the
+   repo is public. Anything that is not shaped like a Slack ID is dropped, so
+   the variable cannot smuggle other text, a channel mention or an @here into a
+   message. Unset means nobody is tagged and the post is otherwise unchanged. */
+function nonIcpReviewMentions() {
+  return String(process.env.NON_ICP_REVIEW_MENTION_IDS || '').split(',')
+    .map((x) => x.trim()).filter((x) => /^[UW][A-Z0-9]{6,}$/.test(x))
+    .map((x) => `<@${x}>`).join(' ');
+}
+/* A MODEL-JUDGED COMPANY THIS BIG IS WHERE A WRONG BLOCK COSTS THE MOST.
+   specialtyprogramgroup.com had 300 staff, a marketing team and a budget, and
+   was blocked like a one-person agent. The brand list is a hard block by
+   design and never triggers this; only the model's judgment does. 200 is a
+   starting point, from the 11 model-blocked domains that large in the first
+   five weeks. */
+const NON_ICP_REVIEW_MIN_STAFF = Number(process.env.NON_ICP_REVIEW_MIN_STAFF) > 0 ? Number(process.env.NON_ICP_REVIEW_MIN_STAFF) : 200;
+
 function slackNonIcpBlocked(d) {
   const name = [d.first_name, d.last_name].filter(Boolean).join(' ');
   const blocks = [];
@@ -1789,15 +1807,31 @@ function slackNonIcpBlocked(d) {
      allstate.com are shared by thousands of different agents and a count by
      domain would read as one person retrying. */
   const repeat = Number(d.attempts) >= 2;
-  blocks.push(bHeader(repeat ? '🔁 Blocked person tried again — Non-ICP' : '🚫 Lead Blocked — Non-ICP'));
+  const large  = d.large_company === true && Number(d.company_staff) > 0;
+  /* THE TWO REASONS A HUMAN SHOULD LOOK, and either one tags the people in
+     NON_ICP_REVIEW_MENTION_IDS. Neither changes who is blocked. */
+  const look = repeat || large;
+  const mentions = look ? nonIcpReviewMentions() : '';
+  const release = 'If this company should not be blocked: `node tools/non-icp-release.js ' + (d.matched_domain || 'domain.com') +
+    '` shows what it would do, and `--apply` does it.';
+  blocks.push(bHeader(repeat ? '🔁 Blocked person tried again — Non-ICP'
+                    : large  ? '👀 Large company blocked — Non-ICP'
+                    :          '🚫 Lead Blocked — Non-ICP'));
   blocks.push(bDivider());
   if (repeat) {
     blocks.push(bSection(
+      (mentions ? mentions + '\n' : '') +
       `*Attempt ${Number(d.attempts)} from this person*` +
       (d.first_attempt ? ` _(first on ${new Date(d.first_attempt).toISOString().slice(0, 10)})_` : '') +
-      '\nA second try usually means we got it wrong, or they did not understand the page. They deserve a human reply either way. ' +
-      'If this company should not be blocked: `node tools/non-icp-release.js ' + (d.matched_domain || 'domain.com') +
-      '` shows what it would do, and `--apply` does it.'
+      '\nA second try usually means we got it wrong, or they did not understand the page. They deserve a human reply either way. ' + release
+    ));
+  }
+  if (large) {
+    blocks.push(bSection(
+      (mentions && !repeat ? mentions + '\n' : '') +
+      `*Large company: about ${Number(d.company_staff).toLocaleString('en-US')} staff.* ` +
+      'We block any insurance or real estate company, but one this size may be a real prospect ' +
+      '(specialtyprogramgroup.com had 300 staff and was one). A quick look is worth it. ' + release
     ));
   }
 
@@ -1892,7 +1926,7 @@ function slackNonIcpBlocked(d) {
         '`NON_ICP_BLOCK=false` on Railway turns the whole thing off without a deploy.'
   ));
   sendSlack(blocks,
-    `${repeat ? '🔁 Blocked person tried again' : '🚫 Lead blocked'} (non-ICP): ${d.email || name || 'unknown'} — matched ${d.matched_domain || 'unknown'}`);
+    `${mentions ? mentions + ' ' : ''}${repeat ? '🔁 Blocked person tried again' : large ? '👀 Large company blocked' : '🚫 Lead blocked'} (non-ICP): ${d.email || name || 'unknown'} — matched ${d.matched_domain || 'unknown'}`);
 }
 
 /* ── The FLAGGED-not-blocked post ────────────────────────────────────
@@ -15656,8 +15690,14 @@ app.post('/submit', async (req, res) => {
           tries = { n: t.rows[0] && t.rows[0].n, first: t.rows[0] && t.rows[0].first_at };
         } catch (err) { console.warn('[/submit] could not count blocked attempts:', err.message); }
       }
+      /* A MODEL-JUDGED company with 200+ staff (Apollo, read off this session's
+         enrichment). Never the brand list, never one of our own tests. */
+      const staff = Number(String(enrich.enriched_company_size || '').replace(/[^0-9]/g, '')) || null;
+      const largeCompany = nonIcpSourceIsModel(nonIcpSource) && staff !== null
+        && staff >= NON_ICP_REVIEW_MIN_STAFF && !isInternalSubmission(email, page_url);
       slackNonIcpBlocked({ stage: 'submit', matched_domain: nonIcpReason,
         attempts: tries ? tries.n : null, first_attempt: tries ? tries.first : null,
+        large_company: largeCompany, company_staff: staff,
         matched_label: NON_ICP_DOMAINS[nonIcpReason] || null,
         matched_in_email: !!emailSide, matched_in_website: !!websiteSide,
         /* The model fields come off the fresh verdict rather than the row:
