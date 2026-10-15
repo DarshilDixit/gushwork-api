@@ -969,10 +969,13 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   await GW.TABS.blocked.load(); GW.TABS.blocked.render(); v = view();
   ok('buyers: with NO buyers the list is empty and says so, and the server is never asked with an empty list (it would filter nothing)', /No likely buyers right now/.test(v) && !b.calls.slice(noneFrom).some((c) => c.path === '/monitor/leads' && 'emails' in c.q && !c.q.emails));
   REPEATS = keepBuyers;
+  /* the failed switch, from a list that HAS rows: All blocked is showing, then Likely buyers is pressed and the server refuses */
+  fire('click', el({ 'data-blf': 'all' })); await ticks(30); v = view();
+  ok('buyers: (precondition) the full list is on screen before the failed switch', v.includes('data-x="blk-3f2a9c1e'));
   leadsHook = (q) => q.emails ? new Error('upstream down') : null;
-  await GW.TABS.blocked.load(); GW.TABS.blocked.render(); v = view();
-  const mlFail = v.slice(v.indexOf('id="blk-list"'), v.indexOf('id="rel-list"'));
-  ok('buyers: a failed filtered read shows the failure and NO rows, never the unfiltered list under a pressed Likely buyers', /upstream down/.test(mlFail) && !/data-x="blk-/.test(mlFail), mlFail.slice(0, 240));
+  fire('click', el({ 'data-blf': 'buyer' })); await ticks(30); v = view();
+  /* the whole page, not the list's slice: an unavailable panel carries no id="blk-list" */
+  ok('buyers: a failed filtered read shows the failure and NO rows, never the unfiltered list under a pressed Likely buyers', /Blocked leads[\s\S]{0,200}upstream down|upstream down[\s\S]{0,200}Blocked leads/.test(v) && !/data-x="blk-/.test(v));
   leadsHook = null;
   fire('click', el({ 'data-blf': 'all' })); await ticks(30); v = view();
   ok('buyers: All blocked goes back to the full list', /data-blf="all" aria-pressed="true"/.test(v) && v.includes('data-x="blk-3f2a9c1e') && /<b>51<\/b> leads blocked/.test(v));
