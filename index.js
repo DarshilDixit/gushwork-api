@@ -14132,35 +14132,50 @@ app.get('/monitor/overview', async (req, res) => {
   }
 });
 
-/* ── Blocked people who TRIED AGAIN ───────────────────────────────────
-   A person blocked twice or more is the likeliest wrong block we have: they
-   did not take no for an answer. specialtyprogramgroup.com's contact tried
-   three times and wrote in. Slack says so at the moment it happens
-   (slackNonIcpBlocked); this is the same list on the dashboard, so it is
-   still there on Monday.
+/* ── Blocked people who NEED A LOOK ───────────────────────────────────
+   The Blocked tab's first section, and the same two reasons the Slack post
+   tags people for: the person TRIED AGAIN, or a MODEL-judged company is large
+   (NON_ICP_REVIEW_MIN_STAFF). Neither changes who is blocked; both are where a
+   wrong block is likeliest. specialtyprogramgroup.com's contact tried three
+   times and wrote in; inlandgroup.com (1,200 staff, a VP of Leasing) was
+   blocked on a first try. Slack says so at the moment it happens; this is the
+   same list on the dashboard, so it is still there on Monday.
 
    BY EMAIL, NOT BY COMPANY. farmersagent.com and allstate.com are shared by
    thousands of agents, so a count by domain read as nine tries from "one
    company" when it was nine different people. Counts distinct SESSIONS of an
-   address that were blocked AND submitted. Our own test submissions are left
-   out (a test against a brand domain is not somebody coming back), with IS NOT
-   TRUE because the clause is NULL for a lead with no email. A released
-   company drops out by itself: tools/non-icp-release.js clears the block on
-   its leads. Takes db so a test or the preview can hand it a read-only
-   connection; writes nothing. */
-async function nonIcpRepeatsReport(db) {
+   address that were blocked AND submitted. The large-company reason applies
+   only to MODEL blocks (the brand list is a hard block by design), exactly as
+   the Slack post does.
+
+   Our own test submissions are left out (a test against a brand domain is not
+   somebody coming back), with IS NOT TRUE because the clause is NULL for a lead
+   with no email. A released company drops out by itself: the release clears the
+   block on its leads. Each row carries the person's ROLE (Apollo's title,
+   seniority and department) because the first question about any of them is
+   "is this an agent or a buyer?". Takes db so a test or the preview can hand it
+   a read-only connection; writes nothing. */
+async function nonIcpReviewReport(db) {
   const params = [];
   const internal = internalLeadSqlClause('l.email', 'l.page_url', params);
+  params.push(NON_ICP_REVIEW_MIN_STAFF);
+  const minStaff = '$' + params.length;
   const r = await db.query(`
     SELECT lower(l.email)                                              AS email,
+           (ARRAY_AGG(NULLIF(trim(concat_ws(' ', l.first_name, l.last_name)), '') ORDER BY l.created_at DESC)
+              FILTER (WHERE NULLIF(trim(concat_ws(' ', l.first_name, l.last_name)), '') IS NOT NULL))[1] AS name,
            (ARRAY_AGG(l.non_icp_reason ORDER BY l.created_at DESC))[1] AS domain,
            COUNT(DISTINCT l.session_id)::int                           AS attempts,
            MIN(l.created_at)                                           AS first_at,
            MAX(l.created_at)                                           AS last_at,
            MAX(l.non_icp_source)                                       AS source,
+           bool_or(l.non_icp_source LIKE 'llm%')                       AS model_blocked,
            MAX(v.business_type)                                        AS business_type,
            MAX(v.confidence)::float                                    AS confidence,
-           MAX(CASE WHEN l.enriched_company_size ~ '^[0-9]+$' THEN l.enriched_company_size::int END) AS company_size
+           MAX(CASE WHEN l.enriched_company_size ~ '^[0-9]+$' THEN l.enriched_company_size::int END) AS company_size,
+           (ARRAY_AGG(l.enriched_title ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.enriched_title, '') IS NOT NULL))[1]       AS title,
+           (ARRAY_AGG(l.enriched_seniority ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.enriched_seniority, '') IS NOT NULL))[1] AS seniority,
+           (ARRAY_AGG(l.enriched_departments ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.enriched_departments, '') IS NOT NULL))[1] AS departments
       FROM leads l
       LEFT JOIN non_icp_domain_verdicts v ON v.domain = l.non_icp_reason
      WHERE l.non_icp_blocked IS TRUE
@@ -14169,27 +14184,38 @@ async function nonIcpRepeatsReport(db) {
        AND (${internal}) IS NOT TRUE
      GROUP BY lower(l.email)
     HAVING COUNT(DISTINCT l.session_id) >= 2
+        OR (bool_or(l.non_icp_source LIKE 'llm%')
+            AND MAX(CASE WHEN l.enriched_company_size ~ '^[0-9]+$' THEN l.enriched_company_size::int END) >= ${minStaff})
      ORDER BY MAX(l.created_at) DESC, COUNT(DISTINCT l.session_id) DESC
      LIMIT 50`, params);
   return {
     as_of: new Date().toISOString(),
-    rows: r.rows.map((x) => ({
-      email: x.email, domain: x.domain, attempts: Number(x.attempts) || 0, first_at: x.first_at, last_at: x.last_at,
-      source: x.source || null, business_type: x.business_type || null,
-      confidence: x.confidence == null ? null : Number(x.confidence),
-      company_size: x.company_size == null ? null : Number(x.company_size),
-    })),
+    min_staff: NON_ICP_REVIEW_MIN_STAFF,
+    rows: r.rows.map((x) => {
+      const attempts = Number(x.attempts) || 0;
+      const size = x.company_size == null ? null : Number(x.company_size);
+      const reasons = [];
+      if (attempts >= 2) reasons.push('tried_again');
+      if (x.model_blocked === true && size !== null && size >= NON_ICP_REVIEW_MIN_STAFF) reasons.push('large');
+      return {
+        email: x.email, name: x.name || null, domain: x.domain, attempts, first_at: x.first_at, last_at: x.last_at,
+        source: x.source || null, business_type: x.business_type || null,
+        confidence: x.confidence == null ? null : Number(x.confidence),
+        company_size: size, title: x.title || null, seniority: x.seniority || null, departments: x.departments || null,
+        reasons,
+      };
+    }),
   };
 }
 
-app.get('/monitor/non-icp-repeats', async (req, res) => {
+app.get('/monitor/non-icp-review', async (req, res) => {
   const token = process.env.MONITOR_TOKEN;
   if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    res.json(await nonIcpRepeatsReport(pool));
+    res.json(await nonIcpReviewReport(pool));
   } catch (err) {
-    console.error('[/monitor/non-icp-repeats]', err.message);
-    res.status(500).json({ error: 'Repeat attempts report failed', detail: err.message });
+    console.error('[/monitor/non-icp-review]', err.message);
+    res.status(500).json({ error: 'Review list failed', detail: err.message });
   }
 });
 

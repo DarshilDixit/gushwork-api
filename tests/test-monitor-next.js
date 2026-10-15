@@ -429,7 +429,8 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   const LEAD_C = { session_id: SID_C, email: 'cy@shop.example', sell_to: 'B2C', product: 'aeo', completed: false, booking_uid: null, meta_withheld_reason: 'model',
     referrer: 'https://www.google.com/search?q=x', created_at: '2026-09-25T11:00:00Z' };
   const LEADS = { total: 4471, page: 2, pages: 179, leads: [LEAD_A, LEAD_B, LEAD_C] };
-  const BLOCKED = { total: 51, page: 1, pages: 3, leads: [LEAD_A] };
+  /* the Blocked tab shows the person's ROLE and company size on the row itself; LEAD_A is used elsewhere, so the role is added only here */
+  const BLOCKED = { total: 51, page: 1, pages: 3, leads: [Object.assign({}, LEAD_A, { enriched_title: 'Vice President of Leasing', enriched_seniority: 'vp', enriched_departments: 'master_operations', enriched_company_size: '1200' })] };
   /* THE MODEL PAYLOAD: cache is TOP-LEVEL and scrape.cache does not exist,
      so reading the wrong one can only paint nothing, never the right number */
   const MODEL = { windowDays: 30, product: 'crm', generatedAt: ASOF, truncated: true,
@@ -496,9 +497,13 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     [SID_B]: { ok: false, unavailable: true }, [SID_C]: { ok: true, changes: [] } };
   let healthDown = false, leadsHook = null, ackDown = false;
   /* The Blocked tab's second read: blocked people who submitted again. */
-  let REPEATS = { as_of: '2026-10-15T12:00:00Z', rows: [
-    { email: 'maya@spgish.test', domain: 'spgish.test', attempts: 3, first_at: '2026-09-28T18:30:00Z', last_at: '2026-10-09T18:30:00Z', source: 'llm', business_type: 'insurance', confidence: 0.97, company_size: 300 },
-    { email: 'pat@remax.com', domain: 'remax.com', attempts: 2, first_at: '2026-10-01T10:00:00Z', last_at: '2026-10-06T10:00:00Z', source: 'domain_list', business_type: null, confidence: null, company_size: null }] };
+  let REPEATS = { as_of: '2026-10-15T12:00:00Z', min_staff: 200, rows: [
+    { email: 'maya@spgish.test', name: 'Maya Lee', domain: 'spgish.test', attempts: 3, first_at: '2026-09-28T18:30:00Z', last_at: '2026-10-09T18:30:00Z', source: 'llm', business_type: 'insurance', confidence: 0.97, company_size: 300,
+      title: 'Digital Marketing Manager', seniority: 'manager', departments: 'master_marketing', reasons: ['tried_again', 'large'] },
+    { email: 'pat@remax.com', name: null, domain: 'remax.com', attempts: 2, first_at: '2026-10-01T10:00:00Z', last_at: '2026-10-06T10:00:00Z', source: 'domain_list', business_type: null, confidence: null, company_size: null,
+      title: null, seniority: null, departments: null, reasons: ['tried_again'] },
+    { email: 'sean@bigco.test', name: 'Sean Lee', domain: 'bigco.test', attempts: 1, first_at: '2026-10-15T14:00:00Z', last_at: '2026-10-15T14:00:00Z', source: 'llm', business_type: 'real_estate', confidence: 0.88, company_size: 1200,
+      title: 'Vice President of Leasing', seniority: 'vp', departments: 'master_operations', reasons: ['large'] }] };
   let repDown = false;
   /* The release routes: what is already released, what a release would clear, and whether the write fails. */
   let RELEASED = { as_of: 'x', rows: [{ domain: 'old-release.test', note: 'insurance group', released_by: 'dashboard', released_at: '2026-10-14T15:00:00Z', leads: 2 }] };
@@ -522,7 +527,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     if (p === '/monitor/metrics') return METRICS;
     if (p === '/monitor/sdr') return SDR;
     if (p === '/monitor/non-icp') return MODEL;
-    if (p === '/monitor/non-icp-repeats') return repDown ? new Error('upstream down') : REPEATS;
+    if (p === '/monitor/non-icp-review') return repDown ? new Error('upstream down') : REPEATS;
     if (p === '/monitor/non-icp-released') return relDown ? new Error('upstream down') : RELEASED;
     if (p === '/monitor/non-icp-release-plan') return PLANS[q.domain] || new Error('not a company domain');
     if (p === '/monitor/non-icp-release') return relFail ? new Error('write refused') : { ok: true, domain: (() => { try { return JSON.parse(b_lastBody()).domain; } catch (e) { return undefined; } })(), released_leads: 3 };
@@ -874,23 +879,47 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('blocked: the lede is true for late verdicts too', v.includes('a few were marked only after they had booked') && !v.includes('turned away before the calendar'));
   /* PEOPLE WHO TRIED AGAIN. A second try is the best sign a block is wrong, and
      Slack only says so at the moment it happens. */
-  ok('repeats: the panel is on the Blocked tab, above the leads', /People who tried again/.test(v) && v.indexOf('People who tried again') < v.indexOf('data-x="blk-'), v.slice(0, 0));
-  ok('repeats: it reads its own route, once per load', b.calls.slice(bc0).filter((c) => c.path === '/monitor/non-icp-repeats').length >= 1);
-  ok('repeats: each person shows email, company and the number of tries', v.includes('maya@spgish.test') && v.includes('spgish.test') && /<span class="cv">3<\/span>/.test(v));
+  /* an email or a domain carries a soft break after @ . - _ so a narrow column wraps at a natural place, never mid-word */
+  const bk = (x) => String(x).replace(/([@.\-_])/g, '$1<wbr>');
+  ok('review: an email wraps at @ and dots, not mid-word (soft break points are in the markup)', v.includes('maya@<wbr>spgish.<wbr>test') && !/maya@spgish\.test/.test(v.slice(v.indexOf('id="blk-review"'), v.indexOf('id="blk-list"'))));
+  /* THE MAIN LIST: every row is blocked, so Product / Sells to / Enriched said nothing. Who, what role, which company, what blocked it. */
+  const listHtml = v.slice(v.indexOf('id="blk-list"'), v.indexOf('id="rel-list"'));
+  ok('blocked list: the columns that say something (Person, Role, Company, Blocked by), not the ones that never vary', ['Person', 'Role', 'Company', 'Blocked by', 'Stage'].every((h) => new RegExp('>' + h + '<').test(listHtml)) && !/>Sells to</.test(listHtml) && !/>Product</.test(listHtml) && !/>Enriched</.test(listHtml), (listHtml.match(/<th[^>]*>[^<]*/g) || []).join(' | ').slice(0, 300));
+  ok('blocked list: a row shows the ROLE without opening it (the collapsed row, not only the detail panel)', /<span class="a">Vice President of Leasing<\/span><span class="b">vp · operations<\/span>/.test(listHtml), listHtml.slice(0, 0));
+  ok('blocked list: ...and the company with its size', /<span class="a">Acme Realty<\/span><span class="b">1,200 staff<\/span>/.test(listHtml));
+  ok('blocked list: ...and the person as name over email', listHtml.includes('<span class="a">Ann Acme</span><span class="b">' + bk('ann@acmerealty.com') + '</span>'));
+  ok('blocked list: the chip that says WHICH CHECK is in its own column', /AI check \(name only\)/.test(listHtml));
+  /* THREE SECTIONS, IN THE ORDER A PERSON WORKS: what needs deciding, the full list, then the housekeeping. */
+  ok('review: "Needs a look" is the FIRST section, then the leads, then the released list', /id="blk-review"/.test(v) && v.indexOf('id="blk-review"') < v.indexOf('id="blk-list"') && v.indexOf('id="blk-list"') < v.indexOf('id="rel-list"'), [v.indexOf('id="blk-review"'), v.indexOf('id="blk-list"'), v.indexOf('id="rel-list"')].join(','));
+  ok('review: the first section carries the accent, the list and the released list do not', /class="card panel look" id="blk-review"/.test(v) && !/class="card panel look" id="blk-list"/.test(v) && /class="card panel quiet" id="rel-list"/.test(v));
+  ok('review: each section has its own heading with a count where there is one', /Needs a look<\/h2>[\s\S]{0,260}<span class="badge b-warn">3<\/span>/.test(v) && /Blocked leads<\/h2>/.test(v) && /Released companies<\/h2>/.test(v));
+  ok('review: a map of the page, with a count on each section, scrolls rather than navigates', /<nav class="jumps" aria-label="Sections on this tab">/.test(v) && /data-jump="blk-review">Needs a look<span class="badge b-warn">3<\/span>/.test(v) && /data-jump="blk-list">Blocked leads<span class="badge b-neu">51<\/span>/.test(v) && /data-jump="rel-list">Released companies<span class="badge b-neu">1<\/span>/.test(v));
+  const jc0 = b.calls.length, hash0 = String(b.window.location.hash);
+  fire('click', el({ 'data-jump': 'blk-list' })); await ticks();
+  ok('review: a jump button reads nothing, writes nothing and leaves the address alone', b.calls.length === jc0 && String(b.window.location.hash) === hash0);
+  ok('review: the footers are ONE element (the panel footer is a flex row; loose text and code broke into columns)', (v.match(/<div class="foot">(?!<span>)/g) || []).length === 0, (v.match(/<div class="foot">.{0,40}/g) || []).join(' | '));
+  ok('review: the list can grow past five rows (the grid is the tall one)', /class="tbl stack tall"/.test(v));
+  ok('repeats: it reads its own route, once per load', b.calls.slice(bc0).filter((c) => c.path === '/monitor/non-icp-review').length >= 1);
+  ok('review: each person shows name over email, so a row reads as a person', v.includes('<span class="c2"><span class="a">Maya Lee</span><span class="b">' + bk('maya@spgish.test') + '</span></span>'));
+  ok('review: a person with no name shows the email alone', v.includes('<span class="c2"><span class="a">' + bk('pat@remax.com') + '</span></span>'));
+  ok('review: the ROLE is shown, title over level and department (Swapnil: "is he an agent?")', /<span class="a">Digital Marketing Manager<\/span><span class="b">manager · marketing<\/span>/.test(v) && /<span class="a">Vice President of Leasing<\/span><span class="b">vp · operations<\/span>/.test(v));
+  ok('review: no title from Apollo says so instead of leaving a blank', /<span class="na">No title from Apollo<\/span>/.test(v));
+  ok('review: the reasons are badges, a person can have both', /Tried 3×<\/span><span class="badge b-neu">300 staff<\/span>/.test(v) && /<span class="badge b-warn">Tried 2×<\/span>/.test(v) && /<span class="badge b-neu">1,200 staff<\/span>/.test(v));
+  ok('review: a first-time large company (no tries) is listed and shows NO "Tried" badge', /Vice President of Leasing[\s\S]{0,600}1,200 staff/.test(v) && !/Tried 1×/.test(v));
   ok('repeats: a model block says what it judged, with its confidence', v.includes('Insurance · 97%'));
   ok('repeats: a brand-list block says so, with no made-up confidence', v.includes('Brand list') && !/Brand list · /.test(v));
-  ok('repeats: staff is shown where Apollo knew it, blank where it did not', />300<\/span>/.test(v));
-  ok('repeats: the footer says what to do, in words', /node tools\/non-icp-release\.js company\.com/.test(v) && /human reply/.test(v));
+  ok('review: the footer tells you to read the role first, and what to do', /Read the <b>role<\/b> first/.test(v) && /node tools\/non-icp-release\.js company\.com/.test(v) && /human reply/.test(v));
   ok('repeats: it goes through U.grid (a plain table must stack on a phone)', !/<table class="tbl"/.test(v));
   /* ISOLATION. The panel is a SECOND read; if it fails the leads must still draw. */
   repDown = true; await GW.TABS.blocked.load(); GW.TABS.blocked.render(); v = view();
-  ok('repeats: a failed refresh says so, and keeps showing the last good read', /Last refresh failed \(HTTP 503 upstream down\) — showing the previous read/.test(v) && v.includes('maya@spgish.test'), (v.match(/People who tried again[\s\S]{0,700}/) || [''])[0].replace(/\s+/g, ' '));
+  ok('repeats: a failed refresh says so, and keeps showing the last good read', /Last refresh failed \(HTTP 503 upstream down\) — showing the previous read/.test(v) && v.includes(bk('maya@spgish.test')), (v.match(/People who tried again[\s\S]{0,700}/) || [''])[0].replace(/\s+/g, ' '));
   ok('repeats: ...and the blocked leads still draw (the tab is not blanked)', v.includes('data-x="blk-') && /<b>51<\/b> leads blocked/.test(v));
   repDown = false; await GW.TABS.blocked.load(); GW.TABS.blocked.render(); v = view();
-  ok('repeats: ...and it recovers on the next read', v.includes('maya@spgish.test') && !/upstream down/.test(v));
+  ok('repeats: ...and it recovers on the next read', v.includes(bk('maya@spgish.test')) && !/upstream down/.test(v));
   const keepRepeats = REPEATS;
   REPEATS = { as_of: 'x', rows: [] }; await GW.TABS.blocked.load(); GW.TABS.blocked.render(); v = view();
-  ok('repeats: nobody back is a plain sentence, not an empty table', /Nobody has tried again/.test(v) && !v.includes('maya@spgish.test'));
+  ok('review: nothing to look at is a plain sentence, not an empty table', /Nothing needs a look/.test(v) && !v.includes(bk('maya@spgish.test')));
+  ok('review: ...and the map says 0 rather than hiding the section', /data-jump="blk-review">Needs a look<span class="badge b-warn">0<\/span>/.test(v));
   REPEATS = keepRepeats; await GW.TABS.blocked.load(); GW.TABS.blocked.render(); v = view();
 
   /* ═══ Release from the Blocked tab ═══ */
@@ -899,9 +928,12 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
      (a crash cannot be told apart from a catch). */
   const bodyOf = (c) => { try { return JSON.parse(c && c.body); } catch (e) { return {}; } };
   const rel0 = posts().length;
-  ok('release: the Released companies panel lists what is released, with when, why and an Undo', /Released companies/.test(v) && v.includes('old-release.test') && v.includes('insurance group') && /data-rel-undo="old-release\.test"/.test(v));
+  ok('release: the Released companies list starts FOLDED, with a count and a Show button', /1 released · never blocked/.test(v) && /data-rel-toggle aria-expanded="false"[^>]*>Show</.test(v) && !v.includes('old-release.test'));
+  fire('click', el({ 'data-rel-toggle': '' })); await ticks(); v = view();
+  ok('release: Show opens it: when, why and an Undo, and the box to release by domain', /data-rel-toggle aria-expanded="true"[^>]*>Hide</.test(v) && v.includes('old-release.test') && v.includes('insurance group') && /data-rel-undo="old-release\.test"/.test(v) && /data-rel-input/.test(v));
   ok('release: a model-judged person has a Release button', /data-rel="spgish\.test"/.test(v));
-  ok('release: a BRAND-LIST person has NONE, and says the command line only', !/data-rel="remax\.com"/.test(v) && /Brand list: command line only/.test(v));
+  ok('release: a BRAND-LIST person has NONE, and says the command line only', !/data-rel="remax\.com"/.test(v) && /Command line only/.test(v));
+  ok('release: a first-time large company CAN be released from its row', /data-rel="bigco\.test"/.test(v));
   ok('release: nothing is open or written before a click', !/id="rel-confirm"/.test(v) && posts().length === rel0);
   /* open: the plan is READ, never written */
   const relPlanFrom = b.calls.length;
@@ -924,7 +956,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   const wr = posts().slice(rel0).filter((c) => c.path === '/monitor/non-icp-release');
   ok('release: Confirm POSTs the company and the note as JSON, once', wr.length === 1 && wr[0].method === 'POST' && bodyOf(wr[0]).domain === 'spgish.test' && bodyOf(wr[0]).note === 'wants AEO', JSON.stringify(wr.map((c) => c.body)));
   ok('release: the domain travels in the BODY, not the query string', wr.length === 1 && !('domain' in wr[0].q));
-  ok('release: it closes, says what happened in words, and reloads both lists', !/id="rel-confirm"/.test(v) && /Released spgish\.test — 3 lead rows cleared/.test(v) && b.calls.slice(ld0).some((c) => c.path === '/monitor/non-icp-released') && b.calls.slice(ld0).some((c) => c.path === '/monitor/non-icp-repeats'));
+  ok('release: it closes, says what happened in words, and reloads both lists', !/id="rel-confirm"/.test(v) && /Released spgish\.test — 3 lead rows cleared/.test(v) && b.calls.slice(ld0).some((c) => c.path === '/monitor/non-icp-released') && b.calls.slice(ld0).some((c) => c.path === '/monitor/non-icp-review'));
   /* a failed write leaves the box OPEN with the note in it */
   relFail = true;
   fire('click', el({ 'data-rel': 'spgish.test' })); await ticks(20);

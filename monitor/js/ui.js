@@ -152,15 +152,17 @@ GW.ui = (function (G) {
      focusable scroll region (a long list held in a fixed height). */
   function grid(cols, rows, o) {
     o = o || {};
-    var head = '<thead><tr>' + cols.map(function (c) { return '<th>' + esc(c.label) + '</th>'; }).join('') + '</tr></thead>';
+    /* c.left puts a column on the LEFT in head AND body (numbers stay right); o.cls adds a class to the box, e.g. "tall" */
+    var head = '<thead><tr>' + cols.map(function (c) { return '<th' + (c.left ? ' class="l"' : '') + '>' + esc(c.label) + '</th>'; }).join('') + '</tr></thead>';
     var body = rows.map(function (r) {
       var rc = o.rowCls ? o.rowCls(r) : '';
       return '<tr' + (rc ? ' class="' + rc + '"' : '') + '>' + cols.map(function (c) {
         var v = c.html ? c.html(r) : esc(c.get ? c.get(r) : r[c.k]);
-        return '<td' + (c.cls ? ' class="' + c.cls + '"' : '') + (c.attr ? ' ' + c.attr(r) : '') + ' data-l="' + esc(c.label) + '"><span class="cv">' + (v === '' ? '—' : v) + '</span></td>';
+        var tc = [c.cls, c.left ? 'l' : ''].filter(Boolean).join(' ');
+        return '<td' + (tc ? ' class="' + tc + '"' : '') + (c.attr ? ' ' + c.attr(r) : '') + ' data-l="' + esc(c.label) + '"><span class="cv">' + (v === '' ? '—' : v) + '</span></td>';
       }).join('') + '</tr>';
     }).join('');
-    return '<div class="tbl stack"' + (o.region ? ' tabindex="0" role="region" aria-label="' + esc(o.region) + '"' : '') + '><table>' + head + '<tbody>' + body + '</tbody></table></div>';
+    return '<div class="tbl stack' + (o.cls ? ' ' + o.cls : '') + '"' + (o.region ? ' tabindex="0" role="region" aria-label="' + esc(o.region) + '"' : '') + '><table>' + head + '<tbody>' + body + '</tbody></table></div>';
   }
   /* Previous and Next are named by DIRECTION (attr-step="prev|next"), their
      target page in data-to -- never in attr. G.paint refocuses by selector:

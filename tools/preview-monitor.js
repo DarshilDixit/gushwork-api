@@ -13,6 +13,9 @@
      /monitor/overview      this branch's overviewReport, LIFTED out of
                             index.js and run on connections that are READ ONLY
                             at the database (default_transaction_read_only)
+     /monitor/non-icp-review  this branch's nonIcpReviewReport (the Blocked tab's
+                            "Needs a look"), lifted the same way: a new route has
+                            no production version to proxy to until it deploys
      /monitor/duplicates    this branch's duplicatesReport, lifted the same
                             way -- the branch changed it (is_internal), and a
                             proxy to production would show the OLD query
@@ -83,6 +86,13 @@ const dropoffLift = new Function('pool', [
   between('const DROPOFF_STAGE_SQL', 'async function visitorsReport'),
   'return { dropoffReport };',
 ].join('\n'));
+/* The Blocked tab's "Needs a look" feed: new in this branch, so it must be lifted, not proxied. */
+const reviewLift = new Function('process', [
+  liftDecl('const ELV_EXCLUDED_DOMAINS'), liftDecl('const INTERNAL_TEST_EMAILS'),
+  liftDecl('const INTERNAL_STAGING_HOSTS'), liftDecl('function internalLeadSqlClause'),
+  liftDecl('const NON_ICP_REVIEW_MIN_STAFF'), liftDecl('async function nonIcpReviewReport'),
+  'return { nonIcpReviewReport };',
+].join('\n'));
 const L = new Function([
   liftDecl('const DASH_TZ'), liftDecl('const BOT_RE'), liftDecl('const DROPOFF_STAGE_SQL'), liftDecl('const DROPOFF_SOURCE_SQL'),
   liftDecl('const OVERVIEW_VIEWS'), liftDecl('const OVERVIEW_WEBHOOK_SOURCES'), liftDecl('function recoveredBookingsSql'), liftDecl('const RECOVERED_BOOKINGS_SQL'),
@@ -140,6 +150,12 @@ function start() {
   app.get('/monitor/dropoff', async (req, res) => {
     if (req.query.token !== TOKEN) return res.status(401).json({ error: 'Unauthorized' });
     try { res.json(await dropoffReport({ from: req.query.from, to: req.query.to, grain: req.query.grain, source: req.query.source, mode: req.query.mode })); }
+    catch (err) { res.status(500).json({ error: err.message }); }
+  });
+  const reviewReport = reviewLift(process).nonIcpReviewReport;
+  app.get('/monitor/non-icp-review', async (req, res) => {
+    if (req.query.token !== TOKEN) return res.status(401).json({ error: 'Unauthorized' });
+    try { res.json(await reviewReport(db)); }
     catch (err) { res.status(500).json({ error: err.message }); }
   });
   app.get('/monitor/duplicates', async (req, res) => {
