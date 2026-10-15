@@ -2879,7 +2879,21 @@ results13 = (async () => {
     eq('release/apply: BEGIN, insert, update, COMMIT, in that order', c.log.q.map((x) => x.f.split(' ')[0] + (x.f.indexOf('INSERT') === 0 ? ' INSERT' : '')),
        ['BEGIN', 'INSERT INSERT', 'UPDATE', 'COMMIT']);
     ok('release/apply: the note is cut to 300 characters', c.log.q[1].p[1].length === 300);
-    ok('release/apply: it clears the block AND the model flag, only for that domain', /SET non_icp_blocked = FALSE, non_icp_llm_flagged = FALSE WHERE non_icp_reason = \$1/.test(c.log.q[2].f) && c.log.q[2].p[0] === 'specialtyprogramgroup.com');
+    ok('release/apply: it clears the block AND the model flag, only for that domain', /SET non_icp_blocked = FALSE, non_icp_llm_flagged = FALSE, loops_sent = TRUE WHERE non_icp_reason = \$1/.test(c.log.q[2].f) && c.log.q[2].p[0] === 'specialtyprogramgroup.com');
+    /* THE 15 OCT 2026 INCIDENT. Releasing specialtyprogramgroup.com cleared the
+       block on three old leads, the follow-up cron saw three ordinary drop-offs,
+       and the SPG contact was emailed "you did not finish booking" three times
+       hours after a person had replied by hand. A cleared lead must be marked
+       follow-up-done in the SAME statement, and that mark must be what the cron
+       and the health check both key on. */
+    ok('release/apply: it switches off the automatic follow-up email in the SAME statement (loops_sent = TRUE)', /loops_sent = TRUE/.test(c.log.q[2].f), c.log.q[2].f);
+    {
+      const cron = between("app.post('/cron/send-partials'", 'const leads = result.rows;');
+      const health = between('async function checkRecoveryHealth', 'const processed =');
+      ok('release/followup: the cron only picks up leads with loops_sent = false', /l\.loops_sent = false/.test(cron));
+      ok('release/followup: ...and so does the health check, so a released lead is neither emailed nor reported as stuck', /l\.loops_sent = false/.test(health));
+      ok('release/followup: the two populations are the same one (both exclude blocked, booked and disqualified)', ['non_icp_blocked IS NOT TRUE', 'booking_uid IS NULL', 'disqualified = false'].every((x) => cron.includes(x) && health.includes(x)));
+    }
     ok('release/apply: the connection is given back', c.log.released === 1);
 
     const d = mk(); err = null;

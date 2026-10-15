@@ -9748,8 +9748,19 @@ async function nonIcpReleaseApply(db, { domain: raw, note, by, allowBrand } = {}
       `INSERT INTO non_icp_exemptions (domain, note, released_by) VALUES ($1, $2, $3)
        ON CONFLICT (domain) DO UPDATE SET note = EXCLUDED.note, released_by = EXCLUDED.released_by, released_at = NOW()`,
       [domain, note ? String(note).slice(0, 300) : null, by ? String(by).slice(0, 80) : null]);
+    /* loops_sent = TRUE IS NOT OPTIONAL. specialtyprogramgroup.com was released
+       on 15 Oct 2026 at 7:19 PM, which cleared the block on its three old leads
+       (3, 13 and 7 days old, completed, never booked). Within minutes the
+       follow-up cron saw three ordinary drop-offs, posted three "Completed Form
+       - Did Not Book" alerts and emailed the contact three "you did not finish
+       booking" messages, hours after a person had replied to them by hand. The
+       health check also called them "stuck in the queue". A released company's
+       old leads are being handled by a PERSON, so the automatic follow-up is
+       marked done. Everything else that acts on a lead (the PartnerStack and
+       Salesforce retry sweeps) only ever picks up rows carrying a failure stamp,
+       which a blocked lead never had; checked, not assumed. */
     const u = await client.query(
-      `UPDATE leads SET non_icp_blocked = FALSE, non_icp_llm_flagged = FALSE
+      `UPDATE leads SET non_icp_blocked = FALSE, non_icp_llm_flagged = FALSE, loops_sent = TRUE
         WHERE non_icp_reason = $1 AND (non_icp_blocked IS TRUE OR non_icp_llm_flagged IS TRUE)`, [domain]);
     await client.query('COMMIT');
     return { domain, released_leads: u.rowCount };
@@ -14197,7 +14208,7 @@ function nonIcpReleaseSlack(kind, r, note) {
   const blocks = [bHeader(verb), bDivider(), bSection(
     `*\`${r.domain}\`*` +
     (kind === 'release'
-      ? ` is no longer blocked. ${r.released_leads} blocked lead row(s) cleared.` + (note ? `\n*Why:* ${slackTruncate(note)}` : '')
+      ? ` is no longer blocked. ${r.released_leads} blocked lead row(s) cleared, and their automatic follow-up email switched off (a person is handling them).` + (note ? `\n*Why:* ${slackTruncate(note)}` : '')
       : ' can be blocked again; the next lead from it is judged like any other. Leads already cleared stay cleared.') +
     '\n_The dashboard link is shared, so this cannot say who did it. This post is the record._')];
   sendSlack(blocks, `${verb}: ${r.domain}`);

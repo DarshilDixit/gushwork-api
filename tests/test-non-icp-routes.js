@@ -2022,8 +2022,11 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     const stmts = S.writes.map((w) => w.flat.split(' ').slice(0, 3).join(' '));
     ok('RELEASE: in ONE transaction, BEGIN then INSERT then UPDATE then COMMIT', ['BEGIN', 'INSERT INTO non_icp_exemptions', 'UPDATE leads SET', 'COMMIT'].every((x, i) => stmts.indexOf(x) !== -1 && (i === 0 || stmts.indexOf(x) > stmts.indexOf(['BEGIN', 'INSERT INTO non_icp_exemptions', 'UPDATE leads SET', 'COMMIT'][i - 1]))), stmts.join(' | '));
     const ins = S.writes.find((w) => /^INSERT INTO non_icp_exemptions/.test(w.flat));
+    const upd = S.writes.find((w) => /^UPDATE leads SET non_icp_blocked = FALSE/.test(w.flat));
+    ok('RELEASE: the same UPDATE switches off the automatic follow-up email (the 15 Oct SPG incident)', !!upd && /loops_sent = TRUE/.test(upd.flat), upd && upd.flat);
     ok('RELEASE: recorded as "dashboard" with the note', ins && ins.params[0] === 'specialtyprogramgroup.com' && ins.params[1] === 'insurance group, wants AEO' && ins.params[2] === 'dashboard', JSON.stringify(ins && ins.params));
     const slack = JSON.stringify(S.slackPayloads);
+    ok('RELEASE: the Slack post says the follow-up email was switched off', /automatic follow-up email switched off/.test(slack), slack.slice(0, 300));
     ok('RELEASE: Slack is told (the dashboard link is shared, so the post is the record)', /Company released from the Blocked tab/.test(slack) && /specialtyprogramgroup\.com/.test(slack) && /cannot say who did it/.test(slack) && /insurance group, wants AEO/.test(slack), slack.slice(0, 200));
 
     reset();
