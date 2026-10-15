@@ -777,11 +777,35 @@ let results8;
   const isDashboardFilter = (m) =>
     DASHBOARD_FILTERS_DELIBERATE.some(([fn]) => enclosingOf(m.index) === fn);
 
+  /* THE FOURTH CATEGORY, added 15 Oct 2026: a RELEASE. A person has decided a
+     company was blocked wrongly, and these two functions find that company's
+     rows so the block AND the model flag can be CLEARED. They gate nobody: one
+     counts what a release would clear (shown in a confirm box), the other
+     clears it. Reached only from the release routes, which are token-gated and
+     which a human drives, and from the command line tool that lifts them. A
+     flag-based predicate that DECIDES a lead stays forbidden above. */
+  const RELEASE_DELIBERATE = [
+    ['nonIcpReleasePlan',  'counts the rows a release would clear, so the confirm box can say how many leads and people; read only'],
+    ['nonIcpReleaseApply', 'clears the block and the model flag on one released company\'s leads; a person chose the company, and it is the only write'],
+  ];
+  const isRelease = (m) => RELEASE_DELIBERATE.some(([fn]) => enclosingOf(m.index) === fn);
+
   const flagCounters   = allFlagPredicates.filter(isCounter);
   const flagDashboard  = allFlagPredicates.filter((m) => !isCounter(m) && isDashboardFilter(m));
-  const flagPredicates = allFlagPredicates.filter((m) => !isCounter(m) && !isDashboardFilter(m));
+  const flagRelease    = allFlagPredicates.filter((m) => !isCounter(m) && !isDashboardFilter(m) && isRelease(m));
+  const flagPredicates = allFlagPredicates.filter((m) => !isCounter(m) && !isDashboardFilter(m) && !isRelease(m));
 
   eq('10f: NO query filters a population on the flag column', flagPredicates.length, 0);
+  /* PINNED. One in the plan's count, one in the apply's UPDATE. A third is a thing somebody decides. */
+  eq('10f: exactly the deliberate RELEASE predicates exist, and no more', flagRelease.length, 2);
+  for (const [name, why] of RELEASE_DELIBERATE) ok(`10f: release predicate has a written reason — ${name}`, why.length > 40, name);
+  /* AND THEY REACH NO LEAD PATH. The plan may be called only from its GET route
+     and the apply only from its POST route; a call from /submit would turn a
+     human's decision into a gate. */
+  for (const [fn, route] of [['nonIcpReleasePlan', '/monitor/non-icp-release-plan'], ['nonIcpReleaseApply', '/monitor/non-icp-release']]) {
+    const callers = [...src.matchAll(new RegExp('(?<!function\\s)\\b' + fn + '\\s*\\(', 'g'))].map((c) => enclosingOf(c.index));
+    ok(`10f: ${fn} is called only from ${route}`, callers.length > 0 && callers.every((n) => n === route), 'callers: ' + [...new Set(callers)].join(', '));
+  }
   /* PINNED, like the counters. A second dashboard filter is a thing
      somebody decides, not a thing that slips through. */
   eq('10f: exactly the deliberate dashboard FILTERS exist, and no more',
@@ -2800,13 +2824,80 @@ results13 = (async () => {
   {
     ok('release: the table is created by the server on boot (db.js)', /CREATE TABLE IF NOT EXISTS non_icp_exemptions \(\s+domain\s+TEXT PRIMARY KEY/.test(dbsrc));
     const tool = require('fs').readFileSync(path.join(__dirname, '..', 'tools', 'non-icp-release.js'), 'utf8');
-    const applyBlocks = tool.split(/\n/).filter((l) => /INSERT INTO non_icp_exemptions|UPDATE leads SET non_icp_blocked = FALSE/.test(l));
-    ok('release/tool: it only writes inside `if (apply)`', applyBlocks.length === 2 && /if \(apply\) \{\s+await client\.query\(\s+`INSERT INTO non_icp_exemptions/.test(tool) );
+    ok('release/tool: it lifts the SAME functions the dashboard uses, not a copy of the SQL', /nonIcpReleasePlan, nonIcpReleaseApply/.test(tool) && /between\('function nonIcpReleaseDomainKey'/.test(tool) && !/INSERT INTO non_icp_exemptions/.test(tool));
+    ok('release/tool: it only writes inside `if (apply)`', (tool.match(/M\.nonIcpReleaseApply\(/g) || []).length === 1 && /if \(apply\) \{\s+const r = await M\.nonIcpReleaseApply/.test(tool));
     ok('release/tool: dry run is the default', /const apply = process\.argv\.includes\('--apply'\)/.test(tool));
     ok('release/tool: it refuses --apply before the table exists', /if \(apply\) throw new Error\('non_icp_exemptions does not exist yet/.test(tool));
     ok('release/tool: it keys the domain through partnerStackCustomerKey like everything else here', /M\.partnerStackCustomerKey\(raw\)/.test(tool));
-    ok('release/tool: it clears the model flag too, so the Schedule guard stops withholding Meta', /non_icp_llm_flagged = FALSE/.test(tool));
-    ok('release/tool: a shared brand-list domain is REFUSED without --allow-brand', /if \(apply\) throw new Error\(`\$\{d\} is a brand-list domain\. Nothing was done\./.test(tool) && /const allowBrand = process\.argv\.includes\('--allow-brand'\)/.test(tool));
+    ok('release/tool: it reads every plan and refuses a brand domain BEFORE writing any', tool.indexOf('plans.push(') < tool.indexOf('M.nonIcpReleaseApply(') && /if \(apply && !allowBrand\)/.test(tool));
+    ok('release/tool: --allow-brand is the only way past a shared brand-list domain', /const allowBrand = process\.argv\.includes\('--allow-brand'\)/.test(tool));
+  }
+
+  /* 6. the shared release functions, EXECUTED with a recording database */
+  {
+    const shared = liftSrc + '\n' + between('function nonIcpReleaseDomainKey', '/* ── The warm path');
+    const mk = (opts = {}) => {
+      const log = { q: [], released: 0 };
+      const client = { query: async (sql, p) => { const f = String(sql).replace(/\s+/g, ' ').trim(); log.q.push({ f, p });
+          if (opts.failOn && f.indexOf(opts.failOn) !== -1) throw new Error('boom');
+          if (/^UPDATE leads/.test(f)) return { rowCount: opts.cleared == null ? 3 : opts.cleared, rows: [] };
+          return { rowCount: 0, rows: [] }; },
+        release: () => { log.released++; } };
+      const db = { query: async (sql, p) => { const f = String(sql).replace(/\s+/g, ' ').trim(); log.q.push({ f, p });
+          if (/^DELETE FROM non_icp_exemptions/.test(f)) return { rowCount: opts.removed == null ? 1 : opts.removed, rows: [] };
+          if (/FROM non_icp_exemptions WHERE domain/.test(f)) return { rows: opts.exempt ? [{ note: 'n', released_by: 'dashboard', released_at: '2026-10-15' }] : [] };
+          if (/FROM non_icp_domain_verdicts/.test(f)) return { rows: [{ business_type: 'insurance', confidence: 0.97, source: 'llm', checked_at: '2026-09-29' }] };
+          if (/FROM leads WHERE non_icp_reason/.test(f)) return { rows: [{ leads: 3, people: 1, blocked: 3, booked: 0 }] };
+          if (/^DELETE FROM non_icp_exemptions/.test(f)) return { rowCount: opts.removed == null ? 1 : opts.removed, rows: [] };
+          return { rows: [], rowCount: 0 }; },
+        connect: async () => client };
+      const fns = (new Function(shared + '\nreturn { nonIcpReleasePlan, nonIcpReleaseApply, nonIcpUnrelease };'))({}.constructor === Object ? undefined : undefined);
+      return { db, log, fns };
+    };
+    const fnsFor = () => (new Function('process', shared + '\nreturn { nonIcpReleasePlan, nonIcpReleaseApply, nonIcpUnrelease };'))({ env: {} });
+    const F = fnsFor();
+
+    const a = mk();
+    const plan = await F.nonIcpReleasePlan(a.db, 'https://www.specialtyprogramgroup.com/about');
+    eq('release/plan: keyed to the company, brand null', [plan.domain, plan.brand], ['specialtyprogramgroup.com', null]);
+    eq('release/plan: says how many leads and people it would unblock', plan.leads, { leads: 3, people: 1, blocked: 3, booked: 0 });
+    ok('release/plan: carries the cached verdict', plan.verdict && plan.verdict.business_type === 'insurance' && plan.verdict.confidence === 0.97);
+    ok('release/plan: not released yet is null', plan.released === null);
+    ok('release/plan: READS ONLY (no write statement)', a.log.q.every((x) => /^SELECT/.test(x.f)));
+    const b = mk({ exempt: true });
+    ok('release/plan: an already released company says so', (await F.nonIcpReleasePlan(b.db, 'specialtyprogramgroup.com')).released.released_by === 'dashboard');
+    const kw = await F.nonIcpReleasePlan(mk().db, 'kw.com');
+    eq('release/plan: a brand-list domain carries its brand name', kw.brand, 'Keller Williams');
+    let err = null; try { await F.nonIcpReleasePlan(mk().db, 'someone@gmail.com'); } catch (e) { err = e; }
+    ok('release/plan: a free mailbox is a 400, not a release', err && err.status === 400, err && err.message);
+    err = null; try { await F.nonIcpReleasePlan(mk().db, ''); } catch (e) { err = e; }
+    ok('release/plan: an empty domain is a 400', err && err.status === 400);
+
+    const c = mk();
+    const done = await F.nonIcpReleaseApply(c.db, { domain: 'SpecialtyProgramGroup.com', note: 'x'.repeat(500), by: 'dashboard' });
+    eq('release/apply: reports the domain and how many lead rows it cleared', done, { domain: 'specialtyprogramgroup.com', released_leads: 3 });
+    eq('release/apply: BEGIN, insert, update, COMMIT, in that order', c.log.q.map((x) => x.f.split(' ')[0] + (x.f.indexOf('INSERT') === 0 ? ' INSERT' : '')),
+       ['BEGIN', 'INSERT INSERT', 'UPDATE', 'COMMIT']);
+    ok('release/apply: the note is cut to 300 characters', c.log.q[1].p[1].length === 300);
+    ok('release/apply: it clears the block AND the model flag, only for that domain', /SET non_icp_blocked = FALSE, non_icp_llm_flagged = FALSE WHERE non_icp_reason = \$1/.test(c.log.q[2].f) && c.log.q[2].p[0] === 'specialtyprogramgroup.com');
+    ok('release/apply: the connection is given back', c.log.released === 1);
+
+    const d = mk(); err = null;
+    try { await F.nonIcpReleaseApply(d.db, { domain: 'farmersagent.com', by: 'dashboard' }); } catch (e) { err = e; }
+    ok('release/apply: a brand-list domain is REFUSED with a 409', err && err.status === 409 && /brand-list domain/.test(err.message), err && err.message);
+    eq('release/apply: ...and NOTHING was sent to the database, not even BEGIN', d.log.q.length, 0);
+    const e2 = mk();
+    ok('release/apply: --allow-brand is the only way through', (await F.nonIcpReleaseApply(e2.db, { domain: 'farmersagent.com', allowBrand: true })).domain === 'farmersagent.com');
+
+    const f = mk({ failOn: 'UPDATE leads' }); err = null;
+    try { await F.nonIcpReleaseApply(f.db, { domain: 'specialtyprogramgroup.com' }); } catch (e) { err = e; }
+    ok('release/apply: a failure rolls the whole thing back and rethrows', err && err.message === 'boom' && f.log.q.some((x) => x.f === 'ROLLBACK') && !f.log.q.some((x) => x.f === 'COMMIT'));
+    ok('release/apply: ...and still gives the connection back', f.log.released === 1);
+
+    const g = mk();
+    eq('release/undo: removes the exemption only', await F.nonIcpUnrelease(g.db, 'specialtyprogramgroup.com'), { domain: 'specialtyprogramgroup.com', removed: 1 });
+    ok('release/undo: it never touches the leads', g.log.q.length === 1 && /^DELETE FROM non_icp_exemptions/.test(g.log.q[0].f));
+    eq('release/undo: undoing something never released says removed 0', (await F.nonIcpUnrelease(mk({ removed: 0 }).db, 'acme.com')).removed, 0);
   }
 })().then(() => {}, (e) => { ok('release: the section completed', false, e && e.stack); });
 

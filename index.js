@@ -9697,6 +9697,77 @@ async function nonIcpExemptDomainFor({ email, website } = {}) {
   return nonIcpCandidateDomains({ email, website }).find((d) => set.has(d)) || null;
 }
 
+/* ── Releasing and un-releasing a company: ONE implementation ─────────
+   Used by the Blocked tab's buttons AND by tools/non-icp-release.js (which
+   lifts these functions out of this file), so the two cannot drift apart.
+   Each takes a pg Pool (or anything with query and connect), so the tool can
+   hand it its own connection.
+
+   A RELEASE IS PER DOMAIN, so a shared domain is a big one. farmersagent.com
+   belongs to thousands of agents; releasing it lifts the block for all of
+   them, for good. A brand-list domain is therefore REFUSED unless allowBrand
+   is passed, and the dashboard never passes it. */
+function nonIcpReleaseDomainKey(raw) {
+  const key = partnerStackCustomerKey(raw);
+  if (!key) {
+    const e = new Error(`"${String(raw == null ? '' : raw).slice(0, 80)}" is not a company domain (a free mailbox, an address or junk).`);
+    e.status = 400; throw e;
+  }
+  return key;
+}
+async function nonIcpReleasePlan(db, raw, opts = {}) {
+  const domain = nonIcpReleaseDomainKey(raw);
+  const brand = Object.prototype.hasOwnProperty.call(NON_ICP_DOMAINS, domain) ? NON_ICP_DOMAINS[domain] : null;
+  const [ex, v, c] = await Promise.all([
+    opts.skipExemptions ? { rows: [] } : db.query('SELECT note, released_by, released_at FROM non_icp_exemptions WHERE domain = $1', [domain]),
+    db.query('SELECT business_type, confidence::float AS confidence, source, checked_at FROM non_icp_domain_verdicts WHERE domain = $1', [domain]),
+    db.query(`SELECT COUNT(*)::int AS leads, COUNT(DISTINCT lower(email))::int AS people,
+                     COUNT(*) FILTER (WHERE non_icp_blocked IS TRUE)::int AS blocked,
+                     COUNT(*) FILTER (WHERE booking_uid IS NOT NULL)::int AS booked
+                FROM leads WHERE non_icp_reason = $1 AND (non_icp_blocked IS TRUE OR non_icp_llm_flagged IS TRUE)`, [domain]),
+  ]);
+  const l = c.rows[0] || {};
+  return {
+    domain, brand,
+    released: ex.rows[0] ? { released_at: ex.rows[0].released_at, released_by: ex.rows[0].released_by || null, note: ex.rows[0].note || null } : null,
+    verdict: v.rows[0] ? { business_type: v.rows[0].business_type, confidence: v.rows[0].confidence, source: v.rows[0].source, checked_at: v.rows[0].checked_at } : null,
+    leads: { leads: Number(l.leads) || 0, people: Number(l.people) || 0, blocked: Number(l.blocked) || 0, booked: Number(l.booked) || 0 },
+  };
+}
+async function nonIcpReleaseApply(db, { domain: raw, note, by, allowBrand } = {}) {
+  const domain = nonIcpReleaseDomainKey(raw);
+  const brand = Object.prototype.hasOwnProperty.call(NON_ICP_DOMAINS, domain) ? NON_ICP_DOMAINS[domain] : null;
+  if (brand && !allowBrand) {
+    const e = new Error(`${domain} is a brand-list domain (${brand}) shared by many people, so releasing it would lift the block for all of them. Nothing was done.`);
+    e.status = 409; throw e;
+  }
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `INSERT INTO non_icp_exemptions (domain, note, released_by) VALUES ($1, $2, $3)
+       ON CONFLICT (domain) DO UPDATE SET note = EXCLUDED.note, released_by = EXCLUDED.released_by, released_at = NOW()`,
+      [domain, note ? String(note).slice(0, 300) : null, by ? String(by).slice(0, 80) : null]);
+    const u = await client.query(
+      `UPDATE leads SET non_icp_blocked = FALSE, non_icp_llm_flagged = FALSE
+        WHERE non_icp_reason = $1 AND (non_icp_blocked IS TRUE OR non_icp_llm_flagged IS TRUE)`, [domain]);
+    await client.query('COMMIT');
+    return { domain, released_leads: u.rowCount };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+/* UNDO: removes the exemption only. Leads already cleared STAY cleared, and the
+   next lead from that company is judged like any other. */
+async function nonIcpUnrelease(db, raw) {
+  const domain = nonIcpReleaseDomainKey(raw);
+  const r = await db.query('DELETE FROM non_icp_exemptions WHERE domain = $1', [domain]);
+  return { domain, removed: r.rowCount };
+}
+
 /* ── The warm path ───────────────────────────────────────────────────
    NEVER AWAITED BY ANYTHING ON THE LEAD PATH. Called from
    /non-icp-check, which the form already fires on email blur at step 1,
@@ -14108,6 +14179,76 @@ app.get('/monitor/non-icp-repeats', async (req, res) => {
   } catch (err) {
     console.error('[/monitor/non-icp-repeats]', err.message);
     res.status(500).json({ error: 'Repeat attempts report failed', detail: err.message });
+  }
+});
+
+/* ── Release and un-release a company FROM THE BLOCKED TAB ────────────
+   The same functions tools/non-icp-release.js uses. The dashboard token is
+   shared, so these routes cannot say WHO clicked; released_by is recorded as
+   "dashboard", and a Slack post to the leads channel is the record that it
+   happened (nobody can release a company in silence). Brand-list domains are
+   refused here and only the command line can release one, with --allow-brand.
+
+   The one-minute cache is cleared on this process the moment a release or an
+   undo lands, so the live form sees it at once; the command line has no such
+   hook and waits out the minute. */
+function nonIcpReleaseSlack(kind, r, note) {
+  const verb = kind === 'release' ? '✅ Company released from the Blocked tab' : '↩️ Release undone from the Blocked tab';
+  const blocks = [bHeader(verb), bDivider(), bSection(
+    `*\`${r.domain}\`*` +
+    (kind === 'release'
+      ? ` is no longer blocked. ${r.released_leads} blocked lead row(s) cleared.` + (note ? `\n*Why:* ${slackTruncate(note)}` : '')
+      : ' can be blocked again; the next lead from it is judged like any other. Leads already cleared stay cleared.') +
+    '\n_The dashboard link is shared, so this cannot say who did it. This post is the record._')];
+  sendSlack(blocks, `${verb}: ${r.domain}`);
+}
+function nonIcpReleaseFail(res, err, label) {
+  if (err && err.status) return res.status(err.status).json({ error: err.message });
+  console.error(`[/monitor/${label}]`, err && err.message);
+  return res.status(500).json({ error: 'Release failed', detail: err && err.message });
+}
+app.get('/monitor/non-icp-release-plan', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+  try { res.json(await nonIcpReleasePlan(pool, (req.query.domain || '').toString().slice(0, 200))); }
+  catch (err) { nonIcpReleaseFail(res, err, 'non-icp-release-plan'); }
+});
+app.post('/monitor/non-icp-release', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const note = (req.body.note || '').toString().trim().slice(0, 300);
+    const r = await nonIcpReleaseApply(pool, { domain: (req.body.domain || '').toString().slice(0, 200), note, by: 'dashboard', allowBrand: false });
+    _nonIcpExempt.at = 0;   // this process sees it on the next lead
+    console.log(`[non-ICP] Released ${r.domain} from the dashboard (${r.released_leads} lead row(s) cleared)` + (note ? ` — ${note}` : ''));
+    nonIcpReleaseSlack('release', r, note);
+    res.json({ ok: true, ...r });
+  } catch (err) { nonIcpReleaseFail(res, err, 'non-icp-release'); }
+});
+app.post('/monitor/non-icp-unrelease', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const r = await nonIcpUnrelease(pool, (req.body.domain || '').toString().slice(0, 200));
+    _nonIcpExempt.at = 0;
+    console.log(`[non-ICP] Un-released ${r.domain} from the dashboard`);
+    if (r.removed) nonIcpReleaseSlack('unrelease', r, null);
+    res.json({ ok: true, ...r });
+  } catch (err) { nonIcpReleaseFail(res, err, 'non-icp-unrelease'); }
+});
+app.get('/monitor/non-icp-released', async (req, res) => {
+  const token = process.env.MONITOR_TOKEN;
+  if (token && req.query.token !== token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const r = await pool.query(
+      `SELECT e.domain, e.note, e.released_by, e.released_at,
+              (SELECT COUNT(*)::int FROM leads l WHERE l.non_icp_reason = e.domain) AS leads
+         FROM non_icp_exemptions e ORDER BY e.released_at DESC LIMIT 100`);
+    res.json({ as_of: new Date().toISOString(), rows: r.rows.map((x) => ({
+      domain: x.domain, note: x.note || null, released_by: x.released_by || null, released_at: x.released_at, leads: Number(x.leads) || 0 })) });
+  } catch (err) {
+    console.error('[/monitor/non-icp-released]', err.message);
+    res.status(500).json({ error: 'Released list failed', detail: err.message });
   }
 });
 
