@@ -2679,6 +2679,25 @@ results13 = (async () => {
 })();
 
 /* ============================================================
+   THE ROLE LINE in the blocked-lead post, EXECUTED. Swapnil asked "is the person
+   booking an agent or not?" about inlandgroup.com (a VP of Leasing) and the post
+   made you go and find out.
+   ============================================================ */
+{
+  const roleFn = (new Function(between('function nonIcpRoleLine', '/* WHO GETS PINGED') + '\nreturn nonIcpRoleLine;'))();
+  eq('role: title, seniority and department read as one line', roleFn({ title: 'Vice President of Leasing', seniority: 'vp', departments: 'master_operations' }), 'Vice President of Leasing (vp, operations)');
+  eq('role: master_ and underscores are tidied, several departments kept', roleFn({ title: 'Product Manager (Growth)', seniority: 'manager', departments: 'product_management, master_marketing' }), 'Product Manager (Growth) (manager, product management, marketing)');
+  eq('role: a title alone is just the title', roleFn({ title: 'Licensed Real Estate Agent' }), 'Licensed Real Estate Agent');
+  eq('role: no title but a seniority says "Title unknown", never blank', roleFn({ seniority: 'owner', departments: 'master_operations' }), 'Title unknown (owner, operations)');
+  eq('role: Apollo knowing nothing gives NULL, so the field is absent', [roleFn({}), roleFn(), roleFn({ title: '  ', seniority: null, departments: '' })], [null, null, null]);
+  eq('role: null and non-string inputs do not throw', roleFn({ title: null, seniority: 5, departments: undefined }), 'Title unknown (5)');
+  /* THE TITLE IS FROM LINKEDIN, WHICH THE PERSON CONTROLS. */
+  const evil = roleFn({ title: '<!channel> CEO & <@U123|x>', seniority: '<!here>', departments: '<!everyone>' });
+  ok('role: a title cannot ping everyone (< > & are escaped for Slack)', !/<|>/.test(evil.replace(/&lt;|&gt;|&amp;/g, '')) && /&lt;!channel&gt;/.test(evil) && /&amp;/.test(evil), evil);
+  ok('role: ...in the seniority and department too', /&lt;!here&gt;/.test(evil) && /&lt;!everyone&gt;/.test(evil), evil);
+}
+
+/* ============================================================
    THANK-YOU INDUSTRY. /thank-you tells a turned-away visitor which industry
    we do not serve yet, so the server has to say which one they are in.
    ============================================================ */

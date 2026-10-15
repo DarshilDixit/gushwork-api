@@ -1777,6 +1777,33 @@ function slackTruncate(text, max = SLACK_ABOUT_MAX) {
    -- an SDR reading it can neither agree nor disagree. "Matched kw.com" can be
    checked against the person's actual company in one glance, which is exactly
    how paycompass.com would have been caught had substring matching shipped. */
+/* THE PERSON'S ROLE, as Apollo has it, for the blocked-lead post. The first
+   question anyone asks of a large-company block is "is this an AGENT or a
+   buyer?" (Swapnil, on inlandgroup.com, 15 Oct 2026: a VP of Leasing at a
+   1,200-person firm), and until now the post made you go and find out. Of the
+   large companies blocked so far, agents read "Agent", "Licensed Real Estate
+   Agent" or "Luxury Property Specialist" and the corporate buyers read VP,
+   Director or Marketing titles.
+
+   Text only, and deliberately NOT a verdict: a title heuristic that labelled a
+   person "agent" or "buyer" would be one more thing deciding on a guess. Null
+   when Apollo has nothing, so the field is simply absent.
+
+   ESCAPED FOR SLACK, because the title is NOT ours: Apollo reads it from
+   LinkedIn, which the person controls, and in Slack's markup "<!channel>" is a
+   ping to everyone. & < > are the three characters Slack asks to be escaped.
+   (The post's other free-text fields, company and about-business, are not
+   escaped today; that is an existing gap, not widened here.) */
+function nonIcpRoleLine({ title, seniority, departments } = {}) {
+  const esc = (x) => String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const t = esc(String(title || '').trim());
+  const bits = [String(seniority || '').trim(),
+    ...String(departments || '').split(',').map((x) => x.trim().replace(/^master_/, '').replace(/_/g, ' '))]
+    .filter(Boolean).map(esc);
+  if (!t && !bits.length) return null;
+  return (t || 'Title unknown') + (bits.length ? ' (' + bits.join(', ') + ')' : '');
+}
+
 /* WHO GETS PINGED when a blocked lead needs a human look. Slack user IDs, in
    Railway (NON_ICP_REVIEW_MENTION_IDS, comma separated), NOT in this file: the
    repo is public. Anything that is not shaped like a Slack ID is dropped, so
@@ -1812,7 +1839,8 @@ function slackNonIcpBlocked(d) {
      NON_ICP_REVIEW_MENTION_IDS. Neither changes who is blocked. */
   const look = repeat || large;
   const mentions = look ? nonIcpReviewMentions() : '';
-  const release = 'If this company should not be blocked: `node tools/non-icp-release.js ' + (d.matched_domain || 'domain.com') +
+  const release = 'If this company should not be blocked: on the dashboard\'s Blocked tab, type `' + (d.matched_domain || 'domain.com') +
+    '` in the Released companies box and press Check…. Or from a terminal: `node tools/non-icp-release.js ' + (d.matched_domain || 'domain.com') +
     '` shows what it would do, and `--apply` does it.';
   blocks.push(bHeader(repeat ? '🔁 Blocked person tried again — Non-ICP'
                     : large  ? '👀 Large company blocked — Non-ICP'
@@ -1899,6 +1927,8 @@ function slackNonIcpBlocked(d) {
     { label: '👤 Name',       value: name        },
     { label: '📧 Email',      value: d.email     },
     { label: '🏢 Company',    value: d.company   },
+    /* Right under the company, because role is what tells an agent from a buyer. */
+    { label: '💼 Role',       value: nonIcpRoleLine({ title: d.role_title, seniority: d.role_seniority, departments: d.role_departments }) },
     { label: '📞 Phone',      value: d.phone     },
     { label: '🎯 Sells to',   value: d.sell_to   },
     /* A blocked lead is never pushed to Salesforce and is not on the SDR
@@ -15876,6 +15906,7 @@ app.post('/submit', async (req, res) => {
       slackNonIcpBlocked({ stage: 'submit', matched_domain: nonIcpReason,
         attempts: tries ? tries.n : null, first_attempt: tries ? tries.first : null,
         large_company: largeCompany, company_staff: staff,
+        role_title: enrich.enriched_title, role_seniority: enrich.enriched_seniority, role_departments: enrich.enriched_departments,
         matched_label: NON_ICP_DOMAINS[nonIcpReason] || null,
         matched_in_email: !!emailSide, matched_in_website: !!websiteSide,
         /* The model fields come off the fresh verdict rather than the row:
