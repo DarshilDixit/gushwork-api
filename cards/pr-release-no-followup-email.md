@@ -1,4 +1,4 @@
-# PR: releasing a company must switch off the automatic follow-up email
+# PR: a released company is never sent the automatic follow-up email
 
 Branch `non-icp/release-no-followup-email`, from `main` at `775a13c`. 15 Oct 2026.
 **Not merged: waiting for your review.** Fixes a bug in the release feature (#142/#143), which
@@ -20,10 +20,18 @@ The three emails cannot be recalled.
 AWS mirror, Meta, messaging the person) and never asked the converse: which automations act on a
 lead the moment it stops being blocked. I tested the release against the blocking paths only.
 
-**The fix.** The release's UPDATE now also sets `loops_sent = TRUE`: a released company's old
+**The fix, two layers.**
+1. **Old leads.** The release's UPDATE now also sets `loops_sent = TRUE`: a released company's old
 leads are being handled by a person, so the automatic follow-up is marked done, in the same
 statement that clears the block. The dashboard's confirm box, the Slack post and the command-line
 output now say so in words.
+2. **New drop-offs (added after the first version of this PR, at your request).** Our database
+   showed no booking for the SPG contact (the direct-link booking never reached it), so if he
+   opened the form again and dropped off, a NEW row would have been emailed two hours later. The
+   follow-up cron now skips any lead whose company is released (`nonIcpExemptDomainFor`, the same
+   one-minute-cached read as everywhere else), marks it done like any terminal outcome, and still
+   posts the "Completed Form - Did Not Book" Slack alert on purpose, so a person sees them start
+   again. This CHANGES WHO GETS AN AUTOMATIC EMAIL (not who is blocked, not Meta).
 
 **What else acts on a lead once it stops being blocked, checked rather than assumed**
 (every place that selects on `non_icp_blocked IS NOT TRUE`, 12 of them):
@@ -39,8 +47,13 @@ output now say so in words.
 **Not changed:** who is blocked, anything about the block itself, Meta, Salesforce.
 
 **Verified, run and read:**
-- Full bar, bare: 16 suites, 5783 assertions (baseline saved: non-icp 803 -> 807, routes 689 -> 691,
+- Full bar, bare: 16 suites, 5791 assertions (baseline saved: non-icp 803 -> 807, routes 689 -> 699,
   monitor-next 476 -> 477).
+- **The follow-up cron DRIVEN over HTTP with a recording mail transport** (the suite now stubs
+  `nodemailer`): an ordinary drop-off IS emailed and counted; a released company is NOT emailed, its
+  Slack post still fires, it is marked done with no attempt counted; released through the website side
+  too; in one run only the released company is skipped; and the SAME lead with the company not released
+  is emailed (the control).
 - The changed UPDATE was run against production as `EXPLAIN` inside a read-only transaction that
   was rolled back: it parses, the column exists, it plans on the existing indexes, nothing changed.
 - Executed against a recording database: the UPDATE carries `loops_sent = TRUE` and is still scoped to
@@ -48,12 +61,13 @@ output now say so in words.
   follow-up email was switched off. In the dashboard's stubbed DOM: the confirm box says so.
 - A source assertion ties the fix to the two queries that matter: the cron AND the health check both
   require `loops_sent = false`, and share the same exclusions, so a released lead is out of both.
-- The original bug put back as a mutation (the release stops setting `loops_sent`): CAUGHT by two suites.
+- Two mutations, both CAUGHT: the release stops setting `loops_sent` (the original bug, two suites), and
+  the cron emails released companies again (4 assertions).
 
 **NOT verified, never executed:**
-- **The cron itself was not run against a released lead.** The suites assert the two queries and the
-  UPDATE as text and the statement was EXPLAINed; no test drives a release and then a cron tick.
-  That would need a database, which the repo's rules say not to stand up on a branch.
+- **No test drives a real release and THEN a cron tick against a database.** The release's UPDATE is
+  asserted as text and was EXPLAINed; the cron's skip is driven with a stubbed database. The two meet
+  only in production. That would need a database, which the repo's rules say not to stand up on a branch.
 - Any other release before this deploys repeats the incident for that company's OLD leads (a fresh
   lead under two hours old is not picked up yet).
 
