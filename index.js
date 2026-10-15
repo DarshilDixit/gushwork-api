@@ -14208,7 +14208,7 @@ function nonIcpReleaseSlack(kind, r, note) {
   const blocks = [bHeader(verb), bDivider(), bSection(
     `*\`${r.domain}\`*` +
     (kind === 'release'
-      ? ` is no longer blocked. ${r.released_leads} blocked lead row(s) cleared, and their automatic follow-up email switched off (a person is handling them).` + (note ? `\n*Why:* ${slackTruncate(note)}` : '')
+      ? ` is no longer blocked. ${r.released_leads} blocked lead row(s) cleared, and their automatic follow-up email switched off (a person is handling them). New drop-offs from this company are not emailed either.` + (note ? `\n*Why:* ${slackTruncate(note)}` : '')
       : ' can be blocked again; the next lead from it is judged like any other. Leads already cleared stay cleared.') +
     '\n_The dashboard link is shared, so this cannot say who did it. This post is the record._')];
   sendSlack(blocks, `${verb}: ${r.domain}`);
@@ -16898,6 +16898,22 @@ app.post('/cron/send-partials', async (req, res) => {
         enriched_total_funding:  enrich.enriched_total_funding,
         enriched_funding_stage:  enrich.enriched_funding_stage
       });
+
+      /* A RELEASED COMPANY'S PEOPLE ARE HANDLED BY A PERSON, so they are never
+         emailed "you did not finish booking". That covers a NEW drop-off from a
+         released company as well as its old leads (releasing marks those done
+         itself). The "did not book" Slack post above still fires on purpose:
+         somebody should see them start the form again. Marked done like any other
+         terminal outcome, so it neither retries nor counts as stuck.
+         specialtyprogramgroup.com, 15 Oct 2026: its contact had been replied to
+         by hand and was emailed three automatic follow-ups anyway. */
+      const releasedDomain = await nonIcpExemptDomainFor({ email: lead.email, website: lead.website });
+      if (releasedDomain) {
+        console.log(`[Cron] ⏭ Not emailing ${lead.email} — ${releasedDomain} is a released company, a person is handling it`);
+        await pool.query('UPDATE leads SET loops_sent=true WHERE session_id=$1', [lead.session_id]);
+        if (awsPool) awsPool.query('UPDATE gw_form_leads SET loops_sent=true,updated_at=NOW() WHERE session_id=$1', [lead.session_id]).catch(err => console.warn('[AWS] ⚠ loops_sent sync failed:', err.message));
+        continue;
+      }
 
       const outcome = await sendFollowUpEmail(lead.email, lead.first_name);
 
