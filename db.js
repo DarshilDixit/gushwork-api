@@ -965,6 +965,20 @@ async function initDB() {
          actually reached the model. */
       `CREATE INDEX IF NOT EXISTS non_icp_verdicts_checked_at_idx ON non_icp_domain_verdicts (checked_at)`,
       `CREATE INDEX IF NOT EXISTS non_icp_verdicts_blocking_idx ON non_icp_domain_verdicts (blocking) WHERE blocking IS TRUE`,
+      /* COMPANIES A PERSON HAS RELEASED. specialtyprogramgroup.com, a 300-person
+         insurance group, was blocked three times in two weeks and the only
+         remedy anyone had was NON_ICP_LLM_BLOCK=false, which stops ALL model
+         blocking. A row here means: whatever the brand list or the model says,
+         do not block, flag or withhold Meta for this company. It is its own
+         table and NOT a column on the verdict row, because a verdict is a
+         cache that is re-judged and expires, and a person's decision must not
+         be. Written only by tools/non-icp-release.js. */
+      `CREATE TABLE IF NOT EXISTS non_icp_exemptions (
+         domain       TEXT PRIMARY KEY,
+         note         TEXT,
+         released_by  TEXT,
+         released_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+       )`,
       /* One conversion per customer key, ever, is enforced by looking this up
          on every partner submit. Without the index that is a seq scan of leads
          on the critical path. */

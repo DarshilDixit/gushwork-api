@@ -4,8 +4,9 @@
    leadRowsHtml(leads, ns) for the same reason: a second copy drifts, and the
    12 Sept scope break is what a second copy looks like when it breaks.
 
-   Both tabs read /monitor/leads, exactly as the classic does -- no new route,
-   no server change. Blocked is the same route with nonicp=only.
+   Both tabs read /monitor/leads, exactly as the classic does. Blocked is the
+   same route with nonicp=only, plus ONE extra read, /monitor/non-icp-repeats,
+   for the "People who tried again" panel above its table.
 
    UNITS, every one printed in words (CLAUDE.md, "Blocked counts: three
    different units"): /monitor/leads counts LEAD ROWS, one per form session;
@@ -359,6 +360,7 @@
   /* ── Blocked ───────────────────────────────────────────────────── */
   GW.TABS.blocked = (function () {
     var data = null, err = null, tot = null, people = null, root = null, seq = 0, busy = false, dm = '';
+    var rep = null, repErr = null;   /* the repeat-attempts panel: its own read, so its failure never blanks the table */
     function mode() { var m = G.S.q.internal || ''; return m === 'only' || m === 'exclude' ? m : ''; }
     function page() { return Math.max(1, +G.S.q.page || 1); }
     function load() {
@@ -370,10 +372,16 @@
          (non_icp_blocked, deduped by address). Only asked for with no filter,
          because that is the only population it describes. */
       var c = m ? Promise.resolve(null) : G.api('/monitor/metrics', {}, { timeout: 20000 }).then(function (d) { return d.peopleNonIcp; }, function () { return null; });
+      /* THE REPEAT PANEL NEVER REJECTS INTO THE ALL-OR-NOTHING BELOW: an
+         unreadable second panel must not hide the leads. It keeps its last
+         good read and says it could not refresh. */
+      var d = G.api('/monitor/non-icp-repeats', {}, { timeout: 20000 }).then(
+        function (x) { if (my === seq) { rep = x; repErr = null; } },
+        function (e) { if (my === seq) repErr = e.message; });
       busy = true;
       /* dm is the mode THIS payload was fetched for: the header words its
          number from the payload, never from the select, which moves first */
-      return Promise.all([a, b, c]).then(function (r) { if (my !== seq) return; if (pastEnd(r[0])) return load(); data = r[0]; dm = m; err = null; tot = r[1]; people = r[2]; }, function (e) { if (my === seq) err = e.message; })
+      return Promise.all([a, b, c, d]).then(function (r) { if (my !== seq) return; if (pastEnd(r[0])) return load(); data = r[0]; dm = m; err = null; tot = r[1]; people = r[2]; }, function (e) { if (my === seq) err = e.message; })
         .then(function () { if (my === seq) busy = false; });
     }
     function activate(el) { root = el; var p = load(); render(); G.every('blocked', 300000, function () { load().then(render); }); return p.then(render); }
@@ -384,6 +392,32 @@
       if (m === 'exclude') return '<b>' + fmt(a) + '</b> ' + G.plural(a, 'lead') + ' blocked, not counting our own tests';
       return '<b>' + fmt(a) + '</b> ' + G.plural(a, 'lead') + ' blocked' + (people !== null && people !== undefined ? ' · <b>' + fmt(people) + '</b> ' + G.plural(people, 'person', 'people') : '') +
         ' · ' + (tot === null ? 'could not separate our own tests' : '<b>' + fmt(tot) + '</b> ' + G.plural(tot, 'lead') + ' excluding our own tests');
+    }
+    /* PEOPLE WHO TRIED AGAIN: blocked and submitted two or more times, by email.
+       A second try is the best sign we got it wrong (SPG's contact tried three
+       times and wrote in). By person, not company: farmersagent.com is thousands
+       of agents. */
+    function repeatsPanel() {
+      var judged = function (r) {
+        if (!r.business_type || !r.source || r.source === 'domain_list') return 'Brand list';
+        var t = r.business_type === 'real_estate' ? 'Real estate' : r.business_type === 'insurance' ? 'Insurance' : String(r.business_type).replace(/_/g, ' ');
+        return t + (r.confidence != null ? ' · ' + Math.round(r.confidence * 100) + '%' : '');
+      };
+      var body;
+      if (!rep && repErr) body = U.unavailable('People who tried again', repErr);
+      else if (!rep) body = U.loading(2);
+      else if (!(rep.rows || []).length) body = U.empty('Nobody has tried again', 'No blocked person has submitted the form a second time.');
+      else body = (repErr ? '<div class="readat"><span class="badge b-warn">Last refresh failed (' + esc(String(repErr).slice(0, 40)) + ') — showing the previous read</span></div>' : '') +
+        U.grid([
+          { label: 'Person', k: 'email' },
+          { label: 'Company', k: 'domain' },
+          { label: 'Tries', get: function (r) { return fmt(r.attempts); } },
+          { label: 'Last try (ET)', get: function (r) { return r.last_at ? G.et(r.last_at) : ''; } },
+          { label: 'We judged', get: judged },
+          { label: 'Staff', get: function (r) { return r.company_size ? fmt(r.company_size) : ''; } }
+        ], rep.rows, { region: 'People who tried again' });
+      return U.panel({ title: 'People who tried again', qual: 'blocked, then submitted again', body: body,
+        foot: 'A second try usually means we got it wrong, or they did not understand the page. They deserve a human reply either way. If the company should not be blocked, run <code>node tools/non-icp-release.js company.com</code> to see what it would do, then add <code>--apply</code>.' });
     }
     function render() {
       if (!root || (G.current && G.current() !== 'blocked')) return;
@@ -404,7 +438,7 @@
           dm === 'only' ? 'None of our own tests are blocked' : dm === 'exclude' ? 'Nothing blocked apart from our own tests' : 'Nothing blocked',
           dm ? '' : 'Either the block is switched off or nobody has matched yet.') + U.pager(d.page, d.pages, 'data-pg') + '</section>'; }) +
         '<p class="foot"><span>The chip on each row says which check blocked it. A brand-list block comes from NON_ICP_DOMAINS and stops with NON_ICP_BLOCK=false; an AI-check block stops with NON_ICP_LLM_BLOCK=false. Either takes effect on Railway without a deploy.</span></p>';
-      G.paint(root, head + body);
+      G.paint(root, head + U.drawn('People who tried again', repeatsPanel) + body);
       afterPaint(root);
     }
     function said() { var d = data; return d ? counts(d).replace(/<[^>]*>/g, '') : ''; }

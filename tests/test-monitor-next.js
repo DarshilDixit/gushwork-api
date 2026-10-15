@@ -495,6 +495,11 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   const CHANGES = { [SID_A]: { ok: true, changes: [{ field: 'sell_to', old_value: 'B2C', new_value: 'B2B (clarified from B2C)', attribution: 'ours_sell_to_clarified', source_route: '/partial', arrived_step: 1, booking_uid_present: false, changed_at: '2026-09-24T14:06:00Z' }] },
     [SID_B]: { ok: false, unavailable: true }, [SID_C]: { ok: true, changes: [] } };
   let healthDown = false, leadsHook = null, ackDown = false;
+  /* The Blocked tab's second read: blocked people who submitted again. */
+  let REPEATS = { as_of: '2026-10-15T12:00:00Z', rows: [
+    { email: 'maya@spgish.test', domain: 'spgish.test', attempts: 3, first_at: '2026-09-28T18:30:00Z', last_at: '2026-10-09T18:30:00Z', source: 'llm', business_type: 'insurance', confidence: 0.97, company_size: 300 },
+    { email: 'pat@remax.com', domain: 'remax.com', attempts: 2, first_at: '2026-10-01T10:00:00Z', last_at: '2026-10-06T10:00:00Z', source: 'domain_list', business_type: null, confidence: null, company_size: null }] };
+  let repDown = false;
   const payloads = (p, q) => {
     if (leadsHook && p === '/monitor/leads') { const r = leadsHook(q); if (r) return r; }
     if (p === '/monitor/overview') return P[q.view] || P.week;
@@ -508,6 +513,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     if (p === '/monitor/metrics') return METRICS;
     if (p === '/monitor/sdr') return SDR;
     if (p === '/monitor/non-icp') return MODEL;
+    if (p === '/monitor/non-icp-repeats') return repDown ? new Error('upstream down') : REPEATS;
     if (p === '/monitor/visitors') return VIS;
     if (p === '/monitor/partners') return PARTNERS;
     if (p === '/monitor/partner-gaps') return gapsDown ? new Error('upstream down') : GAPS;
@@ -852,6 +858,26 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   ok('blocked: the chip says WHICH CHECK, and no "Meta: blocked"', />AI check \(name only\)<\/span>/.test(v) && !/>Meta: blocked</.test(v));
   ok('blocked: the same lead has a DIFFERENT key here than on All leads', v.includes('data-x="blk-3f2a9c1e') && !v.includes('data-x="ld-3f2a9c1e'));
   ok('blocked: the lede is true for late verdicts too', v.includes('a few were marked only after they had booked') && !v.includes('turned away before the calendar'));
+  /* PEOPLE WHO TRIED AGAIN. A second try is the best sign a block is wrong, and
+     Slack only says so at the moment it happens. */
+  ok('repeats: the panel is on the Blocked tab, above the leads', /People who tried again/.test(v) && v.indexOf('People who tried again') < v.indexOf('data-x="blk-'), v.slice(0, 0));
+  ok('repeats: it reads its own route, once per load', b.calls.slice(bc0).filter((c) => c.path === '/monitor/non-icp-repeats').length >= 1);
+  ok('repeats: each person shows email, company and the number of tries', v.includes('maya@spgish.test') && v.includes('spgish.test') && /<span class="cv">3<\/span>/.test(v));
+  ok('repeats: a model block says what it judged, with its confidence', v.includes('Insurance · 97%'));
+  ok('repeats: a brand-list block says so, with no made-up confidence', v.includes('Brand list') && !/Brand list · /.test(v));
+  ok('repeats: staff is shown where Apollo knew it, blank where it did not', />300<\/span>/.test(v));
+  ok('repeats: the footer says what to do, in words', /node tools\/non-icp-release\.js company\.com/.test(v) && /human reply/.test(v));
+  ok('repeats: it goes through U.grid (a plain table must stack on a phone)', !/<table class="tbl"/.test(v));
+  /* ISOLATION. The panel is a SECOND read; if it fails the leads must still draw. */
+  repDown = true; await GW.TABS.blocked.load(); GW.TABS.blocked.render(); v = view();
+  ok('repeats: a failed refresh says so, and keeps showing the last good read', /Last refresh failed \(HTTP 503 upstream down\) — showing the previous read/.test(v) && v.includes('maya@spgish.test'), (v.match(/People who tried again[\s\S]{0,700}/) || [''])[0].replace(/\s+/g, ' '));
+  ok('repeats: ...and the blocked leads still draw (the tab is not blanked)', v.includes('data-x="blk-') && /<b>51<\/b> leads blocked/.test(v));
+  repDown = false; await GW.TABS.blocked.load(); GW.TABS.blocked.render(); v = view();
+  ok('repeats: ...and it recovers on the next read', v.includes('maya@spgish.test') && !/upstream down/.test(v));
+  const keepRepeats = REPEATS;
+  REPEATS = { as_of: 'x', rows: [] }; await GW.TABS.blocked.load(); GW.TABS.blocked.render(); v = view();
+  ok('repeats: nobody back is a plain sentence, not an empty table', /Nobody has tried again/.test(v) && !v.includes('maya@spgish.test'));
+  REPEATS = keepRepeats; await GW.TABS.blocked.load(); GW.TABS.blocked.render(); v = view();
   const bc1 = b.calls.length;
   fire('change', el({ 'data-blk': '' }, { value: 'only' })); await ticks(20); v = view();
   ok('blocked: "only ours" says so, and asks for no people figure', /<b>51<\/b> of our own test leads blocked/.test(v) && !b.calls.slice(bc1).some((c) => c.path === '/monitor/metrics'));
