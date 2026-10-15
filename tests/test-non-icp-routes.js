@@ -51,7 +51,10 @@ const S = { fetches: [], slackPayloads: [], leadRow: null, writes: [], psBlocked
             reportLeads: null, reportVerdicts: null, metaPayloads: [],
             /* released domains (non_icp_exemptions), the "tries" count the
                blocked-lead post reads, and the dashboard's repeat rows */
-            exempt: [], tries: null, repeatRows: [], enrich: null };
+            exempt: [], tries: null, repeatRows: [], enrich: null,
+            /* the release routes: what a release would clear, what the UPDATE reports,
+               what the DELETE reports, and the released list */
+            relCounts: null, relCleared: null, unrelRemoved: null, releasedRows: [] };
 
 /* ── stub pg ──────────────────────────────────────────────────────
    Both pools (Railway and the AWS warehouse) come through here.
@@ -197,6 +200,18 @@ function stubQuery(q, params) {
   if (/^SELECT \* FROM enrichment_data WHERE session_id=\$1/.test(flat)) {
     return { rows: S.enrich ? [S.enrich] : [], rowCount: S.enrich ? 1 : 0 };
   }
+  /* The release plan's verdict read: the cached row, if it is for the domain asked about. */
+  if (/^SELECT business_type, confidence::float AS confidence, source, checked_at FROM non_icp_domain_verdicts WHERE domain = \$1/.test(flat)) {
+    const rows = S.verdict && S.verdict.domain === (params || [])[0] ? [S.verdict] : [];
+    return { rows, rowCount: rows.length };
+  }
+  /* The release routes' statements, matched before the broader exemptions branch. */
+  if (/^DELETE FROM non_icp_exemptions/.test(flat)) return { rows: [], rowCount: S.unrelRemoved == null ? 1 : S.unrelRemoved };
+  if (/^UPDATE leads SET non_icp_blocked = FALSE, non_icp_llm_flagged = FALSE/.test(flat)) return { rows: [], rowCount: S.relCleared == null ? 3 : S.relCleared };
+  if (/FROM non_icp_exemptions e ORDER BY e\.released_at DESC/.test(flat)) return { rows: S.releasedRows || [], rowCount: (S.releasedRows || []).length };
+  if (/^SELECT COUNT\(\*\)::int AS leads, COUNT\(DISTINCT lower\(email\)\)::int AS people/.test(flat)) {
+    return { rows: [S.relCounts || { leads: 3, people: 1, blocked: 3, booked: 0 }], rowCount: 1 };
+  }
   /* The three reads the release-and-repeat change adds. Matched BEFORE the
      generic COUNT branch below, which would answer each with an empty row. */
   if (/FROM non_icp_exemptions/.test(flat)) {
@@ -337,7 +352,7 @@ const post = async (p, body) => {
   let j = null; try { j = await r.json(); } catch (_) {}
   return { status: r.status, body: j };
 };
-const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; S.dropoffInternal = null; S.dropoffRows = null; S.dropoffSources = null; S.stickySource = null; S.exempt = []; S.tries = null; S.repeatRows = []; S.enrich = null; };
+const reset = () => { S.fetches = []; S.slackPayloads = []; S.metaPayloads = []; S.writes = []; S.leadRow = null; S.psBlocked = false; S.verdict = null; S.reportLeads = null; S.reportVerdicts = null; S.dropoffInternal = null; S.dropoffRows = null; S.dropoffSources = null; S.stickySource = null; S.exempt = []; S.tries = null; S.repeatRows = []; S.enrich = null; S.relCounts = null; S.relCleared = null; S.unrelRemoved = null; S.releasedRows = []; };
 const metaFired      = () => S.fetches.some((u) => /graph\.facebook\.com/.test(u));
 const salesforceHit  = () => S.fetches.some((u) => /\/sobjects\//.test(u));
 const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') || true);
@@ -1978,6 +1993,62 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     const both = JSON.stringify(S.slackPayloads);
     ok('BOTH: tried again AND large gives one post carrying both lines', /Blocked person tried again/.test(both) && /Attempt 2 from this person/.test(both) && /about 300 staff/.test(both) && S.slackPayloads.filter((p) => /Blocked person tried again/.test(JSON.stringify(p))).length === 1, both.slice(0, 200));
     ok('BOTH: the people are tagged ONCE, not twice', (both.match(/<@U0TESTAAA1>/g) || []).length === 2 /* the section and the notification text */, String((both.match(/<@U0TESTAAA1>/g) || []).length));
+  }
+  {
+    /* RELEASE FROM THE BLOCKED TAB. The same functions as the command line;
+       the dashboard token is shared, so the Slack post is the record. */
+    const GET = (p) => realFetch(BASE + p);
+    const POSTJ = (p, body) => realFetch(BASE + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    for (const [m, p] of [['GET', '/monitor/non-icp-release-plan?domain=a.com'], ['POST', '/monitor/non-icp-release'], ['POST', '/monitor/non-icp-unrelease'], ['GET', '/monitor/non-icp-released']]) {
+      const r = m === 'GET' ? await GET(p) : await POSTJ(p, { domain: 'a.com' });
+      ok(`RELEASE/routes: ${m} ${p.split('?')[0]} is token-gated`, r.status === 401, String(r.status));
+    }
+    reset(); S.verdict = { domain: 'specialtyprogramgroup.com', business_type: 'insurance', blocking: true, confidence: 0.97, source: 'llm', checked_at: '2026-09-29T16:57:52Z' };
+    let r = await GET('/monitor/non-icp-release-plan?token=stub&domain=' + encodeURIComponent('https://www.specialtyprogramgroup.com/about'));
+    let j = await r.json();
+    ok('RELEASE/plan: says what a release would clear, keyed to the company', r.status === 200 && j.domain === 'specialtyprogramgroup.com' && j.leads.leads === 3 && j.leads.people === 1 && j.leads.booked === 0 && j.brand === null, JSON.stringify(j));
+    ok('RELEASE/plan: carries the verdict the model gave', j.verdict && j.verdict.business_type === 'insurance' && j.verdict.confidence === 0.97, JSON.stringify(j.verdict));
+    ok('RELEASE/plan: READS ONLY, nothing was written', !S.writes.some((w) => /^(INSERT|UPDATE|DELETE|BEGIN)/.test(w.flat)), S.writes.map((w) => w.flat.slice(0, 40)).join(' | '));
+    reset();
+    r = await GET('/monitor/non-icp-release-plan?token=stub&domain=kw.com'); j = await r.json();
+    ok('RELEASE/plan: a brand-list domain says which brand, so the screen can refuse it', r.status === 200 && j.brand === 'Keller Williams', JSON.stringify(j));
+    reset();
+    r = await GET('/monitor/non-icp-release-plan?token=stub&domain=someone%40gmail.com');
+    ok('RELEASE/plan: a free mailbox is a 400', r.status === 400, String(r.status));
+
+    reset();
+    r = await POSTJ('/monitor/non-icp-release?token=stub', { domain: 'specialtyprogramgroup.com', note: 'insurance group, wants AEO' }); j = await r.json();
+    ok('RELEASE: a company is released and the response says how many lead rows were cleared', r.status === 200 && j.ok === true && j.domain === 'specialtyprogramgroup.com' && j.released_leads === 3, JSON.stringify(j));
+    const stmts = S.writes.map((w) => w.flat.split(' ').slice(0, 3).join(' '));
+    ok('RELEASE: in ONE transaction, BEGIN then INSERT then UPDATE then COMMIT', ['BEGIN', 'INSERT INTO non_icp_exemptions', 'UPDATE leads SET', 'COMMIT'].every((x, i) => stmts.indexOf(x) !== -1 && (i === 0 || stmts.indexOf(x) > stmts.indexOf(['BEGIN', 'INSERT INTO non_icp_exemptions', 'UPDATE leads SET', 'COMMIT'][i - 1]))), stmts.join(' | '));
+    const ins = S.writes.find((w) => /^INSERT INTO non_icp_exemptions/.test(w.flat));
+    ok('RELEASE: recorded as "dashboard" with the note', ins && ins.params[0] === 'specialtyprogramgroup.com' && ins.params[1] === 'insurance group, wants AEO' && ins.params[2] === 'dashboard', JSON.stringify(ins && ins.params));
+    const slack = JSON.stringify(S.slackPayloads);
+    ok('RELEASE: Slack is told (the dashboard link is shared, so the post is the record)', /Company released from the Blocked tab/.test(slack) && /specialtyprogramgroup\.com/.test(slack) && /cannot say who did it/.test(slack) && /insurance group, wants AEO/.test(slack), slack.slice(0, 200));
+
+    reset();
+    r = await POSTJ('/monitor/non-icp-release?token=stub', { domain: 'farmersagent.com' }); j = await r.json();
+    ok('RELEASE: a shared brand-list domain is REFUSED from the dashboard (409)', r.status === 409 && /brand-list domain/.test(j.error), r.status + ' ' + JSON.stringify(j));
+    ok('RELEASE: ...and nothing was written, not even BEGIN, and nobody was told', !S.writes.some((w) => /^(BEGIN|INSERT|UPDATE|COMMIT)/.test(w.flat)) && S.slackPayloads.length === 0);
+    reset();
+    r = await POSTJ('/monitor/non-icp-release?token=stub', { domain: 'someone@gmail.com' });
+    ok('RELEASE: a free mailbox is a 400 and writes nothing', r.status === 400 && !S.writes.some((w) => /^(BEGIN|INSERT|UPDATE)/.test(w.flat)), String(r.status));
+    reset();
+    r = await POSTJ('/monitor/non-icp-release?token=stub', {});
+    ok('RELEASE: no domain is a 400', r.status === 400, String(r.status));
+
+    reset();
+    r = await POSTJ('/monitor/non-icp-unrelease?token=stub', { domain: 'specialtyprogramgroup.com' }); j = await r.json();
+    ok('UNRELEASE: removes the exemption', r.status === 200 && j.removed === 1 && j.domain === 'specialtyprogramgroup.com', JSON.stringify(j));
+    ok('UNRELEASE: touches NO lead', !S.writes.some((w) => /^UPDATE leads/.test(w.flat)));
+    ok('UNRELEASE: Slack is told', /Release undone from the Blocked tab/.test(JSON.stringify(S.slackPayloads)));
+    reset(); S.unrelRemoved = 0;
+    r = await POSTJ('/monitor/non-icp-unrelease?token=stub', { domain: 'acme.com' }); j = await r.json();
+    ok('UNRELEASE: undoing something never released removes 0 and says nothing in Slack', j.removed === 0 && S.slackPayloads.length === 0, JSON.stringify(j));
+
+    reset(); S.releasedRows = [{ domain: 'specialtyprogramgroup.com', note: 'n', released_by: 'dashboard', released_at: '2026-10-15T10:00:00Z', leads: 3 }];
+    r = await GET('/monitor/non-icp-released?token=stub'); j = await r.json();
+    ok('RELEASED list: each company with when, by, note and how many leads', r.status === 200 && j.rows.length === 1 && j.rows[0].domain === 'specialtyprogramgroup.com' && j.rows[0].leads === 3 && j.rows[0].released_by === 'dashboard', JSON.stringify(j));
   }
   {
     /* THE DASHBOARD'S READ. */
