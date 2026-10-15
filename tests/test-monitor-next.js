@@ -500,6 +500,15 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     { email: 'maya@spgish.test', domain: 'spgish.test', attempts: 3, first_at: '2026-09-28T18:30:00Z', last_at: '2026-10-09T18:30:00Z', source: 'llm', business_type: 'insurance', confidence: 0.97, company_size: 300 },
     { email: 'pat@remax.com', domain: 'remax.com', attempts: 2, first_at: '2026-10-01T10:00:00Z', last_at: '2026-10-06T10:00:00Z', source: 'domain_list', business_type: null, confidence: null, company_size: null }] };
   let repDown = false;
+  /* The release routes: what is already released, what a release would clear, and whether the write fails. */
+  let RELEASED = { as_of: 'x', rows: [{ domain: 'old-release.test', note: 'insurance group', released_by: 'dashboard', released_at: '2026-10-14T15:00:00Z', leads: 2 }] };
+  let relFail = false, relDown = false;
+  const PLANS = {
+    'spgish.test':       { domain: 'spgish.test', brand: null, released: null, verdict: { business_type: 'insurance', confidence: 0.97, source: 'llm' }, leads: { leads: 3, people: 1, blocked: 3, booked: 0 } },
+    'farmersagent.com':  { domain: 'farmersagent.com', brand: 'Farmers Insurance', released: null, verdict: null, leads: { leads: 9, people: 7, blocked: 9, booked: 0 } },
+    'old-release.test':  { domain: 'old-release.test', brand: null, released: { released_at: '2026-10-14T15:00:00Z', released_by: 'dashboard', note: null }, verdict: null, leads: { leads: 0, people: 0, blocked: 0, booked: 0 } },
+    'empty.test':        { domain: 'empty.test', brand: null, released: null, verdict: null, leads: { leads: 0, people: 0, blocked: 0, booked: 0 } } };
+  let b_lastBody = () => '{}';   /* set once the browser exists: the body of the POST being served */
   const payloads = (p, q) => {
     if (leadsHook && p === '/monitor/leads') { const r = leadsHook(q); if (r) return r; }
     if (p === '/monitor/overview') return P[q.view] || P.week;
@@ -514,6 +523,10 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     if (p === '/monitor/sdr') return SDR;
     if (p === '/monitor/non-icp') return MODEL;
     if (p === '/monitor/non-icp-repeats') return repDown ? new Error('upstream down') : REPEATS;
+    if (p === '/monitor/non-icp-released') return relDown ? new Error('upstream down') : RELEASED;
+    if (p === '/monitor/non-icp-release-plan') return PLANS[q.domain] || new Error('not a company domain');
+    if (p === '/monitor/non-icp-release') return relFail ? new Error('write refused') : { ok: true, domain: JSON.parse(b_lastBody()).domain, released_leads: 3 };
+    if (p === '/monitor/non-icp-unrelease') return { ok: true, domain: JSON.parse(b_lastBody()).domain, removed: 1 };
     if (p === '/monitor/visitors') return VIS;
     if (p === '/monitor/partners') return PARTNERS;
     if (p === '/monitor/partner-gaps') return gapsDown ? new Error('upstream down') : GAPS;
@@ -527,6 +540,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   const servedCfg = JSON.parse((cfgTag.match(/window\.__GW__=(.*);<\/script>$/) || [])[1] || 'null');
   ok('page: the config carries the server\'s label maps', servedCfg && servedCfg.labels && servedCfg.labels.website && servedCfg.labels.website.parked_confirmed === 'Domain registered but no website on it' && servedCfg.labels.meta.blocked === 'Blocked — non-ICP');
   const b = browser(payloads, servedCfg);
+  b_lastBody = () => { const c = b.calls[b.calls.length - 1]; return c && c.body ? c.body : '{}'; };
   b.window.location.hash = '#tab=overview&view=week&unit=people';
   let GW = null, evalErr = null;
   try { GW = run(js, b); } catch (e) { evalErr = e; }
@@ -878,6 +892,72 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   REPEATS = { as_of: 'x', rows: [] }; await GW.TABS.blocked.load(); GW.TABS.blocked.render(); v = view();
   ok('repeats: nobody back is a plain sentence, not an empty table', /Nobody has tried again/.test(v) && !v.includes('maya@spgish.test'));
   REPEATS = keepRepeats; await GW.TABS.blocked.load(); GW.TABS.blocked.render(); v = view();
+
+  /* ═══ Release from the Blocked tab ═══ */
+  const posts = () => b.calls.filter((c) => c.method === 'POST');
+  const rel0 = posts().length;
+  ok('release: the Released companies panel lists what is released, with when, why and an Undo', /Released companies/.test(v) && v.includes('old-release.test') && v.includes('insurance group') && /data-rel-undo="old-release\.test"/.test(v));
+  ok('release: a model-judged person has a Release button', /data-rel="spgish\.test"/.test(v));
+  ok('release: a BRAND-LIST person has NONE, and says the command line only', !/data-rel="remax\.com"/.test(v) && /Brand list: command line only/.test(v));
+  ok('release: nothing is open or written before a click', !/id="rel-confirm"/.test(v) && posts().length === rel0);
+  /* open: the plan is READ, never written */
+  const relPlanFrom = b.calls.length;
+  fire('click', el({ 'data-rel': 'spgish.test' })); await ticks(20); v = view();
+  const planCalls = b.calls.slice(relPlanFrom).filter((c) => c.path === '/monitor/non-icp-release-plan');
+  ok('release: Release reads the plan for THAT company, as a GET', planCalls.length === 1 && planCalls[0].q.domain === 'spgish.test' && planCalls[0].method === 'GET', JSON.stringify(planCalls.map((c) => c.q)));
+  ok('release: the box says exactly how many leads and people it will unblock', /Release spgish\.test\?/.test(v) && /<b>3<\/b> blocked leads from <b>1<\/b> person \(0 already booked\) will stop being blocked/.test(v), (v.match(/id="rel-confirm"[\s\S]{0,700}/) || [''])[0].replace(/\s+/g, ' '));
+  ok('release: ...says what it does NOT do', /does <b>not<\/b> send them to Salesforce and does <b>not<\/b> message them/.test(v) && /Slack is told/.test(v));
+  ok('release: it offers a note, a Confirm and a Cancel', /data-rel-note/.test(v) && /data-rel-go/.test(v) && /data-rel-cancel/.test(v));
+  ok('release: opening it WROTE NOTHING', posts().length === rel0);
+  /* cancel */
+  fire('click', el({ 'data-rel-cancel': '' })); await ticks(); v = view();
+  ok('release: Cancel closes the box and writes nothing', !/id="rel-confirm"/.test(v) && posts().length === rel0);
+  /* confirm */
+  fire('click', el({ 'data-rel': 'spgish.test' })); await ticks(20);
+  fire('input', el({ 'data-rel-note': '' }, { value: 'wants AEO' }));
+  const ld0 = b.calls.length;
+  fire('click', el({ 'data-rel-go': '' })); await ticks(30); v = view();
+  const wr = posts().slice(rel0).filter((c) => c.path === '/monitor/non-icp-release');
+  ok('release: Confirm POSTs the company and the note as JSON, once', wr.length === 1 && wr[0].method === 'POST' && JSON.parse(wr[0].body).domain === 'spgish.test' && JSON.parse(wr[0].body).note === 'wants AEO', JSON.stringify(wr.map((c) => c.body)));
+  ok('release: the domain travels in the BODY, not the query string', wr.length === 1 && !('domain' in wr[0].q));
+  ok('release: it closes, says what happened in words, and reloads both lists', !/id="rel-confirm"/.test(v) && /Released spgish\.test — 3 lead rows cleared/.test(v) && b.calls.slice(ld0).some((c) => c.path === '/monitor/non-icp-released') && b.calls.slice(ld0).some((c) => c.path === '/monitor/non-icp-repeats'));
+  /* a failed write leaves the box OPEN with the note in it */
+  relFail = true;
+  fire('click', el({ 'data-rel': 'spgish.test' })); await ticks(20);
+  fire('input', el({ 'data-rel-note': '' }, { value: 'second try' }));
+  fire('click', el({ 'data-rel-go': '' })); await ticks(30); v = view();
+  ok('release: a failed write says so and leaves the box OPEN', /id="rel-confirm"/.test(v) && /Could not release: HTTP 503 write refused/.test(v));
+  ok('release: ...with the note still in it', /data-rel-note value="second try"/.test(v));
+  relFail = false;
+  fire('click', el({ 'data-rel-cancel': '' })); await ticks();
+  /* a shared brand domain cannot be released from here */
+  fire('input', el({ 'data-rel-input': '' }, { value: 'farmersagent.com' }));
+  fire('click', el({ 'data-rel-check': '' })); await ticks(20); v = view();
+  ok('release: a typed brand-list domain is explained and REFUSED, with no Confirm button', /shared brand domain \(Farmers Insurance\)/.test(v) && /--allow-brand/.test(v) && !/data-rel-go/.test(v) && /data-rel-cancel/.test(v));
+  fire('click', el({ 'data-rel-cancel': '' })); await ticks();
+  fire('input', el({ 'data-rel-input': '' }, { value: 'old-release.test' }));
+  fire('click', el({ 'data-rel-check': '' })); await ticks(20); v = view();
+  ok('release: an already released company says so and offers no second release', /is already released/.test(v) && !/data-rel-go/.test(v));
+  fire('click', el({ 'data-rel-cancel': '' })); await ticks();
+  fire('input', el({ 'data-rel-input': '' }, { value: 'empty.test' }));
+  fire('click', el({ 'data-rel-check': '' })); await ticks(20); v = view();
+  ok('release: a company with no blocked leads says it only stops future blocks', /No blocked leads from this company right now\. This only stops it being blocked in future/.test(v) && /data-rel-go/.test(v));
+  fire('click', el({ 'data-rel-cancel': '' })); await ticks();
+  fire('input', el({ 'data-rel-input': '' }, { value: 'someone@gmail.com' }));
+  fire('click', el({ 'data-rel-check': '' })); await ticks(20); v = view();
+  ok('release: a domain the server rejects is shown as a failed check, with no Confirm', /The release check could not be read/.test(v) && /not a company domain/.test(v) && !/data-rel-go/.test(v));
+  fire('click', el({ 'data-rel-cancel': '' })); await ticks();
+  ok('release: through all of that, exactly ONE write was sent (the confirmed one) plus the failed retry', posts().slice(rel0).filter((c) => c.path === '/monitor/non-icp-release').length === 2);
+  /* undo */
+  const uw0 = posts().length;
+  fire('click', el({ 'data-rel-undo': 'old-release.test' })); await ticks(30); v = view();
+  const un = posts().slice(uw0);
+  ok('release: Undo POSTs the company to unrelease and says so', un.length === 1 && un[0].path === '/monitor/non-icp-unrelease' && JSON.parse(un[0].body).domain === 'old-release.test' && /Undid the release of old-release\.test/.test(v), JSON.stringify(un.map((c) => [c.path, c.body])));
+  /* isolation: the released list failing must not blank the leads */
+  relDown = true; await GW.TABS.blocked.load(); GW.TABS.blocked.render(); v = view();
+  ok('release: a failed refresh of the released list keeps the last read and says so', /Last refresh failed \(HTTP 503 upstream down\) — showing the previous read/.test(v) && v.includes('old-release.test'));
+  ok('release: ...and the blocked leads still draw', v.includes('data-x="blk-') && /<b>51<\/b> leads blocked/.test(v));
+  relDown = false; await GW.TABS.blocked.load(); GW.TABS.blocked.render(); v = view();
   const bc1 = b.calls.length;
   fire('change', el({ 'data-blk': '' }, { value: 'only' })); await ticks(20); v = view();
   ok('blocked: "only ours" says so, and asks for no people figure', /<b>51<\/b> of our own test leads blocked/.test(v) && !b.calls.slice(bc1).some((c) => c.path === '/monitor/metrics'));

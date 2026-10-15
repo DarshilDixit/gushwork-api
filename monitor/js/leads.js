@@ -361,6 +361,11 @@
   GW.TABS.blocked = (function () {
     var data = null, err = null, tot = null, people = null, root = null, seq = 0, busy = false, dm = '';
     var rep = null, repErr = null;   /* the repeat-attempts panel: its own read, so its failure never blanks the table */
+    /* RELEASE FROM THIS TAB. A company is released ONE WAY: click Release, read what it will do, confirm.
+       relOpen is the company whose confirm box is open; relPlan is what the server says a release would
+       clear (or why it cannot be read); the draft note survives repaints. Nothing here writes until the
+       one Confirm button, and a failure leaves the box OPEN with the note still in it. */
+    var released = null, releasedErr = null, relOpen = null, relPlan = null, relNote = '', relBusy = false, relErr = null, relInput = '', undoBusy = null, relMsg = '';
     function mode() { var m = G.S.q.internal || ''; return m === 'only' || m === 'exclude' ? m : ''; }
     function page() { return Math.max(1, +G.S.q.page || 1); }
     function load() {
@@ -378,10 +383,13 @@
       var d = G.api('/monitor/non-icp-repeats', {}, { timeout: 20000 }).then(
         function (x) { if (my === seq) { rep = x; repErr = null; } },
         function (e) { if (my === seq) repErr = e.message; });
+      var e2 = G.api('/monitor/non-icp-released', {}, { timeout: 20000 }).then(
+        function (x) { if (my === seq) { released = x; releasedErr = null; } },
+        function (e) { if (my === seq) releasedErr = e.message; });
       busy = true;
       /* dm is the mode THIS payload was fetched for: the header words its
          number from the payload, never from the select, which moves first */
-      return Promise.all([a, b, c, d]).then(function (r) { if (my !== seq) return; if (pastEnd(r[0])) return load(); data = r[0]; dm = m; err = null; tot = r[1]; people = r[2]; }, function (e) { if (my === seq) err = e.message; })
+      return Promise.all([a, b, c, d, e2]).then(function (r) { if (my !== seq) return; if (pastEnd(r[0])) return load(); data = r[0]; dm = m; err = null; tot = r[1]; people = r[2]; }, function (e) { if (my === seq) err = e.message; })
         .then(function () { if (my === seq) busy = false; });
     }
     function activate(el) { root = el; var p = load(); render(); G.every('blocked', 300000, function () { load().then(render); }); return p.then(render); }
@@ -414,10 +422,95 @@
           { label: 'Tries', get: function (r) { return fmt(r.attempts); } },
           { label: 'Last try (ET)', get: function (r) { return r.last_at ? G.et(r.last_at) : ''; } },
           { label: 'We judged', get: judged },
-          { label: 'Staff', get: function (r) { return r.company_size ? fmt(r.company_size) : ''; } }
+          { label: 'Staff', get: function (r) { return r.company_size ? fmt(r.company_size) : ''; } },
+          /* A brand-list company is shared by thousands of people, so the button is not offered: releasing it
+             would lift the block for all of them. The command line can, with --allow-brand. */
+          { label: 'Action', html: function (r) {
+            if (!r.domain) return '';
+            if (!r.source || r.source === 'domain_list') return '<span class="na" title="Shared by many people. Only the command line can release a brand-list company.">Brand list: command line only</span>';
+            return '<button class="btn sm" data-rel="' + esc(r.domain) + '" aria-label="Release ' + esc(r.domain) + '">Release…</button>';
+          } }
         ], rep.rows, { region: 'People who tried again' });
       return U.panel({ title: 'People who tried again', qual: 'blocked, then submitted again', body: body,
         foot: 'A second try usually means we got it wrong, or they did not understand the page. They deserve a human reply either way. If the company should not be blocked, run <code>node tools/non-icp-release.js company.com</code> to see what it would do, then add <code>--apply</code>.' });
+    }
+    /* ── Release: the confirm box, the released list, and the three actions ── */
+    function relFocus(sel2) { var el = root && root.querySelector && root.querySelector(sel2); if (el && el.focus) { try { el.focus({ preventScroll: true }); } catch (e) { el.focus(); } } }
+    function releaseConfirm() {
+      if (!relOpen) return '';
+      var body, pl = relPlan && relPlan.plan, cancel = '<button class="btn sm" data-rel-cancel aria-label="Cancel releasing ' + esc(relOpen) + '">Cancel</button>';
+      if (!relPlan) body = U.loading(2);
+      else if (relPlan.err) body = U.unavailable('The release check', relPlan.err) + '<div class="ackf">' + cancel + '</div>';
+      else if (pl.brand) body = '<p class="lnote"><b>' + esc(pl.domain) + '</b> is a shared brand domain (' + esc(pl.brand) + '). Releasing it would lift the block for everyone who uses it, so it cannot be done from here. If you really mean it, use the command line with <code>--allow-brand</code>.</p><div class="ackf">' + cancel + '</div>';
+      else if (pl.released) body = '<p class="lnote"><b>' + esc(pl.domain) + '</b> is already released (' + esc(G.et(pl.released.released_at)) + ').</p><div class="ackf">' + cancel + '</div>';
+      else {
+        var l = pl.leads;
+        body = '<p class="lnote">' + (l.leads
+            ? '<b>' + fmt(l.blocked) + '</b> blocked ' + G.plural(l.blocked, 'lead') + ' from <b>' + fmt(l.people) + '</b> ' + G.plural(l.people, 'person', 'people') + ' (' + fmt(l.booked) + ' already booked) will stop being blocked.'
+            : 'No blocked leads from this company right now. This only stops it being blocked in future.') +
+          ' From now on this company is never blocked, and its Meta events are no longer held back. It does <b>not</b> send them to Salesforce and does <b>not</b> message them: a person replies.</p>' +
+          '<p class="lnote">Slack is told when you confirm, because this page cannot say who clicked.</p>' +
+          '<div class="ackf">' + (relErr ? '<span class="badge b-bad">' + esc(relErr) + '</span>' : '') +
+          '<input class="field" data-rel-note value="' + esc(relNote) + '" placeholder="Why (optional)" aria-label="Why ' + esc(pl.domain) + ' is being released" maxlength="300"' + (relBusy ? ' disabled' : '') + '>' +
+          '<button class="btn sm primary" data-rel-go' + (relBusy ? ' disabled' : '') + ' aria-label="Release ' + esc(pl.domain) + '">' + (relBusy ? 'Releasing…' : 'Release this company') + '</button>' + cancel + '</div>';
+      }
+      return U.panel({ id: 'rel-confirm', title: 'Release ' + relOpen + '?', qual: 'a company we blocked by mistake', body: body });
+    }
+    function releasedPanel() {
+      var body;
+      if (!released && releasedErr) body = U.unavailable('Released companies', releasedErr);
+      else if (!released) body = U.loading(2);
+      else body = (releasedErr ? '<div class="readat"><span class="badge b-warn">Last refresh failed (' + esc(String(releasedErr).slice(0, 40)) + ') — showing the previous read</span></div>' : '') +
+        (relMsg ? '<div class="readat"><span class="badge b-good">' + esc(relMsg) + '</span></div>' : '') +
+        ((released.rows || []).length ? U.grid([
+          { label: 'Company', k: 'domain' },
+          { label: 'Released (ET)', get: function (r) { return r.released_at ? G.et(r.released_at) : ''; } },
+          { label: 'By', get: function (r) { return r.released_by || ''; } },
+          { label: 'Why', get: function (r) { return r.note || ''; } },
+          { label: 'Leads', get: function (r) { return fmt(r.leads); } },
+          { label: 'Action', html: function (r) { return '<button class="btn sm" data-rel-undo="' + esc(r.domain) + '"' + (undoBusy === r.domain ? ' disabled' : '') + ' aria-label="Undo the release of ' + esc(r.domain) + '">' + (undoBusy === r.domain ? 'Undoing…' : 'Undo') + '</button>'; } }
+        ], released.rows, { region: 'Released companies' }) : U.empty('No company has been released', 'Release one from the list above, or by typing its domain below.')) +
+        '<div class="ackf"><input class="field" data-rel-input value="' + esc(relInput) + '" placeholder="Company domain, e.g. acme.com" aria-label="Company domain to release" maxlength="200">' +
+        '<button class="btn sm" data-rel-check aria-label="Check what releasing this company would do">Check…</button></div>';
+      return U.panel({ id: 'rel-list', title: 'Released companies', qual: 'never blocked, whatever the AI check or the brand list says', body: body,
+        foot: 'Undo only stops the NEXT lead from that company being exempt; leads already cleared stay cleared. A brand-list company (shared by many people) can only be released from the command line, with <code>--allow-brand</code>.' });
+    }
+    function openRelease(domain) {
+      var want = String(domain || '').trim(); if (!want) return;
+      relOpen = want; relPlan = null; relErr = null; relBusy = false; render(); relFocus('#rel-confirm');
+      return G.api('/monitor/non-icp-release-plan', { domain: want }, { timeout: 15000 }).then(
+        function (pl) { if (relOpen !== want) return; relPlan = { plan: pl }; render(); relFocus(pl.brand || pl.released ? '[data-rel-cancel]' : '[data-rel-note]'); },
+        function (e) { if (relOpen !== want) return; relPlan = { err: e.message }; render(); relFocus('[data-rel-cancel]'); });
+    }
+    function doRelease() {
+      if (!relPlan || !relPlan.plan || relBusy) return;
+      var dom = relPlan.plan.domain; relBusy = true; relErr = null; render();
+      /* the JSON body, never the query string; a failure leaves the box OPEN with the note in it */
+      return G.api('/monitor/non-icp-release', {}, { method: 'POST', body: { domain: dom, note: relNote }, timeout: 20000 }).then(
+        function (r) { relBusy = false; relOpen = null; relPlan = null; relNote = ''; relInput = ''; relMsg = 'Released ' + dom + ' — ' + fmt(r.released_leads) + ' lead ' + (r.released_leads === 1 ? 'row' : 'rows') + ' cleared';
+          return load().then(function () { render(); relFocus('#rel-list'); G.announce(relMsg); }); },
+        function (e) { relBusy = false; relErr = 'Could not release: ' + e.message; render(); relFocus('[data-rel-go]'); G.announce(relErr); });
+    }
+    function undoRelease(domain) {
+      if (undoBusy) return; undoBusy = domain; relMsg = ''; render();
+      return G.api('/monitor/non-icp-unrelease', {}, { method: 'POST', body: { domain: domain }, timeout: 15000 }).then(
+        function () { undoBusy = null; relMsg = 'Undid the release of ' + domain; return load().then(function () { render(); G.announce(relMsg); }); },
+        function (e) { undoBusy = null; relMsg = ''; releasedErr = 'Could not undo: ' + e.message; render(); G.announce(releasedErr); });
+    }
+    if (typeof document !== 'undefined' && document.addEventListener) {
+      document.addEventListener('click', function (e) {
+        var t = e.target && e.target.closest ? e.target : null; if (!t || !G.current || G.current() !== 'blocked') return;
+        var o = t.closest('[data-rel]'); if (o) { relNote = ''; openRelease(o.getAttribute('data-rel')); return; }
+        var ck = t.closest('[data-rel-check]'); if (ck) { relNote = ''; openRelease(relInput); return; }
+        var go = t.closest('[data-rel-go]'); if (go) { var n = root && root.querySelector ? root.querySelector('[data-rel-note]') : null; if (n) relNote = n.value; doRelease(); return; }
+        var c = t.closest('[data-rel-cancel]'); if (c) { relOpen = null; relPlan = null; relErr = null; relNote = ''; render(); return; }   /* Cancel does NOTHING else */
+        var u = t.closest('[data-rel-undo]'); if (u) { undoRelease(u.getAttribute('data-rel-undo')); }
+      });
+      document.addEventListener('input', function (e) {
+        var el = e.target; if (!el || !el.hasAttribute) return;
+        if (el.hasAttribute('data-rel-note')) relNote = el.value;
+        else if (el.hasAttribute('data-rel-input')) relInput = el.value;
+      });
     }
     function render() {
       if (!root || (G.current && G.current() !== 'blocked')) return;
@@ -438,11 +531,11 @@
           dm === 'only' ? 'None of our own tests are blocked' : dm === 'exclude' ? 'Nothing blocked apart from our own tests' : 'Nothing blocked',
           dm ? '' : 'Either the block is switched off or nobody has matched yet.') + U.pager(d.page, d.pages, 'data-pg') + '</section>'; }) +
         '<p class="foot"><span>The chip on each row says which check blocked it. A brand-list block comes from NON_ICP_DOMAINS and stops with NON_ICP_BLOCK=false; an AI-check block stops with NON_ICP_LLM_BLOCK=false. Either takes effect on Railway without a deploy.</span></p>';
-      G.paint(root, head + U.drawn('People who tried again', repeatsPanel) + body);
+      G.paint(root, head + U.drawn('Release', releaseConfirm) + U.drawn('People who tried again', repeatsPanel) + U.drawn('Released companies', releasedPanel) + body);
       afterPaint(root);
     }
     function said() { var d = data; return d ? counts(d).replace(/<[^>]*>/g, '') : ''; }
-    return { title: 'Blocked', activate: activate, deactivate: deactivate, render: render, load: load, said: said, _set: function (d, t, p) { data = d; tot = t; people = p; dm = mode(); } };
+    return { title: 'Blocked', activate: activate, deactivate: deactivate, render: render, load: load, said: said, _open: openRelease, _release: doRelease, _undo: undoRelease, _set: function (d, t, p) { data = d; tot = t; people = p; dm = mode(); } };
   })();
 
   /* ── Events: one delegated set for both tabs ────────────────────── */
