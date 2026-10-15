@@ -309,6 +309,8 @@ input.field { min-width: 0; }
 .jumps { display: flex; flex-wrap: wrap; gap: var(--gw-space-8); margin: var(--gw-space-12) 0 var(--gw-space-4); }
 .jumps .badge { margin-left: var(--gw-space-4); }
 .marks.nomg { margin-left: 0; }
+/* A LIKELY BUYER's row is tinted, in the existing "good" colour: a hint to look here first, not a verdict */
+.tbl tr.buyer td, .rt > tbody > tr.main.buyer > td { background: var(--good-bg); }
 /* a two-line cell: the main fact, then the supporting one in muted text */
 .c2 { display: flex; flex-direction: column; align-items: flex-start; gap: var(--gw-space-4); text-align: left; min-width: 0; }
 .c2 .a { color: var(--ink); font: var(--gw-text-body-14-med); overflow-wrap: anywhere; }

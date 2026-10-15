@@ -14205,7 +14205,15 @@ async function nonIcpReviewReport(db) {
            MAX(CASE WHEN l.enriched_company_size ~ '^[0-9]+$' THEN l.enriched_company_size::int END) AS company_size,
            (ARRAY_AGG(l.enriched_title ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.enriched_title, '') IS NOT NULL))[1]       AS title,
            (ARRAY_AGG(l.enriched_seniority ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.enriched_seniority, '') IS NOT NULL))[1] AS seniority,
-           (ARRAY_AGG(l.enriched_departments ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.enriched_departments, '') IS NOT NULL))[1] AS departments
+           (ARRAY_AGG(l.enriched_departments ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.enriched_departments, '') IS NOT NULL))[1] AS departments,
+           /* WHERE THEY CAME FROM, the latest non-empty answer: the ad source and medium, the campaign, what they
+              said when asked how they heard of us, and the referrer. The Blocked tab shows these beside the role
+              so "a VP who found us on a branded search" reads in one line. */
+           (ARRAY_AGG(l.utm_source ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.utm_source, '') IS NOT NULL))[1]       AS utm_source,
+           (ARRAY_AGG(l.utm_medium ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.utm_medium, '') IS NOT NULL))[1]       AS utm_medium,
+           (ARRAY_AGG(l.utm_campaign ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.utm_campaign, '') IS NOT NULL))[1]   AS utm_campaign,
+           (ARRAY_AGG(l.hear_about_us ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.hear_about_us, '') IS NOT NULL))[1] AS hear_about_us,
+           (ARRAY_AGG(l.referrer ORDER BY l.created_at DESC) FILTER (WHERE NULLIF(l.referrer, '') IS NOT NULL))[1]           AS referrer
       FROM leads l
       LEFT JOIN non_icp_domain_verdicts v ON v.domain = l.non_icp_reason
      WHERE l.non_icp_blocked IS TRUE
@@ -14232,6 +14240,8 @@ async function nonIcpReviewReport(db) {
         source: x.source || null, business_type: x.business_type || null,
         confidence: x.confidence == null ? null : Number(x.confidence),
         company_size: size, title: x.title || null, seniority: x.seniority || null, departments: x.departments || null,
+        utm_source: x.utm_source || null, utm_medium: x.utm_medium || null, utm_campaign: x.utm_campaign || null,
+        hear_about_us: x.hear_about_us || null, referrer: x.referrer || null,
         reasons,
       };
     }),

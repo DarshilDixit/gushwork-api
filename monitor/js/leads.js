@@ -206,11 +206,44 @@
   /* TWO-LINE CELLS for the Blocked tab. Every row there is blocked, so Product, Sells to and Enriched were
      the same on nearly every line and said nothing; what tells one blocked lead from another is WHO the person
      is (agent or buyer?), WHICH company and how big, and WHAT blocked it. */
-  function roleCell(title, seniority, departments) {
+  /* A HINT, NOT A VERDICT. It reads the person's role off Apollo and says "looks like a buyer" or "agent-type
+     title", so the rows worth a human minute stand out. It decides NOTHING: it never blocks, releases or
+     un-blocks anyone, and a person still reads the row. It exists because the first question about any blocked
+     lead is "agent or buyer?" (Swapnil, on inlandgroup.com) and the rows all looked alike.
+
+     AGENT-TYPE: the title says agent, broker, realtor, associate, specialist, producer, licensed, loan officer,
+     advisor or intern. Checked FIRST, so "CEO / Mortgage Broker" is an agent, whatever the level.
+     LIKELY BUYER: not agent-type, and a corporate level (VP, director, head, C-suite, manager) or a marketing or
+     growth department, at a company of 20+ staff when Apollo knows its size. The size line is there because
+     "President" of a 2-person agency reads as VP-level and is not a buyer.
+     Measured on the 15 large blocked companies on 15 Oct 2026: it marks the VP of Leasing, the CMO, the Director,
+     both Product / Marketing Managers and the VP of Benefits, and none of the nine agents, brokers and specialists. */
+  var AGENT_TITLE = /\b(agent|broker|realtor|associate|specialist|producer|licensed|loan officer|advisor|adviser|intern)\b/i;
+  var CORPORATE_LEVEL = { vp: 1, director: 1, head: 1, c_suite: 1, manager: 1 };
+  function roleHint(title, seniority, departments, size) {
+    var t = String(title || '').trim(), s = String(seniority || '').trim(), d = String(departments || '').toLowerCase();
+    if (!t && !s && !d) return null;
+    if (AGENT_TITLE.test(t)) return 'agent';
+    var n = Number(size);
+    if (n > 0 && n < 20) return null;
+    if (CORPORATE_LEVEL[s] === 1 || /marketing|growth/.test(d)) return 'buyer';
+    return null;
+  }
+  function roleCell(title, seniority, departments, size) {
     var dept = String(departments || '').split(',').map(function (x) { return x.trim().replace(/^master_/, '').replace(/_/g, ' '); }).filter(Boolean).join(', ');
     var sub = [seniority, dept].filter(Boolean).join(' · ');
     if (!title && !sub) return '<span class="na">No title from Apollo</span>';
-    return '<span class="c2"><span class="a">' + esc(title || 'Title unknown') + '</span>' + (sub ? '<span class="b">' + esc(sub) + '</span>' : '') + '</span>';
+    var h = roleHint(title, seniority, departments, size);
+    return '<span class="c2"><span class="a">' + esc(title || 'Title unknown') + '</span>' + (sub ? '<span class="b">' + esc(sub) + '</span>' : '') +
+      (h === 'buyer' ? '<span class="badge b-good" title="A hint, not a decision: not an agent-type title, a corporate level or a marketing role, at a company of 20+ staff.">Likely buyer</span>'
+        : h === 'agent' ? '<span class="badge b-neu" title="A hint, not a decision: the title says agent, broker, realtor, associate, specialist, producer, licensed, loan officer, advisor or intern.">Agent-type title</span>' : '') + '</span>';
+  }
+  /* WHERE THEY CAME FROM, in one two-line cell: the ad source and medium over what they said when asked how they
+     heard of us. The campaign name is in the tooltip: it is cryptic, but "Brand" in it means a branded search. */
+  function cameFrom(r) {
+    var src = source(r), heard = r.hear_about_us ? 'Heard: ' + r.hear_about_us : '';
+    if ((!src || src === '—') && !heard) return '<span class="na">Unknown</span>';
+    return '<span class="c2"' + (r.utm_campaign ? ' title="Campaign: ' + esc(r.utm_campaign) + '"' : '') + '><span class="a">' + esc(src) + '</span>' + (heard ? '<span class="b">' + esc(heard) + '</span>' : '') + '</span>';
   }
   /* AN EMAIL OR A DOMAIN BREAKS AT @ . - _, not mid-word: a soft break after each, so a narrow column wraps
      "kert.leblanc.b3cz@" / "statefarm.com" instead of "statefar" / "m.com". Escaped first. */
@@ -224,7 +257,7 @@
   function blockedCols(ns) {
     return [
       { label: 'Person', cls: 'ecell', html: function (l) { return personCell([l.first_name, l.last_name].filter(Boolean).join(' '), l.email); } },
-      { label: 'Role', cls: 'rc', html: function (l) { return roleCell(l.enriched_title, l.enriched_seniority, l.enriched_departments); } },
+      { label: 'Role', cls: 'rc', html: function (l) { return roleCell(l.enriched_title, l.enriched_seniority, l.enriched_departments, Number(l.enriched_company_size) || null); } },
       { label: 'Company', cls: 'rc', html: function (l) { return companyCell(l.company || l.e_company, Number(l.enriched_company_size) || null); } },
       { label: 'Blocked by', html: function (l) { return marks(l, ns) || '—'; } },
       { label: 'Stage', opt: 1, html: L.stageBadge },
@@ -236,10 +269,12 @@
     var o = { ns: ns, rows: rows, key: function (l) { return l.session_id; }, rowName: function (l) { return l.email || 'this lead'; },
       xattr: function (l) { return 'data-sid="' + esc(l.session_id) + '"'; },
       emptyTitle: emptyTitle, emptyBody: emptyBody, cols: ns === 'blk' ? blockedCols(ns) : cols(ns, !!sort), sort: sort };
+    /* on Blocked, a likely buyer's row is tinted so it stands out from the agents around it */
+    if (ns === 'blk') o.rowCls = function (l) { return roleHint(l.enriched_title, l.enriched_seniority, l.enriched_departments, Number(l.enriched_company_size) || null) === 'buyer' ? 'buyer' : ''; };
     o.detail = function (l) { return leadPanel(l, U.keyOf(o, l)); };
     return U.rtable(o);
   }
-  G.leadRows = { table: table, leadPanel: leadPanel, marks: marks, source: source, _changes: changes };
+  G.leadRows = { table: table, leadPanel: leadPanel, marks: marks, source: source, roleHint: roleHint, _changes: changes };
 
   /* ── All leads ─────────────────────────────────────────────────── */
 
@@ -394,6 +429,7 @@
        relOpen is the company whose confirm box is open; relPlan is what the server says a release would
        clear (or why it cannot be read); the draft note survives repaints. Nothing here writes until the
        one Confirm button, and a failure leaves the box OPEN with the note still in it. */
+    var nlf = 'all';   /* Needs a look: 'all' people, or only the 'buyer' hints */
     var relListOpen = false;   /* the released list is housekeeping, so it starts folded; a release or a Check opens it */
     var released = null, releasedErr = null, relOpen = null, relPlan = null, relNote = '', relBusy = false, relErr = null, relInput = '', undoBusy = null, relMsg = '';
     function mode() { var m = G.S.q.internal || ''; return m === 'only' || m === 'exclude' ? m : ''; }
@@ -449,17 +485,24 @@
         return '<span class="marks nomg">' + b.join('') + '</span>';
       };
       var n = rep && rep.rows ? rep.rows.length : null, body;
+      var hintOf = function (r) { return roleHint(r.title, r.seniority, r.departments, r.company_size); };
+      var all = rep && rep.rows ? rep.rows : [];
+      var nBuyer = all.filter(function (r) { return hintOf(r) === 'buyer'; }).length;
+      var shown = nlf === 'buyer' ? all.filter(function (r) { return hintOf(r) === 'buyer'; }) : all;
       if (!rep && repErr) body = U.unavailable('Needs a look', repErr);
       else if (!rep) body = U.loading(2);
-      else if (!(rep.rows || []).length) body = U.empty('Nothing needs a look', 'Nobody blocked has tried again, and no large company has been blocked by the AI check.');
+      else if (!all.length) body = U.empty('Nothing needs a look', 'Nobody blocked has tried again, and no large company has been blocked by the AI check.');
       else body = (repErr ? '<div class="readat"><span class="badge b-warn">Last refresh failed (' + esc(String(repErr).slice(0, 40)) + ') — showing the previous read</span></div>' : '') +
-        U.grid([
+        /* THE FILTER: every person, or only the ones whose role looks like a buyer. A hint, so it is a filter and not a verdict. */
+        U.pills([['all', 'Everyone'], ['buyer', 'Likely buyers']], nlf, { all: all.length, buyer: nBuyer }, 'data-nlf', 'Which people to show') +
+        (shown.length ? U.grid([
           { label: 'Person', left: true, cls: 'pc', html: function (r) { return personCell(r.name, r.email); } },
-          { label: 'Role', left: true, cls: 'pc', html: function (r) { return roleCell(r.title, r.seniority, r.departments); } },
+          { label: 'Role', left: true, cls: 'pc', html: function (r) { return roleCell(r.title, r.seniority, r.departments, r.company_size); } },
           /* the company, over what the AI check made of it, so the judgment sits where it is read */
           { label: 'Company', left: true, cls: 'pc', html: function (r) { return '<span class="c2"><span class="a">' + breakable(r.domain || '—') + '</span><span class="b">' + esc(judged(r)) + '</span></span>'; } },
-          { label: 'Why it is here', left: true, html: why },
-          { label: 'Last try (ET)', get: function (r) { return r.last_at ? G.et(r.last_at) : ''; } },
+          { label: 'Came from', left: true, html: cameFrom },
+          /* why it is here, over when they last tried: two facts, one column's width */
+          { label: 'Why it is here', left: true, html: function (r) { return '<span class="c2">' + why(r) + '<span class="b">' + esc(r.last_at ? G.et(r.last_at) : '') + '</span></span>'; } },
           /* A brand-list company is shared by thousands of people, so the button is not offered: releasing it
              would lift the block for all of them. The command line can, with --allow-brand. */
           { label: 'Action', html: function (r) {
@@ -467,10 +510,11 @@
             if (!r.source || r.source === 'domain_list') return '<span class="na" title="Shared by many people. Only the command line can release a brand-list company.">Command line only</span>';
             return '<button class="btn sm" data-rel="' + esc(r.domain) + '" aria-label="Release ' + esc(r.domain) + '">Release…</button>';
           } }
-        ], rep.rows, { region: 'Blocked people who need a look', cls: 'tall' });
+        ], shown, { region: 'Blocked people who need a look', cls: 'tall', rowCls: function (r) { return hintOf(r) === 'buyer' ? 'buyer' : ''; } })
+          : U.empty('No likely buyers right now', 'Everyone here has an agent-type title, or no title from Apollo. Switch to Everyone to see them.'));
       return U.panel({ id: 'blk-review', cls: 'look', title: 'Needs a look', qual: 'tried again, or a large company the AI check blocked',
         right: n === null ? '' : '<span class="badge b-warn">' + fmt(n) + '</span>', body: body,
-        foot: '<span>Read the <b>role</b> first: agents and brokers read “Agent”, “Realtor” or “Broker”; buyers read VP, Director or Marketing. A second try usually means we got it wrong, and they deserve a human reply either way. To release a company, press <b>Release…</b>, or run <code>node tools/non-icp-release.js company.com</code> in a terminal.</span>' });
+        foot: '<span>Read the <b>role</b> first: a green row is a hint that the person looks like a buyer (a corporate or marketing role at a company of 20+ staff); agents, brokers and realtors read “Agent”, “Realtor” or “Broker”. It is a hint, not a decision. A second try usually means we got it wrong, and they deserve a human reply either way. To release a company, press <b>Release…</b>, or run <code>node tools/non-icp-release.js company.com</code> in a terminal.</span>' });
     }
     /* A MAP OF THE PAGE: three buttons that scroll to the three sections, each with its count. The Blocked tab is
        long, and with the sections the same weight there was nothing to tell them apart or to jump between. */
@@ -553,6 +597,7 @@
     if (typeof document !== 'undefined' && document.addEventListener) {
       document.addEventListener('click', function (e) {
         var t = e.target && e.target.closest ? e.target : null; if (!t || !G.current || G.current() !== 'blocked') return;
+        var nf = t.closest('[data-nlf]'); if (nf) { nlf = nf.getAttribute('data-nlf') === 'buyer' ? 'buyer' : 'all'; render(); relFocus('[data-nlf="' + nlf + '"]'); return; }
         var jp = t.closest('[data-jump]');
         if (jp) { var tg = root && root.querySelector ? root.querySelector('#' + jp.getAttribute('data-jump')) : null; if (tg && tg.scrollIntoView) tg.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
         var tgl = t.closest('[data-rel-toggle]'); if (tgl) { relListOpen = !relListOpen; render(); relFocus('[data-rel-toggle]'); return; }
