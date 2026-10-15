@@ -5,8 +5,8 @@
    12 Sept scope break is what a second copy looks like when it breaks.
 
    Both tabs read /monitor/leads, exactly as the classic does. Blocked is the
-   same route with nonicp=only, plus ONE extra read, /monitor/non-icp-repeats,
-   for the "People who tried again" panel above its table.
+   same route with nonicp=only, plus extra reads for the sections around its
+   table: /monitor/non-icp-review ("Needs a look") and /monitor/non-icp-released.
 
    UNITS, every one printed in words (CLAUDE.md, "Blocked counts: three
    different units"): /monitor/leads counts LEAD ROWS, one per form session;
@@ -203,10 +203,39 @@
       { label: 'Source', cls: 'mw', opt: 1, get: source },
     ];
   }
+  /* TWO-LINE CELLS for the Blocked tab. Every row there is blocked, so Product, Sells to and Enriched were
+     the same on nearly every line and said nothing; what tells one blocked lead from another is WHO the person
+     is (agent or buyer?), WHICH company and how big, and WHAT blocked it. */
+  function roleCell(title, seniority, departments) {
+    var dept = String(departments || '').split(',').map(function (x) { return x.trim().replace(/^master_/, '').replace(/_/g, ' '); }).filter(Boolean).join(', ');
+    var sub = [seniority, dept].filter(Boolean).join(' · ');
+    if (!title && !sub) return '<span class="na">No title from Apollo</span>';
+    return '<span class="c2"><span class="a">' + esc(title || 'Title unknown') + '</span>' + (sub ? '<span class="b">' + esc(sub) + '</span>' : '') + '</span>';
+  }
+  /* AN EMAIL OR A DOMAIN BREAKS AT @ . - _, not mid-word: a soft break after each, so a narrow column wraps
+     "kert.leblanc.b3cz@" / "statefarm.com" instead of "statefar" / "m.com". Escaped first. */
+  function breakable(x) { return esc(x).replace(/([@.\-_])/g, '$1<wbr>'); }
+  function personCell(name, email) {
+    return '<span class="c2"><span class="a">' + (name ? esc(name) : breakable(email || '—')) + '</span>' + (name && email ? '<span class="b">' + breakable(email) + '</span>' : '') + '</span>';
+  }
+  function companyCell(name, size) {
+    return '<span class="c2"><span class="a">' + esc(name || '—') + '</span>' + (size ? '<span class="b">' + fmt(size) + ' staff</span>' : '') + '</span>';
+  }
+  function blockedCols(ns) {
+    return [
+      { label: 'Person', cls: 'ecell', html: function (l) { return personCell([l.first_name, l.last_name].filter(Boolean).join(' '), l.email); } },
+      { label: 'Role', cls: 'rc', html: function (l) { return roleCell(l.enriched_title, l.enriched_seniority, l.enriched_departments); } },
+      { label: 'Company', cls: 'rc', html: function (l) { return companyCell(l.company || l.e_company, Number(l.enriched_company_size) || null); } },
+      { label: 'Blocked by', html: function (l) { return marks(l, ns) || '—'; } },
+      { label: 'Stage', opt: 1, html: L.stageBadge },
+      /* the date over where they came from: two facts that each need a column's width are one column's worth */
+      { label: 'When (ET)', cls: 'm', html: function (l) { var src = source(l); return '<span class="c2"><span class="a">' + esc(created(l.created_at)) + '</span>' + (src && src !== '—' ? '<span class="b">' + esc(src) + '</span>' : '') + '</span>'; } },
+    ];
+  }
   function table(rows, ns, sort, emptyTitle, emptyBody) {
     var o = { ns: ns, rows: rows, key: function (l) { return l.session_id; }, rowName: function (l) { return l.email || 'this lead'; },
       xattr: function (l) { return 'data-sid="' + esc(l.session_id) + '"'; },
-      emptyTitle: emptyTitle, emptyBody: emptyBody, cols: cols(ns, !!sort), sort: sort };
+      emptyTitle: emptyTitle, emptyBody: emptyBody, cols: ns === 'blk' ? blockedCols(ns) : cols(ns, !!sort), sort: sort };
     o.detail = function (l) { return leadPanel(l, U.keyOf(o, l)); };
     return U.rtable(o);
   }
@@ -365,6 +394,7 @@
        relOpen is the company whose confirm box is open; relPlan is what the server says a release would
        clear (or why it cannot be read); the draft note survives repaints. Nothing here writes until the
        one Confirm button, and a failure leaves the box OPEN with the note still in it. */
+    var relListOpen = false;   /* the released list is housekeeping, so it starts folded; a release or a Check opens it */
     var released = null, releasedErr = null, relOpen = null, relPlan = null, relNote = '', relBusy = false, relErr = null, relInput = '', undoBusy = null, relMsg = '';
     function mode() { var m = G.S.q.internal || ''; return m === 'only' || m === 'exclude' ? m : ''; }
     function page() { return Math.max(1, +G.S.q.page || 1); }
@@ -380,7 +410,7 @@
       /* THE REPEAT PANEL NEVER REJECTS INTO THE ALL-OR-NOTHING BELOW: an
          unreadable second panel must not hide the leads. It keeps its last
          good read and says it could not refresh. */
-      var d = G.api('/monitor/non-icp-repeats', {}, { timeout: 20000 }).then(
+      var d = G.api('/monitor/non-icp-review', {}, { timeout: 20000 }).then(
         function (x) { if (my === seq) { rep = x; repErr = null; } },
         function (e) { if (my === seq) repErr = e.message; });
       var e2 = G.api('/monitor/non-icp-released', {}, { timeout: 20000 }).then(
@@ -401,39 +431,55 @@
       return '<b>' + fmt(a) + '</b> ' + G.plural(a, 'lead') + ' blocked' + (people !== null && people !== undefined ? ' · <b>' + fmt(people) + '</b> ' + G.plural(people, 'person', 'people') : '') +
         ' · ' + (tot === null ? 'could not separate our own tests' : '<b>' + fmt(tot) + '</b> ' + G.plural(tot, 'lead') + ' excluding our own tests');
     }
-    /* PEOPLE WHO TRIED AGAIN: blocked and submitted two or more times, by email.
-       A second try is the best sign we got it wrong (SPG's contact tried three
-       times and wrote in). By person, not company: farmersagent.com is thousands
-       of agents. */
-    function repeatsPanel() {
+    /* NEEDS A LOOK: the people a human should read first. The same two reasons Slack tags you for -- the
+       person TRIED AGAIN (SPG's contact tried three times and wrote in), or the AI check blocked a LARGE
+       company (inlandgroup.com: a VP of Leasing at 1,200 staff). By person, not company: farmersagent.com is
+       thousands of agents. The ROLE is the point of the middle column: agents read Agent, Realtor, Broker;
+       buyers read VP, Director, Marketing. */
+    function reviewPanel() {
       var judged = function (r) {
         if (!r.business_type || !r.source || r.source === 'domain_list') return 'Brand list';
         var t = r.business_type === 'real_estate' ? 'Real estate' : r.business_type === 'insurance' ? 'Insurance' : String(r.business_type).replace(/_/g, ' ');
         return t + (r.confidence != null ? ' · ' + Math.round(r.confidence * 100) + '%' : '');
       };
-      var body;
-      if (!rep && repErr) body = U.unavailable('People who tried again', repErr);
+      var why = function (r) {
+        var b = [], rs = r.reasons || [];
+        if (rs.indexOf('tried_again') >= 0) b.push('<span class="badge b-warn">Tried ' + fmt(r.attempts) + '×</span>');
+        if (rs.indexOf('large') >= 0) b.push('<span class="badge b-neu">' + fmt(r.company_size) + ' staff</span>');
+        return '<span class="marks nomg">' + b.join('') + '</span>';
+      };
+      var n = rep && rep.rows ? rep.rows.length : null, body;
+      if (!rep && repErr) body = U.unavailable('Needs a look', repErr);
       else if (!rep) body = U.loading(2);
-      else if (!(rep.rows || []).length) body = U.empty('Nobody has tried again', 'No blocked person has submitted the form a second time.');
+      else if (!(rep.rows || []).length) body = U.empty('Nothing needs a look', 'Nobody blocked has tried again, and no large company has been blocked by the AI check.');
       else body = (repErr ? '<div class="readat"><span class="badge b-warn">Last refresh failed (' + esc(String(repErr).slice(0, 40)) + ') — showing the previous read</span></div>' : '') +
         U.grid([
-          { label: 'Person', k: 'email' },
-          { label: 'Company', k: 'domain' },
-          { label: 'Tries', get: function (r) { return fmt(r.attempts); } },
+          { label: 'Person', left: true, cls: 'pc', html: function (r) { return personCell(r.name, r.email); } },
+          { label: 'Role', left: true, cls: 'pc', html: function (r) { return roleCell(r.title, r.seniority, r.departments); } },
+          /* the company, over what the AI check made of it, so the judgment sits where it is read */
+          { label: 'Company', left: true, cls: 'pc', html: function (r) { return '<span class="c2"><span class="a">' + breakable(r.domain || '—') + '</span><span class="b">' + esc(judged(r)) + '</span></span>'; } },
+          { label: 'Why it is here', left: true, html: why },
           { label: 'Last try (ET)', get: function (r) { return r.last_at ? G.et(r.last_at) : ''; } },
-          { label: 'We judged', get: judged },
-          { label: 'Staff', get: function (r) { return r.company_size ? fmt(r.company_size) : ''; } },
           /* A brand-list company is shared by thousands of people, so the button is not offered: releasing it
              would lift the block for all of them. The command line can, with --allow-brand. */
           { label: 'Action', html: function (r) {
             if (!r.domain) return '';
-            if (!r.source || r.source === 'domain_list') return '<span class="na" title="Shared by many people. Only the command line can release a brand-list company.">Brand list: command line only</span>';
+            if (!r.source || r.source === 'domain_list') return '<span class="na" title="Shared by many people. Only the command line can release a brand-list company.">Command line only</span>';
             return '<button class="btn sm" data-rel="' + esc(r.domain) + '" aria-label="Release ' + esc(r.domain) + '">Release…</button>';
           } }
-        ], rep.rows, { region: 'People who tried again' });
-      return U.panel({ title: 'People who tried again', qual: 'blocked, then submitted again', body: body,
-        foot: 'A second try usually means we got it wrong, or they did not understand the page. They deserve a human reply either way. If the company should not be blocked, run <code>node tools/non-icp-release.js company.com</code> to see what it would do, then add <code>--apply</code>.' });
+        ], rep.rows, { region: 'Blocked people who need a look', cls: 'tall' });
+      return U.panel({ id: 'blk-review', cls: 'look', title: 'Needs a look', qual: 'tried again, or a large company the AI check blocked',
+        right: n === null ? '' : '<span class="badge b-warn">' + fmt(n) + '</span>', body: body,
+        foot: '<span>Read the <b>role</b> first: agents and brokers read “Agent”, “Realtor” or “Broker”; buyers read VP, Director or Marketing. A second try usually means we got it wrong, and they deserve a human reply either way. To release a company, press <b>Release…</b>, or run <code>node tools/non-icp-release.js company.com</code> in a terminal.</span>' });
     }
+    /* A MAP OF THE PAGE: three buttons that scroll to the three sections, each with its count. The Blocked tab is
+       long, and with the sections the same weight there was nothing to tell them apart or to jump between. */
+    function jumpNav() {
+      var nRev = rep && rep.rows ? rep.rows.length : null, nBlk = data ? data.total : null, nRel = released && released.rows ? released.rows.length : null;
+      var b = function (id, label, n, cls) { return '<button class="btn sm" data-jump="' + id + '">' + esc(label) + (n === null || n === undefined ? '' : '<span class="badge ' + cls + '">' + fmt(n) + '</span>') + '</button>'; };
+      return '<nav class="jumps" aria-label="Sections on this tab">' + b('blk-review', 'Needs a look', nRev, 'b-warn') + b('blk-list', 'Blocked leads', nBlk, 'b-neu') + b('rel-list', 'Released companies', nRel, 'b-neu') + '</nav>';
+    }
+
     /* ── Release: the confirm box, the released list, and the three actions ── */
     function relFocus(sel2) { var el = root && root.querySelector && root.querySelector(sel2); if (el && el.focus) { try { el.focus({ preventScroll: true }); } catch (e) { el.focus(); } } }
     function releaseConfirm() {
@@ -457,7 +503,13 @@
       return U.panel({ id: 'rel-confirm', title: 'Release ' + relOpen + '?', qual: 'a company we blocked by mistake', body: body });
     }
     function releasedPanel() {
-      var body;
+      var body, n = released && released.rows ? released.rows.length : null;
+      if (!relListOpen) {
+        /* folded: the header says how many, and a release or an undo still says what happened */
+        return U.panel({ id: 'rel-list', cls: 'quiet', title: 'Released companies', qual: n === null ? 'never blocked once released' : fmt(n) + ' released · never blocked, whatever the AI check or the brand list says',
+          right: '<button class="btn sm" data-rel-toggle aria-expanded="false" aria-controls="rel-list">Show</button>',
+          body: relMsg ? '<div class="readat"><span class="badge b-good">' + esc(relMsg) + '</span></div>' : '' });
+      }
       if (!released && releasedErr) body = U.unavailable('Released companies', releasedErr);
       else if (!released) body = U.loading(2);
       else body = (releasedErr ? '<div class="readat"><span class="badge b-warn">Last refresh failed (' + esc(String(releasedErr).slice(0, 40)) + ') — showing the previous read</span></div>' : '') +
@@ -472,8 +524,9 @@
         ], released.rows, { region: 'Released companies' }) : U.empty('No company has been released', 'Release one from the list above, or by typing its domain below.')) +
         '<div class="ackf"><input class="field" data-rel-input value="' + esc(relInput) + '" placeholder="Company domain, e.g. acme.com" aria-label="Company domain to release" maxlength="200">' +
         '<button class="btn sm" data-rel-check aria-label="Check what releasing this company would do">Check…</button></div>';
-      return U.panel({ id: 'rel-list', title: 'Released companies', qual: 'never blocked, whatever the AI check or the brand list says', body: body,
-        foot: 'Undo only stops the NEXT lead from that company being exempt; leads already cleared stay cleared. A brand-list company (shared by many people) can only be released from the command line, with <code>--allow-brand</code>.' });
+      return U.panel({ id: 'rel-list', cls: 'quiet', title: 'Released companies', qual: 'never blocked, whatever the AI check or the brand list says',
+        right: '<button class="btn sm" data-rel-toggle aria-expanded="true" aria-controls="rel-list">Hide</button>', body: body,
+        foot: '<span>Undo only stops the NEXT lead from that company being exempt; leads already cleared stay cleared. A brand-list company (shared by many people) can only be released from the command line, with <code>--allow-brand</code>.</span>' });
     }
     function openRelease(domain) {
       var want = String(domain || '').trim(); if (!want) return;
@@ -487,7 +540,7 @@
       var dom = relPlan.plan.domain; relBusy = true; relErr = null; render();
       /* the JSON body, never the query string; a failure leaves the box OPEN with the note in it */
       return G.api('/monitor/non-icp-release', {}, { method: 'POST', body: { domain: dom, note: relNote }, timeout: 20000 }).then(
-        function (r) { relBusy = false; relOpen = null; relPlan = null; relNote = ''; relInput = ''; relMsg = 'Released ' + dom + ' — ' + fmt(r.released_leads) + ' lead ' + (r.released_leads === 1 ? 'row' : 'rows') + ' cleared';
+        function (r) { relBusy = false; relOpen = null; relPlan = null; relNote = ''; relInput = ''; relListOpen = true; relMsg = 'Released ' + dom + ' — ' + fmt(r.released_leads) + ' lead ' + (r.released_leads === 1 ? 'row' : 'rows') + ' cleared';
           return load().then(function () { render(); relFocus('#rel-list'); G.announce(relMsg); }); },
         function (e) { relBusy = false; relErr = 'Could not release: ' + e.message; render(); relFocus('[data-rel-go]'); G.announce(relErr); });
     }
@@ -500,6 +553,9 @@
     if (typeof document !== 'undefined' && document.addEventListener) {
       document.addEventListener('click', function (e) {
         var t = e.target && e.target.closest ? e.target : null; if (!t || !G.current || G.current() !== 'blocked') return;
+        var jp = t.closest('[data-jump]');
+        if (jp) { var tg = root && root.querySelector ? root.querySelector('#' + jp.getAttribute('data-jump')) : null; if (tg && tg.scrollIntoView) tg.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+        var tgl = t.closest('[data-rel-toggle]'); if (tgl) { relListOpen = !relListOpen; render(); relFocus('[data-rel-toggle]'); return; }
         var o = t.closest('[data-rel]'); if (o) { relNote = ''; openRelease(o.getAttribute('data-rel')); return; }
         var ck = t.closest('[data-rel-check]'); if (ck) { relNote = ''; openRelease(relInput); return; }
         var go = t.closest('[data-rel-go]'); if (go) { var n = root && root.querySelector ? root.querySelector('[data-rel-note]') : null; if (n) relNote = n.value; doRelease(); return; }
@@ -519,19 +575,21 @@
         /* TRUE FOR EVERY ROW: a late model verdict marks a lead AFTER it has
            booked and never cancels the meeting, so "turned away before the
            calendar" was false for those. */
-        '<p class="lede">Leads we stopped as real estate or insurance — by the brand-domain list or by the AI check. Most were stopped before the calendar; a few were marked only after they had booked, when the AI check answered late, and those kept their meeting. Every one is still in All leads and counted as a lead: marked, never removed. (The Overview and Dropoff leave out our own test submissions, blocked or not.)</p>' +
+        '<p class="lede">Leads we stopped as real estate or insurance, by the brand-domain list or by the AI check. Most were stopped before the calendar; a few were marked only after they had booked, when the AI check answered late, and those kept their meeting. Every one is still in All leads: marked, never removed.</p>' +
         '<div class="controls"><label class="lfl inline"><span>Our own tests</span><select class="field" data-blk aria-label="Our own tests">' +
         [['', 'Included, and marked'], ['exclude', 'Hide our own tests'], ['only', 'Only our own tests']].map(function (o) { return '<option value="' + o[0] + '"' + (o[0] === m ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
         '</select></label></div></section>';
       var body;
       if (!d && err) body = '<section class="card panel">' + U.unavailable('Blocked leads', err) + '</section>';
       else if (!d) body = U.loading(4);
-      else body = U.drawn('Blocked leads', function () { return (err ? '<div class="readat"><span class="badge b-warn">Last refresh failed (' + esc(String(err).slice(0, 40)) + ') — showing the previous read</span></div>' : '') +
-        '<section class="card">' + table(d.leads || [], 'blk', null,
-          dm === 'only' ? 'None of our own tests are blocked' : dm === 'exclude' ? 'Nothing blocked apart from our own tests' : 'Nothing blocked',
-          dm ? '' : 'Either the block is switched off or nobody has matched yet.') + U.pager(d.page, d.pages, 'data-pg') + '</section>'; }) +
-        '<p class="foot"><span>The chip on each row says which check blocked it. A brand-list block comes from NON_ICP_DOMAINS and stops with NON_ICP_BLOCK=false; an AI-check block stops with NON_ICP_LLM_BLOCK=false. Either takes effect on Railway without a deploy.</span></p>';
-      G.paint(root, head + U.drawn('Release', releaseConfirm) + U.drawn('People who tried again', repeatsPanel) + U.drawn('Released companies', releasedPanel) + body);
+      else body = U.drawn('Blocked leads', function () { return U.panel({ id: 'blk-list', title: 'Blocked leads', qual: 'newest first',
+        body: (err ? '<div class="readat"><span class="badge b-warn">Last refresh failed (' + esc(String(err).slice(0, 40)) + ') — showing the previous read</span></div>' : '') +
+          table(d.leads || [], 'blk', null,
+            dm === 'only' ? 'None of our own tests are blocked' : dm === 'exclude' ? 'Nothing blocked apart from our own tests' : 'Nothing blocked',
+            dm ? '' : 'Either the block is switched off or nobody has matched yet.') + U.pager(d.page, d.pages, 'data-pg'),
+        foot: '<span>The chip on each row says which check blocked it. A brand-list block comes from NON_ICP_DOMAINS and stops with NON_ICP_BLOCK=false; an AI-check block stops with NON_ICP_LLM_BLOCK=false. Either takes effect on Railway without a deploy.</span>' }); });
+      /* THREE SECTIONS, in the order a person works: what needs deciding, the full list, then the housekeeping. */
+      G.paint(root, head + jumpNav() + U.drawn('Release', releaseConfirm) + U.drawn('Needs a look', reviewPanel) + body + U.drawn('Released companies', releasedPanel));
       afterPaint(root);
     }
     function said() { var d = data; return d ? counts(d).replace(/<[^>]*>/g, '') : ''; }

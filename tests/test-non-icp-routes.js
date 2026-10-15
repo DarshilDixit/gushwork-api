@@ -2101,23 +2101,34 @@ const leadSlack      = () => S.slackPayloads.filter((p) => /hooks|./.test('') ||
     /* THE DASHBOARD'S READ. */
     reset();
     S.repeatRows = [
-      { email: 'maya@spgish.test', domain: 'spgish.test', attempts: 3, first_at: '2026-09-28T18:30:00Z', last_at: '2026-10-09T18:30:00Z', source: 'llm', business_type: 'insurance', confidence: 0.97, company_size: 300 },
-      { email: 'pat@kw.com', domain: 'kw.com', attempts: '2', first_at: '2026-10-01T10:00:00Z', last_at: '2026-10-06T10:00:00Z', source: 'domain_list', business_type: null, confidence: null, company_size: null }];
-    const unauth = await realFetch(BASE + '/monitor/non-icp-repeats');
+      { email: 'maya@spgish.test', name: 'Maya Lee', domain: 'spgish.test', attempts: 3, first_at: '2026-09-28T18:30:00Z', last_at: '2026-10-09T18:30:00Z', source: 'llm', model_blocked: true, business_type: 'insurance', confidence: 0.97, company_size: 300,
+        title: 'Digital Marketing Manager', seniority: 'manager', departments: 'master_marketing' },
+      { email: 'pat@kw.com', name: null, domain: 'kw.com', attempts: '2', first_at: '2026-10-01T10:00:00Z', last_at: '2026-10-06T10:00:00Z', source: 'domain_list', model_blocked: false, business_type: null, confidence: null, company_size: 88000, title: null, seniority: null, departments: null },
+      { email: 'sean@bigco.test', name: 'Sean Lee', domain: 'bigco.test', attempts: 1, first_at: '2026-10-15T14:00:00Z', last_at: '2026-10-15T14:00:00Z', source: 'llm', model_blocked: true, business_type: 'real_estate', confidence: 0.88, company_size: 1200,
+        title: 'Vice President of Leasing', seniority: 'vp', departments: 'master_operations' },
+      { email: 'edge@mid.test', name: null, domain: 'mid.test', attempts: 1, first_at: '2026-10-15T14:00:00Z', last_at: '2026-10-15T14:00:00Z', source: 'llm', model_blocked: true, business_type: 'insurance', confidence: 0.9, company_size: 199, title: null, seniority: null, departments: null }];
+    const unauth = await realFetch(BASE + '/monitor/non-icp-review');
     ok('REPEAT/dashboard: the route is token-gated', unauth.status === 401, String(unauth.status));
-    const okr = await realFetch(BASE + '/monitor/non-icp-repeats?token=stub');
+    const okr = await realFetch(BASE + '/monitor/non-icp-review?token=stub');
     const body = await okr.json();
-    ok('REPEAT/dashboard: answers with the people who came back', okr.status === 200 && body.rows.length === 2, JSON.stringify(body).slice(0, 200));
+    ok('REPEAT/dashboard: answers with the people who need a look', okr.status === 200 && body.rows.length === 4 && body.min_staff === 200, JSON.stringify(body).slice(0, 200));
     ok('REPEAT/dashboard: a person carries email, company, tries, judgment and size',
        body.rows[0].email === 'maya@spgish.test' && body.rows[0].domain === 'spgish.test' && body.rows[0].attempts === 3 &&
        body.rows[0].business_type === 'insurance' && body.rows[0].confidence === 0.97 && body.rows[0].company_size === 300, JSON.stringify(body.rows[0]));
-    ok('REPEAT/dashboard: counts are numbers, nulls stay null', body.rows[1].attempts === 2 && body.rows[1].company_size === null && body.rows[1].confidence === null, JSON.stringify(body.rows[1]));
+    ok('REPEAT/dashboard: counts are numbers, nulls stay null', body.rows[1].attempts === 2 && body.rows[1].confidence === null && body.rows[1].title === null, JSON.stringify(body.rows[1]));
+    ok('REVIEW: every person carries name and ROLE (title, seniority, department)', body.rows[0].name === 'Maya Lee' && body.rows[0].title === 'Digital Marketing Manager' && body.rows[0].seniority === 'manager' && body.rows[0].departments === 'master_marketing', JSON.stringify(body.rows[0]));
+    ok('REVIEW: the reasons are decided in code, a person can have both', JSON.stringify(body.rows[0].reasons) === JSON.stringify(['tried_again', 'large']), JSON.stringify(body.rows[0].reasons));
+    ok('REVIEW: a brand-list block is "tried again" only, NEVER "large", however big (88,000 staff)', JSON.stringify(body.rows[1].reasons) === JSON.stringify(['tried_again']), JSON.stringify(body.rows[1].reasons));
+    ok('REVIEW: a first-time MODEL block at 1,200 staff is "large" only', JSON.stringify(body.rows[2].reasons) === JSON.stringify(['large']), JSON.stringify(body.rows[2].reasons));
+    ok('REVIEW: the line is exactly 200 (199 staff is neither reason)', JSON.stringify(body.rows[3].reasons) === JSON.stringify([]), JSON.stringify(body.rows[3].reasons));
     reset();
-    const none = await (await realFetch(BASE + '/monitor/non-icp-repeats?token=stub')).json();
+    const none = await (await realFetch(BASE + '/monitor/non-icp-review?token=stub')).json();
     ok('REPEAT/dashboard: nobody back is an empty list, not an error', Array.isArray(none.rows) && none.rows.length === 0, JSON.stringify(none));
     const q = S.writes.find((w) => /GROUP BY lower\(l\.email\)/.test(w.flat));
     ok('REPEAT/dashboard: our own test submissions are left out, with IS NOT TRUE', !!q && /\) IS NOT TRUE/.test(q.flat), q && q.flat.slice(0, 200));
     ok('REPEAT/dashboard: counts distinct SESSIONS of an address that SUBMITTED', !!q && /COUNT\(DISTINCT l\.session_id\) >= 2/.test(q.flat) && /l\.submitted_at IS NOT NULL/.test(q.flat));
+    ok('REVIEW: the large-company reason is for MODEL blocks only, in SQL as well as in code', !!q && /OR \(bool_or\(l\.non_icp_source LIKE 'llm%'\)/.test(q.flat), q && q.flat.slice(q.flat.indexOf('HAVING'), q.flat.indexOf('HAVING') + 260));
+    ok('REVIEW: the staff line is bound as a parameter (200 by default), not written into the SQL', !!q && q.params[q.params.length - 1] === 200 && /MAX\(CASE WHEN l\.enriched_company_size ~ '\^\[0-9\]\+\$' THEN l\.enriched_company_size::int END\) >= \$\d/.test(q.flat), q && JSON.stringify(q.params).slice(-40));
   }
 
   /* All three booking routes must REFUSE, not merely suppress Schedule.

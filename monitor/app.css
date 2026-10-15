@@ -297,6 +297,22 @@ input.field { min-width: 0; }
 .tbl .pd { color: var(--ink-muted); margin-left: var(--gw-space-4); }
 .tbl td.day { white-space: nowrap; }
 .tbl td.wrap { overflow-wrap: anywhere; }
+.tbl th.l, .tbl td.l { text-align: left; }
+.tbl.tall { max-height: 560px; }
+/* the role and company cells get a little floor so a title is not stacked word by word */
+.rt > tbody > tr > td.rc { min-width: 120px; }
+/* THE BLOCKED TAB'S SECTIONS. The first one (people who need a look) carries an accent so it reads as the thing to do;
+   the leads list is the plain main block; the released list is quiet housekeeping at the bottom. All existing tokens. */
+.panel.look { border-left: 3px solid var(--warn-ink); }
+.panel.quiet { padding-top: var(--gw-space-16); padding-bottom: var(--gw-space-16); gap: var(--gw-space-12); }
+.panel.quiet .sh-t { font: var(--gw-text-body-14-sem); }
+.jumps { display: flex; flex-wrap: wrap; gap: var(--gw-space-8); margin: var(--gw-space-12) 0 var(--gw-space-4); }
+.jumps .badge { margin-left: var(--gw-space-4); }
+.marks.nomg { margin-left: 0; }
+/* a two-line cell: the main fact, then the supporting one in muted text */
+.c2 { display: flex; flex-direction: column; align-items: flex-start; gap: var(--gw-space-4); text-align: left; min-width: 0; }
+.c2 .a { color: var(--ink); font: var(--gw-text-body-14-med); overflow-wrap: anywhere; }
+.c2 .b { color: var(--ink-muted); font: var(--gw-text-body-12-reg); overflow-wrap: anywhere; }
 
 /* ── Funnel, channels ──────────────────────────────────────────────────── */
 .funnel { display: flex; flex-direction: column; gap: var(--gw-space-12); }
@@ -636,7 +652,7 @@ input.field { min-width: 0; }
    because a stacked row is five or six lines and 260 would show barely one
    (480 is a judgement call, not a design-system figure). */
 @container view (max-width: 559px) {
-  .tbl.stack { max-height: 480px; }
+  .tbl.stack, .tbl.stack.tall { max-height: 480px; }
   .tbl.stack table, .tbl.stack tbody, .tbl.stack tr, .tbl.stack td { display: block; width: 100%; }
   .tbl.stack thead { display: none; }
   .tbl.stack tr { padding: var(--gw-space-8) var(--gw-space-12); border-bottom: 1px solid var(--row-line); }
