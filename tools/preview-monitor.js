@@ -90,8 +90,9 @@ const dropoffLift = new Function('pool', [
 const reviewLift = new Function('process', [
   liftDecl('const ELV_EXCLUDED_DOMAINS'), liftDecl('const INTERNAL_TEST_EMAILS'),
   liftDecl('const INTERNAL_STAGING_HOSTS'), liftDecl('function internalLeadSqlClause'),
-  liftDecl('const NON_ICP_REVIEW_MIN_STAFF'), liftDecl('async function nonIcpReviewReport'),
-  'return { nonIcpReviewReport };',
+  liftDecl('const NON_ICP_REVIEW_MIN_STAFF'), liftDecl('const NON_ICP_AGENT_TITLE'), liftDecl('const NON_ICP_LEVEL_LABEL'),
+  liftDecl('const NON_ICP_BUYER_MIN_STAFF'), liftDecl('function nonIcpRoleHint'), liftDecl('async function nonIcpReviewReport'), liftDecl('async function nonIcpReleasedReport'),
+  'return { nonIcpReviewReport, nonIcpRoleHint, nonIcpReleasedReport };',
 ].join('\n'));
 const L = new Function([
   liftDecl('const DASH_TZ'), liftDecl('const BOT_RE'), liftDecl('const DROPOFF_STAGE_SQL'), liftDecl('const DROPOFF_SOURCE_SQL'),
@@ -153,6 +154,33 @@ function start() {
     catch (err) { res.status(500).json({ error: err.message }); }
   });
   const reviewReport = reviewLift(process).nonIcpReviewReport;
+  const roleHint = reviewLift(process).nonIcpRoleHint;
+  /* /monitor/leads is NOT lifted (it is a 400-line route), so production's copy is proxied. This branch changes it
+     in two ways production does not yet have: every row carries role_hint / role_reason, and an emails filter. The
+     preview adds the first from the REAL nonIcpRoleHint, and does the second in memory (reads every page of
+     blocked leads from production, keeps the requested addresses, re-pages by 25). The SQL of the real filter is
+     checked separately, by running its condition read-only. */
+  app.get('/monitor/leads', async (req, res) => {
+    try {
+      const want = req.query.emails ? String(req.query.emails).split(',').map((x) => x.trim().toLowerCase()).filter(Boolean) : null;
+      const q = new URLSearchParams(req.query); q.delete('emails');
+      const get = async (page) => { q.set('page', String(page)); const r = await fetch(UPSTREAM + '/monitor/leads?' + q.toString()); if (r.status !== 200) throw new Error('upstream ' + r.status); return r.json(); };
+      const shim = (rows) => rows.map((x) => { const h = roleHint(x.enriched_title, x.enriched_seniority, x.enriched_departments, x.enriched_company_size); return { ...x, role_hint: h.hint, role_reason: h.reason }; });
+      if (!want) { const d = await get(req.query.page || 1); return res.json({ ...d, leads: shim(d.leads || []) }); }
+      const first = await get(1); let rows = first.leads || [];
+      for (let p = 2; p <= first.pages; p++) rows = rows.concat((await get(p)).leads || []);
+      rows = rows.filter((x) => want.includes(String(x.email || '').toLowerCase()));
+      const page = Math.max(1, +req.query.page || 1);
+      res.json({ total: rows.length, page, pages: Math.max(1, Math.ceil(rows.length / 25)), leads: shim(rows.slice((page - 1) * 25, page * 25)) });
+    } catch (err) { res.status(502).json({ error: err.message }); }
+  });
+  /* the released list gained tries and where-from fields, so it is lifted too, not proxied */
+  app.get('/monitor/non-icp-released', async (req, res) => {
+    if (req.query.token !== TOKEN) return res.status(401).json({ error: 'Unauthorized' });
+    try {
+      res.json(await reviewLift(process).nonIcpReleasedReport(db));
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
   app.get('/monitor/non-icp-review', async (req, res) => {
     if (req.query.token !== TOKEN) return res.status(401).json({ error: 'Unauthorized' });
     try { res.json(await reviewReport(db)); }
