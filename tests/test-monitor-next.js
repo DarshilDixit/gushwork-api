@@ -525,8 +525,8 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
     if (p === '/monitor/non-icp-repeats') return repDown ? new Error('upstream down') : REPEATS;
     if (p === '/monitor/non-icp-released') return relDown ? new Error('upstream down') : RELEASED;
     if (p === '/monitor/non-icp-release-plan') return PLANS[q.domain] || new Error('not a company domain');
-    if (p === '/monitor/non-icp-release') return relFail ? new Error('write refused') : { ok: true, domain: JSON.parse(b_lastBody()).domain, released_leads: 3 };
-    if (p === '/monitor/non-icp-unrelease') return { ok: true, domain: JSON.parse(b_lastBody()).domain, removed: 1 };
+    if (p === '/monitor/non-icp-release') return relFail ? new Error('write refused') : { ok: true, domain: (() => { try { return JSON.parse(b_lastBody()).domain; } catch (e) { return undefined; } })(), released_leads: 3 };
+    if (p === '/monitor/non-icp-unrelease') return { ok: true, domain: (() => { try { return JSON.parse(b_lastBody()).domain; } catch (e) { return undefined; } })(), removed: 1 };
     if (p === '/monitor/visitors') return VIS;
     if (p === '/monitor/partners') return PARTNERS;
     if (p === '/monitor/partner-gaps') return gapsDown ? new Error('upstream down') : GAPS;
@@ -895,6 +895,9 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
 
   /* ═══ Release from the Blocked tab ═══ */
   const posts = () => b.calls.filter((c) => c.method === 'POST');
+  /* A request that lost its body must FAIL an assertion, not crash the suite
+     (a crash cannot be told apart from a catch). */
+  const bodyOf = (c) => { try { return JSON.parse(c && c.body); } catch (e) { return {}; } };
   const rel0 = posts().length;
   ok('release: the Released companies panel lists what is released, with when, why and an Undo', /Released companies/.test(v) && v.includes('old-release.test') && v.includes('insurance group') && /data-rel-undo="old-release\.test"/.test(v));
   ok('release: a model-judged person has a Release button', /data-rel="spgish\.test"/.test(v));
@@ -918,7 +921,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   const ld0 = b.calls.length;
   fire('click', el({ 'data-rel-go': '' })); await ticks(30); v = view();
   const wr = posts().slice(rel0).filter((c) => c.path === '/monitor/non-icp-release');
-  ok('release: Confirm POSTs the company and the note as JSON, once', wr.length === 1 && wr[0].method === 'POST' && JSON.parse(wr[0].body).domain === 'spgish.test' && JSON.parse(wr[0].body).note === 'wants AEO', JSON.stringify(wr.map((c) => c.body)));
+  ok('release: Confirm POSTs the company and the note as JSON, once', wr.length === 1 && wr[0].method === 'POST' && bodyOf(wr[0]).domain === 'spgish.test' && bodyOf(wr[0]).note === 'wants AEO', JSON.stringify(wr.map((c) => c.body)));
   ok('release: the domain travels in the BODY, not the query string', wr.length === 1 && !('domain' in wr[0].q));
   ok('release: it closes, says what happened in words, and reloads both lists', !/id="rel-confirm"/.test(v) && /Released spgish\.test — 3 lead rows cleared/.test(v) && b.calls.slice(ld0).some((c) => c.path === '/monitor/non-icp-released') && b.calls.slice(ld0).some((c) => c.path === '/monitor/non-icp-repeats'));
   /* a failed write leaves the box OPEN with the note in it */
@@ -952,7 +955,7 @@ const nums = (html) => [...html.matchAll(/data-v="([^"]*)"/g)].map((m) => m[1]);
   const uw0 = posts().length;
   fire('click', el({ 'data-rel-undo': 'old-release.test' })); await ticks(30); v = view();
   const un = posts().slice(uw0);
-  ok('release: Undo POSTs the company to unrelease and says so', un.length === 1 && un[0].path === '/monitor/non-icp-unrelease' && JSON.parse(un[0].body).domain === 'old-release.test' && /Undid the release of old-release\.test/.test(v), JSON.stringify(un.map((c) => [c.path, c.body])));
+  ok('release: Undo POSTs the company to unrelease and says so', un.length === 1 && un[0].path === '/monitor/non-icp-unrelease' && bodyOf(un[0]).domain === 'old-release.test' && /Undid the release of old-release\.test/.test(v), JSON.stringify(un.map((c) => [c.path, c.body])));
   /* isolation: the released list failing must not blank the leads */
   relDown = true; await GW.TABS.blocked.load(); GW.TABS.blocked.render(); v = view();
   ok('release: a failed refresh of the released list keeps the last read and says so', /Last refresh failed \(HTTP 503 upstream down\) — showing the previous read/.test(v) && v.includes('old-release.test'));
