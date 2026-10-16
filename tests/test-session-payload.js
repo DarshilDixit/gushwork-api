@@ -372,9 +372,16 @@ for (const file of ['gushwork-form.js', 'gushwork-form-popup.js']) {
     const src2 = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
     ok(`${tag}/geo: the lookup is PREWARMED at parse time, not left to init`,
        /\n\s*lookupCountry\(function \(\) \{\}\);/.test(src2));
-    /* It must fire BEFORE the script chain, or it is not a prewarm. */
-    ok(`${tag}/geo: and the prewarm runs before the jQuery load starts`,
-       src2.indexOf('lookupCountry(function () {});') < src2.indexOf("loadScript('https://cdnjs.cloudflare.com/ajax/libs/jquery"));
+    /* It must fire BEFORE the script chain, or it is not a prewarm. The
+       chain's first link was jQuery until v5.21.0 and is intl-tel-input
+       now; this asserts against the FIRST loadScript call whatever it
+       loads, and that a first call exists at all (indexOf -1 would make
+       the comparison meaningless). */
+    {
+      const firstLoad = src2.indexOf("loadScript('https://");
+      ok(`${tag}/geo: and the prewarm runs before the first script load starts`,
+         firstLoad !== -1 && src2.indexOf('lookupCountry(function () {});') < firstLoad);
+    }
   }
 
   /* The options the library is actually given. Behaviour above proves the

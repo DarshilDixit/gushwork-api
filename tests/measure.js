@@ -55,6 +55,7 @@ const SUITES = [
   'test-monitor-next.js',
   'test-gads-upload.js',
   'test-agency-exclusions.js',
+  'test-form-differential.js',
 ];
 
 const BASELINE = path.join(__dirname, '.baseline.json');

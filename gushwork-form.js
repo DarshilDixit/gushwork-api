@@ -1,5 +1,12 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.20.0  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.21.0  (/demo PAGE VERSION - thru github/jsdlivr)
+
+  v5.21.0 — no jQuery. The phone setup no longer loads jQuery 3.6.0 from
+  cdnjs first (89,501 bytes, 27,938 as sent): the file used it for three
+  calls, now plain DOM with the same results. One request and one serial
+  round trip fewer before the phone field is set up. Nothing a visitor,
+  the server, GTM or RevenueHero sees changes, except that window.jQuery
+  is no longer set by this file. See "NO jQUERY" in the phone section.
 
   v5.20.0 — the two GTM events carry the lead's email for Google Ads
   enhanced conversions: gw_form_submitted and gw_demo_booked now push
@@ -370,10 +377,11 @@
 
     /* ── START IT NOW, NOT AFTER THE SCRIPTS ──────────────────────────
        THIS LINE IS THE FIX, and without it the flag stays wrong for as long
-       as the CDN takes. initPhoneInputs runs at the END of three SERIAL
-       script loads -- jQuery, then intlTelInput, then utils.js, each waiting
-       on the previous onload -- and only then did anything ask where the
-       visitor is. Measured on a fast connection on 16 Sept 2026: 0.30s of
+       as the CDN takes. initPhoneInputs runs at the END of SERIAL script
+       loads -- intlTelInput, then utils.js, each waiting on the previous
+       onload (and, until v5.21.0, jQuery in front of both) -- and only then
+       did anything ask where the visitor is. Measured on a fast connection
+       on 16 Sept 2026, with jQuery still in the chain: 0.30s of
        serial script loading before a 0.22s lookup could even start, and that
        is the good case. On mobile it is seconds.
 
@@ -399,20 +407,44 @@
       document.head.appendChild(s);
     }
 
-    loadScript('https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js', function () {
-      loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/intlTelInput.min.js', function () {
-        loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/utils.js', function () {
-          initPhoneInputs();
-        });
+    /* ── NO jQUERY (v5.21.0) ───────────────────────────────────────────
+       This chain used to start with jQuery 3.6.0 from cdnjs (89.5 KB, about
+       28 KB as sent), and the whole file used it for exactly three things,
+       all in initPhoneInputs below: a typeof guard, finding the phone
+       inputs, and reading one attribute. Every other line here was already
+       plain DOM. So a phone visitor downloaded and parsed a library, and
+       waited one extra serial round trip before the phone field was set up,
+       to run three calls the browser does natively.
+
+       Each was replaced with its exact equivalent, not an approximation:
+         $('input[ms-code-phone-number]').each(fn) -> querySelectorAll +
+           forEach. jQuery hands that selector to querySelectorAll itself,
+           so it is the same static list in the same document order.
+         $(input).attr(name) -> input.getAttribute(name). The input was
+           matched BY that attribute, so it is always present; jQuery only
+           differs (undefined instead of null) when it is missing.
+         typeof $ guard -> dropped. It could only ever be reached after
+           jQuery's own onload, so it never decided anything.
+       tests/test-form-differential.js runs v5.20.0 and this file side by side
+       through every page and lead type and requires identical results.
+
+       WHAT THE PAGE NOTICES. window.$ and window.jQuery are no longer set
+       by this file. Every Webflow page loads its own jQuery 3.5.1, which
+       this load used to OVERWRITE once it arrived, so those pages now keep
+       their own copy. The Astro pages load none, so there window.jQuery is
+       now absent; nothing in gushwork-web used it when this was checked
+       on 17 Oct 2026. GTM tags are not in any repo and were not checked. */
+    loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/intlTelInput.min.js', function () {
+      loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/utils.js', function () {
+        initPhoneInputs();
       });
     });
 
 
     function initPhoneInputs() {
-      if (typeof $ === 'undefined' || typeof window.intlTelInput === 'undefined') return;
-      $('input[ms-code-phone-number]').each(function () {
-        var input = this;
-        var preferredCountries = $(input).attr('ms-code-phone-number').split(',');
+      if (typeof window.intlTelInput === 'undefined') return;
+      document.querySelectorAll('input[ms-code-phone-number]').forEach(function (input) {
+        var preferredCountries = input.getAttribute('ms-code-phone-number').split(',');
         var iti = window.intlTelInput(input, {
           preferredCountries: preferredCountries,
           /* 'auto' defers the flag until lookupCountry answers, so the field
@@ -3555,7 +3587,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.20.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.21.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
