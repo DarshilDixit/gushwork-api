@@ -582,7 +582,11 @@ function makeWorld(opts) {
           if (typeof s.onerror === 'function') runCb(s.onerror, [new FakeEvent('error')], 'script.onerror');
           return;
         }
-        install(src);
+        /* A "broken" script still fires load -- a browser fires it for a
+           file that arrived, whatever was in it (an error page served with
+           a 200, a truncated file) -- but defines nothing. */
+        if (opts.brokenScripts.some((f) => src.indexOf(f) !== -1)) rec('script.broken', { src });
+        else install(src);
         if (typeof s.onload === 'function') runCb(s.onload.bind(s), [new FakeEvent('load')], 'script.onload');
       }, latency, true);
     }
@@ -1125,7 +1129,7 @@ async function runOne(which, file, pageKey, leadKey, mode, extra) {
     referrer: extra.referrer || 'https://www.google.com/',
     session: Object.assign({ gw_referrer: 'https://www.google.com/', gw_landing_page: 'https://www.gushwork.ai' + page.path }, extra.session || {}),
     cookies: (lead.cookies || []).concat(extra.cookies || []),
-    route: makeRoute(lead), latency, failScripts, rhFails: !!lead.rhFails,
+    route: makeRoute(lead), latency, failScripts, brokenScripts: extra.brokenScripts || [], rhFails: !!lead.rhFails,
     dataLayer: extra.dataLayer, pageJquery: !!extra.pageJquery, readyState: extra.readyState,
   });
   w.loadScript(compiled);
@@ -1156,7 +1160,7 @@ function normalise(r) {
   return r.trace
     /* The script elements themselves (create, src, insert) and the jQuery
        calls are the intended difference; they are compared on their own. */
-    .filter((e) => e.k !== 'script.load' && e.k !== 'script.error' && e.k !== 'jquery.call' && !e.script)
+    .filter((e) => e.k !== 'script.load' && e.k !== 'script.error' && e.k !== 'script.broken' && e.k !== 'jquery.call' && !e.script)
     .map((e) => (e.k === 'console' ? Object.assign({}, e, { text: e.text.replace(re, 'Form initialised vX ') }) : e))
     .map((e) => JSON.stringify(e));
 }
@@ -1351,6 +1355,10 @@ const ADA = 'ada@acmewidgets.com';
      way: the phone field stays a plain input and the raw number is sent. */
   add('gushwork-form.js', 'demo', 'b2bOrganic', { phone: '2015550123', itiInits: 0 }, { label: '(utils.js fails to load)', failScripts: ['utils.js'] });
   add('gushwork-form-popup.js', 'start', 'b2bOrganic', { phone: '2015550123', itiInits: 0 }, { label: '(intl-tel-input fails to load)', failScripts: ['intlTelInput.min.js'] });
+  /* The one case the remaining typeof guard decides: the library file
+     "loads" but defines nothing. Both must step aside quietly. */
+  add('gushwork-form.js', 'demo', 'b2bOrganic', { phone: '2015550123', itiInits: 0 }, { label: '(intl-tel-input arrives but defines nothing)', brokenScripts: ['intlTelInput.min.js'] });
+  add('gushwork-form-popup.js', 'start', 'b2bOrganic', { phone: '2015550123', itiInits: 0 }, { label: '(intl-tel-input arrives but defines nothing)', brokenScripts: ['intlTelInput.min.js'] });
 
   for (const c of cases) {
     const res = await compareCase(c.file, c.page, c.lead, c.extra);
