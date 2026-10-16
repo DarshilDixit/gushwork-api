@@ -393,6 +393,202 @@ for (const file of ['gushwork-form.js', 'gushwork-form-popup.js']) {
   }
 }
 
+/* ── THE GTM EVENTS CARRY THE LEAD'S EMAIL (v5.20.0) ─────────────────
+   Google Ads enhanced conversions used to rely on the Google tag scraping
+   an email field off the page, which is the kind of thing that stops
+   working silently when the site moves off Webflow. So gw_form_submitted
+   and gw_demo_booked now push user_data: { email }, trimmed and
+   lowercased, and GTM maps user_data.email.
+
+   EXECUTED, not read: the real handleStep2Next and initRHBookingListener
+   are lifted out of each file with the helpers they call and driven
+   against stubs, and what lands in window.dataLayer is inspected.
+
+   The NEGATIVE cases are the dangerous ones to test, because "nothing was
+   pushed" is also what a handler that threw on line one looks like. So
+   every negative case also asserts the flow got PAST the push site (it
+   reached step 3, or it reached the redirect), and every case asserts the
+   handler's own catch never fired. */
+function driveGtm(file, opts = {}) {
+  const src = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+
+  const logs = [];
+  const capture = (...args) => logs.push(args.map((a) => {
+    if (typeof a === 'string') return a;
+    try { return JSON.stringify(a); } catch (_) { return String(a); }
+  }).join(' '));
+  const consoleFake = { log: capture, warn: capture, error: capture, info: capture };
+
+  const listeners = [];
+  const windowFake = {
+    addEventListener: (type, fn) => { if (type === 'message') listeners.push(fn); },
+  };
+  if (opts.dataLayer) windowFake.dataLayer = opts.dataLayer;
+  const documentFake = {
+    getElementById: () => null,
+    documentElement: { classList: { add() {} } },
+  };
+
+  const formState = { email: opts.email, session_id: 'sess-gtm-1' };
+  const fields = {
+    email: opts.email, 'first-name': 'Ada', 'last-name': 'Lovelace',
+    company: 'Example Lead Co', website: 'example-lead.com',
+    'hear-about-us': 'Google', 'about-business': '',
+  };
+  const seen = { steps: [], redirects: [], posts: [] };
+  class RevenueHero {
+    constructor() { this.dialog = { setEmbedTarget() {}, open() {} }; }
+    submit() { return Promise.resolve({}); }
+  }
+
+  const factory = new Function(
+    'formState', 'window', 'document', 'console',
+    'validateStep2', 'setLoading', 'getField', 'checkWebsite',
+    'extractWebsiteDomain', 'domainsMatch', 'showWebsiteVerdictError',
+    'WEBSITE_BLOCKING_REASONS', 'nonIcpCached', 'nonIcpCachedEmail',
+    'submitLead', 'redirectNonIcp', 'RevenueHero', 'rhRouterId', 'showStep',
+    'showCalSkeleton', 'hideCalSkeleton', 'awaitNonIcpVerdict', 'setTimeout',
+    'isRailwayReady', 'fetchWithTimeout', 'RAILWAY_API_URL', 'NET_TIMEOUT_MS',
+    ['let _submitting = false;',
+     (/const TEST_EMAILS = \[[^\]]*\];/.exec(src) || [''])[0],
+     lift(src, 'isTestEmail'),
+     (/const _gtmPushed = \{\};/.exec(src) || [''])[0],
+     lift(src, 'gtmUserData'),
+     lift(src, 'pushGtmLeadEvent'),
+     'async ' + lift(src, 'handleStep2Next'),
+     lift(src, 'initRHBookingListener'),
+     'return { handleStep2Next, initRHBookingListener };'].join('\n')
+  );
+  const fns = factory(
+    formState, windowFake, documentFake, consoleFake,
+    () => true, () => {}, (id) => (id in fields ? fields[id] : ''),
+    async () => ({ ok: true }),
+    (u) => String(u || ''), () => true, () => {},
+    [],
+    () => (opts.clientBlocked ? { blocked: true, matched_domain: 'kw.com' } : null),
+    () => null,
+    async () => ('submitRes' in opts ? opts.submitRes : { ok: true }),
+    (v) => { seen.redirects.push(v); },
+    RevenueHero, () => 'router-1', (s) => { seen.steps.push(s); },
+    () => {}, () => {}, async () => 'clear', () => 0,
+    () => true,
+    (url, o) => { seen.posts.push({ url, body: JSON.parse(o.body) }); return Promise.resolve({ ok: true }); },
+    'https://api.example.test', { booking: 5000 }
+  );
+  fns.initRHBookingListener();
+  const book = (data) => Promise.all(listeners.map((fn) => fn({ data })));
+  return { fns, window: windowFake, logs, seen, book };
+}
+
+const GTM_RAW_EMAIL = '  LowerCased@Trimmed.COM ';
+const GTM_EMAIL     = 'lowercased@trimmed.com';
+const MEETING = {
+  type: 'MEETING_BOOKED',
+  meeting: {
+    id: 'mtg-777',
+    /* RevenueHero fills this object, and it can carry the guest's own
+       details -- which is why the console line must not print it whole. */
+    attributes: { id: 'mtg-777', meeting_time: '2026-10-20T15:00:00Z',
+                  email: 'LowerCased@Trimmed.COM', guests: ['LowerCased@Trimmed.COM'] },
+  },
+};
+const noEmailInLogs = (logs) => !logs.some((l) => l.toLowerCase().indexOf(GTM_EMAIL) !== -1);
+const noCatch = (logs) => !logs.some((l) => l.indexOf('RH error') !== -1);
+
+for (const file of ['gushwork-form.js', 'gushwork-form-popup.js']) {
+  const tag = file.replace('gushwork-form', 'form').replace('.js', '');
+
+  /* 1. A real lead submits, then books, on one page load. */
+  {
+    const d = driveGtm(file, { email: GTM_RAW_EMAIL });
+    await d.fns.handleStep2Next();
+    const dl = d.window.dataLayer || [];
+    eq(`${tag}/gtm: submit pushes gw_form_submitted with the trimmed, lowercased email`,
+       JSON.stringify(dl), JSON.stringify([{ event: 'gw_form_submitted', user_data: { email: GTM_EMAIL } }]));
+    ok(`${tag}/gtm: the submit still reached step 3`, d.seen.steps.indexOf('step-3') !== -1, JSON.stringify(d.seen.steps));
+    ok(`${tag}/gtm: the submit did not fall into its catch`, noCatch(d.logs), d.logs.join(' | '));
+
+    /* Back to step 2 and Next again -- the /demo double-submit path. */
+    await d.fns.handleStep2Next();
+    eq(`${tag}/gtm: a second submit on the same page does not push again`,
+       (d.window.dataLayer || []).filter((e) => e.event === 'gw_form_submitted').length, 1);
+
+    await d.book(MEETING);
+    eq(`${tag}/gtm: MEETING_BOOKED pushes gw_demo_booked with the same email`,
+       JSON.stringify((d.window.dataLayer || []).filter((e) => e.event === 'gw_demo_booked')),
+       JSON.stringify([{ event: 'gw_demo_booked', user_data: { email: GTM_EMAIL } }]));
+    await d.book(MEETING);
+    eq(`${tag}/gtm: a repeated MEETING_BOOKED does not push again`,
+       (d.window.dataLayer || []).filter((e) => e.event === 'gw_demo_booked').length, 1);
+    await d.book({ type: 'SOMETHING_ELSE', email: GTM_RAW_EMAIL });
+    eq(`${tag}/gtm: any other message pushes nothing`, (d.window.dataLayer || []).length, 2);
+
+    /* Nothing else about the booking moved. */
+    ok(`${tag}/gtm: /booking-confirmed is still posted with the meeting id`,
+       d.seen.posts.length >= 1 && d.seen.posts[0].body.booking_uid === 'mtg-777'
+         && /\/booking-confirmed$/.test(d.seen.posts[0].url),
+       JSON.stringify(d.seen.posts[0]));
+    ok(`${tag}/gtm: no console line carries the email (submit, booking, repeats)`,
+       noEmailInLogs(d.logs), d.logs.filter((l) => l.toLowerCase().indexOf(GTM_EMAIL) !== -1).join(' | '));
+    ok(`${tag}/gtm: the booking log still says the event arrived`,
+       d.logs.some((l) => l.indexOf('MEETING_BOOKED event received') !== -1 && l.indexOf('mtg-777') !== -1),
+       d.logs.join(' | '));
+  }
+
+  /* 2. GTM's own dataLayer is APPENDED to, never replaced. */
+  {
+    const existing = [{ event: 'gtm.js' }];
+    const d = driveGtm(file, { email: GTM_RAW_EMAIL, dataLayer: existing });
+    await d.fns.handleStep2Next();
+    ok(`${tag}/gtm: an existing dataLayer is pushed onto, not replaced`,
+       d.window.dataLayer === existing && existing.length === 2 && existing[0].event === 'gtm.js',
+       JSON.stringify(d.window.dataLayer));
+  }
+
+  /* 3. Our own test address pushes nothing -- and the flow still ran past
+        the push site, so "nothing" is a decision, not a throw. */
+  {
+    const d = driveGtm(file, { email: 'B@g.ai' });
+    await d.fns.handleStep2Next();
+    await d.book(MEETING);
+    eq(`${tag}/gtm: a test email pushes nothing`, (d.window.dataLayer || []).length, 0);
+    ok(`${tag}/gtm: ...while still reaching step 3`, d.seen.steps.indexOf('step-3') !== -1, JSON.stringify(d.seen.steps));
+    ok(`${tag}/gtm: ...and the booking listener still ran`,
+       d.logs.some((l) => l.indexOf('MEETING_BOOKED event received') !== -1), d.logs.join(' | '));
+    ok(`${tag}/gtm: ...without falling into the catch`, noCatch(d.logs), d.logs.join(' | '));
+  }
+
+  /* 4. The server blocked the lead as non-ICP: the backstop returns before
+        the push, and the lead is redirected instead. */
+  {
+    const d = driveGtm(file, { email: GTM_RAW_EMAIL,
+                               submitRes: { non_icp_blocked: true, non_icp_reason: 'kw.com', non_icp_industry: 'real_estate' } });
+    await d.fns.handleStep2Next();
+    eq(`${tag}/gtm: a server-blocked submit pushes nothing`, (d.window.dataLayer || []).length, 0);
+    ok(`${tag}/gtm: ...because it was redirected instead`,
+       d.seen.redirects.length === 1 && d.seen.redirects[0].matched_domain === 'kw.com', JSON.stringify(d.seen.redirects));
+    ok(`${tag}/gtm: ...and never shown the calendar`, d.seen.steps.indexOf('step-3') === -1, JSON.stringify(d.seen.steps));
+    ok(`${tag}/gtm: ...without falling into the catch`, noCatch(d.logs), d.logs.join(' | '));
+  }
+
+  /* 5. The client-side cached block, which returns even earlier. */
+  {
+    const d = driveGtm(file, { email: GTM_RAW_EMAIL, clientBlocked: true });
+    await d.fns.handleStep2Next();
+    eq(`${tag}/gtm: a client-blocked submit pushes nothing`, (d.window.dataLayer || []).length, 0);
+    ok(`${tag}/gtm: ...because it was redirected instead`, d.seen.redirects.length === 1, JSON.stringify(d.seen.redirects));
+  }
+
+  /* 6. The normaliser on its own: blank stays out rather than sending an
+        empty string Google would try to match. */
+  {
+    const d = driveGtm(file, { email: '   ' });
+    await d.book(MEETING);
+    eq(`${tag}/gtm: a blank email pushes the event with no user_data`,
+       JSON.stringify(d.window.dataLayer || []), JSON.stringify([{ event: 'gw_demo_booked' }]));
+  }
+}
+
 /* ── THE THIRD OFFER RUNG: an internal referrer that still has the
       campaign ───────────────────────────────────────────────────────
 

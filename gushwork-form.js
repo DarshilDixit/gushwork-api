@@ -1,5 +1,11 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.19.0  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.20.0  (/demo PAGE VERSION - thru github/jsdlivr)
+
+  v5.20.0 — the two GTM events carry the lead's email for Google Ads
+  enhanced conversions: gw_form_submitted and gw_demo_booked now push
+  user_data: { email } (trimmed, lowercased), so the Ads tags no longer
+  depend on the Google tag finding an email field on the page. Each fires
+  once per page load. Same guards, same timing. See SECTION 7B.
 
   v5.19.0 — /thank-you can name the industry we do not serve yet. The
   server's non-ICP answers now carry 'real_estate' or 'insurance'; the form
@@ -2891,6 +2897,47 @@
     }
 
     /* =======================================================
+SECTION 7B — GTM EVENTS CARRY THE LEAD'S EMAIL (enhanced conversions)
+======================================================= */
+    /* WHY. Google Ads enhanced conversions found the email by letting the
+       Google tag scrape the page for an email field. The site is moving
+       off Webflow to Astro, and a scrape that worked on one page's markup
+       is exactly the thing that quietly stops working on the next. Our
+       Ads specialist asked for the email to be handed over explicitly at
+       submit, so GTM's Ads tags can send it as user-provided data -- it is
+       also the address the server-side conversion upload matches on.
+
+       SHAPE: { event, user_data: { email } }. GTM maps a User-Provided
+       Data variable to user_data.email. Normalised the way Google asks
+       (trimmed, lowercased) and sent as PLAIN TEXT: Google hashes it, and
+       this file has no SHA-256 helper to do it here. No phone: the field
+       falls back to raw typed text whenever intl-tel-input's utils have
+       not loaded, so it is not reliably E.164 and must not be sent as if
+       it were.
+
+       ONCE PER EVENT PER PAGE LOAD. On /demo the browser Back button walks
+       from the calendar to step 2, and pressing Next again ran the whole
+       submit a second time, pushing a second gw_form_submitted for one
+       person. RevenueHero can also post MEETING_BOOKED more than once.
+       The guard lives in memory only -- the email goes nowhere new: no
+       URL, no cookie, no storage key, and never into a console line. */
+    const _gtmPushed = {};
+
+    function gtmUserData(email) {
+      const e = String(email || '').trim().toLowerCase();
+      return e ? { email: e } : null;
+    }
+
+    function pushGtmLeadEvent(eventName) {
+      if (_gtmPushed[eventName]) return false;
+      _gtmPushed[eventName] = true;
+      const userData = gtmUserData(formState.email);
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push(userData ? { event: eventName, user_data: userData } : { event: eventName });
+      return true;
+    }
+
+    /* =======================================================
 SECTION 8 — REVENUEHERO MEETING_BOOKED LISTENER
 Listens for MEETING_BOOKED postMessage from RH inline embed.
 Fires /booking-confirmed (browser-side) — same endpoint Cal uses.
@@ -2903,13 +2950,14 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
 
         const meeting = ev.data.meeting?.attributes || {};
 
-        console.log('[GW] ✅ RH MEETING_BOOKED event received:', meeting);
+        /* The id and the time only. This used to print the whole attributes
+           object, which is RevenueHero's to fill and can carry the guest's
+           details -- and the console is not a place for a lead's email. */
+        console.log('[GW] ✅ RH MEETING_BOOKED event received:', meeting.id || ev.data.meeting?.id || '', meeting.meeting_time || '');
 
         // GTM — Demo Booked
         if (!isTestEmail(formState.email)) {
-          window.dataLayer = window.dataLayer || [];
-          window.dataLayer.push({ event: 'gw_demo_booked' });
-          console.log('[GW] ✅ GTM Demo Booked event pushed');
+          if (pushGtmLeadEvent('gw_demo_booked')) console.log('[GW] ✅ GTM Demo Booked event pushed');
         }
 
         // Fire existing /booking-confirmed endpoint — same one Cal uses
@@ -3186,9 +3234,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
 
         // GTM — Form Submitted
         if (!isTestEmail(formState.email)) {
-          window.dataLayer = window.dataLayer || [];
-          window.dataLayer.push({ event: 'gw_form_submitted' });
-          console.log('[GW] ✅ GTM Form Submitted event pushed');
+          if (pushGtmLeadEvent('gw_form_submitted')) console.log('[GW] ✅ GTM Form Submitted event pushed');
         }
 
         // Transition to step-3 (300ms animation)
@@ -3509,7 +3555,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.19.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.20.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
