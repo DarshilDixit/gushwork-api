@@ -415,6 +415,8 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `tools/crosscheck-monitor.mjs` | The new dashboard against the classic, number for number, on live data through the preview: every payload fetched once and served to both pages, then each page's painted numbers compared with the payload and each other, plus the partitions every `/monitor/leads` filter must keep. Prints numbers only, never lead data. Not mounted |
 | `gushwork-form.js` | The `/demo` form frontend. Lives here and is served live by jsDelivr — see below |
 | `gushwork-form-popup.js` | The Google Ads popup/modal form frontend. Lives here and is served live by jsDelivr — see below |
+| `gushwork-form.min.js`, `gushwork-form-popup.min.js` (+ `.map`) | GENERATED since v5.22.0 by `tools/build-form-min.js` from the two files above, and committed so jsDelivr serves our bytes at a SHA (an SRI hash holds). Never edit by hand; the readable files stay the source. `test-form-differential.js` fails if they are stale |
+| `tools/build-form-min.js` | Builds the two `.min.js` files and their maps with the pinned terser (`--check` writes nothing and exits 1 if stale). Not mounted |
 | `package.json` | Dependencies, scripts, Node engine constraint |
 | `package-lock.json` | Locked dependency versions, committed so Railway installs exactly what was tested |
 | `.gitignore` | Keeps `node_modules/`, `.env`, logs, and local Claude settings out of the repo |
@@ -535,6 +537,8 @@ reason this correction exists: `test-ads-parity.js` asserts *"init banner
 agrees with the header"* in each file, so bumping the banner alone fails with
 `header=v5.16.0 banner=v5.17.0`. Found on the v5.17.0 bump by following this
 very paragraph and getting a red bar. Do all five in one commit.
+
+**THEN REBUILD THE MINIFIED FILES (since v5.22.0): `node tools/build-form-min.js`, and commit what it writes in the same commit.** Any change to either form file, not just a bump. `test-form-differential.js` rebuilds them and fails on a stale byte, and it runs both `.min.js` files against the previous release as well as the sources. A page pinned to the `.min.js` gets the same code at a third of the bytes; the pin rules above apply to it unchanged (same SHA for both, full 40 characters).
 
 **And when the version did not move, these two are what actually discriminate:**
 
