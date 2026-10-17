@@ -513,11 +513,17 @@ const without = (o, ...keys) => { const c = Object.assign({}, o); keys.forEach((
     eq('G: the list is the three origins the env held on 17 Oct 2026', JSON.stringify(ALLOWED_ORIGINS), JSON.stringify(['https://www.gushwork.ai', 'https://gushwork.ai', 'https://gushwork.webflow.io']));
     ok('G: index.js takes CORS origins from allowed-origins.js', /const allowedOrigins = ALLOWED_ORIGINS\.slice\(\);/.test(idx) && /require\('\.\/allowed-origins'\)/.test(idx));
     ok('G: index.js no longer builds the list from the env', !/const allowedOrigins = \(process\.env/.test(idx));
+    /* ONE assertion over the whole list, so the suite's count does not move
+       when an origin is added -- a moving count reads as UNMEASURED to
+       measure.js --mutation, which is how this was found. */
+    const refused = [];
     for (const o of ALLOWED_ORIGINS) {
       const r = await realFetch(BASE + '/session', { method: 'OPTIONS', headers: { Origin: o, 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'content-type,x-gw-synthetic' } });
-      ok(`G: ${o} is accepted, and may send X-GW-Synthetic`, r.status === 204 && r.headers.get('access-control-allow-origin') === o
-         && /x-gw-synthetic/i.test(r.headers.get('access-control-allow-headers') || ''), r.status + ' ' + r.headers.get('access-control-allow-headers'));
+      if (!(r.status === 204 && r.headers.get('access-control-allow-origin') === o && /x-gw-synthetic/i.test(r.headers.get('access-control-allow-headers') || ''))) {
+        refused.push(o + ' ' + r.status + ' ' + r.headers.get('access-control-allow-headers'));
+      }
     }
+    ok('G: every origin on the list is accepted, and may send X-GW-Synthetic', refused.length === 0, refused.join(' | '));
     const evil = await realFetch(BASE + '/session', { method: 'POST', headers: { Origin: 'https://evil.example', 'Content-Type': 'application/json' }, body: '{"session_id":"x"}' });
     eq('G: an origin only the ENV names is refused (the env is no longer read)', evil.status, 500);
     ok('G: and the boot says the env is ignored', LOGS.some((l) => /ALLOWED_ORIGIN is set in the environment but is no longer read/.test(l.text)));

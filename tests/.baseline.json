@@ -1,6 +1,6 @@
 {
-  "savedAt": "2026-10-17T16:12:06.118Z",
-  "grandTotal": 8358,
+  "savedAt": "2026-10-17T16:56:33.162Z",
+  "grandTotal": 8356,
   "suites": {
     "test-batch1.js": 109,
     "test-batch2.js": 1299,
@@ -19,7 +19,7 @@
     "test-gads-upload.js": 215,
     "test-agency-exclusions.js": 76,
     "test-form-differential.js": 2013,
-    "test-synthetic.js": 236,
+    "test-synthetic.js": 234,
     "test-server-differential.js": 117
   }
 }
