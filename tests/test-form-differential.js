@@ -1461,6 +1461,20 @@ const ADA = 'ada@acmewidgets.com';
        strip(o) === strip(n));
   }
 
+  /* 3b. THE WAIT IS IN BOTH FILES. The two form files are a fork, and the
+         head-pin cases above only exercise the Ads file, so on 17 Oct 2026
+         removing the wait from gushwork-form.js alone survived a mutation.
+         /demo has its phone field in the markup, so a missing wait does not
+         change what it sends; what it changes is WHEN the setup runs. With
+         the page ready at 350ms and the libraries at 200ms, NEW must not set
+         the phone up before the page is ready, in either file. */
+  for (const [f, pg] of [['gushwork-form.js', 'demo'], ['gushwork-form-popup.js', 'aiDemo']]) {
+    const n = await runOne('new', f, pg, 'b2bOrganic', 'same', { dclAt: 350 });
+    const inits = eventsOf(n, 'iti.init');
+    ok(`${f} on a page still loading at 350ms: the phone setup waits for the page and runs once, at or after 350ms`,
+       inits.length === 1 && inits[0].t >= 350, JSON.stringify(inits.map((e) => e.t)));
+  }
+
   console.log('');
   if (failures.length) {
     console.log('  FAILURES:');
