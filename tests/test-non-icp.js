@@ -1310,7 +1310,12 @@ const results10d = (async () => {
        calendar. Paired with a reachability assertion, because an offset
        comparison survives an early return. */
     const iCheck = s.indexOf('const icp2 = nonIcpCached(');
-    const iHero  = s.indexOf('const hero = new RevenueHero(');
+    /* Since v5.23.0 the line picks a stand-in on a synthetic check, and only
+       there; the real constructor must still be the other branch of it. */
+    const iHero  = s.indexOf('const hero = ');
+    ok(`${name}: a visitor still gets the real RevenueHero on that line`,
+       s.slice(iHero, s.indexOf('\n', iHero)) === 'const hero = syntheticToken() ? syntheticHero(rhRouterId()) : new RevenueHero({ routerId: rhRouterId() });',
+       s.slice(iHero, s.indexOf('\n', iHero)));
     ok(`${name}: step-2 check runs BEFORE RevenueHero`, iCheck > 0 && iHero > 0 && iCheck < iHero,
        `check at ${iCheck}, hero at ${iHero}`);
     const guarded = s.slice(iCheck, iHero);
@@ -1834,7 +1839,7 @@ results13 = (async () => {
            these. Real implementations, not stubs: a stub would let the
            speculative-domain rules drift from the free-mail list they
            are supposed to key off. */
-        'freeEmailMatch', 'partnerStackCustomerKey',
+        'freeEmailMatch', 'partnerStackCustomerKey', 'synthetic',
         'const _nonIcpLlmInFlight = new Map();\n' + warmLift +
         '\nreturn { warmNonIcpLlm, _nonIcpLlmInFlight };'))(
         { env: {} }, stats,
@@ -1847,7 +1852,7 @@ results13 = (async () => {
         opts.v1Hit === true, () => (opts.v1Hit ? { domain: 'kw.com' } : null),
         /* the released-companies list: empty unless a scenario sets opts.exempt */
         async () => new Set(opts.exempt || []),
-        M.freeEmailMatch, M.partnerStackCustomerKey);
+        M.freeEmailMatch, M.partnerStackCustomerKey, require('../synthetic'));
       return { scope, calls, stats };
     };
     const wait = () => new Promise((r) => setTimeout(r, 30));

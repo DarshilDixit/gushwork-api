@@ -91,7 +91,11 @@ function between(s, startMarker, endMarker) {
      Named explicitly so a second non-ET zone cannot arrive by widening the
      pattern. If another one is ever legitimate it goes on this list with
      its own reason, the same shape as test-non-icp.js's DELIBERATE list. */
-  const TZ_DELIBERATE = ['visitorTz'];
+  /* 'UTC' (v5.23.0) is /metrics/submissions: a machine-read endpoint for
+     the website monitor, not a dashboard number. Its hours are UTC ISO
+     instants and the response says timezone: 'UTC', so the monitor applies
+     its own business hours. Confined to that one route below. */
+  const TZ_DELIBERATE = ['visitorTz', 'UTC'];
   ok('tz: every active zone is ET, the injected constant, or a named exemption',
      activeZone(src).split('|').filter(Boolean)
        .every((z) => /America\/New_York|TZ|DASH_TZ/.test(z)
@@ -99,7 +103,15 @@ function between(s, startMarker, endMarker) {
   /* The exemption must be REAL. A stale entry here would quietly permit a
      zone nobody is using any more. */
   ok('tz: the named exemption is actually used',
-     TZ_DELIBERATE.every((d) => src.includes('timeZone:' + d)), TZ_DELIBERATE.join(','));
+     TZ_DELIBERATE.every((d) => src.includes('timeZone:' + d) || src.includes("AT TIME ZONE '" + d + "'")), TZ_DELIBERATE.join(','));
+  {
+    const a = src.indexOf("app.get('/metrics/submissions'");
+    const b = src.indexOf('\n});', a);
+    const at = [];
+    for (let i = src.indexOf("AT TIME ZONE 'UTC'"); i !== -1; i = src.indexOf("AT TIME ZONE 'UTC'", i + 1)) at.push(i);
+    ok("tz: AT TIME ZONE 'UTC' appears only inside /metrics/submissions",
+       a > 0 && at.length > 0 && at.every((i) => i > a && i < b), at.length + ' uses');
+  }
   /* And it must be confined to the one column it was granted for. */
   ok('tz: visitorTz is only used by the Visitors tab local-time helper',
      (src.match(/visitorTz/g) || []).length === 2, String((src.match(/visitorTz/g) || []).length));

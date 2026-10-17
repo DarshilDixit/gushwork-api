@@ -1,9 +1,17 @@
 /* ============================================================
    Builds the minified form files, and checks they are current.
 
-     node tools/build-form-min.js           write both .min.js and their maps
+     node tools/build-form-min.js           write the API's hosts into both
+                                            readable files, then both .min.js
+                                            and their maps
      node tools/build-form-min.js --check   rebuild in memory, compare, write
                                             nothing; exits 1 if any is stale
+
+   SINCE v5.23.0 IT ALSO OWNS ONE LINE OF EACH READABLE FILE:
+   `const SESSION_HOSTS = [...]`, the hosts the form sends /session from.
+   It is written from allowed-origins.js, the list the API's CORS check
+   reads, so the hosts the forms send from and the origins the API accepts
+   are one list. Edit allowed-origins.js only, then run this.
 
    WHY THIS EXISTS. A Lighthouse audit of the form pages (Oct 2026) put
    about 36 KB of the Ads file's transfer down to its comments and
@@ -38,6 +46,32 @@ const { minify } = require('terser');
 
 const ROOT = path.join(__dirname, '..');
 const FILES = ['gushwork-form.js', 'gushwork-form-popup.js'];
+const { ALLOWED_ORIGINS, allowedHostnames } = require('../allowed-origins');
+
+const HOSTS_LINE = /const SESSION_HOSTS = \[[^\]]*\];/g;
+/* The hosts a form file's SESSION_HOSTS line names, or null when the file
+   does not have exactly one such line. */
+function hostListIn(src) {
+  const m = String(src).match(HOSTS_LINE);
+  if (!m || m.length !== 1) return null;
+  return (m[0].match(/'([^']*)'/g) || []).map((q) => q.slice(1, -1));
+}
+function hostsLine(origins) {
+  return 'const SESSION_HOSTS = [' + allowedHostnames(origins).map((h) => "'" + h + "'").join(', ') + '];';
+}
+/* src with its SESSION_HOSTS line rewritten from the API's list. */
+function injectHosts(src, origins = ALLOWED_ORIGINS) {
+  const m = String(src).match(HOSTS_LINE);
+  if (!m || m.length !== 1) throw new Error('expected exactly one "const SESSION_HOSTS = [...];" line, found ' + (m ? m.length : 0));
+  return String(src).replace(HOSTS_LINE, hostsLine(origins));
+}
+/* null when a file's hosts are exactly the API's, else what differs. */
+function hostsMismatch(src, origins = ALLOWED_ORIGINS) {
+  const have = hostListIn(src);
+  const want = allowedHostnames(origins);
+  if (!have) return 'no single SESSION_HOSTS line';
+  return JSON.stringify(have) === JSON.stringify(want) ? null : 'has ' + JSON.stringify(have) + ', the API accepts ' + JSON.stringify(want);
+}
 const TERSER_VERSION = require('terser/package.json').version;
 
 function minName(file) { return file.replace(/\.js$/, '.min.js'); }
@@ -70,7 +104,10 @@ async function buildOne(file, src) {
 async function buildAll(readSource) {
   readSource = readSource || ((f) => fs.readFileSync(path.join(ROOT, f), 'utf8'));
   const res = [];
-  for (const f of FILES) res.push(Object.assign({ file: f }, await buildOne(f, readSource(f))));
+  for (const f of FILES) {
+    const source = injectHosts(readSource(f));
+    res.push(Object.assign({ file: f, source }, await buildOne(f, source)));
+  }
   return res;
 }
 
@@ -78,7 +115,7 @@ async function buildAll(readSource) {
 async function staleFiles() {
   const stale = [];
   for (const b of await buildAll()) {
-    for (const [n, want] of [[b.name, b.code], [b.mapName, b.map]]) {
+    for (const [n, want] of [[b.file, b.source], [b.name, b.code], [b.mapName, b.map]]) {
       const p = path.join(ROOT, n);
       const have = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null;
       if (have !== want) stale.push(n);
@@ -87,7 +124,7 @@ async function staleFiles() {
   return stale;
 }
 
-module.exports = { FILES, minName, buildOne, buildAll, staleFiles, TERSER_VERSION };
+module.exports = { FILES, minName, buildOne, buildAll, staleFiles, TERSER_VERSION, hostListIn, injectHosts, hostsMismatch };
 
 if (require.main === module) {
   (async () => {
@@ -101,6 +138,10 @@ if (require.main === module) {
       return;
     }
     for (const b of await buildAll()) {
+      if (fs.readFileSync(path.join(ROOT, b.file), 'utf8') !== b.source) {
+        fs.writeFileSync(path.join(ROOT, b.file), b.source);
+        console.log('wrote the API\'s hosts into ' + b.file);
+      }
       fs.writeFileSync(path.join(ROOT, b.name), b.code);
       fs.writeFileSync(path.join(ROOT, b.mapName), b.map);
       console.log('wrote ' + b.name + ' (' + Buffer.byteLength(b.code) + ' bytes) and ' + b.mapName);

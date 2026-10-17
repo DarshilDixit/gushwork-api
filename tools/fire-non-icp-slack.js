@@ -65,6 +65,9 @@ function liftDecl(decl) {
 
 const lifted = new Function('require', [
   `const nodemailer = require('${path.join(ROOT, 'node_modules', 'nodemailer')}');`,
+  /* index.js guards its senders with the synthetic-check module (v5.23.0);
+     outside a synthetic request it changes nothing. */
+  `const synthetic = require('${path.join(ROOT, 'synthetic')}');`,
   liftDecl('const DASH_TZ'),
   liftDecl('const ALERT_COOLDOWN_MS'),
   liftDecl('const ALERT_EMAIL_TO'),

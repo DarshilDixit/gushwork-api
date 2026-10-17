@@ -64,22 +64,24 @@
    moment a reviewer should be asking why -- and the absolute
    expectations near the end of the file change with it.
 
-   SINCE v5.22.0 THERE IS A SECOND LOCK, AGAINST v5.21.0 (RELEASE below),
-   and it is stricter, because v5.22.0 is meant to change nothing at all
-   on the hosts the API accepts. Both the working-tree source AND the
+   SINCE v5.22.0 THERE IS A SECOND LOCK, AGAINST THE PREVIOUS RELEASE
+   (RELEASE below, v5.22.0 since v5.23.0), and it is stricter, because a
+   release under it is meant to change nothing at all for a visitor. Both the working-tree source AND the
    minified files (gushwork-form.min.js, gushwork-form-popup.min.js) are
-   run against v5.21.0 over the same matrix, every request at the same
+   run against RELEASE over the same matrix, every request at the same
    latency, and must be IDENTICAL: every effect, every timestamp, the
    scripts requested, the page after load and at the end. Nothing is
    carved out except the version inside the init banner. The minified
    files are also rebuilt here and must match the committed bytes, so a
    source change without a rebuild fails the suite.
-   The ONE intended difference is pinned on its own: on a host the API
-   does not accept (a workers.dev preview, localhost), v5.21.0 posted
-   /session, which the browser refused on CORS with a console error;
-   v5.22.0 does not send it and logs one plain line instead. Everything
-   else on that host is identical too. The fake network refuses every
-   API call from such a host, as the real one does.
+   v5.22.0 stopped sending /session from a host the API does not accept
+   (a workers.dev preview, localhost); that is now locked as identical to
+   v5.22.0 on those hosts too. The fake network refuses every API call
+   from such a host, as the real one does.
+   v5.23.0's ONE intended difference is pinned on its own: with the
+   website monitor's token in sessionStorage gw_synthetic, every API call
+   carries it as X-GW-Synthetic and is otherwise the same call, the GTM
+   events are not pushed, and RevenueHero is not contacted.
 
    Needs git (it reads REFERENCE and RELEASE with `git show`) and terser
    from node_modules (a devDependency, for the rebuild check). No network,
@@ -97,9 +99,10 @@ const ROOT = path.join(__dirname, '..');
 /* v5.20.0 / v5.20.0-ads: the merge of PR 149, the last release that
    loaded jQuery. */
 const REFERENCE = '08ecc1ef07aa34f6fc3edc3abc2096b7b679abbe';
-/* v5.21.0 / v5.21.0-ads: the merge of PR 150, the release before the
-   /session host check and the minified build. */
-const RELEASE = '57f45b5dc2a8eac33055c2f8719092b547bb7820';
+/* v5.22.0 / v5.22.0-ads: the merge of PR 151, the release before
+   synthetic checks. (Was v5.21.0, 57f45b5, for v5.22.0's own PR.) */
+const RELEASE = '5db62fb9abd68e7b7b60decc72690cc18d13fde9';
+const RELEASE_BANNER = 'v5.22.0';
 const MIN = require('../tools/build-form-min.js');
 
 let pass = 0, fail = 0;
@@ -1184,6 +1187,7 @@ async function runOne(which, file, pageKey, leadKey, mode, extra) {
     session: w.sessionStorage._dump(), local: w.localStorage._dump(), cookies: Object.fromEntries(w.cookieJar),
     dataLayer: g.dataLayer ? JSON.parse(JSON.stringify(g.dataLayer)) : null,
     jquery: g.jQuery ? (g.jQuery.label || 'unknown') : null,
+    gwSynthetic: g.gwSynthetic ? JSON.parse(JSON.stringify(g.gwSynthetic)) : null,
     userStart: w.userStart,
   };
 }
@@ -1315,8 +1319,8 @@ function expectAbsolute(c, exp) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
-   AGAINST v5.21.0 (RELEASE): the source and the minified file, each run
-   whole at the same latency as v5.21.0, must record exactly what it
+   AGAINST RELEASE (v5.22.0): the source and the minified file, each run
+   whole at the same latency as RELEASE, must record exactly what it
    recorded. Only the version inside the init banner is normalised; no
    entry is filtered out, scripts included.
    ════════════════════════════════════════════════════════════════════ */
@@ -1330,7 +1334,7 @@ const SUBJECT_NAME = (subject, file) => (subject === 'min' ? MIN.minName(file) :
 
 async function compareToRelease(subject, file, pageKey, leadKey, extra) {
   const where = (extra && extra.origin ? extra.origin.replace(/^https?:\/\//, '') : '') + PAGES[pageKey].path;
-  const tag = `${SUBJECT_NAME(subject, file)} vs v5.21.0 ${where}${pageKey === 'demoNeeds' ? '(needs)' : pageKey === 'twoPhones' ? '(two phone fields)' : ''} ${leadKey}${extra && extra.label ? ' ' + extra.label : ''}`;
+  const tag = `${SUBJECT_NAME(subject, file)} vs ${RELEASE_BANNER} ${where}${pageKey === 'demoNeeds' ? '(needs)' : pageKey === 'twoPhones' ? '(two phone fields)' : ''} ${leadKey}${extra && extra.label ? ' ' + extra.label : ''}`;
   const r = await runOne('rel', file, pageKey, leadKey, 'same', extra);
   const n = await runOne(subject, file, pageKey, leadKey, 'same', extra);
   const R = bannerOnly(r), N = bannerOnly(n);
@@ -1541,19 +1545,19 @@ const ADA = 'ada@acmewidgets.com';
   }
 
   /* ════════════════════════════════════════════════════════════════
-     THE v5.21.0 LOCK (v5.22.0): source and minified, against RELEASE
+     THE RELEASE LOCK: source and minified, against v5.22.0
      ════════════════════════════════════════════════════════════════ */
   for (const f of FILES) {
     const s = SOURCES[f];
     const ads = f === 'gushwork-form.js' ? '' : '-ads';
-    ok(`${f}: RELEASE is v5.21.0${ads} from git`, s.rel.banner === 'v5.21.0' + ads, s.rel.banner);
-    ok(`${f}: the working tree is v5.22.0${ads}`, s.new.banner === 'v5.22.0' + ads, s.new.banner);
+    ok(`${f}: RELEASE is ${RELEASE_BANNER}${ads} from git`, s.rel.banner === RELEASE_BANNER + ads, s.rel.banner);
+    ok(`${f}: the working tree is v5.23.0${ads}`, s.new.banner === 'v5.23.0' + ads, s.new.banner);
     ok(`${MIN.minName(f)}: carries the same banner as its source`, s.min.banner === s.new.banner, s.min.banner);
     ok(`${MIN.minName(f)}: its first line names the source file and version`,
        s.min.src.split('\n')[0].indexOf('/*! ' + f + ' ' + s.new.banner + ' ') === 0, s.min.src.split('\n')[0].slice(0, 120));
     ok(`${MIN.minName(f)}: actually minified (under 40% of the source's bytes)`, s.min.src.length < 0.4 * s.new.src.length, s.min.src.length + ' / ' + s.new.src.length);
     const fmt = (src) => (/console\.log\('\[GW\] ✅ Form initialised v[^']*'(.*)\);/.exec(src) || [])[1];
-    ok(`${f}: the init log line has the same format as v5.21.0 apart from the version`, !!fmt(s.rel.src) && fmt(s.rel.src) === fmt(s.new.src));
+    ok(`${f}: the init log line has the same format as RELEASE apart from the version`, !!fmt(s.rel.src) && fmt(s.rel.src) === fmt(s.new.src));
   }
   /* The committed minified files are what a fresh build of the committed
      sources produces, byte for byte (map included). A form change without
@@ -1562,7 +1566,7 @@ const ADA = 'ada@acmewidgets.com';
   ok('the committed .min.js files and maps match a fresh build of their sources', stale.length === 0, 'stale: ' + stale.join(', ') + ' -- run node tools/build-form-min.js');
 
   /* Every case above, plus the conditions the v5.20.0 comparison pinned as
-     differences (they are not differences against v5.21.0), plus the two
+     differences (they are not differences against RELEASE), plus the two
      other hosts the API accepts. Each runs against the source AND the
      minified file, and each keeps its absolute expectations. */
   const relCases = cases.slice();
@@ -1587,39 +1591,85 @@ const ADA = 'ada@acmewidgets.com';
     }
   }
 
-  /* THE ONE INTENDED DIFFERENCE: a host the API does not accept. v5.21.0
-     set its 5-second abort timer and posted /session, which the browser
-     refused (and printed as a console error, which this fake cannot show).
-     v5.22.0 logs one plain line in its place and sends nothing. The
-     recording must be v5.21.0's with exactly that swap, timestamps
-     included; everything the visitor does after it is unchanged (every
-     other API call is refused on that host too, for both). */
+  /* A HOST THE API DOES NOT ACCEPT (a workers.dev preview, localhost).
+     v5.22.0 stopped sending /session there and logs one plain line
+     instead; every other API call is refused on that host, as CORS does.
+     Locked as IDENTICAL to v5.22.0, and the v5.22.0 behaviour is asserted
+     outright too: no API request at all during page load, the log line,
+     no console error or warning. */
   const PREVIEW_ORIGINS = ['https://gushwork-web-preview.gushwork.workers.dev', 'http://localhost:4321'];
   for (const [f, pg] of [['gushwork-form.js', 'demo'], ['gushwork-form-popup.js', 'aiDemo'], ['gushwork-form-popup.js', 'start']]) {
     for (const origin of PREVIEW_ORIGINS) {
       const host = new URL(origin).hostname;
       for (const subject of ['new', 'min']) {
-        const tag = `${SUBJECT_NAME(subject, f)} vs v5.21.0 on ${origin}${PAGES[pg].path}`;
-        const r = await runOne('rel', f, pg, 'b2bOrganic', 'same', { origin });
-        const n = await runOne(subject, f, pg, 'b2bOrganic', 'same', { origin });
-        const R = bannerOnly(r), N = bannerOnly(n);
-        const i = R.findIndex((l) => { const e = JSON.parse(l); return e.k === 'fetch' && e.url === API + '/session'; });
-        const timer = i > 0 ? JSON.parse(R[i - 1]) : null;
-        ok(`${tag}: v5.21.0 posted /session at load, right after setting its 5000ms abort timer`,
-           i > 0 && JSON.parse(R[i]).phase === 'load' && timer.k === 'timer' && timer.ms === 5000, R[i]);
-        const expected = R.slice(0, Math.max(0, i - 1)).concat([JSON.stringify({ t: timer && timer.t, phase: 'load', k: 'console', level: 'log',
-          text: '[GW] /session not sent: ' + host + ' is not a host the API accepts.' })]).concat(R.slice(i + 1));
-        ok(`${tag}: the recording is v5.21.0's with only /session swapped for one log line (${N.length} entries)`,
-           N.join('\n') === expected.join('\n'), firstDiff(expected, N));
-        ok(`${tag}: no request to the API at all during page load`,
+        const res = await compareToRelease(subject, f, pg, 'b2bOrganic', { origin });
+        const n = res.new;
+        ok(`${res.tag}: no request to the API at all during page load`,
            !n.trace.some((e) => e.k === 'fetch' && e.phase === 'load' && e.url.indexOf(API) === 0));
-        ok(`${tag}: no console error or warning during page load`,
+        ok(`${res.tag}: says once, plainly, that /session was not sent`,
+           n.trace.filter((e) => e.k === 'console' && e.text === '[GW] /session not sent: ' + host + ' is not a host the API accepts.').length === 1);
+        ok(`${res.tag}: no console error or warning during page load`,
            !n.trace.some((e) => e.k === 'console' && e.phase === 'load' && (e.level === 'error' || e.level === 'warn')),
            JSON.stringify(n.trace.filter((e) => e.k === 'console' && e.phase === 'load' && e.level !== 'log')));
-        ok(`${tag}: the page and the storage end up identical`,
-           JSON.stringify([r.afterLoad, r.final, r.session, r.local, r.cookies, r.dataLayer, r.scripts]) === JSON.stringify([n.afterLoad, n.final, n.session, n.local, n.cookies, n.dataLayer, n.scripts]));
-        ok(`${tag}: nothing threw inside the page`, !r.trace.concat(n.trace).some((e) => e.k === 'error'));
       }
+    }
+  }
+
+  /* ════════════════════════════════════════════════════════════════
+     SYNTHETIC CHECKS (v5.23.0): the one intended difference, pinned.
+     The website monitor's token in sessionStorage gw_synthetic. Compared
+     with v5.22.0 running the same visit WITHOUT the key:
+       - the same API calls, in the same order, with the same bodies, each
+         carrying exactly one extra header, X-GW-Synthetic: <token>;
+       - no GTM event (gw_form_submitted, gw_demo_booked);
+       - RevenueHero never constructed, submitted to or opened;
+       - window.gwSynthetic names the router id v5.22.0 handed RevenueHero,
+         and holds the /submit answer;
+       - the token in no console line, URL, storage or cookie write.
+     Run against the source and the minified file.
+     ════════════════════════════════════════════════════════════════ */
+  const SYN_TOKEN = 'monitor-token-0123456789abcdef0123456789abcdef';
+  const apiFetches = (r) => r.trace.filter((e) => e.k === 'fetch' && e.url.indexOf(API) === 0);
+  const SYN_CASES = [
+    ['gushwork-form.js', 'demo', 'b2bOrganic', '6138'],
+    ['gushwork-form.js', 'demo', 'crmCpc', '6804'],
+    ['gushwork-form.js', 'demoNeeds', 'b2bOrganic', '6804'],
+    ['gushwork-form-popup.js', 'aiDemo', 'b2bOrganic', '6804'],
+    ['gushwork-form-popup.js', 'start', 'aeoCpc', '6138'],
+    ['gushwork-form-popup.js', 'l2o', 'l2oSocial', '6804'],
+    ['gushwork-form.js', 'demo', 'serverBlock', null],
+    ['gushwork-form-popup.js', 'aeo', 'clientBlock', null],
+  ];
+  for (const [f, pg, lead, router] of SYN_CASES) {
+    const r = await runOne('rel', f, pg, lead, 'same', {});
+    for (const subject of ['new', 'min']) {
+      const tag = `${SUBJECT_NAME(subject, f)} synthetic ${PAGES[pg].path}${pg === 'demoNeeds' ? '(needs)' : ''} ${lead}`;
+      const n = await runOne(subject, f, pg, lead, 'same', { session: { gw_synthetic: SYN_TOKEN } });
+      const RF = apiFetches(r), NF = apiFetches(n);
+      ok(`${tag}: the same API calls, in order, same bodies, each with only X-GW-Synthetic added (${RF.length} calls)`,
+         RF.length > 0 && RF.length === NF.length && RF.every((e, i) => {
+           const x = NF[i];
+           return x.url === e.url && x.method === e.method && JSON.stringify(x.body) === JSON.stringify(e.body)
+             && JSON.stringify(x.headers) === JSON.stringify(Object.assign({}, e.headers, { 'X-GW-Synthetic': SYN_TOKEN }));
+         }), JSON.stringify([RF.map((e) => e.url.replace(API, '')), NF.map((e) => e.url.replace(API, '') + ' ' + JSON.stringify(e.headers))]));
+      ok(`${tag}: no GTM event`, !(n.dataLayer || []).some((e) => /^gw_/.test(e.event || '')), JSON.stringify(n.dataLayer));
+      ok(`${tag}: RevenueHero never constructed, submitted to or opened`, !n.trace.some((e) => /^rh\./.test(e.k)));
+      if (router) {
+        const relRouter = (eventsOf(r, 'rh.new')[0] || { o: {} }).o.routerId;
+        ok(`${tag}: window.gwSynthetic names router ${router}, the one v5.22.0 handed RevenueHero`,
+           relRouter === router && n.gwSynthetic && n.gwSynthetic.router_id === router, JSON.stringify([relRouter, n.gwSynthetic]));
+        const sub = NF.find((e) => e.url === API + '/submit');
+        ok(`${tag}: window.gwSynthetic holds the /submit answer`,
+           !!sub && n.gwSynthetic && JSON.stringify(n.gwSynthetic.submit) === JSON.stringify({ ok: true }), JSON.stringify(n.gwSynthetic));
+      } else {
+        const relNav = eventsOf(r, 'navigate').map((e) => e.href), newNav = eventsOf(n, 'navigate').map((e) => e.href);
+        ok(`${tag}: a blocked lead is still redirected exactly as by v5.22.0`,
+           relNav.length === 1 && JSON.stringify(relNav) === JSON.stringify(newNav), JSON.stringify([relNav, newNav]));
+      }
+      const leaks = n.trace.filter((e) => e.k !== 'fetch' && JSON.stringify(e).indexOf(SYN_TOKEN) !== -1)
+        .concat(n.trace.filter((e) => e.k === 'fetch' && (e.url.indexOf(SYN_TOKEN) !== -1 || JSON.stringify(e.body).indexOf(SYN_TOKEN) !== -1)));
+      ok(`${tag}: the token appears nowhere but the header (console, URLs, bodies, storage, cookies, DOM)`, leaks.length === 0, JSON.stringify(leaks.slice(0, 2)));
+      ok(`${tag}: nothing threw inside the page`, !n.trace.some((e) => e.k === 'error'), JSON.stringify(n.trace.filter((e) => e.k === 'error').slice(0, 2)));
     }
   }
 

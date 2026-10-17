@@ -1,23 +1,25 @@
 {
-  "savedAt": "2026-10-17T14:59:26.893Z",
-  "grandTotal": 7846,
+  "savedAt": "2026-10-17T16:56:33.162Z",
+  "grandTotal": 8356,
   "suites": {
     "test-batch1.js": 109,
     "test-batch2.js": 1299,
-    "test-batch-a.js": 369,
+    "test-batch-a.js": 370,
     "test-ads-parity.js": 264,
     "test-partnerstack.js": 1035,
     "test-sf-readers.js": 70,
     "test-submit-gate.js": 14,
-    "test-session-payload.js": 195,
+    "test-session-payload.js": 219,
     "test-session-page-views.js": 23,
     "test-lead-field-changes.js": 120,
-    "test-non-icp.js": 829,
+    "test-non-icp.js": 831,
     "test-non-icp-routes.js": 731,
     "test-apollo.js": 85,
     "test-monitor-next.js": 531,
     "test-gads-upload.js": 215,
     "test-agency-exclusions.js": 76,
-    "test-form-differential.js": 1881
+    "test-form-differential.js": 2013,
+    "test-synthetic.js": 234,
+    "test-server-differential.js": 117
   }
 }

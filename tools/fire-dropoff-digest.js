@@ -64,6 +64,9 @@ function between(a, b) {
    what production sends. */
 const lifted = new Function('require', 'pool', [
   "const DASH_TZ = 'America/New_York';",
+  /* index.js guards its senders with the synthetic-check module (v5.23.0);
+     outside a synthetic request it changes nothing. */
+  `const synthetic = require('${path.join(ROOT, 'synthetic')}');`,
   /* sendSlack plus the block builders, in one contiguous region -- they sit
      together at the top of index.js in that order. */
   between('function sendSlack(blocks, fallbackText)', 'function bContext(text)'),

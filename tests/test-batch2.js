@@ -153,9 +153,11 @@ const R = (new Function(ruleSrc + `
     if (dbThrows) return Promise.reject(new Error('relation does not exist'));
     return Promise.resolve({ rows: dbRow ? [dbRow] : [] });
   } };
-  const S = (new Function('pool', 'elvCacheGet', 'console', storeSrc + `
+  /* synthetic: persistElvVerdict's first line asks it (v5.23.0). The real
+     module, so outside a synthetic request it is the no-op it is in prod. */
+  const S = (new Function('pool', 'elvCacheGet', 'console', 'synthetic', storeSrc + `
     return { persistElvVerdict, lookupElvStatus, ELV_BLOCK, ELV_PASS };
-  `))(stubPool, () => memHit, { log() {}, warn() {} });
+  `))(stubPool, () => memHit, { log() {}, warn() {} }, require('../synthetic'));
 
   // Only DEFINITIVE verdicts are stored. This single guard is what makes an
   // empty column mean "we deliberately do not know" rather than "fine".
@@ -4289,9 +4291,9 @@ const results31 = (async () => {
   });
 
   const makeSync = (pool, logs) => new Function(
-    'awsPool', 'console', 'recordFailure', 'process',
+    'awsPool', 'console', 'recordFailure', 'process', 'synthetic',
     base.concat(liftTop('syncToAWS'), 'return syncToAWS;').join('\n')
-  )(pool, { log: (m) => logs.push(m), warn: (m) => logs.push(m) }, () => {}, { env: {} });
+  )(pool, { log: (m) => logs.push(m), warn: (m) => logs.push(m) }, () => {}, { env: {} }, require('../synthetic'));
 
   /* ---- the mirror itself ---- */
   [
@@ -4316,9 +4318,9 @@ const results31 = (async () => {
      not have moved above it and started touching a null pool. */
   {
     const logs = [];
-    const sync = new Function('awsPool', 'console', 'recordFailure', 'process',
+    const sync = new Function('awsPool', 'console', 'recordFailure', 'process', 'synthetic',
       base.concat(liftTop('syncToAWS'), 'return syncToAWS;').join('\n')
-    )(null, { log: (m) => logs.push(m), warn: (m) => logs.push(m) }, () => {}, { env: {} });
+    )(null, { log: (m) => logs.push(m), warn: (m) => logs.push(m) }, () => {}, { env: {} }, require('../synthetic'));
     let threw = false;
     try { sync({ session_id: 's1', email: 'buyer@acme.com' }); } catch (e) { threw = true; }
     ok('29: no awsPool is still a clean no-op', !threw);

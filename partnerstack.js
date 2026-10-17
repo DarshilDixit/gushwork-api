@@ -58,6 +58,10 @@ const TIMEOUT_MS = 10000;
    only record that an affiliate was credited, and "the conversion did not
    arrive" is a conversation you cannot have from a log line that says
    "PartnerStack failed". Bodies are truncated, not omitted. */
+
+/* The net under the synthetic branches in index.js (see synthetic.js): a
+   synthetic website-monitor check must never reach this system. */
+const synthetic = require('./synthetic');
 function logCall(direction, payload) {
   console.log(`[PartnerStack] ${direction} ${JSON.stringify(payload).slice(0, 800)}`);
 }
@@ -67,6 +71,7 @@ function logCall(direction, payload) {
  * Resolves { ok, status, body, reason } — never rejects.
  */
 async function sendConversion({ xid, customer_key, email, name, ip_address, user_agent, origin, meta }) {
+  if (synthetic.refuseIfSynthetic('partnerstack', 'PartnerStack conversion')) return { ok: false, reason: 'synthetic' };
   const token = process.env.PARTNERSTACK_TRACKING_TOKEN;
   if (!token) {
     console.warn('[PartnerStack] PARTNERSTACK_TRACKING_TOKEN not set — conversion NOT sent');
@@ -212,6 +217,7 @@ async function fetchPartnership(partnerKey) {
 
    Resolves { ok, status, body, reason } — never rejects. */
 async function sendAction({ customer_key, type, value }) {
+  if (synthetic.refuseIfSynthetic('partnerstack', 'PartnerStack action')) return { ok: false, reason: 'synthetic' };
   const auth = v2AuthHeader();
   if (!auth) {
     console.warn('[PartnerStack] PARTNERSTACK_PUBLIC_KEY / _SECRET_KEY not set — action NOT sent');
