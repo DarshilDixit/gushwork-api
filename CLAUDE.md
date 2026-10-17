@@ -1174,8 +1174,18 @@ sees on screen is what the column keeps.
 **SYNTHETIC CHECKS (v5.23.0): A NEW OUTBOUND WRITE MUST OPEN WITH ITS GUARD.**
 gushwork-web's monitor fills the forms with `X-GW-Synthetic: <SYNTHETIC_TOKEN>`; nine form
 routes honour it and must leave NOTHING behind. Rules, all enforced by `test-synthetic.js`:
-- **A wrong or missing token is an ordinary request**, by design. A stale monitor token
-  creates real leads, so the monitor's address belongs in `INTERNAL_TEST_EMAILS`.
+- **FAILS CLOSED SINCE v5.24.0.** A header whose token does not match -- wrong, EMPTY, or
+  any header while `SYNTHETIC_TOKEN` is unset or under 32 characters -- is answered 401
+  `{"ok":false,"error":"synthetic token rejected","synthetic":false}` before any handler,
+  limiter or database call. Until v5.23.0 it was handled as a visitor, so a drifted monitor
+  token would have made real leads. NO header is unchanged: a visitor never sends one.
+- **`SYNTHETIC_EMAILS`** (Railway, comma-separated): the monitor's own addresses. On
+  `/partial`, `/submit`, `/enrich`, `/verify-email` (address in the body) and
+  `/booking-confirmed` (no address in the body: read off the session's lead row, only while
+  the list is non-empty), such an address without a valid token is refused 403. Neither
+  refusal counts toward `/metrics/submissions`.
+- **`/health/deep` and `/metrics/submissions` check the token BEFORE their budget**;
+  strangers' 401s have their own small budget per `clientIpOf`, never `req.ip` (a proxy hop).
 - **A form route that writes needs a `req.synthetic` branch** after its parsing and
   decisions; a route that only reads relies on the guarded helpers instead.
 - **A new Slack, email, Salesforce, Meta, PartnerStack, mirror or other outbound write

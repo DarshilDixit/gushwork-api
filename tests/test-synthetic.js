@@ -530,11 +530,15 @@ const without = (o, ...keys) => { const c = Object.assign({}, o); keys.forEach((
     const r = await get('/health/deep', TOKEN);
     eq('E: twenty unauthenticated calls did not spend the monitor\'s budget (still 200)', r.status, 200);
     eq('E: ...and its budget shows only the monitor\'s own calls', r.headers.get('ratelimit-remaining') !== null && Number(r.headers.get('ratelimit-remaining')) >= 3, true);
-    /* A stranger's 401s have their own small budget, per client address. */
+    /* A stranger's 401s have their own small budget, per CLIENT address.
+       X-Forwarded-For is sent as Railway sends it -- the client, then the
+       proxy hop -- because that is where req.ip (the hop, under trust proxy
+       1) and clientIpOf (the client) differ. With a one-entry header the two
+       agree, and keying on req.ip survived a mutation (18 Oct 2026). */
     let last = null;
-    for (let i = 0; i < 11; i++) last = await get('/metrics/submissions', 'wrong', { 'X-Forwarded-For': '203.0.113.77' });
-    eq('E: one address past its 10 unauthenticated calls gets 429', last.status, 429);
-    eq('E: ...another address still gets a plain 401', (await get('/metrics/submissions', undefined, { 'X-Forwarded-For': '203.0.113.78' })).status, 401);
+    for (let i = 0; i < 11; i++) last = await get('/metrics/submissions', 'wrong', { 'X-Forwarded-For': '203.0.113.77, 10.0.0.1' });
+    eq('E: one client past its 10 unauthenticated calls gets 429', last.status, 429);
+    eq('E: ...another client behind the SAME proxy hop still gets a plain 401', (await get('/metrics/submissions', undefined, { 'X-Forwarded-For': '203.0.113.78, 10.0.0.1' })).status, 401);
     eq('E: ...and the monitor is not affected', (await get('/metrics/submissions?hours=1', TOKEN)).status, 200);
   }
   {
