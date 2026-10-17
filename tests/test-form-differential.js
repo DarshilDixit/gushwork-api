@@ -52,8 +52,11 @@
 
    KNOWN, DOCUMENTED DIFFERENCES, asserted as differences rather than
    hidden: NEW does not request jQuery; NEW does not set window.jQuery;
-   and when the jQuery request itself FAILS, OLD never set the phone
-   field up at all while NEW (which no longer makes that request) does.
+   when the jQuery request itself FAILS, OLD never set the phone field up
+   at all while NEW (which no longer makes that request) does; and on a
+   page with the script in its HEAD whose phone field only gets its
+   attribute at DOMContentLoaded (/ai-demo), there is a timing window in
+   which OLD set the phone field up and NEW looks too early and does not.
 
    THIS IS A REFACTOR LOCK. REFERENCE names the commit whose behaviour
    the working tree must reproduce. A later change that is MEANT to
@@ -862,8 +865,12 @@ function makeWorld(opts) {
     loadScript(compiled) {
       compiled.runInContext(g);
       if (doc.readyState === 'loading') {
-        doc.readyState = 'interactive';
-        dispatch(doc, new FakeEvent('DOMContentLoaded', { bubbles: true }));
+        const fire = () => { doc.readyState = 'interactive'; dispatch(doc, new FakeEvent('DOMContentLoaded', { bubbles: true })); };
+        /* dclAt models a script pinned in the HEAD: the rest of the page,
+           including the parser-blocking scripts at the end of the body,
+           still has to arrive before DOMContentLoaded. Otherwise the
+           script is in the footer and the page finishes parsing at once. */
+        if (opts.dclAt != null) addTimer(fire, opts.dclAt, true); else fire();
       }
     },
     snapshot() { return snap(html); },
@@ -1130,7 +1137,7 @@ async function runOne(which, file, pageKey, leadKey, mode, extra) {
     session: Object.assign({ gw_referrer: 'https://www.google.com/', gw_landing_page: 'https://www.gushwork.ai' + page.path }, extra.session || {}),
     cookies: (lead.cookies || []).concat(extra.cookies || []),
     route: makeRoute(lead), latency, failScripts, brokenScripts: extra.brokenScripts || [], rhFails: !!lead.rhFails,
-    dataLayer: extra.dataLayer, pageJquery: !!extra.pageJquery, readyState: extra.readyState,
+    dataLayer: extra.dataLayer, pageJquery: !!extra.pageJquery, readyState: extra.readyState, dclAt: extra.dclAt,
   });
   w.loadScript(compiled);
   await w.idle();
@@ -1408,6 +1415,38 @@ const ADA = 'ada@acmewidgets.com';
     /* Everything except the phone handling is still the same. */
     const strip = (r) => { const b = Object.assign({}, submitBody(r)); delete b.phone; return JSON.stringify(b); };
     ok(`${tag} when cdnjs jQuery fails: the rest of /submit is identical`, strip(o) === strip(n));
+  }
+
+  /* 3. A HEAD-PINNED PAGE: the one place the earlier phone setup can be
+        SEEN. /ai-demo carries the Ads file in its <head> (checked 17 Oct
+        2026; every other form page has it in the footer). Its phone input
+        has no ms-code-phone-number attribute: the Ads file's markup
+        backfill adds it at DOMContentLoaded, and that waits for the whole
+        page, parser-blocking body scripts included. initPhoneInputs runs
+        when utils.js lands and looks once. If that is before
+        DOMContentLoaded it finds nothing and the field is never set up
+        (raw digits sent, no number check). That race is in v5.20.0 too;
+        removing a round trip moves NEW's look earlier, so there is now a
+        window where OLD found the field and NEW does not. Pinned here so
+        it is on record and is a decision, not a surprise. With the
+        libraries landing at OLD 300ms / NEW 200ms: */
+  {
+    const f = 'gushwork-form-popup.js';
+    const at = async (dcl) => [await runOne('old', f, 'aiDemo', 'b2bOrganic', 'same', { dclAt: dcl }),
+                               await runOne('new', f, 'aiDemo', 'b2bOrganic', 'same', { dclAt: dcl })];
+    const inits = (r) => eventsOf(r, 'iti.init').length;
+    const phoneOf = (r) => (submitBody(r) || {}).phone;
+    let [o, n] = await at(150);
+    ok('head-pinned /ai-demo, page ready at 150ms (before both): both set the phone up, both send E.164',
+       inits(o) === 1 && inits(n) === 1 && phoneOf(o) === '+12015550123' && phoneOf(n) === '+12015550123', [inits(o), inits(n), phoneOf(o), phoneOf(n)].join(' '));
+    [o, n] = await at(250);
+    ok('head-pinned /ai-demo, page ready at 250ms (between): OLD set the phone up, NEW looked too early and did not',
+       inits(o) === 1 && inits(n) === 0, inits(o) + ' / ' + inits(n));
+    ok('head-pinned /ai-demo, page ready at 250ms: so OLD sent E.164 and NEW sends the raw digits',
+       phoneOf(o) === '+12015550123' && phoneOf(n) === '2015550123', phoneOf(o) + ' / ' + phoneOf(n));
+    [o, n] = await at(350);
+    ok('head-pinned /ai-demo, page ready at 350ms (after both): neither sets the phone up -- the v5.20.0 race',
+       inits(o) === 0 && inits(n) === 0 && phoneOf(o) === '2015550123' && phoneOf(n) === '2015550123', [inits(o), inits(n), phoneOf(o), phoneOf(n)].join(' '));
   }
 
   console.log('');
