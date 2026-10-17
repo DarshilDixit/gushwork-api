@@ -477,7 +477,13 @@ const without = (o, ...keys) => { const c = Object.assign({}, o); keys.forEach((
     ok('E /metrics/submissions: totals add up', j.totals && j.totals.submitted === (j.series || []).reduce((a, x) => a + x.submitted, 0));
     ok('E /metrics/submissions: no personal data (no address, no session id)', !/@/.test(r.text) && r.text.indexOf(failing) === -1, r.text.slice(0, 200));
     const mq = Q.filter((q) => /generate_series/.test(q.text)).pop();
-    ok('E /metrics/submissions: our own submissions are left out with IS NOT TRUE, never NOT', mq && /\) IS NOT TRUE/.test(mq.text) && /\$2/.test(mq.text), mq && mq.text.slice(0, 80));
+    /* In EACH count, not just somewhere in the statement: dropping it from
+       one of the two would otherwise pass. */
+    const seg = (t, from, to) => { const i = t.indexOf(from); return i === -1 ? '' : t.slice(i, t.indexOf(to, i)); };
+    const subSeg = mq ? seg(mq.text, 'WHERE l.submitted_at', 'AS submitted') : '';
+    const bookSeg = mq ? seg(mq.text, 'WHERE l.booking_uid', 'AS booked') : '';
+    ok('E /metrics/submissions: submitted leaves our own submissions out, with IS NOT TRUE', /\) IS NOT TRUE\)?\s*$/.test(subSeg.trim()) && /\$2/.test(subSeg), subSeg.slice(-80));
+    ok('E /metrics/submissions: booked leaves our own submissions out, with IS NOT TRUE', /\) IS NOT TRUE\)?\s*$/.test(bookSeg.trim()) && /\$2/.test(bookSeg), bookSeg.slice(-80));
     const h = (await get('/metrics/submissions?hours=99999', TOKEN)).json;
     eq('E /metrics/submissions: hours is capped at a week', h && h.hours, 168);
   }
