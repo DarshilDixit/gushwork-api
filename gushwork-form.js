@@ -1,5 +1,15 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.20.0  (/demo PAGE VERSION - thru github/jsdlivr)
+  GUSHWORK — MULTI-STEP FORM  v5.21.0  (/demo PAGE VERSION - thru github/jsdlivr)
+
+  v5.21.0 — no jQuery. The phone setup no longer loads jQuery 3.6.0 from
+  cdnjs first (89,501 bytes, 27,938 as sent): the file used it for three
+  calls, now plain DOM with the same results. One request and one serial
+  round trip fewer before the phone field is set up. Nothing a visitor,
+  the server, GTM or RevenueHero sees changes, except that window.jQuery
+  is no longer set by this file. See "NO jQUERY" in the phone section.
+  One deliberate change: the phone setup now waits for DOMContentLoaded
+  when the page is still loading, so a <head> pin (/ai-demo) no longer
+  misses the phone field. A footer pin runs it at once, as before.
 
   v5.20.0 — the two GTM events carry the lead's email for Google Ads
   enhanced conversions: gw_form_submitted and gw_demo_booked now push
@@ -370,10 +380,11 @@
 
     /* ── START IT NOW, NOT AFTER THE SCRIPTS ──────────────────────────
        THIS LINE IS THE FIX, and without it the flag stays wrong for as long
-       as the CDN takes. initPhoneInputs runs at the END of three SERIAL
-       script loads -- jQuery, then intlTelInput, then utils.js, each waiting
-       on the previous onload -- and only then did anything ask where the
-       visitor is. Measured on a fast connection on 16 Sept 2026: 0.30s of
+       as the CDN takes. initPhoneInputs runs at the END of SERIAL script
+       loads -- intlTelInput, then utils.js, each waiting on the previous
+       onload (and, until v5.21.0, jQuery in front of both) -- and only then
+       did anything ask where the visitor is. Measured on a fast connection
+       on 16 Sept 2026, with jQuery still in the chain: 0.30s of
        serial script loading before a 0.22s lookup could even start, and that
        is the good case. On mobile it is seconds.
 
@@ -399,20 +410,40 @@
       document.head.appendChild(s);
     }
 
-    loadScript('https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js', function () {
-      loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/intlTelInput.min.js', function () {
-        loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/utils.js', function () {
-          initPhoneInputs();
-        });
+    /* ── NO jQUERY (v5.21.0) ──────────────────────────────────────────
+       jQuery 3.6.0 used to load first (89,501 bytes, and one more serial
+       round trip before the phone field is set up) for three calls, all in
+       initPhoneInputs: a typeof $ guard, only reachable after jQuery's own
+       onload, so it never decided anything; $('input[...]').each, which
+       jQuery hands to querySelectorAll, so the same static list in the same
+       order; and $(input).attr, i.e. getAttribute on an input matched BY
+       that attribute, so never missing. tests/test-form-differential.js runs
+       v5.20.0 and this file side by side and requires identical results.
+       window.jQuery is no longer set here: Webflow pages keep their own
+       3.5.1, which this used to overwrite; the Astro pages have none.
+       HEAD PINS: initPhoneInputs looks for the phone field ONCE. /ai-demo
+       loads this file in its <head> (checked 17 Oct 2026), where the two
+       scripts can land before the Ads backfill tags the field at
+       DOMContentLoaded: the setup then found nothing, and the visitor got a
+       plain field with no number check and raw digits went to Salesforce and
+       RevenueHero. v5.20.0 missed it too, and dropping jQuery made the
+       scripts land a round trip sooner, so the setup now WAITS for
+       DOMContentLoaded. The backfill's listener is added while this file
+       first runs, so it is always ahead of this one and tags the field
+       first. On a footer pin the page is normally parsed by the time
+       utils.js lands, so this runs at once, as before. */
+    loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/intlTelInput.min.js', function () {
+      loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/utils.js', function () {
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { initPhoneInputs(); });
+        else initPhoneInputs();
       });
     });
 
 
     function initPhoneInputs() {
-      if (typeof $ === 'undefined' || typeof window.intlTelInput === 'undefined') return;
-      $('input[ms-code-phone-number]').each(function () {
-        var input = this;
-        var preferredCountries = $(input).attr('ms-code-phone-number').split(',');
+      if (typeof window.intlTelInput === 'undefined') return;
+      document.querySelectorAll('input[ms-code-phone-number]').forEach(function (input) {
+        var preferredCountries = input.getAttribute('ms-code-phone-number').split(',');
         var iti = window.intlTelInput(input, {
           preferredCountries: preferredCountries,
           /* 'auto' defers the flag until lookupCountry answers, so the field
@@ -3555,7 +3586,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.20.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.21.0 (/demo).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

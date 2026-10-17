@@ -1,5 +1,11 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.20.0-ads  (ADS PAGE VERSION)
+  GUSHWORK — MULTI-STEP FORM  v5.21.0-ads  (ADS PAGE VERSION)
+
+  v5.21.0-ads — no jQuery. Ported from /demo v5.21.0, identical: the
+  phone setup no longer loads jQuery 3.6.0 from cdnjs first, and its three
+  jQuery calls are plain DOM with the same results. One deliberate change:
+  the phone setup now waits for DOMContentLoaded when the page is still
+  loading, so a <head> pin (/ai-demo) no longer misses the phone field.
 
   v5.20.0-ads — the two GTM events carry the lead's email for Google Ads
   enhanced conversions: gw_form_submitted and gw_demo_booked now push
@@ -11,7 +17,7 @@
   server's non-ICP answers now carry 'real_estate' or 'insurance'; the form
   remembers it and adds industry= to the redirect. Nothing else moves.
 
-  Tracks /demo v5.20.0. Full feature parity with /demo, EXCEPT the
+  Tracks /demo v5.21.0. Full feature parity with /demo, EXCEPT the
   booking step, which keeps the Ads page's fullscreen modal
   presentation — opened after step 2 — instead of /demo's inline
   column render, AND the close affordances that modal needs (v5.7.2).
@@ -260,7 +266,7 @@
   ensureWebsiteMismatchTip() already uses for its own element.
 
   Runs before SECTION 0A so injected inputs get float-label wrapped,
-  and long before initPhoneInputs() (which waits on 3 CDN scripts).
+  and long before initPhoneInputs() (which waits on 2 CDN scripts).
 
   Everything here is a no-op when the element already exists, so adding
   the fields properly in Webflow later changes nothing.
@@ -713,10 +719,11 @@
 
     /* ── START IT NOW, NOT AFTER THE SCRIPTS ──────────────────────────
        THIS LINE IS THE FIX, and without it the flag stays wrong for as long
-       as the CDN takes. initPhoneInputs runs at the END of three SERIAL
-       script loads -- jQuery, then intlTelInput, then utils.js, each waiting
-       on the previous onload -- and only then did anything ask where the
-       visitor is. Measured on a fast connection on 16 Sept 2026: 0.30s of
+       as the CDN takes. initPhoneInputs runs at the END of SERIAL script
+       loads -- intlTelInput, then utils.js, each waiting on the previous
+       onload (and, until v5.21.0, jQuery in front of both) -- and only then
+       did anything ask where the visitor is. Measured on a fast connection
+       on 16 Sept 2026, with jQuery still in the chain: 0.30s of
        serial script loading before a 0.22s lookup could even start, and that
        is the good case. On mobile it is seconds.
 
@@ -742,20 +749,40 @@
       document.head.appendChild(s);
     }
 
-    loadScript('https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js', function () {
-      loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/intlTelInput.min.js', function () {
-        loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/utils.js', function () {
-          initPhoneInputs();
-        });
+    /* ── NO jQUERY (v5.21.0) ──────────────────────────────────────────
+       jQuery 3.6.0 used to load first (89,501 bytes, and one more serial
+       round trip before the phone field is set up) for three calls, all in
+       initPhoneInputs: a typeof $ guard, only reachable after jQuery's own
+       onload, so it never decided anything; $('input[...]').each, which
+       jQuery hands to querySelectorAll, so the same static list in the same
+       order; and $(input).attr, i.e. getAttribute on an input matched BY
+       that attribute, so never missing. tests/test-form-differential.js runs
+       v5.20.0 and this file side by side and requires identical results.
+       window.jQuery is no longer set here: Webflow pages keep their own
+       3.5.1, which this used to overwrite; the Astro pages have none.
+       HEAD PINS: initPhoneInputs looks for the phone field ONCE. /ai-demo
+       loads this file in its <head> (checked 17 Oct 2026), where the two
+       scripts can land before the Ads backfill tags the field at
+       DOMContentLoaded: the setup then found nothing, and the visitor got a
+       plain field with no number check and raw digits went to Salesforce and
+       RevenueHero. v5.20.0 missed it too, and dropping jQuery made the
+       scripts land a round trip sooner, so the setup now WAITS for
+       DOMContentLoaded. The backfill's listener is added while this file
+       first runs, so it is always ahead of this one and tags the field
+       first. On a footer pin the page is normally parsed by the time
+       utils.js lands, so this runs at once, as before. */
+    loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/intlTelInput.min.js', function () {
+      loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/utils.js', function () {
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { initPhoneInputs(); });
+        else initPhoneInputs();
       });
     });
 
 
     function initPhoneInputs() {
-      if (typeof $ === 'undefined' || typeof window.intlTelInput === 'undefined') return;
-      $('input[ms-code-phone-number]').each(function () {
-        var input = this;
-        var preferredCountries = $(input).attr('ms-code-phone-number').split(',');
+      if (typeof window.intlTelInput === 'undefined') return;
+      document.querySelectorAll('input[ms-code-phone-number]').forEach(function (input) {
+        var preferredCountries = input.getAttribute('ms-code-phone-number').split(',');
         var iti = window.intlTelInput(input, {
           preferredCountries: preferredCountries,
           /* 'auto' defers the flag until lookupCountry answers, so the field
@@ -3959,7 +3986,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.20.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.21.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

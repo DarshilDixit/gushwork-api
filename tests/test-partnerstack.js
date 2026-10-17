@@ -3948,7 +3948,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        the banner read v5.13.0 on the old pin and the new one alike and
        could not tell you anything. A deploy check that returns the same
        answer either way is not a check. See the Webflow step in CLAUDE.md. */
-    ok(`form(${name}): version banner says v5.20.0`, /Form initialised v5\.20\.0/.test(f));
+    ok(`form(${name}): version banner says v5.21.0`, /Form initialised v5\.21\.0/.test(f));
   }
 
   console.log('');
