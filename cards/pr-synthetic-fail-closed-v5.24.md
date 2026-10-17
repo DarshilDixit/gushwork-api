@@ -77,12 +77,38 @@ The `/submit` outcome counter now skips **any** request carrying the header,
 matching or not. It used to skip only matching ones, so a refused check would
 have shown up as a visitor's rejected submit.
 
+### 5. Added before merge, at review (18 Oct)
+
+- **The refusal has its own budget.** A wrong-token 401 is answered before
+  every route limiter, so on its own a flood of bad headers got unlimited 401s
+  and a log line each. It now sits behind `syntheticRefusalLimiter`: 60 an hour
+  per client address (`clientIpOf`, like the ops budget; `SYNTHETIC_REFUSED_PER_HOUR`).
+  - Past that, a **429** `{"ok":false,"error":"Too many requests","synthetic":false}`
+    that writes no log line and runs nothing.
+  - The 401 body and CORS are unchanged.
+  - The 401 now carries that budget's rate-limit headers (limit 60), never a
+    visitor budget's.
+- **The `/booking-confirmed` row read is behind that route's limiter.** The
+  monitor-address lock is now mounted after the route limiters, so a stranger
+  cannot drive database reads with made-up session ids past the route's own
+  limit. The four body routes moved with it; their check never touched the
+  database.
+- **Found, NOT changed, pre-existing:** that route limiter (`globalLimiter`,
+  100 per 15 minutes, shared by `/partial`, `/submit`, `/session` and
+  `/booking-confirmed`) keys on `req.ip`. On Railway that is the proxy hop,
+  so it is effectively **one bucket for every visitor**. It caps the row reads
+  at about 400 an hour in total. But a stranger who floods those routes can
+  exhaust it for real visitors, and that was already true before this PR.
+  Keying it on `clientIpOf` would fix that. It changes visitor rate limiting,
+  so it is a separate decision for you, not a tidy-up here.
+
 ## Set this
 
 | Variable | Value |
 |---|---|
 | `SYNTHETIC_EMAILS` | the monitor's address(es), comma-separated. **Unset: the address guard is off** |
 | `SYNTHETIC_OPS_UNAUTH_PER_HOUR` | optional, default 30 |
+| `SYNTHETIC_REFUSED_PER_HOUR` | optional, default 60 per client address |
 | `SYNTHETIC_TOKEN` | already set on 17 Oct. Unchanged |
 
 **The monitor must send the right token from the first request after this
@@ -109,9 +135,21 @@ it in synthetic mode.
 
 ## Verified (run, not just read)
 
-- **Full bar, run bare after the last commit: 19 suites, 8,631 assertions, 0
-  failed.** Before: 8,356. Only the two suites I changed moved:
-  `test-synthetic` 234 → 376 and `test-server-differential` 117 → 250.
+- **Full bar, run bare after the last commit: 19 suites, 8,642 assertions, 0
+  failed.** Before this PR: 8,356. Only the two suites I changed moved:
+  `test-synthetic` 234 → 387 and `test-server-differential` 117 → 250.
+- **The two review additions, executed in `test-synthetic`:**
+  - **Flood:** one client's first 40 bad headers (the suite's budget) are each
+    a 401 with one log line. The 41st is a 429 with no log line, nothing run,
+    `synthetic: false`, and CORS readable. Another client behind the same
+    proxy hop still gets 401, and a visitor is untouched.
+  - **Booking row read:** with the route's visitor budget spent, a
+    `/booking-confirmed` for a monitor-address session gets 429 with **zero**
+    database statements.
+
+  Three more mutations, all **CAUGHT**: the refusal not behind its limiter
+  (2 suites), the refusal limiter keyed on `req.ip`, and the lock moved back
+  in front of the route limiters.
 - **`test-server-differential` now locks against v5.23.0** (`c2220b1`). It
   boots both servers with identical stubs and sends every form route three ways:
   - **No header:** same status, headers, database statements and outbound
@@ -156,7 +194,7 @@ it in synthetic mode.
     not in `rejected`; the visitor's 400 is.
   - Routes in the earlier sections behave as in v5.23.0 with the right token
     and with no header.
-- **8 mutations, all CAUGHT** by `measure.js --mutation`, each committed first
+- **8 mutations of the first version, all CAUGHT** by `measure.js --mutation`, each committed first
   and restored from a byte-exact backup:
   - Wrong token handled as a visitor again: 58 + 66 failures across 2 suites.
   - Empty header treated as no header: 2 suites.

@@ -1179,10 +1179,13 @@ routes honour it and must leave NOTHING behind. Rules, all enforced by `test-syn
   `{"ok":false,"error":"synthetic token rejected","synthetic":false}` before any handler,
   limiter or database call. Until v5.23.0 it was handled as a visitor, so a drifted monitor
   token would have made real leads. NO header is unchanged: a visitor never sends one.
+  The refusal has its OWN budget, 60 an hour per `clientIpOf` (`SYNTHETIC_REFUSED_PER_HOUR`):
+  past it a flood gets 429 and writes no log line.
 - **`SYNTHETIC_EMAILS`** (Railway, comma-separated): the monitor's own addresses. On
   `/partial`, `/submit`, `/enrich`, `/verify-email` (address in the body) and
   `/booking-confirmed` (no address in the body: read off the session's lead row, only while
-  the list is non-empty), such an address without a valid token is refused 403. Neither
+  the list is non-empty), such an address without a valid token is refused 403. The check is
+  mounted AFTER the route limiters, so that row read is behind the route's own limit. Neither
   refusal counts toward `/metrics/submissions`.
 - **`/health/deep` and `/metrics/submissions` check the token BEFORE their budget**;
   strangers' 401s have their own small budget per `clientIpOf`, never `req.ip` (a proxy hop).
