@@ -266,10 +266,12 @@ So the default 60 an hour is about **six full runs an hour**. Raise
 
   Required, per request: the same status, body and response headers, and the
   same database statements and outbound requests. Results:
-  - 18 answers were byte for byte.
-  - The rest differed only in generated values: ELV's `ms` stopwatch,
-    `/health`'s timestamp, and the stack-trace path on express's own error
-    pages, because the release runs from a temp directory.
+  - In the last run, **23 of 27 bodies were byte for byte** (counted, not
+    estimated). The other 4 differed only in generated values: ELV's `ms`
+    stopwatch on a `/verify-email` answer (which of the two `/verify-email`
+    requests that hits varies run to run), `/health`'s timestamp, and the
+    stack-trace path on express's own 413 and CORS error pages, because the
+    release runs from a temp directory.
   - The only intended differences, pinned: the preflight now lists
     `X-GW-Synthetic`, and the two monitor endpoints answer 401 where the
     release had 404.
@@ -337,6 +339,8 @@ So the default 60 an hour is about **six full runs an hour**. Raise
 - **Production, read-only:** the `/metrics/submissions` SQL (EXPLAIN, then run,
   rolled back); Apollo's auth-health and RevenueHero's script (one call each);
   the Railway `ALLOWED_ORIGIN` value (the three origins).
+- No new dependency: `synthetic.js` and `allowed-origins.js` use only Node
+  built-ins.
 - The three fire tools whose lifts I changed: `fire-alert` and
   `fire-non-icp-slack` load and print their usage. `fire-dropoff-digest`
   has no usage guard (run bare, it sends), so it was only syntax-checked.
@@ -350,8 +354,6 @@ So the default 60 an hour is about **six full runs an hour**. Raise
   deploy). The first one after deploy should be `/health/deep` with the token.
 - ELV and Apollo pricing per synthetic run is from the code's own comments,
   not measured.
-- Railway now also installs nothing new at runtime: `synthetic.js` and
-  `allowed-origins.js` use only Node built-ins.
 
 ## Shipping it
 
