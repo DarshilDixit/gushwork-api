@@ -88,7 +88,7 @@ function drive(file, opts = {}) {
   const windowFake = { location: {
     href: page,
     search: page.indexOf('?') === -1 ? '' : page.slice(page.indexOf('?')),
-    hostname: 'www.gushwork.ai',
+    hostname: 'hostname' in opts ? opts.hostname : 'www.gushwork.ai',
   } };
 
   let posted = null;
@@ -112,6 +112,9 @@ function drive(file, opts = {}) {
         instead of a payload -- which is how it announced itself. */
      lift(src, 'offerFromReferrer'),
      (/const OFFER_COOKIE_DAYS = \d+;/.exec(src) || [''])[0],
+     /* The hosts /session goes out from, since v5.22.0. saveSession reads
+        it, so without it the factory throws on the first call. */
+     (/const SESSION_HOSTS = \[[^\]]*\];/.exec(src) || [''])[0],
      'return { initSession, captureUTMs, saveSession };'].join('\n')
   );
   const fns = factory(
@@ -670,6 +673,27 @@ for (const file of ['gushwork-form.js', 'gushwork-form-popup.js']) {
                              session: { gw_referrer: '', gw_utm_campaign: '', gw_utm_medium: '' } });
   ok(`${tag}/offer: an unparseable referrer does not throw`,
      !junk.state.offer_campaign, JSON.stringify(junk.state.offer_campaign));
+}
+
+/* ── /session ONLY FROM THE HOSTS THE API ACCEPTS (v5.22.0) ──────────
+
+   From any other host (a gushwork-web preview on workers.dev, localhost)
+   the browser refused /session on CORS and printed the refusal as a
+   console error, which costs Lighthouse points on every preview audit.
+   The three accepted hosts must post exactly as before; anything else,
+   lookalikes included, must post nothing. EXECUTED: saveSession is
+   driven for real with each hostname. */
+for (const file of ['gushwork-form.js', 'gushwork-form-popup.js']) {
+  const tag = file.replace('gushwork-form', 'form').replace('.js', '');
+  for (const h of ['www.gushwork.ai', 'gushwork.ai', 'gushwork.webflow.io']) {
+    const d = drive(file, { hostname: h });
+    ok(`${tag}/hosts: ${h} posts /session`, !!d.posted && /\/session$/.test(d.posted.url), JSON.stringify(d.posted && d.posted.url));
+  }
+  for (const h of ['gushwork-web-preview.gushwork.workers.dev', 'localhost', '127.0.0.1',
+                   'gushwork.ai.evil.com', 'evilgushwork.ai', 'staging.gushwork.ai', 'WWW.GUSHWORK.AI.', '']) {
+    const d = drive(file, { hostname: h });
+    ok(`${tag}/hosts: ${JSON.stringify(h)} posts nothing`, d.posted === null, JSON.stringify(d.posted && d.posted.url));
+  }
 }
 
 console.log('');

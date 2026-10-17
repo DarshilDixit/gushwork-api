@@ -1,5 +1,13 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.21.0-ads  (ADS PAGE VERSION)
+  GUSHWORK — MULTI-STEP FORM  v5.22.0-ads  (ADS PAGE VERSION)
+
+  v5.22.0-ads — ported from /demo v5.22.0, identical. (1) /session is only
+  sent from the hosts the API accepts, so a preview audit no longer logs
+  a CORS error. See SESSION_HOSTS. (2) A minified copy,
+  gushwork-form-popup.min.js, built from this file by
+  tools/build-form-min.js and committed beside it. This file stays the
+  source. Sizes, raw / gzip -9 / brotli 11: v5.21.0-ads source 201,049 /
+  61,323 / 50,204 bytes; v5.22.0-ads min 67,264 / 19,255 / 16,586 bytes.
 
   v5.21.0-ads — no jQuery. Ported from /demo v5.21.0, identical: the
   phone setup no longer loads jQuery 3.6.0 from cdnjs first, and its three
@@ -17,7 +25,7 @@
   server's non-ICP answers now carry 'real_estate' or 'insurance'; the form
   remembers it and adds industry= to the redirect. Nothing else moves.
 
-  Tracks /demo v5.21.0. Full feature parity with /demo, EXCEPT the
+  Tracks /demo v5.22.0. Full feature parity with /demo, EXCEPT the
   booking step, which keeps the Ads page's fullscreen modal
   presentation — opened after step 2 — instead of /demo's inline
   column render, AND the close affordances that modal needs (v5.7.2).
@@ -1496,8 +1504,24 @@
       }
     }
 
+    /* /session ONLY FROM THE HOSTS THE API ADMITS (v5.22.0). The API's
+       ALLOWED_ORIGIN (Railway env, 17 Oct 2026) is exactly these three. From
+       anywhere else -- a gushwork-web preview on workers.dev, localhost --
+       the browser refuses the request on CORS, and the .catch below cannot
+       stop the browser printing that refusal as a console error. Lighthouse
+       counts it against Best Practices on every preview audit. Skipping it
+       loses nothing: the server could never have received it. Production and
+       the Webflow staging host send exactly what they sent before.
+       If an origin is ever added to ALLOWED_ORIGIN, add it here too, or that
+       site records no page loads. Exact names, never a pattern. */
+    const SESSION_HOSTS = ['www.gushwork.ai', 'gushwork.ai', 'gushwork.webflow.io'];
+
     function saveSession() {
       if (!isRailwayReady()) return;
+      if (SESSION_HOSTS.indexOf(window.location.hostname) === -1) {
+        console.log('[GW] /session not sent: ' + window.location.hostname + ' is not a host the API accepts.');
+        return;
+      }
       fetchWithTimeout(`${RAILWAY_API_URL}/session`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3986,7 +4010,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.21.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.22.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

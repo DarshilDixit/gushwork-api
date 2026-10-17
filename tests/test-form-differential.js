@@ -64,8 +64,26 @@
    moment a reviewer should be asking why -- and the absolute
    expectations near the end of the file change with it.
 
-   Needs git (it reads REFERENCE with `git show`). No network, no
-   database, no dependencies. Run:  node tests/test-form-differential.js
+   SINCE v5.22.0 THERE IS A SECOND LOCK, AGAINST v5.21.0 (RELEASE below),
+   and it is stricter, because v5.22.0 is meant to change nothing at all
+   on the hosts the API accepts. Both the working-tree source AND the
+   minified files (gushwork-form.min.js, gushwork-form-popup.min.js) are
+   run against v5.21.0 over the same matrix, every request at the same
+   latency, and must be IDENTICAL: every effect, every timestamp, the
+   scripts requested, the page after load and at the end. Nothing is
+   carved out except the version inside the init banner. The minified
+   files are also rebuilt here and must match the committed bytes, so a
+   source change without a rebuild fails the suite.
+   The ONE intended difference is pinned on its own: on a host the API
+   does not accept (a workers.dev preview, localhost), v5.21.0 posted
+   /session, which the browser refused on CORS with a console error;
+   v5.22.0 does not send it and logs one plain line instead. Everything
+   else on that host is identical too. The fake network refuses every
+   API call from such a host, as the real one does.
+
+   Needs git (it reads REFERENCE and RELEASE with `git show`) and terser
+   from node_modules (a devDependency, for the rebuild check). No network,
+   no database. Run:  node tests/test-form-differential.js
    ============================================================ */
 
 require('./crash-reporter')('test-form-differential');
@@ -79,6 +97,10 @@ const ROOT = path.join(__dirname, '..');
 /* v5.20.0 / v5.20.0-ads: the merge of PR 149, the last release that
    loaded jQuery. */
 const REFERENCE = '08ecc1ef07aa34f6fc3edc3abc2096b7b679abbe';
+/* v5.21.0 / v5.21.0-ads: the merge of PR 150, the release before the
+   /session host check and the minified build. */
+const RELEASE = '57f45b5dc2a8eac33055c2f8719092b547bb7820';
+const MIN = require('../tools/build-form-min.js');
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -87,8 +109,8 @@ function ok(name, cond, extra) {
 }
 
 /* ── the two versions of each file ─────────────────────────────────── */
-function readReference(file) {
-  return execFileSync('git', ['show', REFERENCE + ':' + file],
+function readReference(file, ref) {
+  return execFileSync('git', ['show', (ref || REFERENCE) + ':' + file],
     { cwd: ROOT, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 const FILES = ['gushwork-form.js', 'gushwork-form-popup.js'];
@@ -96,9 +118,13 @@ const SOURCES = {};
 for (const f of FILES) {
   const oldSrc = readReference(f);
   const newSrc = fs.readFileSync(path.join(ROOT, f), 'utf8');
+  const relSrc = readReference(f, RELEASE);
+  const minSrc = fs.readFileSync(path.join(ROOT, MIN.minName(f)), 'utf8');
   SOURCES[f] = {
     old: { src: oldSrc, script: new vm.Script(oldSrc, { filename: 'OLD/' + f }), banner: bannerOf(oldSrc) },
     new: { src: newSrc, script: new vm.Script(newSrc, { filename: 'NEW/' + f }), banner: bannerOf(newSrc) },
+    rel: { src: relSrc, script: new vm.Script(relSrc, { filename: 'RELEASE/' + f }), banner: bannerOf(relSrc) },
+    min: { src: minSrc, script: new vm.Script(minSrc, { filename: 'MIN/' + MIN.minName(f) }), banner: bannerOf(minSrc) },
   };
 }
 function bannerOf(src) {
@@ -598,7 +624,7 @@ function makeWorld(opts) {
   /* ── window ── */
   const win = {};
   win._ls = {};
-  const loc = new URL('https://www.gushwork.ai' + opts.path + (opts.query || ''));
+  const loc = new URL((opts.origin || 'https://www.gushwork.ai') + opts.path + (opts.query || ''));
   const location = {
     get href() { return loc.href; },
     set href(v) { rec('navigate', { href: String(v) }); },
@@ -979,9 +1005,15 @@ const PAGES = {
 /* ════════════════════════════════════════════════════════════════════
    THE NETWORK — what each endpoint answers in each scenario
    ════════════════════════════════════════════════════════════════════ */
-function makeRoute(lead) {
+/* The API's ALLOWED_ORIGIN in the Railway env, read 17 Oct 2026. From any
+   other origin the browser refuses every API call on CORS, which reaches
+   the page as a network error. */
+const API_ORIGINS = ['https://www.gushwork.ai', 'https://gushwork.ai', 'https://gushwork.webflow.io'];
+function makeRoute(lead, origin) {
   let nonIcpCalls = 0;
+  const corsRefused = API_ORIGINS.indexOf(origin || 'https://www.gushwork.ai') === -1;
   return (url, method, body) => {
+    if (corsRefused && url.indexOf(API + '/') === 0) return { networkError: true };
     if (url === 'https://api.country.is') return { json: { ip: '203.0.113.9', country: lead.geo || 'US' }, latency: 60 };
     if (url.indexOf('https://dns.google/resolve?') === 0 || url.indexOf('https://cloudflare-dns.com/dns-query?') === 0) {
       const q = new URL(url).searchParams;
@@ -1132,11 +1164,11 @@ async function runOne(which, file, pageKey, leadKey, mode, extra) {
      round trip OLD spent on jQuery. */
   const latency = (src) => (mode === 'aligned' && which === 'new' && src === URL_ITI ? 2 * BASE_LATENCY : BASE_LATENCY);
   const w = makeWorld({
-    path: page.path, query: lead.query || '', markup: formMarkup(page.markup),
+    path: page.path, query: lead.query || '', markup: formMarkup(page.markup), origin: extra.origin,
     referrer: extra.referrer || 'https://www.google.com/',
-    session: Object.assign({ gw_referrer: 'https://www.google.com/', gw_landing_page: 'https://www.gushwork.ai' + page.path }, extra.session || {}),
+    session: Object.assign({ gw_referrer: 'https://www.google.com/', gw_landing_page: (extra.origin || 'https://www.gushwork.ai') + page.path }, extra.session || {}),
     cookies: (lead.cookies || []).concat(extra.cookies || []),
-    route: makeRoute(lead), latency, failScripts, brokenScripts: extra.brokenScripts || [], rhFails: !!lead.rhFails,
+    route: makeRoute(lead, extra.origin), latency, failScripts, brokenScripts: extra.brokenScripts || [], rhFails: !!lead.rhFails,
     dataLayer: extra.dataLayer, pageJquery: !!extra.pageJquery, readyState: extra.readyState, dclAt: extra.dclAt,
   });
   w.loadScript(compiled);
@@ -1280,6 +1312,39 @@ function expectAbsolute(c, exp) {
   if ('itiInits' in exp) {
     ok(`${tag}: intl-tel-input set up ${exp.itiInits} field(s)`, eventsOf(r, 'iti.init').length === exp.itiInits, String(eventsOf(r, 'iti.init').length));
   }
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   AGAINST v5.21.0 (RELEASE): the source and the minified file, each run
+   whole at the same latency as v5.21.0, must record exactly what it
+   recorded. Only the version inside the init banner is normalised; no
+   entry is filtered out, scripts included.
+   ════════════════════════════════════════════════════════════════════ */
+function bannerOnly(r) {
+  const re = new RegExp('Form initialised ' + r.banner.replace(/\./g, '\\.') + ' ', 'g');
+  return r.trace
+    .map((e) => (e.k === 'console' ? Object.assign({}, e, { text: e.text.replace(re, 'Form initialised vX ') }) : e))
+    .map((e) => JSON.stringify(e));
+}
+const SUBJECT_NAME = (subject, file) => (subject === 'min' ? MIN.minName(file) : file);
+
+async function compareToRelease(subject, file, pageKey, leadKey, extra) {
+  const where = (extra && extra.origin ? extra.origin.replace(/^https?:\/\//, '') : '') + PAGES[pageKey].path;
+  const tag = `${SUBJECT_NAME(subject, file)} vs v5.21.0 ${where}${pageKey === 'demoNeeds' ? '(needs)' : pageKey === 'twoPhones' ? '(two phone fields)' : ''} ${leadKey}${extra && extra.label ? ' ' + extra.label : ''}`;
+  const r = await runOne('rel', file, pageKey, leadKey, 'same', extra);
+  const n = await runOne(subject, file, pageKey, leadKey, 'same', extra);
+  const R = bannerOnly(r), N = bannerOnly(n);
+  ok(`${tag}: every recorded effect identical, in order, at the same times (${R.length} entries)`,
+     R.length > 0 && R.join('\n') === N.join('\n'), firstDiff(R, N));
+  ok(`${tag}: the page after load and the final page are identical`,
+     JSON.stringify([r.afterLoad, r.final]) === JSON.stringify([n.afterLoad, n.final]));
+  ok(`${tag}: storage, cookies, dataLayer and window.jQuery identical`,
+     JSON.stringify([r.session, r.local, r.cookies, r.dataLayer, r.jquery]) === JSON.stringify([n.session, n.local, n.cookies, n.dataLayer, n.jquery]));
+  ok(`${tag}: the same scripts requested, in the same order`, JSON.stringify(r.scripts) === JSON.stringify(n.scripts), JSON.stringify([r.scripts, n.scripts]));
+  ok(`${tag}: nothing threw inside the page, and no console line carries the lead's email`,
+     !r.trace.concat(n.trace).some((e) => e.k === 'error') && !consoleHasEmail(r) && !consoleHasEmail(n),
+     JSON.stringify(r.trace.concat(n.trace).filter((e) => e.k === 'error').slice(0, 3)));
+  return { rel: r, new: n, tag };
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -1473,6 +1538,89 @@ const ADA = 'ada@acmewidgets.com';
     const inits = eventsOf(n, 'iti.init');
     ok(`${f} on a page still loading at 350ms: the phone setup waits for the page and runs once, at or after 350ms`,
        inits.length === 1 && inits[0].t >= 350, JSON.stringify(inits.map((e) => e.t)));
+  }
+
+  /* ════════════════════════════════════════════════════════════════
+     THE v5.21.0 LOCK (v5.22.0): source and minified, against RELEASE
+     ════════════════════════════════════════════════════════════════ */
+  for (const f of FILES) {
+    const s = SOURCES[f];
+    const ads = f === 'gushwork-form.js' ? '' : '-ads';
+    ok(`${f}: RELEASE is v5.21.0${ads} from git`, s.rel.banner === 'v5.21.0' + ads, s.rel.banner);
+    ok(`${f}: the working tree is v5.22.0${ads}`, s.new.banner === 'v5.22.0' + ads, s.new.banner);
+    ok(`${MIN.minName(f)}: carries the same banner as its source`, s.min.banner === s.new.banner, s.min.banner);
+    ok(`${MIN.minName(f)}: its first line names the source file and version`,
+       s.min.src.split('\n')[0].indexOf('/*! ' + f + ' ' + s.new.banner + ' ') === 0, s.min.src.split('\n')[0].slice(0, 120));
+    ok(`${MIN.minName(f)}: actually minified (under 40% of the source's bytes)`, s.min.src.length < 0.4 * s.new.src.length, s.min.src.length + ' / ' + s.new.src.length);
+    const fmt = (src) => (/console\.log\('\[GW\] ✅ Form initialised v[^']*'(.*)\);/.exec(src) || [])[1];
+    ok(`${f}: the init log line has the same format as v5.21.0 apart from the version`, !!fmt(s.rel.src) && fmt(s.rel.src) === fmt(s.new.src));
+  }
+  /* The committed minified files are what a fresh build of the committed
+     sources produces, byte for byte (map included). A form change without
+     a rebuild fails here. */
+  const stale = await MIN.staleFiles();
+  ok('the committed .min.js files and maps match a fresh build of their sources', stale.length === 0, 'stale: ' + stale.join(', ') + ' -- run node tools/build-form-min.js');
+
+  /* Every case above, plus the conditions the v5.20.0 comparison pinned as
+     differences (they are not differences against v5.21.0), plus the two
+     other hosts the API accepts. Each runs against the source AND the
+     minified file, and each keeps its absolute expectations. */
+  const relCases = cases.slice();
+  for (const dcl of [150, 250, 350]) {
+    relCases.push({ file: 'gushwork-form-popup.js', page: 'aiDemo', lead: 'b2bOrganic', exp: { phone: '+12015550123', itiInits: 1 }, extra: { label: '(head-pinned, page ready at ' + dcl + 'ms)', dclAt: dcl } });
+  }
+  relCases.push({ file: 'gushwork-form.js', page: 'demo', lead: 'b2bOrganic', exp: { phone: '+12015550123', itiInits: 1 }, extra: { label: '(page still loading until 350ms)', dclAt: 350 } });
+  for (const f of FILES) relCases.push({ file: f, page: 'start', lead: 'b2bOrganic', exp: {}, extra: { label: '(Webflow page with its own jQuery)', pageJquery: true } });
+  relCases.push({ file: 'gushwork-form.js', page: 'demo', lead: 'b2bOrganic', exp: { router: '6138', dataLayer: DL(ADA), phone: '+12015550123' }, extra: { origin: 'https://gushwork.ai' } });
+  relCases.push({ file: 'gushwork-form-popup.js', page: 'aiDemo', lead: 'b2bOrganic', exp: { router: '6804', dataLayer: DL(ADA), phone: '+12015550123' }, extra: { origin: 'https://gushwork.ai' } });
+  relCases.push({ file: 'gushwork-form.js', page: 'demo', lead: 'testAddress', exp: { submitted: false, dataLayer: null }, extra: { origin: 'https://gushwork.webflow.io' } });
+  relCases.push({ file: 'gushwork-form-popup.js', page: 'start', lead: 'aeoCpc', exp: { router: '6138', itiInits: 1 }, extra: { origin: 'https://gushwork.webflow.io' } });
+
+  const sessionPosts = (r) => r.trace.filter((e) => e.k === 'fetch' && e.url === API + '/session');
+  for (const c of relCases) {
+    for (const subject of ['new', 'min']) {
+      const res = await compareToRelease(subject, c.file, c.page, c.lead, c.extra);
+      expectAbsolute(res, c.exp);
+      /* On every accepted host /session still goes out, once, at load. */
+      const sp = sessionPosts(res.new);
+      ok(`${res.tag}: /session posted once, at page load`, sp.length === 1 && sp[0].phase === 'load' && sp[0].method === 'POST', JSON.stringify(sp.map((e) => [e.phase, e.method])));
+    }
+  }
+
+  /* THE ONE INTENDED DIFFERENCE: a host the API does not accept. v5.21.0
+     set its 5-second abort timer and posted /session, which the browser
+     refused (and printed as a console error, which this fake cannot show).
+     v5.22.0 logs one plain line in its place and sends nothing. The
+     recording must be v5.21.0's with exactly that swap, timestamps
+     included; everything the visitor does after it is unchanged (every
+     other API call is refused on that host too, for both). */
+  const PREVIEW_ORIGINS = ['https://gushwork-web-preview.gushwork.workers.dev', 'http://localhost:4321'];
+  for (const [f, pg] of [['gushwork-form.js', 'demo'], ['gushwork-form-popup.js', 'aiDemo'], ['gushwork-form-popup.js', 'start']]) {
+    for (const origin of PREVIEW_ORIGINS) {
+      const host = new URL(origin).hostname;
+      for (const subject of ['new', 'min']) {
+        const tag = `${SUBJECT_NAME(subject, f)} vs v5.21.0 on ${origin}${PAGES[pg].path}`;
+        const r = await runOne('rel', f, pg, 'b2bOrganic', 'same', { origin });
+        const n = await runOne(subject, f, pg, 'b2bOrganic', 'same', { origin });
+        const R = bannerOnly(r), N = bannerOnly(n);
+        const i = R.findIndex((l) => { const e = JSON.parse(l); return e.k === 'fetch' && e.url === API + '/session'; });
+        const timer = i > 0 ? JSON.parse(R[i - 1]) : null;
+        ok(`${tag}: v5.21.0 posted /session at load, right after setting its 5000ms abort timer`,
+           i > 0 && JSON.parse(R[i]).phase === 'load' && timer.k === 'timer' && timer.ms === 5000, R[i]);
+        const expected = R.slice(0, Math.max(0, i - 1)).concat([JSON.stringify({ t: timer && timer.t, phase: 'load', k: 'console', level: 'log',
+          text: '[GW] /session not sent: ' + host + ' is not a host the API accepts.' })]).concat(R.slice(i + 1));
+        ok(`${tag}: the recording is v5.21.0's with only /session swapped for one log line (${N.length} entries)`,
+           N.join('\n') === expected.join('\n'), firstDiff(expected, N));
+        ok(`${tag}: no request to the API at all during page load`,
+           !n.trace.some((e) => e.k === 'fetch' && e.phase === 'load' && e.url.indexOf(API) === 0));
+        ok(`${tag}: no console error or warning during page load`,
+           !n.trace.some((e) => e.k === 'console' && e.phase === 'load' && (e.level === 'error' || e.level === 'warn')),
+           JSON.stringify(n.trace.filter((e) => e.k === 'console' && e.phase === 'load' && e.level !== 'log')));
+        ok(`${tag}: the page and the storage end up identical`,
+           JSON.stringify([r.afterLoad, r.final, r.session, r.local, r.cookies, r.dataLayer, r.scripts]) === JSON.stringify([n.afterLoad, n.final, n.session, n.local, n.cookies, n.dataLayer, n.scripts]));
+        ok(`${tag}: nothing threw inside the page`, !r.trace.concat(n.trace).some((e) => e.k === 'error'));
+      }
+    }
   }
 
   console.log('');
