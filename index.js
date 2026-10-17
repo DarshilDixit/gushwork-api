@@ -8,11 +8,20 @@ const rateLimit = require('express-rate-limit');
 const { Pool }  = require('pg');
 const { pool, initDB } = require('./db');
 const { sendConversion, fetchPartnership, sendAction, fetchCustomer } = require('./partnerstack');
-const { pushToSalesforce, findSFLeadByEmail, updateSFLead, updateOpportunityFields, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails , sfIsRetryable, setSalesforceInternalCheck} = require('./salesforce');
+const { pushToSalesforce, findSFLeadByEmail, updateSFLead, updateOpportunityFields, findQualifiedDemoOpportunities, findOpportunityDomains, findEnrichmentByEmails , sfIsRetryable, setSalesforceInternalCheck, salesforceSkipReason, getSalesforceToken} = require('./salesforce');
 const { pushFormEventsToMeta, pushStartTrialToMeta, resolveProduct, resolveEventProduct, predictedLtvFor, canonicalProductInterest, setMetaOutcomeReporter, metaExcludedDomainMatch } = require('./meta-capi');
 const { createGadsUploader, startGadsUploadSweep } = require('./google-ads-conversions');
 const { agencyDomainMatch } = require('./agency-domains');
 const createLeadMagnetRouter = require('./lead-magnet');
+const { ALLOWED_ORIGINS } = require('./allowed-origins');
+const synthetic = require('./synthetic');
+
+/* Every console line written while a synthetic check is being handled
+   starts with [synthetic]. See synthetic.js. */
+synthetic.tagConsole(console);
+/* A database write or transaction inside a synthetic check is refused;
+   outside one, nothing changes. */
+synthetic.guardPoolWrites(pool, 'railway');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -65,8 +74,22 @@ app.use(helmet({
   contentSecurityPolicy: false
 }));
 
-const allowedOrigins = (process.env.ALLOWED_ORIGIN || '')
-  .split(',').map(o => o.trim()).filter(Boolean);
+/* ONE LIST, IN THE REPO, SINCE v5.23.0: allowed-origins.js. The form files
+   carry its hostnames (written there by tools/build-form-min.js), so the
+   origins this API accepts and the hosts the forms send /session from
+   cannot drift apart. ALLOWED_ORIGIN in the Railway env held exactly
+   these three on 17 Oct 2026 and is no longer read: an origin added there
+   alone would have been accepted here and never sent by the forms. Said
+   at boot if it is still set to something different, so nobody edits the
+   env and wonders why nothing changed. */
+const allowedOrigins = ALLOWED_ORIGINS.slice();
+{
+  const envOrigins = (process.env.ALLOWED_ORIGIN || '').split(',').map(o => o.trim()).filter(Boolean);
+  if (envOrigins.length && envOrigins.slice().sort().join(',') !== allowedOrigins.slice().sort().join(',')) {
+    console.warn('[CORS] ALLOWED_ORIGIN is set in the environment but is no longer read. Origins come from allowed-origins.js: '
+      + allowedOrigins.join(', ') + '. Edit that file and rebuild the form files.');
+  }
+}
 
 /* THE API'S OWN ADDRESS, AND NOTHING BROADER. Added 27 Sept 2026.
 
@@ -109,7 +132,11 @@ app.use(cors({
     callback(new Error(`CORS blocked: ${origin}`));
   },
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type']
+  /* X-GW-Synthetic since v5.23.0: the website monitor's header (see
+     synthetic.js). A browser asks before sending a header not on this
+     list, so without it every synthetic check would be refused at the
+     preflight. A visitor's browser never sends it. */
+  allowedHeaders: ['Content-Type', synthetic.HEADER]
 }));
 
 app.use('/booking-confirmed-webhook-rh', express.raw({ type: 'application/json' }));
@@ -125,7 +152,80 @@ app.use('/booking-confirmed-webhook-rh', express.raw({ type: 'application/json' 
    12,755 bytes WITHOUT the textarea — over the old limit. 50kb leaves
    ~38kb of headroom, and a maxlength=1000 textarea costs at most 6kb of
    that even if every character escapes to \u00XX. */
+/* ── /submit OUTCOMES, BY HOUR, FOR /metrics/submissions ────────────────
+   Successes and bookings are read from the leads table, which survives a
+   deploy. A FAILED submit may leave no row at all, so failures can only be
+   counted here, as they happen: 5xx is "failed", 4xx is "rejected" (no
+   session id, a body over the 50kb limit, the rate limit). Mounted BEFORE
+   express.json so a 413 is counted too, and after cors so a foreign
+   origin's refused POST is not. In memory, so the count starts at boot and
+   the endpoint says when. Synthetic checks are never counted. */
+const SUBMIT_OUTCOMES_KEEP_H = 168;
+const _submitOutcomes = new Map();   // UTC hour ISO -> { failed, rejected }
+const SUBMIT_OUTCOMES_SINCE = new Date();
+function submitOutcomeHour(ms) {
+  const d = new Date(ms); d.setUTCMinutes(0, 0, 0);
+  return d.toISOString().replace('.000Z', 'Z');
+}
+app.use('/submit', (req, res, next) => {
+  if (req.method !== 'POST') return next();
+  if (synthetic.tokenMatches(req.get(synthetic.HEADER))) return next();
+  res.on('finish', () => {
+    const kind = res.statusCode >= 500 ? 'failed' : res.statusCode >= 400 ? 'rejected' : null;
+    if (!kind) return;
+    const key = submitOutcomeHour(Date.now());
+    const row = _submitOutcomes.get(key) || { failed: 0, rejected: 0 };
+    row[kind]++;
+    _submitOutcomes.set(key, row);
+    const floor = Date.now() - SUBMIT_OUTCOMES_KEEP_H * 3600 * 1000;
+    for (const k of _submitOutcomes.keys()) if (Date.parse(k) < floor) _submitOutcomes.delete(k);
+  });
+  next();
+});
+
 app.use(express.json({ limit: '50kb' }));
+
+/* ── SYNTHETIC CHECKS (v5.23.0) ──────────────────────────────────────────
+   The website monitor sends X-GW-Synthetic: <SYNTHETIC_TOKEN> on every call
+   a form makes. Only these nine routes honour it; anywhere else the header
+   means nothing. A missing or wrong token is an ordinary request, exactly
+   as before. A matching one is rate limited on its own budget (all
+   synthetic traffic shares it, whatever the IP, because a Worker's address
+   is not stable), marked req.synthetic, run inside the synthetic context
+   that every outbound choke point checks, and every JSON answer it gets
+   carries synthetic: true so the monitor can see the header took effect. */
+const SYNTHETIC_ROUTES = ['/session', '/partial', '/submit', '/enrich', '/verify-email',
+  '/non-icp-check', '/verify-website', '/resolve-website', '/booking-confirmed'];
+const SYNTHETIC_RATE_PER_HOUR = Math.max(1, Number(process.env.SYNTHETIC_RATE_PER_HOUR) || 60);
+const syntheticLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, max: SYNTHETIC_RATE_PER_HOUR,
+  keyGenerator: () => 'synthetic',
+  message: { error: 'Synthetic check rate limit reached', synthetic: true },
+  standardHeaders: true, legacyHeaders: false, validate: false,
+});
+if (process.env.SYNTHETIC_TOKEN && !synthetic.configuredToken()) {
+  console.warn('[synthetic] SYNTHETIC_TOKEN is set but shorter than ' + synthetic.MIN_TOKEN_LENGTH
+    + ' characters, so synthetic checks are OFF and the header is ignored.');
+}
+app.use((req, res, next) => {
+  if (req.method !== 'POST' || SYNTHETIC_ROUTES.indexOf(req.path) === -1) return next();
+  const given = req.get(synthetic.HEADER);
+  if (given == null) return next();
+  if (!synthetic.tokenMatches(given)) {
+    /* Never the value: a near-miss token in a log is half a leaked one. */
+    if (synthetic.configuredToken()) console.warn(`[synthetic] ${synthetic.HEADER} on ${req.path} did not match SYNTHETIC_TOKEN, so it was handled as an ordinary request`);
+    return next();
+  }
+  syntheticLimiter(req, res, () => {
+    req.synthetic = true;
+    const json = res.json.bind(res);
+    res.json = (body) => json(body && typeof body === 'object' && !Array.isArray(body) ? Object.assign({}, body, { synthetic: true }) : body);
+    synthetic.runSynthetic(() => {
+      console.log(`[synthetic] ${req.method} ${req.path}`);
+      next();
+    });
+  });
+});
 
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, max: 100,
@@ -169,6 +269,8 @@ if (process.env.AWS_PG_HOST) {
     idleTimeoutMillis:       10000,
     max:                     3
   });
+  /* Same guard as the Railway pool: no write from a synthetic check. */
+  synthetic.guardPoolWrites(awsPool, 'aws');
   console.log('[AWS] Pool configured for', process.env.AWS_PG_HOST);
 } else {
   console.warn('[AWS] AWS_PG_HOST not set — AWS sync disabled');
@@ -371,6 +473,7 @@ async function initAWSTable() {
 }
 
 function syncToAWS(data) {
+  if (synthetic.refuseIfSynthetic('aws_mirror', 'AWS mirror (dialer feed) write')) return;
   if (!awsPool) return;
   /* OUR OWN TEST SUBMISSIONS DO NOT REACH THE DIALER.
 
@@ -693,6 +796,7 @@ function syncPartnerStackStampToAWS(session_id, column, value) {
 }
 
 function sendSlack(blocks, fallbackText) {
+  if (synthetic.refuseIfSynthetic('slack', 'Slack post to the leads channel')) return;
   const webhookUrl = process.env.SLACK_WEBHOOK_URL;
   if (!webhookUrl) { console.warn('[Slack] SLACK_WEBHOOK_URL not set — skipping'); alertSlackBroken('SLACK_WEBHOOK_URL is not configured'); return; }
   const cleanBlocks = Array.isArray(blocks) ? blocks.filter(Boolean) : null;
@@ -1040,6 +1144,7 @@ const ALERT_EMAIL_TO      = ['darshil.dixit@gushwork.ai', 'darshil@darshildixit.
 const _alertLastSent      = new Map(); // `${severity}:${source}:${title}` -> ms
 
 function sendOpsSlack(blocks, fallbackText) {
+  if (synthetic.refuseIfSynthetic('ops_slack', 'Slack post to the alerts channel')) return;
   // Falls back to the main webhook if the alerts one isn't configured,
   // so alerts are never silently lost just because an env var is missing.
   const webhookUrl = process.env.SLACK_ALERTS_WEBHOOK_URL || process.env.SLACK_WEBHOOK_URL;
@@ -1054,6 +1159,7 @@ function sendOpsSlack(blocks, fallbackText) {
 }
 
 async function sendAlertEmail(subject, details) {
+  if (synthetic.refuseIfSynthetic('alert_email', 'alert email')) return;
   if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
     console.warn('[alertOps] GMAIL credentials not set — alert email skipped');
     return;
@@ -1077,6 +1183,7 @@ const _alertSuppressed = new Map();        // same key -> count hidden by cooldo
 const _alertSuppressedIds = new Map();     // same key -> identifiers hidden by cooldown
 
 function alertOps(severity, source, title, details) {
+  if (synthetic.refuseIfSynthetic('alert', `alert (${severity}) ${source}: ${title}`)) return;
   // Fully defensive: alerting must NEVER throw into a request path.
   try {
     const sev  = severity === 'critical' ? 'critical' : 'warning';
@@ -1353,6 +1460,7 @@ const FOLLOWUP_MAX_ATTEMPTS = Number(process.env.FOLLOWUP_MAX_ATTEMPTS) || 3;
 /* Call on SUCCESS to clear a service's streak, so an outage that recovers
    doesn't leave a stale count that trips on the next unrelated blip. */
 function recordSuccess(source) {
+  if (synthetic.isSynthetic()) return;   // a synthetic check moves no health state
   if (_failStreaks.get(source)) _failStreaks.set(source, 0);
 }
 
@@ -1486,6 +1594,7 @@ function salesforceFailureAlert(kind, err, ctx) {
 }
 
 function recordFailure(source, id, error) {
+  if (synthetic.refuseIfSynthetic('failure_record', `failure record for ${source}`)) return;
   try {
     const cfg = FAILURE_MONITORS[source];
     if (!cfg) return;
@@ -2391,6 +2500,145 @@ function formatRevenue(amount) {
 }
 
 app.get('/health', (req, res) => { res.json({ status: 'ok', timestamp: new Date().toISOString() }); });
+
+/* ── FOR THE WEBSITE MONITOR (v5.23.0): /health/deep and /metrics/submissions
+   Both need X-GW-Synthetic: <SYNTHETIC_TOKEN>, and share their own budget
+   (120 an hour by default) so polling them cannot eat the form checks'.
+   /health above is unchanged: fast, no auth, says only that the process is
+   up. Neither endpoint writes, alerts or returns personal data. */
+const syntheticOpsLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, max: Math.max(1, Number(process.env.SYNTHETIC_OPS_RATE_PER_HOUR) || 120),
+  keyGenerator: () => 'synthetic-ops',
+  message: { error: 'Rate limit reached' },
+  standardHeaders: true, legacyHeaders: false, validate: false,
+});
+function syntheticOpsAuthorised(req, res) {
+  if (synthetic.tokenMatches(req.get(synthetic.HEADER))) return true;
+  res.status(401).json({ error: 'Unauthorized' });
+  return false;
+}
+
+/* One check, bounded. A check that cannot answer inside its time is a
+   FAILED check -- health fails loud (CLAUDE.md), it is never "unknown,
+   styled as fine". The error is a short reason, never a credential. */
+const DEEP_HEALTH_TIMEOUT_MS = Math.max(100, Number(process.env.DEEP_HEALTH_TIMEOUT_MS) || 4000);
+async function deepHealthCheck(fn) {
+  const started = Date.now();
+  const ctl = new AbortController();
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => { ctl.abort(); reject(new Error(`no answer within ${DEEP_HEALTH_TIMEOUT_MS}ms`)); }, DEEP_HEALTH_TIMEOUT_MS);
+  });
+  try {
+    await Promise.race([fn(ctl.signal), deadline]);
+    return { ok: true, ms: Date.now() - started };
+  } catch (err) {
+    const msg = String((err && err.message) || err || 'failed').replace(/\s+/g, ' ').slice(0, 160);
+    return { ok: false, ms: Date.now() - started, error: msg };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+const DEEP_HEALTH_CHECKS = {
+  /* The database every form route writes to. */
+  db: async () => { await pool.query('SELECT 1'); },
+  /* Salesforce auth, proved with a real authenticated read: the token
+     (cached for two hours, as for every push) and then the org's limits,
+     which costs one API call and touches no record. */
+  salesforce: async (signal) => {
+    const { accessToken, instanceUrl } = await getSalesforceToken();
+    const r = await fetch(`${instanceUrl}/services/data/v60.0/limits`, { headers: { Authorization: 'Bearer ' + accessToken }, signal });
+    if (!r.ok) throw new Error('Salesforce answered HTTP ' + r.status);
+  },
+  /* THIS SERVICE HOLDS NO RevenueHero CREDENTIALS -- the browser talks to
+     RevenueHero, not this API. So this checks the one thing every form page
+     needs from them: the scheduler script the pages load. */
+  revenuehero: async (signal) => {
+    const r = await fetch('https://assets.revenuehero.io/scheduler.min.js', { method: 'HEAD', signal });
+    if (!r.ok) throw new Error('RevenueHero scheduler script answered HTTP ' + r.status);
+  },
+  /* Apollo's own auth check: proves the key works and costs no credit.
+     It does not prove credits remain -- an out-of-credit refusal only shows
+     on a real lookup, which /enrich already pages on. */
+  enrichment: async (signal) => {
+    if (!process.env.APOLLO_API_KEY) throw new Error('APOLLO_API_KEY is not set');
+    const r = await fetch('https://api.apollo.io/v1/auth/health', { headers: { 'X-Api-Key': process.env.APOLLO_API_KEY, 'Cache-Control': 'no-cache' }, signal });
+    if (!r.ok) throw new Error('Apollo answered HTTP ' + r.status);
+    const j = await r.json().catch(() => null);
+    if (!j || j.healthy !== true || j.is_logged_in !== true) throw new Error('Apollo says the key is not logged in');
+  },
+};
+app.get('/health/deep', syntheticOpsLimiter, async (req, res) => {
+  if (!syntheticOpsAuthorised(req, res)) return;
+  res.setHeader('Cache-Control', 'no-store');
+  const names = Object.keys(DEEP_HEALTH_CHECKS);
+  const results = await Promise.all(names.map((n) => deepHealthCheck(DEEP_HEALTH_CHECKS[n])));
+  const checks = {};
+  names.forEach((n, i) => { checks[n] = results[i]; });
+  const ok = results.every((r) => r.ok);
+  /* 503 when anything failed, so a monitor that only reads the status
+     code still alerts. The body says which. */
+  res.status(ok ? 200 : 503).json({ ok, checks });
+});
+
+/* Real /submit outcomes per UTC hour, for the monitor's "submissions
+   stopped" and "failures spiked" alerts. Counts only.
+     submitted -- leads whose submitted_at falls in the hour. submitted_at
+                  is rewritten on a repeat submit, so a session counts once,
+                  in the hour of its latest submit.
+     booked    -- leads with a booking, in the hour of COALESCE(booked_at,
+                  created_at), the Definitions rule.
+     failed / rejected -- /submit answers of 5xx / 4xx, counted in memory
+                  since failures_counted_since; null for hours before it.
+   Our own test submissions are left out of submitted and booked, by the
+   same rule as the Overview. Synthetic checks never write a row, so they
+   are not in any count. */
+app.get('/metrics/submissions', syntheticOpsLimiter, async (req, res) => {
+  if (!syntheticOpsAuthorised(req, res)) return;
+  res.setHeader('Cache-Control', 'no-store');
+  const hours = Math.min(SUBMIT_OUTCOMES_KEEP_H, Math.max(1, parseInt(req.query.hours, 10) || 24));
+  try {
+    const params = [hours];
+    const notOurs = `(${internalLeadSqlClause('l.email', 'l.page_url', params)}) IS NOT TRUE`;
+    const { rows } = await pool.query(`
+      WITH hours AS (
+        SELECT generate_series(
+                 date_trunc('hour', NOW() AT TIME ZONE 'UTC') - ($1::int - 1) * INTERVAL '1 hour',
+                 date_trunc('hour', NOW() AT TIME ZONE 'UTC'),
+                 INTERVAL '1 hour') AS h
+      )
+      SELECT to_char(h, 'YYYY-MM-DD"T"HH24":00:00Z"') AS hour,
+             (SELECT COUNT(*)::int FROM leads l
+               WHERE l.submitted_at >= (h AT TIME ZONE 'UTC')
+                 AND l.submitted_at <  ((h + INTERVAL '1 hour') AT TIME ZONE 'UTC')
+                 AND ${notOurs}) AS submitted,
+             (SELECT COUNT(*)::int FROM leads l
+               WHERE l.booking_uid IS NOT NULL
+                 AND COALESCE(l.booked_at, l.created_at) >= (h AT TIME ZONE 'UTC')
+                 AND COALESCE(l.booked_at, l.created_at) <  ((h + INTERVAL '1 hour') AT TIME ZONE 'UTC')
+                 AND ${notOurs}) AS booked
+        FROM hours
+       ORDER BY h`, params);
+    const sinceHour = Date.parse(submitOutcomeHour(SUBMIT_OUTCOMES_SINCE.getTime()));
+    const series = rows.map((r) => {
+      const counted = Date.parse(r.hour) >= sinceHour;
+      const o = _submitOutcomes.get(r.hour) || { failed: 0, rejected: 0 };
+      return { hour: r.hour, submitted: r.submitted, booked: r.booked,
+               failed: counted ? o.failed : null, rejected: counted ? o.rejected : null };
+    });
+    const sum = (k) => series.reduce((a, x) => a + (x[k] || 0), 0);
+    res.json({
+      ok: true, hours, timezone: 'UTC',
+      failures_counted_since: SUBMIT_OUTCOMES_SINCE.toISOString(),
+      excludes: 'our own test submissions; synthetic checks never write a row',
+      totals: { submitted: sum('submitted'), booked: sum('booked'), failed: sum('failed'), rejected: sum('rejected') },
+      series,
+    });
+  } catch (err) {
+    console.error('[/metrics/submissions]', err.message);
+    res.status(500).json({ ok: false, error: 'Could not read submissions' });
+  }
+});
 
 /* ══ SYSTEM HEALTH — nine rows that now check something ═══════════════
    Seven of the nine rows on the Health tab were lifetime counters wearing
@@ -6753,6 +7001,7 @@ function elvHealthSnapshot() {
 }
 
 function recordElvOutcome(status, email) {
+  if (synthetic.isSynthetic()) return;   // nor the email-check health window
   try {
     const now = Date.now();
     _elvLastStatus  = status;
@@ -6841,6 +7090,7 @@ function elvCacheGet(email) {
   return hit;
 }
 function elvCacheSet(email, valid, status) {
+  if (synthetic.isSynthetic()) return;   // nor the email-check cache
   if (!ELV_BLOCK.includes(status) && !ELV_PASS.includes(status)) return;
   if (_elvCache.size >= ELV_CACHE_MAX) _elvCache.delete(_elvCache.keys().next().value);
   _elvCache.set(email, { valid, status, at: Date.now() });
@@ -6865,6 +7115,7 @@ function elvCacheSet(email, valid, status) {
    seconds until /submit, and /submit re-checks rather than storing a
    blank. Two independent chances plus a re-check. */
 function persistElvVerdict(email, status, valid, source) {
+  if (synthetic.refuseIfSynthetic('elv_store', 'email verification write')) return;
   if (!ELV_BLOCK.includes(status) && !ELV_PASS.includes(status)) return;
   pool.query(`
     INSERT INTO email_verifications (email, status, valid, source, checked_at)
@@ -9988,6 +10239,7 @@ function nonIcpWarmPending({ email, website } = {}) {
 }
 
 function warmNonIcpLlm({ email, website } = {}) {
+  if (synthetic.refuseIfSynthetic('non_icp_warm', 'non-ICP model warm (a scrape, a model call and a cache write)')) return;
   if (!NON_ICP_LLM_ENABLED) return;
   if (isPartnerStackTestEmail(email)) return;
   /* A BRAND-DOMAIN HIT ALREADY DECIDES THE LEAD, so classifying it is
@@ -10454,6 +10706,7 @@ const _ipGeoInFlight = new Set();
    a targeted UPDATE on an indexed key costs a millisecond and cannot
    renumber anything. */
 async function finaliseIpGeo(session_id, ip) {
+  if (synthetic.refuseIfSynthetic('ip_geo', 'IP location lookup and write')) return;
   if (!session_id) return;
   try {
     /* The ADDRESS is written on every call, because it is free and because
@@ -14944,6 +15197,8 @@ function logPartnerStackEligibility(verdict, ctx = {}) {
 app.post('/session', async (req, res) => {
   const session_id = (req.body.session_id || '').toString().trim().slice(0, 100);
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
+  /* SYNTHETIC: the same answer, and no form_sessions or page-view row. */
+  if (req.synthetic) return res.json({ ok: true });
   res.json({ ok: true });
 
   const s = (v, n) => (v || '').toString().trim().slice(0, n) || null;
@@ -15113,15 +15368,20 @@ app.post('/enrich', async (req, res) => {
          did before, and recordFailure pages -- at once for credits. */
       console.error(`[/enrich] Apollo refused the lookup for ${email} (HTTP ${apolloRes.status}): ${refused}`);
       recordFailure('Apollo', email, refused);
-      await pool.query(ENRICHMENT_REFUSAL_SQL, [session_id, email, (apolloData && typeof apolloData === 'object') ? apolloData : { error: refused }])
+      /* A synthetic check stores nothing, a refusal included. */
+      if (!req.synthetic) await pool.query(ENRICHMENT_REFUSAL_SQL, [session_id, email, (apolloData && typeof apolloData === 'object') ? apolloData : { error: refused }])
         .catch(err => console.warn('[/enrich] Refusal not recorded (ignored):', err.message));
       return res.json(emptyEnrichment());
     }
     recordSuccess('Apollo');
     const f = apolloEnrichmentFields(apolloData);
     console.log(`[/enrich] Apollo — seniority: ${f.seniority} | dept: ${f.departments} | revenue: ${f.annualRevenue} | funding: ${f.totalFunding} (${f.fundingStage}) | location: ${f.city||f.country||'n/a'} | org HQ: ${f.orgHQ}`);
-    await pool.query(ENRICHMENT_UPSERT_SQL, enrichmentUpsertParams(session_id, email, f, apolloData));
-    await pool.query(ENRICHMENT_LEAD_UPDATE_SQL, enrichmentLeadParams(session_id, f));
+    /* SYNTHETIC: Apollo is asked exactly as for a visitor and the answer is
+       returned exactly as for a visitor; neither row is written. */
+    if (!req.synthetic) {
+      await pool.query(ENRICHMENT_UPSERT_SQL, enrichmentUpsertParams(session_id, email, f, apolloData));
+      await pool.query(ENRICHMENT_LEAD_UPDATE_SQL, enrichmentLeadParams(session_id, f));
+    }
     res.json({ first_name:f.person.first_name||'',last_name:f.person.last_name||'',title:f.person.title||'',company:f.org.name||'',company_size:f.org.estimated_num_employees?.toString()||'',industry:f.org.industry||'',linkedin_url:f.person.linkedin_url||'',website:f.org.website_url||'' });
   } catch (err) { console.error('[/enrich] Error:', err.message, err.detail||''); recordFailure('Apollo', email || 'unknown', err.message); res.json(emptyEnrichment()); }
 });
@@ -15352,6 +15612,7 @@ function diffLeadIdentityFields(row, ctx) {
 }
 
 function recordLeadFieldChanges(session_id, row, source_route, ctx) {
+  if (synthetic.refuseIfSynthetic('lead_field_changes', 'lead field change log write')) return;
   try {
     if (!session_id || !row) return;
     const { changes, backNavigation } = diffLeadIdentityFields(row, ctx);
@@ -15391,7 +15652,9 @@ function recordLeadFieldChanges(session_id, row, source_route, ctx) {
 }
 
 app.post('/partial', async (req, res) => {
-  _lastLeadAt = Date.now(); // heartbeat: form traffic is flowing
+  /* Not for a synthetic check: the heartbeat means REAL form traffic, and a
+     monitor run every few minutes would hide a form nobody can reach. */
+  if (!req.synthetic) _lastLeadAt = Date.now(); // heartbeat: form traffic is flowing
   const session_id         = (req.body.session_id         || '').toString().trim().slice(0, 100);
   const page_url           = (req.body.page_url           || '').toString().trim().slice(0, 1000);
   const email              = (req.body.email              || '').toString().trim().slice(0, 254).toLowerCase();
@@ -15512,6 +15775,15 @@ app.post('/partial', async (req, res) => {
     const meta_predicted_ltv = metaWillFire
       ? predictedLtvFor(resolveEventProduct({ page_url, product_interest, utm_campaign: offer_campaign, utm_medium: offer_medium || utm_medium }))
       : null;
+
+    /* SYNTHETIC: everything above ran (parsing, the stored email verdict,
+       the non-ICP verdict, the product and the StartTrial gate). Nothing
+       below does: no lead row, no mirror row, no StartTrial, no IP lookup,
+       no partner lookup. The answer is the one a visitor gets. */
+    if (req.synthetic) {
+      console.log(`[/partial] synthetic check: step ${step_reached} | non-ICP: ${nonIcp.blocked ? nonIcp.reason : 'no'} | StartTrial would ${metaWillFire ? 'fire' : 'not fire'} | nothing saved`);
+      return res.json({ ok: true });
+    }
 
     const upsert = await pool.query(`
       WITH prev AS (
@@ -15719,6 +15991,50 @@ app.post('/partial', async (req, res) => {
   } catch (err) { console.error('[/partial]', err.message); res.status(500).json({ error: 'Partial save failed' }); }
 });
 
+/* What /submit would have done, for a synthetic check. MIRRORS THE REAL
+   PATH BELOW, branch for branch, and must move with it: a new gate there
+   needs its line here, or the parity test in tests/test-synthetic.js
+   fails.
+
+   A synthetic session has no lead row, so the sticky block from an
+   earlier step cannot apply and the fresh verdict IS the effective one --
+   which is also what the real row reads back on a first submit. The
+   RevenueHero router id is not here because this service has never known
+   it: the form picks it from the page's markup. `team` is the routing
+   slug the server stores (crm or aeo); the form reports the router id. */
+async function syntheticSubmitAnswer(d) {
+  const { email, website, page_url, nonIcp, alreadySubmitted } = d;
+  const blocked = nonIcp.blocked === true;
+  const flagged = nonIcp.llm_flagged === true;
+  const reason  = (nonIcp.blocked || nonIcp.llm_flagged) ? nonIcp.reason : null;
+  const internal = isInternalSubmission(email, page_url);
+  const sfSkip  = salesforceSkipReason({ email, website, page_url });
+  const agencyForMeta = metaExcludedDomainMatch({ email, website });
+  const suppressMeta = blocked || (flagged && NON_ICP_LLM_META);
+  const verified = isWebsiteVerified({ website_check_failed: d.website_check_failed, website_check_reason: d.website_check_reason });
+  const done = 'skip:already_submitted';
+  const would = {
+    team: d.product || null,
+    product_interest: d.product_interest || null,
+    slack: alreadySubmitted ? done : blocked ? 'non_icp_blocked_post' : 'lead_post',
+    salesforce: alreadySubmitted ? done : blocked ? 'skip:non_icp' : internal ? 'skip:internal'
+      : sfSkip ? 'skip:' + sfSkip.reason : 'push',
+    meta_lead: alreadySubmitted ? done : blocked ? 'suppress:non_icp' : internal ? 'skip:internal'
+      : suppressMeta ? 'suppress:model_flagged' : !verified ? 'skip:website_not_verified'
+      : agencyForMeta ? 'skip:agency' : 'fire',
+    model_flag_post: !alreadySubmitted && !blocked && flagged,
+    /* runPartnerStackSignup's guards, in its order. 'run' still has the
+       once-per-domain claim ahead of it, which only the real send can test. */
+    partnerstack: alreadySubmitted ? done : !(d.ps && d.ps.ps_xid) ? 'skip:no_partner'
+      : d.disqualified ? 'skip:disqualified' : blocked ? 'skip:non_icp'
+      : !d.ps.ps_customer_key ? 'skip:no_customer_key' : isPartnerStackTestEmail(email) ? 'skip:test_email' : 'run',
+    meta_predicted_ltv: d.meta_predicted_ltv,
+  };
+  const industry = blocked ? await nonIcpIndustryForDomain(reason) : null;
+  console.log(`[/submit] synthetic check: team ${would.team || '?'} | non-ICP: ${blocked ? reason : 'no'} | Salesforce ${would.salesforce} | Meta Lead ${would.meta_lead} | nothing saved or sent`);
+  return { ok: true, non_icp_blocked: blocked, non_icp_reason: reason, non_icp_industry: industry, would };
+}
+
 app.post('/submit', async (req, res) => {
   const session_id         = (req.body.session_id         || '').toString().trim().slice(0, 100);
   const page_url           = (req.body.page_url           || '').toString().trim().slice(0, 1000);
@@ -15841,6 +16157,15 @@ app.post('/submit', async (req, res) => {
         && !metaExcludedDomainMatch({ email, website }))
       ? predictedLtvFor(resolveEventProduct({ page_url, product_interest, utm_campaign: offer_campaign, utm_medium: offer_medium || utm_medium }))
       : null;
+
+    /* SYNTHETIC: the answer a visitor would get, plus what the path below
+       WOULD have done, decided by the same functions in the same order --
+       and nothing done. tests/test-synthetic.js drives the real path with
+       the same submissions and requires every "would" here to match what
+       actually fired, so the two cannot drift apart unnoticed. */
+    if (req.synthetic) return res.json(await syntheticSubmitAnswer({
+      email, website, page_url, product, product_interest, meta_predicted_ltv, ps, nonIcp,
+      alreadySubmitted, website_check_failed, website_check_reason, disqualified }));
 
     const upsert = await pool.query(`
       WITH prev AS (
@@ -16750,6 +17075,13 @@ app.post('/booking-confirmed', async (req, res) => {
   const end_time    = req.body.end_time     || null;
   const event_type  = (req.body.event_type  || '').toString().trim().slice(0, 100);
   if (!session_id || !booking_uid) return res.status(400).json({ error: 'session_id and booking_uid required' });
+  /* SYNTHETIC: no booking is recorded, mirrored, pushed to Salesforce or
+     sent to Meta. A synthetic form run never opens RevenueHero, so this is
+     reached only if the monitor posts it directly. */
+  if (req.synthetic) {
+    console.log(`[/booking-confirmed] synthetic check: booking ${booking_uid} not recorded`);
+    return res.json({ ok: true });
+  }
 
   try {
     if (await rejectBookingIfNonIcp('/booking-confirmed', session_id, booking_uid, start_time)) {

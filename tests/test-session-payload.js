@@ -93,7 +93,7 @@ function drive(file, opts = {}) {
 
   let posted = null;
   const fetchWithTimeout = (url, opts) => {
-    posted = { url, body: JSON.parse(opts.body) };
+    posted = { url, body: JSON.parse(opts.body), headers: opts.headers };
     return Promise.resolve({ ok: true });
   };
 
@@ -106,6 +106,8 @@ function drive(file, opts = {}) {
        Sept 2026, so its two helpers have to come across or this factory
        throws and the suite reports a crash rather than a payload. */
     [lift(src, 'initSession'), lift(src, 'captureUTMs'), lift(src, 'saveSession'),
+     /* saveSession builds its headers through apiHeaders since v5.23.0. */
+     lift(src, 'syntheticToken'), lift(src, 'apiHeaders'),
      lift(src, 'rememberCampaign'), lift(src, 'getCookie'),
      /* THE THIRD OFFER RUNG, added 22 Sept 2026. captureUTMs calls it, so
         without it here the factory throws and the suite reports a crash
@@ -445,10 +447,10 @@ function driveGtm(file, opts = {}) {
     company: 'Example Lead Co', website: 'example-lead.com',
     'hear-about-us': 'Google', 'about-business': '',
   };
-  const seen = { steps: [], redirects: [], posts: [] };
+  const seen = { steps: [], redirects: [], posts: [], rhNew: 0, rhSubmits: 0 };
   class RevenueHero {
-    constructor() { this.dialog = { setEmbedTarget() {}, open() {} }; }
-    submit() { return Promise.resolve({}); }
+    constructor() { seen.rhNew++; this.dialog = { setEmbedTarget() {}, open() {} }; }
+    submit() { seen.rhSubmits++; return Promise.resolve({}); }
   }
 
   const factory = new Function(
@@ -459,7 +461,12 @@ function driveGtm(file, opts = {}) {
     'submitLead', 'redirectNonIcp', 'RevenueHero', 'rhRouterId', 'showStep',
     'showCalSkeleton', 'hideCalSkeleton', 'awaitNonIcpVerdict', 'setTimeout',
     'isRailwayReady', 'fetchWithTimeout', 'RAILWAY_API_URL', 'NET_TIMEOUT_MS',
+    /* v5.23.0: the synthetic-check helpers. handleStep2Next picks the
+       RevenueHero stand-in through them and pushGtmLeadEvent asks them, so
+       they come across or the factory throws. */
+    'sessionStorage',
     ['let _submitting = false;',
+     lift(src, 'syntheticToken'), lift(src, 'apiHeaders'), lift(src, 'syntheticRecord'), lift(src, 'syntheticHero'),
      (/const TEST_EMAILS = \[[^\]]*\];/.exec(src) || [''])[0],
      lift(src, 'isTestEmail'),
      (/const _gtmPushed = \{\};/.exec(src) || [''])[0],
@@ -482,8 +489,9 @@ function driveGtm(file, opts = {}) {
     RevenueHero, () => 'router-1', (s) => { seen.steps.push(s); },
     () => {}, () => {}, async () => 'clear', () => 0,
     () => true,
-    (url, o) => { seen.posts.push({ url, body: JSON.parse(o.body) }); return Promise.resolve({ ok: true }); },
-    'https://api.example.test', { booking: 5000 }
+    (url, o) => { seen.posts.push({ url, body: JSON.parse(o.body), headers: o.headers }); return Promise.resolve({ ok: true }); },
+    'https://api.example.test', { booking: 5000 },
+    { getItem: (k) => (k === 'gw_synthetic' && opts.syntheticToken ? opts.syntheticToken : null) }
   );
   fns.initRHBookingListener();
   const book = (data) => Promise.all(listeners.map((fn) => fn({ data })));
@@ -543,6 +551,33 @@ for (const file of ['gushwork-form.js', 'gushwork-form-popup.js']) {
     ok(`${tag}/gtm: the booking log still says the event arrived`,
        d.logs.some((l) => l.indexOf('MEETING_BOOKED event received') !== -1 && l.indexOf('mtg-777') !== -1),
        d.logs.join(' | '));
+  }
+
+  /* 1b. A SYNTHETIC CHECK (v5.23.0): the website monitor's token in
+         sessionStorage gw_synthetic. Same submit and booking as 1, and:
+         no GTM event at all, RevenueHero never constructed or submitted,
+         the router id it would have used recorded in window.gwSynthetic,
+         the token on the booking post's header and in no console line.
+         EXECUTED through the real handleStep2Next and booking listener. */
+  {
+    const TOKEN = 'synthetic-token-for-the-suite-0123456789abcdef';
+    const d = driveGtm(file, { email: GTM_RAW_EMAIL, syntheticToken: TOKEN });
+    await d.fns.handleStep2Next();
+    await d.book(MEETING);
+    ok(`${tag}/synthetic: no GTM event is pushed, submit or booking`, !(d.window.dataLayer || []).length, JSON.stringify(d.window.dataLayer));
+    ok(`${tag}/synthetic: RevenueHero is never constructed or submitted to`, d.seen.rhNew === 0 && d.seen.rhSubmits === 0, d.seen.rhNew + '/' + d.seen.rhSubmits);
+    ok(`${tag}/synthetic: the visitor's flow still reaches step 3`, d.seen.steps.indexOf('step-3') !== -1, JSON.stringify(d.seen.steps));
+    ok(`${tag}/synthetic: window.gwSynthetic names the router it would have used`,
+       d.window.gwSynthetic && d.window.gwSynthetic.router_id === 'router-1', JSON.stringify(d.window.gwSynthetic));
+    ok(`${tag}/synthetic: the booking post carries the token as X-GW-Synthetic`,
+       d.seen.posts.length >= 1 && d.seen.posts[0].headers && d.seen.posts[0].headers['X-GW-Synthetic'] === TOKEN, JSON.stringify(d.seen.posts[0] && d.seen.posts[0].headers));
+    ok(`${tag}/synthetic: the token is in no console line`, !d.logs.some((l) => l.indexOf(TOKEN) !== -1));
+    ok(`${tag}/synthetic: the submit did not fall into its catch`, noCatch(d.logs), d.logs.join(' | '));
+    /* And without the key, the same driver constructs RevenueHero once. */
+    const v = driveGtm(file, { email: GTM_RAW_EMAIL });
+    await v.fns.handleStep2Next();
+    ok(`${tag}/synthetic: without the key RevenueHero is constructed and submitted to, once`, v.seen.rhNew === 1 && v.seen.rhSubmits === 1, v.seen.rhNew + '/' + v.seen.rhSubmits);
+    ok(`${tag}/synthetic: without the key there is no window.gwSynthetic`, v.window.gwSynthetic === undefined);
   }
 
   /* 2. GTM's own dataLayer is APPENDED to, never replaced. */
@@ -685,6 +720,21 @@ for (const file of ['gushwork-form.js', 'gushwork-form-popup.js']) {
    driven for real with each hostname. */
 for (const file of ['gushwork-form.js', 'gushwork-form-popup.js']) {
   const tag = file.replace('gushwork-form', 'form').replace('.js', '');
+  /* v5.23.0: the synthetic header rides /session only when the key is set,
+     and the headers are otherwise EXACTLY what they were. */
+  {
+    const plain = drive(file);
+    ok(`${tag}/synthetic: without the key /session sends exactly Content-Type, nothing else`,
+       JSON.stringify(plain.posted && plain.posted.headers) === JSON.stringify({ 'Content-Type': 'application/json' }),
+       JSON.stringify(plain.posted && plain.posted.headers));
+    const syn = drive(file, { session: { gw_synthetic: '  tok-0123456789abcdef0123456789abcdef  ' } });
+    ok(`${tag}/synthetic: with the key /session carries it, trimmed, as X-GW-Synthetic`,
+       JSON.stringify(syn.posted && syn.posted.headers) === JSON.stringify({ 'Content-Type': 'application/json', 'X-GW-Synthetic': 'tok-0123456789abcdef0123456789abcdef' }),
+       JSON.stringify(syn.posted && syn.posted.headers));
+    const blank = drive(file, { session: { gw_synthetic: '   ' } });
+    ok(`${tag}/synthetic: a blank key is no key`,
+       JSON.stringify(blank.posted && blank.posted.headers) === JSON.stringify({ 'Content-Type': 'application/json' }));
+  }
   for (const h of ['www.gushwork.ai', 'gushwork.ai', 'gushwork.webflow.io']) {
     const d = drive(file, { hostname: h });
     ok(`${tag}/hosts: ${h} posts /session`, !!d.posted && /\/session$/.test(d.posted.url), JSON.stringify(d.posted && d.posted.url));

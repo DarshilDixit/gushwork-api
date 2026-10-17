@@ -663,8 +663,10 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
      /Buffer\.from\(`\$\{pub\}:\$\{sec\}`\)\.toString\('base64'\)/.test(psmod));
   ok('v6: v2 auth does NOT use the tracking token',
      !/v2AuthHeader[\s\S]{0,300}?TRACKING_TOKEN/.test(psmod));
+  /* 1600, not 1400: v5.23.0 put the one-line synthetic-check guard at the
+     top of sendConversion, which moved the header past the old window. */
   ok('v6: the conversion still uses Bearer, not Basic',
-     /sendConversion[\s\S]{0,1400}?Bearer \$\{token\}/.test(psmod));
+     /sendConversion[\s\S]{0,1600}?Bearer \$\{token\}/.test(psmod));
   ok('v6: a missing key pair is inert, not an error', /reason: 'no_credentials'/.test(psmod));
   ok('v6: the response is unwrapped defensively',
      /const d = \(json && json\.data\) \|\| json \|\| \{\}/.test(psmod) && /d\.partnership \|\| d/.test(psmod));
@@ -3564,7 +3566,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        correct, and the streak still never fell. */
     {
       const alerts = [];
-      const H = (new Function('alertOps', 'isAuthFailure', 'AUTH_FAILURE_GUIDANCE', 'isCreditsExhausted', 'CREDITS_GUIDANCE', 'console',
+      const H = (new Function('alertOps', 'isAuthFailure', 'AUTH_FAILURE_GUIDANCE', 'isCreditsExhausted', 'CREDITS_GUIDANCE', 'console', 'synthetic',
         liftLine(src, 'const FAILURE_BUFFER_TTL_MS') + '\n' +
         liftLine(src, 'const _failBuffers') + '\n' +
         liftLine(src, 'const _failStreaks') + '\n' +
@@ -3574,7 +3576,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
         lift(src, 'function recordFailure(') + '\n' +
         'return { recordFailure, recordSuccess, streaks: _failStreaks, buffers: _failBuffers };'))(
           (sev, source, title, d) => { alerts.push({ sev, source, title, d }); return true; },
-          () => false, {}, () => false, {}, { warn() {}, log() {} });
+          () => false, {}, () => false, {}, { warn() {}, log() {} }, require('../synthetic'));
 
       /* A success must clear the streak. This is the whole defect. */
       H.recordFailure('PartnerStack SF read', 'qualified-demo read', 'http_503');
@@ -3948,7 +3950,7 @@ function makeEligibility({ customerRows, contactRows, customerThrows, contactThr
        the banner read v5.13.0 on the old pin and the new one alike and
        could not tell you anything. A deploy check that returns the same
        answer either way is not a check. See the Webflow step in CLAUDE.md. */
-    ok(`form(${name}): version banner says v5.22.0`, /Form initialised v5\.22\.0/.test(f));
+    ok(`form(${name}): version banner says v5.23.0`, /Form initialised v5\.23\.0/.test(f));
   }
 
   console.log('');

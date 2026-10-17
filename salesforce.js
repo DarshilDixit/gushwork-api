@@ -8,6 +8,9 @@
 //   findSFLeadByEmail(email)         — find Lead ID by email
 //   updateSFLead(leadId, fields)     — update existing Lead
 // ============================================================
+/* The net under the synthetic branches in index.js (see synthetic.js): a
+   synthetic website-monitor check must never reach this system. */
+const synthetic = require('./synthetic');
 const { agencyDomainMatch } = require('./agency-domains');
 
 let sfAccessToken = null;
@@ -357,6 +360,7 @@ async function readSfBody(res) {
 }
 
 async function pushToSalesforce(payload) {
+  if (synthetic.refuseIfSynthetic('salesforce', 'Salesforce Lead write')) return { skipped: 'synthetic', detail: 'synthetic website-monitor check' };
   const skip = salesforceSkipReason(payload || {});
   if (skip) {
     /* The matched domain, never the address: this log is read by people. */
@@ -527,6 +531,7 @@ async function findSFLeadByEmail(email) {
    Also applies max length truncation to any string fields.
 -------------------------------------------------------- */
 async function updateSFLead(leadId, fields) {
+  if (synthetic.refuseIfSynthetic('salesforce', 'Salesforce Lead update')) return { skipped: 'synthetic' };
   if (!leadId) throw new Error('[SF] updateSFLead called with no leadId');
   const { accessToken, instanceUrl } = await getSalesforceToken();
 
@@ -655,6 +660,7 @@ const SF_MAX_PAGES = 25;
    "no such field", and the two read identically from the outside.
 -------------------------------------------------------- */
 async function updateOpportunityFields(opportunityId, fields) {
+  if (synthetic.refuseIfSynthetic('salesforce', 'Salesforce Opportunity update')) return { ok: false, reason: 'synthetic' };
   if (!opportunityId) return { ok: false, reason: 'no_opportunity_id' };
   if (!fields || !Object.keys(fields).length) return { ok: false, reason: 'no_fields' };
   try {

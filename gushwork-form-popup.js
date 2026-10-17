@@ -1,5 +1,14 @@
 /* ==========================================================
-  GUSHWORK — MULTI-STEP FORM  v5.22.0-ads  (ADS PAGE VERSION)
+  GUSHWORK — MULTI-STEP FORM  v5.23.0-ads  (ADS PAGE VERSION)
+
+  v5.23.0-ads — ported from /demo v5.23.0, identical: synthetic checks
+  (a token in sessionStorage gw_synthetic is sent as X-GW-Synthetic on
+  every API call, no GTM events, no RevenueHero, window.gwSynthetic holds
+  the router id and the /submit answer; nothing changes without the key)
+  and SESSION_HOSTS written from the API's allowed-origins.js by
+  tools/build-form-min.js. Sizes of gushwork-form-popup.min.js, raw / gzip
+  -9 / brotli 11: v5.22.0-ads 67,264 / 19,255 / 16,586 bytes; v5.23.0-ads
+  68,140 / 19,509 / 16,823.
 
   v5.22.0-ads — ported from /demo v5.22.0, identical. (1) /session is only
   sent from the hosts the API accepts, so a preview audit no longer logs
@@ -25,7 +34,7 @@
   server's non-ICP answers now carry 'real_estate' or 'insurance'; the form
   remembers it and adds industry= to the redirect. Nothing else moves.
 
-  Tracks /demo v5.22.0. Full feature parity with /demo, EXCEPT the
+  Tracks /demo v5.23.0. Full feature parity with /demo, EXCEPT the
   booking step, which keeps the Ads page's fullscreen modal
   presentation — opened after step 2 — instead of /demo's inline
   column render, AND the close affordances that modal needs (v5.7.2).
@@ -838,6 +847,45 @@
   -------------------------------------------------------- */
   (function () {
     const RAILWAY_API_URL = 'https://gushwork-api-production.up.railway.app';
+
+    /* ── SYNTHETIC CHECKS (v5.23.0) ─────────────────────────────────────
+       gushwork-web's website monitor fills this form in a headless browser.
+       It puts a shared token in sessionStorage under gw_synthetic; this file
+       then sends it as X-GW-Synthetic on every call to the API, which
+       answers exactly as it would for a visitor and saves and sends nothing
+       (synthetic.js in gushwork-api). In that session the two GTM events are
+       not pushed, and RevenueHero is not contacted: a stand-in records the
+       router id it would have used in window.gwSynthetic, with the /submit
+       answer, for the monitor to read.
+
+       WITHOUT THE KEY NOTHING CHANGES: apiHeaders hands back the very same
+       headers object, and every other synthetic branch is skipped. The
+       token is never logged, never put in a URL and never stored by this
+       file. */
+    function syntheticToken() {
+      try {
+        const t = sessionStorage.getItem('gw_synthetic');
+        return t && String(t).trim() ? String(t).trim() : null;
+      } catch (e) { return null; }
+    }
+    function apiHeaders(headers) {
+      const t = syntheticToken();
+      return t ? Object.assign({}, headers, { 'X-GW-Synthetic': t }) : headers;
+    }
+    function syntheticRecord(fields) {
+      window.gwSynthetic = Object.assign(window.gwSynthetic || {}, fields);
+    }
+    /* RevenueHero's two calls and its dialog, so the step flow runs exactly
+       as for a visitor and nothing reaches RevenueHero (a submit there is a
+       record on their side). */
+    function syntheticHero(routerId) {
+      syntheticRecord({ router_id: routerId });
+      console.log('[GW] Synthetic check: RevenueHero not contacted; would route to ' + routerId + '.');
+      return {
+        submit: (fields) => { syntheticRecord({ revenuehero_fields: Object.keys(fields || {}) }); return Promise.resolve(null); },
+        dialog: { setEmbedTarget: () => {}, open: () => { syntheticRecord({ calendar: 'would open' }); } },
+      };
+    }
     /* RevenueHero router, per page.
 
        READ AT USE TIME, not here. This IIFE runs when the script is parsed
@@ -1512,8 +1560,11 @@
        counts it against Best Practices on every preview audit. Skipping it
        loses nothing: the server could never have received it. Production and
        the Webflow staging host send exactly what they sent before.
-       If an origin is ever added to ALLOWED_ORIGIN, add it here too, or that
-       site records no page loads. Exact names, never a pattern. */
+       GENERATED SINCE v5.23.0: tools/build-form-min.js writes this list from
+       allowed-origins.js in gushwork-api, the same list the API's CORS check
+       reads, so the two can no longer drift. EDIT THE API'S LIST ONLY, THEN
+       REBUILD. An edit here is overwritten by the next build, and the tests
+       fail until then. Exact names, never a pattern. */
     const SESSION_HOSTS = ['www.gushwork.ai', 'gushwork.ai', 'gushwork.webflow.io'];
 
     function saveSession() {
@@ -1524,7 +1575,7 @@
       }
       fetchWithTimeout(`${RAILWAY_API_URL}/session`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: apiHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           session_id: formState.session_id,
           page_url: formState.page_url,
@@ -2424,7 +2475,7 @@
         const t = setTimeout(() => controller.abort(), 15000); // matches the content check's budget
         const res = await fetch(`${RAILWAY_API_URL}/resolve-website`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: apiHeaders({ 'Content-Type': 'application/json' }),
           signal: controller.signal,
           body: JSON.stringify({ website: rawValue }),
         });
@@ -2451,7 +2502,7 @@
         const t = setTimeout(() => controller.abort(), 15000);
         const res = await fetch(`${RAILWAY_API_URL}/verify-website`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: apiHeaders({ 'Content-Type': 'application/json' }),
           signal: controller.signal,
           body: JSON.stringify({ website: rawValue, parking_hint: parkingHint || null, has_mx: hasMX === true }),
         });
@@ -2705,7 +2756,7 @@
         try {
           const res = await fetchWithTimeout(`${RAILWAY_API_URL}/verify-email`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: apiHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ email }),
           }, NET_TIMEOUT_MS.verifyEmail);
           if (!res.ok) return { valid: true, status: 'backend_error' };
@@ -2979,7 +3030,7 @@
         try {
           const res = await fetchWithTimeout(`${RAILWAY_API_URL}/non-icp-check`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: apiHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ email: email || '', website: website || '' }),
           }, NET_TIMEOUT_MS.nonIcp);
           if (!res.ok) return { blocked: false, status: 'backend_error', pending: false };
@@ -3153,7 +3204,7 @@
       try {
         const res = await fetchWithTimeout(`${RAILWAY_API_URL}/partial`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: apiHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify(formState),
         }, NET_TIMEOUT_MS.partial);
         return res.ok;
@@ -3174,7 +3225,7 @@
       try {
         const res = await fetchWithTimeout(`${RAILWAY_API_URL}/submit`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: apiHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify(formState),
         }, NET_TIMEOUT_MS.submit);
         /* Returns the BODY now, not just res.ok, so handleStep2Next can act on
@@ -3184,6 +3235,7 @@
            failure must not lose the lead, so it degrades to res.ok. */
         try {
           const body = await res.json();
+          if (syntheticToken()) syntheticRecord({ submit: body });
           return (body && typeof body === 'object') ? body : res.ok;
         } catch (_) {
           return res.ok;
@@ -3228,7 +3280,7 @@
       try {
         const res = await fetchWithTimeout(`${RAILWAY_API_URL}/enrich`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: apiHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({ email, session_id: formState.session_id }),
         }, NET_TIMEOUT_MS.enrich);
         if (!res.ok) return null;
@@ -3341,6 +3393,8 @@ SECTION 7B — GTM EVENTS CARRY THE LEAD'S EMAIL (enhanced conversions)
     }
 
     function pushGtmLeadEvent(eventName) {
+      /* A synthetic check is not a lead: no event, so no conversion tag. */
+      if (syntheticToken()) return false;
       if (_gtmPushed[eventName]) return false;
       _gtmPushed[eventName] = true;
       const userData = gtmUserData(formState.email);
@@ -3380,7 +3434,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
         if (isRailwayReady() && !isTestEmail(formState.email)) {
           await fetchWithTimeout(`${RAILWAY_API_URL}/booking-confirmed`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: apiHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({
               session_id: formState.session_id,
               booking_uid: meeting.id || ev.data.meeting?.id || '',
@@ -3620,7 +3674,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
         // hero.submit() starts immediately alongside submitLead()
         // Both resolve concurrently — eliminates sequential lag
         // ───────────────────────────────────────────────────
-        const hero = new RevenueHero({ routerId: rhRouterId() });
+        const hero = syntheticToken() ? syntheticHero(rhRouterId()) : new RevenueHero({ routerId: rhRouterId() });
         const rhPromise = hero.submit({
           Email: formState.email,
           'First Name': formState.first_name,
@@ -4010,7 +4064,7 @@ Server-side redundancy handled by /booking-confirmed-webhook-rh.
       initBrowserBack();
       initRHBookingListener();
 
-      console.log('[GW] ✅ Form initialised v5.22.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
+      console.log('[GW] ✅ Form initialised v5.23.0-ads (Google Ads).', 'Session:', formState.session_id, '| Page:', formState.page_url, '| Landing:', formState.landing_page, '| Previous:', formState.previous_page || 'none', '| Referrer:', formState.referrer, formState.fbc ? '| fbc: ' + formState.fbc.substring(0, 20) + '...' : '', formState.fbp ? '| fbp: ' + formState.fbp : '', formState.ps_xid ? '| ps_xid: ' + formState.ps_xid : '');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

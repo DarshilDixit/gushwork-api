@@ -13,6 +13,9 @@
 // user graph and ph contributes nothing to match quality.
 // ============================================================
 
+/* The net under the synthetic branches in index.js (see synthetic.js): a
+   synthetic website-monitor check must never reach this system. */
+const synthetic = require('./synthetic');
 const crypto = require('crypto');
 
 function sha256(value) {
@@ -635,6 +638,9 @@ function metaExcludedDomainMatch({ email, website } = {}, env = process.env) {
 }
 
 async function sendEvent(eventName, payload, options = {}) {
+  /* Every Meta event passes through here, so this one line covers all of
+     them. Not a failure (no alert) and not a success (no streak reset). */
+  if (synthetic.refuseIfSynthetic('meta', `Meta ${eventName} event`)) return { skipped: 'synthetic', eventName };
   /* FIRST, before credentials or anything else, so it holds whatever else is
      configured. Not a failure (no success:false, so throwIfAnyFailed raises
      nothing and no Meta alert counts it) and not a success (no

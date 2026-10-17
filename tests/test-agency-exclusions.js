@@ -325,8 +325,10 @@ const NORMAL       = { email: 'buyer@northwind-trading.test', website: 'northwin
   ok('H: a skip RESOLVES -- it never throws (a throw would mark the lead failed)', !threw, threw && threw.message);
   ok('H: ...to { skipped, detail }, not success', res && res.skipped === 'agency' && res.success === undefined && /flighted\.co/.test(res.detail), JSON.stringify(res));
   eq('H: ...having asked Salesforce NOTHING, not even "does this Lead exist" (no update either)', sfCalls(), 0);
+  /* The only line allowed above it is the v5.23.0 synthetic-check guard,
+     which also returns before the try and is exactly this text. */
   ok('H: the check runs before the try block, so nothing below it can run',
-     /async function pushToSalesforce\(payload\) \{\s*const skip = salesforceSkipReason\(payload \|\| \{\}\);\s*if \(skip\) \{[\s\S]{0,200}return \{ skipped: skip\.reason, detail: skip\.detail \};\s*\}\s*try \{/.test(fs.readFileSync(path.join(ROOT, 'salesforce.js'), 'utf8')));
+     /async function pushToSalesforce\(payload\) \{\s*(if \(synthetic\.refuseIfSynthetic\('salesforce', 'Salesforce Lead write'\)\) return \{ skipped: 'synthetic', detail: 'synthetic website-monitor check' \};\s*)?const skip = salesforceSkipReason\(payload \|\| \{\}\);\s*if \(skip\) \{[\s\S]{0,200}return \{ skipped: skip\.reason, detail: skip\.detail \};\s*\}\s*try \{/.test(fs.readFileSync(path.join(ROOT, 'salesforce.js'), 'utf8')));
   ok('H: index.js hands Salesforce the REAL isInternalSubmission at boot', /\nsetSalesforceInternalCheck\(isInternalSubmission\);/.test(src));
   eq('H: ours, by the real rule (b@g.ai)', (SF.salesforceSkipReason({ email: 'b@g.ai' }) || {}).reason, 'internal');
   eq('H: a normal lead has no skip reason', SF.salesforceSkipReason(NORMAL), null);

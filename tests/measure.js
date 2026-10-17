@@ -56,6 +56,8 @@ const SUITES = [
   'test-gads-upload.js',
   'test-agency-exclusions.js',
   'test-form-differential.js',
+  'test-synthetic.js',
+  'test-server-differential.js',
 ];
 
 const BASELINE = path.join(__dirname, '.baseline.json');
