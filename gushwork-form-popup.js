@@ -3,7 +3,9 @@
 
   v5.21.0-ads — no jQuery. Ported from /demo v5.21.0, identical: the
   phone setup no longer loads jQuery 3.6.0 from cdnjs first, and its three
-  jQuery calls are plain DOM with the same results.
+  jQuery calls are plain DOM with the same results. One deliberate change:
+  the phone setup now waits for DOMContentLoaded when the page is still
+  loading, so a <head> pin (/ai-demo) no longer misses the phone field.
 
   v5.20.0-ads — the two GTM events carry the lead's email for Google Ads
   enhanced conversions: gw_form_submitted and gw_demo_booked now push
@@ -758,12 +760,21 @@
        v5.20.0 and this file side by side and requires identical results.
        window.jQuery is no longer set here: Webflow pages keep their own
        3.5.1, which this used to overwrite; the Astro pages have none.
-       HEAD PINS: initPhoneInputs looks once, now a round trip sooner, so on
-       a page that loads this in its <head> (/ai-demo) it can run before the
-       Ads backfill tags the phone field at DOMContentLoaded and miss it. */
+       HEAD PINS: initPhoneInputs looks for the phone field ONCE. /ai-demo
+       loads this file in its <head> (checked 17 Oct 2026), where the two
+       scripts can land before the Ads backfill tags the field at
+       DOMContentLoaded: the setup then found nothing, and the visitor got a
+       plain field with no number check and raw digits went to Salesforce and
+       RevenueHero. v5.20.0 missed it too, and dropping jQuery made the
+       scripts land a round trip sooner, so the setup now WAITS for
+       DOMContentLoaded. The backfill's listener is added while this file
+       first runs, so it is always ahead of this one and tags the field
+       first. On a footer pin the page is normally parsed by the time
+       utils.js lands, so this runs at once, as before. */
     loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/intlTelInput.min.js', function () {
       loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/utils.js', function () {
-        initPhoneInputs();
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { initPhoneInputs(); });
+        else initPhoneInputs();
       });
     });
 

@@ -1343,6 +1343,13 @@ const ADA = 'ada@acmewidgets.com';
   add('gushwork-form-popup.js', 'start', 'testAddress', { submitted: false, dataLayer: null });
   add('gushwork-form-popup.js', 'noPhone', 'b2bOrganic', { router: '6138', phone: '+12015550123', itiInits: 1 });
   add('gushwork-form-popup.js', 'twoPhones', 'b2bOrganic', { itiInits: 2 });
+  /* ARRIVING FROM ANOTHER gushwork.ai PAGE (home page or /pricing to the form,
+     a common real path). Every case above arrives from Google, so the
+     previous-page branch (document.referrer on gushwork.ai, stored as
+     gw_previous_page) never ran: renaming that storage key survived a
+     mutation in review on 17 Oct 2026. These two make OLD and NEW walk it. */
+  add('gushwork-form.js', 'demo', 'b2bOrganic', { router: '6138', dataLayer: DL(ADA) }, { referrer: 'https://www.gushwork.ai/pricing' });
+  add('gushwork-form-popup.js', 'start', 'aeoCpc', { router: '6138', itiInits: 1 }, { referrer: 'https://www.gushwork.ai/' });
   add('gushwork-form-popup.js', 'start', 'rhDown', {});
 
   /* Each file on the other's pages too: the fork is meant to be the same
@@ -1417,36 +1424,41 @@ const ADA = 'ada@acmewidgets.com';
     ok(`${tag} when cdnjs jQuery fails: the rest of /submit is identical`, strip(o) === strip(n));
   }
 
-  /* 3. A HEAD-PINNED PAGE: the one place the earlier phone setup can be
-        SEEN. /ai-demo carries the Ads file in its <head> (checked 17 Oct
-        2026; every other form page has it in the footer). Its phone input
-        has no ms-code-phone-number attribute: the Ads file's markup
-        backfill adds it at DOMContentLoaded, and that waits for the whole
-        page, parser-blocking body scripts included. initPhoneInputs runs
-        when utils.js lands and looks once. If that is before
-        DOMContentLoaded it finds nothing and the field is never set up
-        (raw digits sent, no number check). That race is in v5.20.0 too;
-        removing a round trip moves NEW's look earlier, so there is now a
-        window where OLD found the field and NEW does not. Pinned here so
-        it is on record and is a decision, not a surprise. With the
-        libraries landing at OLD 300ms / NEW 200ms: */
+  /* 3. A HEAD-PINNED PAGE. /ai-demo carries the Ads file in its <head>
+        (checked 17 Oct 2026; every other form page has it in the footer).
+        Its phone input has no ms-code-phone-number attribute: the Ads
+        file's markup backfill adds it at DOMContentLoaded, and that waits
+        for the whole page, parser-blocking body scripts included.
+        initPhoneInputs looks once. In v5.20.0 it looked when utils.js
+        landed, so when that was before DOMContentLoaded it found nothing:
+        no number check, raw digits sent. Dropping jQuery moved the look a
+        round trip earlier, which would have made that miss MORE common, so
+        v5.21.0 waits for DOMContentLoaded when the page is still loading.
+        The result: NEW sets the field up at every page-ready time, and the
+        only difference from OLD is the case OLD already got wrong. With
+        the libraries landing at OLD 300ms / NEW 200ms: */
   {
     const f = 'gushwork-form-popup.js';
     const at = async (dcl) => [await runOne('old', f, 'aiDemo', 'b2bOrganic', 'same', { dclAt: dcl }),
                                await runOne('new', f, 'aiDemo', 'b2bOrganic', 'same', { dclAt: dcl })];
     const inits = (r) => eventsOf(r, 'iti.init').length;
     const phoneOf = (r) => (submitBody(r) || {}).phone;
+    const strip = (r) => { const b = Object.assign({}, submitBody(r)); delete b.phone; return JSON.stringify(b); };
     let [o, n] = await at(150);
     ok('head-pinned /ai-demo, page ready at 150ms (before both): both set the phone up, both send E.164',
        inits(o) === 1 && inits(n) === 1 && phoneOf(o) === '+12015550123' && phoneOf(n) === '+12015550123', [inits(o), inits(n), phoneOf(o), phoneOf(n)].join(' '));
     [o, n] = await at(250);
-    ok('head-pinned /ai-demo, page ready at 250ms (between): OLD set the phone up, NEW looked too early and did not',
-       inits(o) === 1 && inits(n) === 0, inits(o) + ' / ' + inits(n));
-    ok('head-pinned /ai-demo, page ready at 250ms: so OLD sent E.164 and NEW sends the raw digits',
-       phoneOf(o) === '+12015550123' && phoneOf(n) === '2015550123', phoneOf(o) + ' / ' + phoneOf(n));
+    ok('head-pinned /ai-demo, page ready at 250ms (between): NEW waits for the page and sets the phone up, like OLD',
+       inits(o) === 1 && inits(n) === 1, inits(o) + ' / ' + inits(n));
+    ok('head-pinned /ai-demo, page ready at 250ms: both send E.164, and the whole /submit body is identical',
+       phoneOf(o) === '+12015550123' && phoneOf(n) === '+12015550123' && JSON.stringify(submitBody(o)) === JSON.stringify(submitBody(n)), phoneOf(o) + ' / ' + phoneOf(n));
     [o, n] = await at(350);
-    ok('head-pinned /ai-demo, page ready at 350ms (after both): neither sets the phone up -- the v5.20.0 race',
-       inits(o) === 0 && inits(n) === 0 && phoneOf(o) === '2015550123' && phoneOf(n) === '2015550123', [inits(o), inits(n), phoneOf(o), phoneOf(n)].join(' '));
+    ok('head-pinned /ai-demo, page ready at 350ms (after both): OLD misses the phone field -- the v5.20.0 race',
+       inits(o) === 0 && phoneOf(o) === '2015550123', inits(o) + ' ' + phoneOf(o));
+    ok('head-pinned /ai-demo, page ready at 350ms: NEW waits, sets it up once and sends E.164 (the race is fixed)',
+       inits(n) === 1 && phoneOf(n) === '+12015550123', inits(n) + ' ' + phoneOf(n));
+    ok('head-pinned /ai-demo, page ready at 350ms: apart from the phone, /submit is identical',
+       strip(o) === strip(n));
   }
 
   console.log('');
