@@ -109,4 +109,74 @@ it in synthetic mode.
 
 ## Verified (run, not just read)
 
-FILLED IN AFTER THE MUTATION RUN.
+- **Full bar, run bare after the last commit: 19 suites, 8,631 assertions, 0
+  failed.** Before: 8,356. Only the two suites I changed moved:
+  `test-synthetic` 234 → 376 and `test-server-differential` 117 → 250.
+- **`test-server-differential` now locks against v5.23.0** (`c2220b1`). It
+  boots both servers with identical stubs and sends every form route three ways:
+  - **No header:** same status, headers, database statements and outbound
+    requests.
+  - **The right token:** same again, so the synthetic path is unchanged.
+  - **A wrong or empty token** (the intended difference): v5.23.0 ran each as a
+    visitor; v5.24.0 answers 401 with the refusal body, with the CORS header,
+    and **its trace shows nothing at all ran: 0 statements, 0 requests, on all
+    22 refused requests.**
+
+  Body comparisons, counted in the last run:
+  - 23 bodies were byte for byte. **Every right-token body was byte for byte:
+    11 of 11.**
+  - The other 4 differed only in generated values: `/verify-email`'s `ms`
+    stopwatch, `/health`'s timestamp, and the stack-trace path on express's
+    413 and CORS error pages.
+
+  One header moves, and is pinned exactly: `ratelimit-remaining` on later
+  visitor requests is higher by exactly the number of refused requests on the
+  same per-IP budget, because v5.23.0 spent one per wrong-token request and
+  v5.24.0 spends none.
+- **`test-synthetic`, for each of the nine routes:**
+  - A wrong token, an empty header and a 32-character prefix of the token each
+    give 401 with the exact body.
+  - **Nothing ran**, proved by the spies: no database statement (the stubbed
+    pool), no outbound request (stubbed fetch), the pool guard never hit, and no
+    choke point (`refuseIfSynthetic`) reached.
+  - The CORS header is on the 401.
+  - Exactly one log line, and the value is never logged.
+
+  Also covered:
+  - With `SYNTHETIC_TOKEN` unset or too short, any header gets 401 and the log
+    says checks are off, while a request with no header is still a visitor.
+  - `SYNTHETIC_EMAILS`: 403, with nothing saved or sent, on the four body
+    routes and on `/booking-confirmed` (after exactly one read of the row).
+    Case and spaces do not get past it, every listed address is covered, and
+    with a valid token each route gives the synthetic answer.
+  - Ops: twenty unauthenticated calls from different addresses leave the
+    monitor's budget untouched. One client gets 429 after 10, another client
+    behind the same proxy hop still gets 401, and the monitor is unaffected.
+  - The counter: two refused header requests and the monitor-address 403s are
+    not in `rejected`; the visitor's 400 is.
+  - Routes in the earlier sections behave as in v5.23.0 with the right token
+    and with no header.
+- **8 mutations, all CAUGHT** by `measure.js --mutation`, each committed first
+  and restored from a byte-exact backup:
+  - Wrong token handled as a visitor again: 58 + 66 failures across 2 suites.
+  - Empty header treated as no header: 2 suites.
+  - Counter counting refused requests.
+  - Monitor-address guard skipped.
+  - Booking route never looking the address up.
+  - Ops budget spent before the token check.
+  - Monitor-address 403 counted as a rejection.
+  - Strangers keyed on `req.ip`.
+
+  **The last one SURVIVED the first run**: the test sent a one-entry
+  X-Forwarded-For, where `req.ip` and `clientIpOf` agree. It now sends
+  Railway's two-entry form (client, then proxy hop). Re-run: CAUGHT.
+- **The form files are byte-identical to `main`.** Six blobs compared:
+  `19f18e2`, `fd88b42`, `43cfd87`, `76ba624`, `09ad405`, `7135533`.
+  The form differential still passes unchanged (2,013).
+
+## NOT verified (never run)
+
+- Production: nothing deployed, no variable read or changed.
+- The real monitor sending the right token, or a real proxy chain. The
+  two-entry X-Forwarded-For is modelled on CLAUDE.md's account of Railway, not
+  read off production for this PR.
