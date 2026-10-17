@@ -194,3 +194,22 @@ race for fast visitors. It would save the download for people who leave at step
 **Shipping it** still needs the pin step after a merge, both files to the same
 40-character SHA (Webflow per page, gushwork-web with new SRI hashes), and then
 the banner should show `v5.21.0` / `v5.21.0-ads`.
+
+## Review and follow-up (17 Oct 2026, after the agent's report)
+
+**Deliberate behaviour change added: the phone setup waits for the page to be ready.**
+`/ai-demo` loads the Ads file in its `<head>` (checked on the live page). Its phone field is only tagged at DOMContentLoaded, and the setup looks once, when `utils.js` lands. Dropping jQuery made that look a round trip sooner, so the miss (plain field, no number check, raw digits to Salesforce and RevenueHero) would have become more common. Both files now wait for DOMContentLoaded when the page is still loading. On a footer pin the page is normally parsed by then, so the setup runs at once, as before. On a footer page where `utils.js` lands before parsing finishes, the setup now runs a little later than in v5.20.0. The version stays v5.21.0, because v5.21.0 was never shipped.
+
+**Verified by the reviewer, not carried over from the agent's report:**
+- jQuery was used in exactly one place (the phone setup), and the replacements match. The loop body has no `return false`. The old files already need a modern browser (`=>`, `const`, `?.`, `NodeList.forEach` elsewhere), so no browser support is lost.
+- No tag in the live GTM container (version 72) calls jQuery, so the "a GTM tag relied on the form's jQuery" risk is closed.
+- Sizes re-measured: raw bytes match the agent's figures exactly. Gzip differs by a few bytes (a different gzip build). jQuery: 89,501 raw, 27,938 as sent.
+- Full bar run bare: 17 suites, 6,699 assertions, 0 failed.
+
+**Test gaps found in review, and closed:**
+- Every case arrived from Google, so the "came from another gushwork.ai page" branch never ran: renaming `gw_previous_page` SURVIVED. Two cases now arrive from gushwork.ai pages. Re-run: CAUGHT.
+- The head-pin expectations now pin the fix: NEW sets the phone up at every page-ready time, and the only difference from OLD is the case OLD got wrong.
+- Removing the new wait from the Ads file: CAUGHT. Removing it from `gushwork-form.js` alone SURVIVED (no `/demo` head-pin case). A timing check now requires the setup to run at or after page-ready in both files. Re-run: CAUGHT.
+- Also CAUGHT in review: the phone error message changed, the phone sent to RevenueHero without its `+`, and the floating label not synced.
+
+**Still not run:** any real browser. The suite is a model, not a page.
