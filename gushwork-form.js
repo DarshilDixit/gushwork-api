@@ -417,7 +417,10 @@
        that attribute, so never missing. tests/test-form-differential.js runs
        v5.20.0 and this file side by side and requires identical results.
        window.jQuery is no longer set here: Webflow pages keep their own
-       3.5.1, which this used to overwrite; the Astro pages have none. */
+       3.5.1, which this used to overwrite; the Astro pages have none.
+       HEAD PINS: initPhoneInputs looks once, now a round trip sooner, so on
+       a page that loads this in its <head> (/ai-demo) it can run before the
+       Ads backfill tags the phone field at DOMContentLoaded and miss it. */
     loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/intlTelInput.min.js', function () {
       loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/utils.js', function () {
         initPhoneInputs();
