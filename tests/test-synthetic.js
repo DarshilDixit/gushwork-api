@@ -62,7 +62,7 @@ const synthetic = require('../synthetic');
 const Q = [];        // { pool, text, params, syn }
 const F = [];        // { method, url, headers, body, syn }
 const LOGS = [];     // { syn, text }
-const S = { submitted: new Set(), apolloHealthy: true, rhHang: false, failSubmitFor: new Set(), rows: new Map() };
+const S = { submitted: new Set(), apolloHealthy: true, rhHang: false, failSubmitFor: new Set(), rows: new Map(), bookingEmails: new Map() };
 
 /* ── stub pg ────────────────────────────────────────────────────── */
 function leadsInsertRow(text, params) {
@@ -100,6 +100,10 @@ function stubAnswer(label, text, params) {
     return { rows: [Object.assign({}, r, { step_reached: 2 })], rowCount: 1 };
   }
   if (/UPDATE leads SET ps_signup_sent_at = NOW/.test(flat)) return { rows: [{ session_id: params[0] }], rowCount: 1 };
+  if (/^SELECT lower\(email\) AS email FROM leads WHERE session_id=\$1$/.test(flat)) {
+    const e = S.bookingEmails.get(params[0]);
+    return { rows: e ? [{ email: e.toLowerCase() }] : [], rowCount: e ? 1 : 0 };
+  }
   /* runPartnerStackSignup reads the block back off the row it was written to. */
   if (/^SELECT non_icp_blocked, non_icp_reason FROM leads WHERE session_id = \$1$/.test(flat)) {
     const r = S.rows.get(params[0]);
@@ -201,6 +205,11 @@ Object.assign(process.env, {
   SYNTHETIC_TOKEN: TOKEN,
   SYNTHETIC_RATE_PER_HOUR: '60',
   DEEP_HEALTH_TIMEOUT_MS: '300',
+  /* v5.24.0: the monitor's own address, and small ops budgets so the
+     suite can spend them. */
+  SYNTHETIC_EMAILS: ' Monitor@GW-Monitor.example , second-monitor@gw-monitor.example',
+  SYNTHETIC_OPS_RATE_PER_HOUR: '8',
+  SYNTHETIC_OPS_UNAUTH_PER_HOUR: '10',
 });
 
 /* Console: captured, attributed and silent. tagConsole wraps whatever is
@@ -220,17 +229,18 @@ async function post(route, body, opts) {
   opts = opts || {};
   const headers = { 'Content-Type': 'application/json', Origin: 'https://www.gushwork.ai', 'User-Agent': 'suite/1.0' };
   if (opts.token !== undefined) headers['X-GW-Synthetic'] = opts.token;
+  if (opts.origin) headers.Origin = opts.origin;
   const res = await realFetch(BASE + route, { method: 'POST', headers, body: typeof body === 'string' ? body : JSON.stringify(body) });
   const text = await res.text();
   let json = null; try { json = JSON.parse(text); } catch (_) {}
   return { status: res.status, json, text, headers: res.headers };
 }
-async function get(route, token) {
-  const headers = token === undefined ? {} : { 'X-GW-Synthetic': token };
+async function get(route, token, extra) {
+  const headers = Object.assign(token === undefined ? {} : { 'X-GW-Synthetic': token }, extra || {});
   const res = await realFetch(BASE + route, { headers });
   const text = await res.text();
   let json = null; try { json = JSON.parse(text); } catch (_) {}
-  return { status: res.status, json, text };
+  return { status: res.status, json, text, headers: res.headers };
 }
 /* Wait until fire-and-forget work has stopped: no new query or request
    for 200ms, capped at 2s. */
@@ -355,21 +365,85 @@ const without = (o, ...keys) => { const c = Object.assign({}, o); keys.forEach((
   ok('B /partial: the form-traffic heartbeat is only for real traffic', /if \(!req\.synthetic\) _lastLeadAt = Date\.now\(\);/.test(idx));
 
   /* ================================================================
-     C. A WRONG OR MISSING TOKEN IS AN ORDINARY REQUEST
+     C. FAIL CLOSED (v5.24.0): a header that does not carry the token is
+        refused 401 on every one of the nine routes, and NOTHING runs --
+        no handler, no database call, no outbound request, no choke point.
+        Each case first proves the same body WITHOUT the header does run.
      ================================================================ */
-  for (const [label, tok] of [['a wrong token', TOKEN.replace(/.$/, '!')], ['an empty header', ''], ['a near-miss prefix', TOKEN.slice(0, 32)]]) {
-    const r = await run('/session', { session_id: newSession(), page_url: 'https://www.gushwork.ai/demo' }, { token: tok });
-    ok(`C: ${label} is an ordinary request (row written, no synthetic flag)`, r.status === 200 && !('synthetic' in (r.json || {}))
-       && writes(r.queries).some((q) => /INSERT INTO form_sessions/.test(q.text)), r.text);
-    ok(`C: ${label} -- the value is never logged`, !r.logs.some((l) => tok && l.text.indexOf(tok) !== -1));
+  const REFUSED = JSON.stringify({ ok: false, error: 'synthetic token rejected', synthetic: false });
+  const nothingRan = (r) => r.queries.length === 0 && r.fetches.length === 0 && r.guardHits === 0 && Object.keys(r.skipped).length === 0;
+  const C_CASES = [['a wrong token', TOKEN.replace(/.$/, '!')], ['an empty header', ''], ['a 32-character prefix of the token', TOKEN.slice(0, 32)]];
+  let ci = 500;
+  for (const [route, body] of ROUTES) {
+    for (const [label, tok] of C_CASES) {
+      const r = await run(route, body(++ci), { token: tok });
+      ok(`C ${route}, ${label}: 401 with the refusal body`, r.status === 401 && r.text === REFUSED, r.status + ' ' + r.text.slice(0, 120));
+      ok(`C ${route}, ${label}: NOTHING ran (no query, no request, no choke point)`, nothingRan(r),
+         JSON.stringify({ q: r.queries.map((q) => q.text.replace(/\s+/g, ' ').slice(0, 40)), f: r.fetches.map((f) => f.url.slice(0, 50)), g: r.guardHits, s: r.skipped }));
+      ok(`C ${route}, ${label}: an allowed origin can read the 401 (CORS headers present)`, r.headers.get('access-control-allow-origin') === 'https://www.gushwork.ai', String(r.headers.get('access-control-allow-origin')));
+      ok(`C ${route}, ${label}: the value is never logged, and one line says it was refused`,
+         (!tok || !r.logs.some((l) => l.text.indexOf(tok) !== -1)) && r.logs.filter((l) => /refused \(401\)/.test(l.text)).length === 1, JSON.stringify(r.logs.map((l) => l.text.slice(0, 90))));
+    }
   }
   {
-    const r = await run('/submit', Object.assign({ session_id: newSession() }, LEAD), { token: 'wrong-but-long-enough-0123456789abcdefgh' });
-    ok('C: /submit with a wrong token does everything a visitor submit does', !('synthetic' in (r.json || {})) && r.fetches.some((f) => /\/sobjects\/Lead/.test(f.url)), r.text);
+    /* Off: no SYNTHETIC_TOKEN, or one too short. Even the old token is refused. */
+    const saved = process.env.SYNTHETIC_TOKEN;
+    for (const [label, val] of [['unset', undefined], ['shorter than 32 characters', 'short-token']]) {
+      if (val === undefined) delete process.env.SYNTHETIC_TOKEN; else process.env.SYNTHETIC_TOKEN = val;
+      const r = await run('/submit', Object.assign({ session_id: newSession() }, LEAD), { token: val || TOKEN });
+      ok(`C: with SYNTHETIC_TOKEN ${label}, any header is refused 401 and nothing runs`, r.status === 401 && r.text === REFUSED && nothingRan(r), r.status + ' ' + r.text);
+      ok(`C: with SYNTHETIC_TOKEN ${label}, the log says checks are off`, r.logs.some((l) => /refused \(401\): synthetic checks are off/.test(l.text)));
+      const v = await run('/session', { session_id: newSession(), page_url: 'https://www.gushwork.ai/demo' });
+      ok(`C: with SYNTHETIC_TOKEN ${label}, a request with NO header is a visitor as before`, v.status === 200 && !('synthetic' in (v.json || {})) && writes(v.queries).length > 0, v.text);
+    }
+    process.env.SYNTHETIC_TOKEN = saved;
   }
   {
-    const r = await run('/lm/track', { foo: 1 }, { token: TOKEN });
-    ok('C: the header means nothing on a route outside the nine (no synthetic flag)', !(r.json && r.json.synthetic === true), r.text.slice(0, 80));
+    const r = await run('/lm/track', { foo: 1 }, { token: 'whatever' });
+    ok('C: the header means nothing on a route outside the nine (not refused, no synthetic flag)', r.status !== 401 && !(r.json && r.json.synthetic === true), r.status + ' ' + r.text.slice(0, 80));
+  }
+
+  /* ================================================================
+     C2. THE MONITOR'S OWN ADDRESS (SYNTHETIC_EMAILS, v5.24.0)
+     Without a valid token: 403 and nothing saved or sent, on the five
+     routes that carry an address. With one: the synthetic answer.
+     ================================================================ */
+  {
+    const MON = 'monitor@gw-monitor.example';
+    const FORBID = JSON.stringify({ ok: false, error: 'monitor address outside a synthetic check' });
+    const BODY_ROUTES = [
+      ['/partial', () => Object.assign({ session_id: newSession(), step_reached: 1 }, LEAD, { email: MON })],
+      ['/submit', () => Object.assign({ session_id: newSession() }, LEAD, { email: MON })],
+      ['/enrich', () => ({ session_id: newSession(), email: MON })],
+      ['/verify-email', () => ({ email: MON })],
+    ];
+    for (const [route, body] of BODY_ROUTES) {
+      const r = await run(route, body());
+      ok(`C2 ${route}: the monitor's address with no header is refused 403`, r.status === 403 && r.text === FORBID, r.status + ' ' + r.text.slice(0, 100));
+      ok(`C2 ${route}: ...and nothing was saved or sent`, nothingRan(r), JSON.stringify({ q: r.queries.length, f: r.fetches.length }));
+      const up = await run(route, Object.assign(body(), { email: '  MONITOR@gw-monitor.EXAMPLE ' }));
+      ok(`C2 ${route}: case and spaces do not get it past`, up.status === 403 && nothingRan(up), String(up.status));
+      const second = await run(route, Object.assign(body(), { email: 'second-monitor@gw-monitor.example' }));
+      ok(`C2 ${route}: every address on the list is covered`, second.status === 403, String(second.status));
+      const syn = await run(route, body(), { token: TOKEN });
+      ok(`C2 ${route}: with a valid token it is the synthetic check, as in v5.23.0`, syn.status === 200 && syn.json && syn.json.synthetic === true && writes(syn.queries).length === 0 && syn.guardHits === 0, syn.status + ' ' + syn.text.slice(0, 100));
+    }
+    {
+      const sidB = newSession();
+      S.bookingEmails.set(sidB, 'Monitor@GW-Monitor.example');
+      const r = await run('/booking-confirmed', { session_id: sidB, booking_uid: 'bk-mon', start_time: '2026-10-20T15:00:00Z' });
+      ok('C2 /booking-confirmed: a session whose lead row is the monitor\'s address is refused 403', r.status === 403 && r.text === FORBID, r.status + ' ' + r.text);
+      ok('C2 /booking-confirmed: ...after one read of that row, and nothing written or sent', r.queries.length === 1 && writes(r.queries).length === 0 && r.fetches.length === 0,
+         JSON.stringify(r.queries.map((q) => q.text.slice(0, 60))));
+      const syn = await run('/booking-confirmed', { session_id: sidB, booking_uid: 'bk-mon2' }, { token: TOKEN });
+      ok('C2 /booking-confirmed: with a valid token it is the synthetic check', syn.status === 200 && syn.json && syn.json.synthetic === true && writes(syn.queries).length === 0);
+    }
+    for (const route of ['/session', '/non-icp-check', '/verify-website', '/resolve-website']) {
+      const r = await run(route, { session_id: newSession(), email: MON, website: 'gw-monitor.example' });
+      ok(`C2 ${route}: not one of the five (no address that can become a lead), so not refused`, r.status !== 403, String(r.status));
+    }
+    const v = await run('/submit', Object.assign({ session_id: newSession() }, LEAD));
+    ok('C2: an ordinary address on /submit is a visitor as before', v.status === 200 && writes(v.queries).some((q) => /INSERT INTO leads/.test(q.text)));
   }
 
   /* ================================================================
@@ -450,6 +524,20 @@ const without = (o, ...keys) => { const c = Object.assign({}, o); keys.forEach((
   }
   eq('E /metrics/submissions without the token is refused', (await get('/metrics/submissions')).status, 401);
   {
+    /* v5.24.0: the token BEFORE the budget. The monitor's budget is 8 here;
+       twenty strangers' calls from different addresses must not spend it. */
+    for (let i = 0; i < 20; i++) await get('/health/deep', undefined, { 'X-Forwarded-For': '198.51.100.' + (i + 1) });
+    const r = await get('/health/deep', TOKEN);
+    eq('E: twenty unauthenticated calls did not spend the monitor\'s budget (still 200)', r.status, 200);
+    eq('E: ...and its budget shows only the monitor\'s own calls', r.headers.get('ratelimit-remaining') !== null && Number(r.headers.get('ratelimit-remaining')) >= 3, true);
+    /* A stranger's 401s have their own small budget, per client address. */
+    let last = null;
+    for (let i = 0; i < 11; i++) last = await get('/metrics/submissions', 'wrong', { 'X-Forwarded-For': '203.0.113.77' });
+    eq('E: one address past its 10 unauthenticated calls gets 429', last.status, 429);
+    eq('E: ...another address still gets a plain 401', (await get('/metrics/submissions', undefined, { 'X-Forwarded-For': '203.0.113.78' })).status, 401);
+    eq('E: ...and the monitor is not affected', (await get('/metrics/submissions?hours=1', TOKEN)).status, 200);
+  }
+  {
     /* Two real failures in this hour -- a 500 and a 400 -- and a synthetic
        500, which must not be counted. */
     const failing = newSession();
@@ -461,6 +549,12 @@ const without = (o, ...keys) => { const c = Object.assign({}, o); keys.forEach((
     await post('/submit', Object.assign({ session_id: failingSyn }, LEAD), { token: TOKEN });
     eq('E: a database failure in /submit answers 500 (the fixture)', f500.status, 500);
     eq('E: a /submit with no session id answers 400 (the fixture)', f400.status, 400);
+    /* v5.24.0: any request carrying the header is left out of the counts,
+       matching token or not. */
+    const w1 = await post('/submit', Object.assign({ session_id: newSession() }, LEAD), { token: 'wrong-token-0123456789abcdef0123456789' });
+    const w2 = await post('/submit', Object.assign({}, LEAD), { token: '' });
+    eq('E: a wrong-token /submit (the fixture) is refused 401', w1.status, 401);
+    eq('E: an empty-header /submit with no session id (the fixture) is refused 401, not 400', w2.status, 401);
     const r = await get('/metrics/submissions?hours=6', TOKEN);
     eq('E /metrics/submissions with the token: 200', r.status, 200);
     const j = r.json || {};
@@ -470,7 +564,7 @@ const without = (o, ...keys) => { const c = Object.assign({}, o); keys.forEach((
       JSON.stringify(Object.keys(x)) === JSON.stringify(['hour', 'submitted', 'booked', 'failed', 'rejected']) && /^\d{4}-\d\d-\d\dT\d\d:00:00Z$/.test(x.hour)), JSON.stringify(j.series && j.series[0]));
     const last = (j.series || [])[5] || {};
     eq('E /metrics/submissions: this hour\'s real failures counted (the 500, not the synthetic one)', last.failed, 1);
-    ok('E /metrics/submissions: this hour\'s rejections counted (the 400)', last.rejected >= 1, JSON.stringify(last));
+    eq('E /metrics/submissions: rejections are the visitor\'s 400 only -- not the refused header requests, nor the monitor-address 403s', last.rejected, 1);
     eq('E /metrics/submissions: submitted and booked come from the database', JSON.stringify([last.submitted, last.booked]), JSON.stringify([3, 2]));
     ok('E /metrics/submissions: says it is UTC, what it leaves out, and since when failures are counted',
        j.timezone === 'UTC' && /our own test submissions/.test(j.excludes || '') && !isNaN(Date.parse(j.failures_counted_since)), JSON.stringify(without(j, 'series')));
