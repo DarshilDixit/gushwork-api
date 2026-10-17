@@ -210,6 +210,9 @@ Object.assign(process.env, {
   SYNTHETIC_EMAILS: ' Monitor@GW-Monitor.example , second-monitor@gw-monitor.example',
   SYNTHETIC_OPS_RATE_PER_HOUR: '8',
   SYNTHETIC_OPS_UNAUTH_PER_HOUR: '10',
+  /* Above the ~31 refusals sections C and E send from the suite's own
+     address, so only the flood test below reaches it. */
+  SYNTHETIC_REFUSED_PER_HOUR: '40',
 });
 
 /* Console: captured, attributed and silent. tagConsole wraps whatever is
@@ -397,6 +400,34 @@ const without = (o, ...keys) => { const c = Object.assign({}, o); keys.forEach((
       ok(`C: with SYNTHETIC_TOKEN ${label}, a request with NO header is a visitor as before`, v.status === 200 && !('synthetic' in (v.json || {})) && writes(v.queries).length > 0, v.text);
     }
     process.env.SYNTHETIC_TOKEN = saved;
+  }
+  {
+    /* A FLOOD OF BAD HEADERS from one client: 401s until its 40 are spent,
+       then 429, which writes no log line and still runs nothing. Another
+       client is unaffected. Two-entry X-Forwarded-For, as Railway sends it,
+       so this is keyed on the client and not the proxy hop. */
+    const FLOOD = { 'X-Forwarded-For': '198.51.100.200, 10.0.0.1' };
+    const flood = async (headers) => {
+      const q0 = Q.length, f0 = F.length, l0 = LOGS.length;
+      const r = await realFetch(BASE + '/submit', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json', Origin: 'https://www.gushwork.ai', 'X-GW-Synthetic': 'flood-token' }, headers),
+        body: JSON.stringify(Object.assign({ session_id: newSession() }, LEAD)) });
+      const text = await r.text();
+      await quiet();
+      return { status: r.status, text, cors: r.headers.get('access-control-allow-origin'), ran: Q.length - q0 + F.length - f0, logs: LOGS.slice(l0).filter((l) => /refused \(401\)/.test(l.text)).length };
+    };
+    const results = [];
+    for (let i = 0; i < 41; i++) results.push(await flood(FLOOD));
+    ok('C: one client\'s first 40 bad headers are each a 401 with one log line', results.slice(0, 40).every((r) => r.status === 401 && r.text === REFUSED && r.logs === 1),
+       JSON.stringify(results.slice(0, 40).filter((r) => r.status !== 401 || r.logs !== 1).slice(0, 2)));
+    const over = results[40];
+    ok('C: the 41st is a 429 -- no unlimited 401s', over.status === 429, over.status + ' ' + over.text);
+    ok('C: ...which writes NO log line (counted during that request alone)', over.logs === 0, String(over.logs));
+    ok('C: ...runs nothing, and says synthetic: false', over.ran === 0 && JSON.parse(over.text).synthetic === false, over.text);
+    ok('C: ...and an allowed origin can still read it (CORS)', over.cors === 'https://www.gushwork.ai', String(over.cors));
+    const other = await flood({ 'X-Forwarded-For': '198.51.100.201, 10.0.0.1' });
+    ok('C: another client behind the same proxy hop still gets a plain 401', other.status === 401 && other.logs === 1, other.status + '');
+    const v = await run('/session', { session_id: newSession(), page_url: 'https://www.gushwork.ai/demo' }, { origin: 'https://www.gushwork.ai' });
+    ok('C: a visitor (no header) is untouched by the refusals\' budget', v.status === 200 && writes(v.queries).length > 0, v.text);
   }
   {
     const r = await run('/lm/track', { foo: 1 }, { token: 'whatever' });
@@ -696,6 +727,33 @@ const without = (o, ...keys) => { const c = Object.assign({}, o); keys.forEach((
       ok(`H: ${sig.replace(/\(.*/, '')} opens with its synthetic guard`, firstLine.indexOf(`if (synthetic.refuseIfSynthetic('${point}'`) === 2, firstLine);
     }
     ok('H: both pools are guarded', /synthetic\.guardPoolWrites\(pool, 'railway'\)/.test(idx) && /synthetic\.guardPoolWrites\(awsPool, 'aws'\)/.test(idx));
+  }
+
+  /* ================================================================
+     I. THE MONITOR-ADDRESS ROW READ IS BEHIND /booking-confirmed's LIMITER.
+     Last on purpose: it spends the suite's whole visitor budget. Once the
+     route's limiter says no, a booking for a made-up session gets 429 and
+     NO database read happens -- a stranger cannot drive row lookups past
+     the route's own limit.
+     ================================================================ */
+  {
+    let limited = null;
+    for (let i = 0; i < 150 && !limited; i++) {
+      const r = await post('/session', { session_id: newSession(), page_url: 'https://www.gushwork.ai/demo' });
+      if (r.status === 429) limited = r;
+    }
+    ok('I: the fixture: the visitor budget is spent (429 on /session)', !!limited, 'never limited');
+    const sidX = newSession();
+    S.bookingEmails.set(sidX, 'monitor@gw-monitor.example');
+    const q0 = Q.length;
+    const r = await post('/booking-confirmed', { session_id: sidX, booking_uid: 'bk-flood' });
+    await quiet();
+    eq('I: /booking-confirmed past the route limit is refused 429', r.status, 429);
+    ok('I: ...BEFORE the monitor-address row read: no database statement at all', Q.length === q0,
+       JSON.stringify(Q.slice(q0).map((q) => q.text.replace(/\s+/g, ' ').slice(0, 60))));
+    const idx2 = fs.readFileSync(path.join(ROOT, 'index.js'), 'utf8');
+    ok('I: and in the source the lock is mounted after the route limiters', idx2.indexOf("app.use('/booking-confirmed', globalLimiter);") > 0
+       && idx2.indexOf("app.use('/booking-confirmed', globalLimiter);") < idx2.indexOf('const SYNTHETIC_EMAILS = '));
   }
 
   realLog('');

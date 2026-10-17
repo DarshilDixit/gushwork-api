@@ -223,6 +223,17 @@ const syntheticLimiter = rateLimit({
   message: { error: 'Synthetic check rate limit reached', synthetic: true },
   standardHeaders: true, legacyHeaders: false, validate: false,
 });
+/* THE REFUSAL HAS ITS OWN BUDGET, per client address (clientIpOf, like
+   syntheticOpsUnauthLimiter; req.ip is a Railway proxy hop here). The 401
+   is answered before every route limiter, so without this a flood of bad
+   headers would get unlimited 401s and a log line each. Past the budget it
+   is a 429, which writes no log line. */
+const syntheticRefusalLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, max: Math.max(1, Number(process.env.SYNTHETIC_REFUSED_PER_HOUR) || 60),
+  keyGenerator: (req) => 'synthetic-refused:' + (clientIpOf(req) || 'unknown'),
+  message: { ok: false, error: 'Too many requests', synthetic: false },
+  standardHeaders: true, legacyHeaders: false, validate: false,
+});
 if (process.env.SYNTHETIC_TOKEN && !synthetic.configuredToken()) {
   console.warn('[synthetic] SYNTHETIC_TOKEN is set but shorter than ' + synthetic.MIN_TOKEN_LENGTH
     + ' characters, so synthetic checks are OFF and the header is ignored.');
@@ -232,9 +243,11 @@ app.use((req, res, next) => {
   const given = req.get(synthetic.HEADER);
   if (given === undefined) return next();
   if (!synthetic.tokenMatches(given)) {
-    /* Never the value: a near-miss token in a log is half a leaked one. */
-    console.warn(`[synthetic] ${synthetic.HEADER} on ${req.path} refused (401): ${synthetic.configuredToken() ? 'the token did not match SYNTHETIC_TOKEN' : 'synthetic checks are off'}`);
-    return res.status(401).json({ ok: false, error: 'synthetic token rejected', synthetic: false });
+    return syntheticRefusalLimiter(req, res, () => {
+      /* Never the value: a near-miss token in a log is half a leaked one. */
+      console.warn(`[synthetic] ${synthetic.HEADER} on ${req.path} refused (401): ${synthetic.configuredToken() ? 'the token did not match SYNTHETIC_TOKEN' : 'synthetic checks are off'}`);
+      res.status(401).json({ ok: false, error: 'synthetic token rejected', synthetic: false });
+    });
   }
   syntheticLimiter(req, res, () => {
     req.synthetic = true;
@@ -247,49 +260,6 @@ app.use((req, res, next) => {
   });
 });
 
-/* ── THE MONITOR'S OWN ADDRESS, OUTSIDE A SYNTHETIC CHECK (v5.24.0) ────────
-   A second lock, keyed on WHO rather than on the token: SYNTHETIC_EMAILS
-   (Railway, comma-separated, empty by default) lists the addresses the
-   website monitor fills the form with. On the five routes that can save or
-   send something about a person, a request for one of those addresses that
-   is NOT a valid synthetic request is refused 403 before the route runs, so
-   the monitor's address can never become a real lead -- whatever happens to
-   the header or the token.
-
-   WHERE THE ADDRESS IS. /partial, /submit, /enrich and /verify-email carry
-   it in the body as `email`, read exactly as each route reads it (trimmed,
-   254 characters, lower-cased). /booking-confirmed carries NO email -- the
-   form sends the session and the booking only -- so it is read off that
-   session's lead row, and only while the list is non-empty, so a booking's
-   database calls are exactly as before when the variable is unset. */
-const SYNTHETIC_EMAILS = (process.env.SYNTHETIC_EMAILS || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
-const SYNTHETIC_EMAIL_ROUTES = ['/partial', '/submit', '/enrich', '/verify-email', '/booking-confirmed'];
-app.use(async (req, res, next) => {
-  if (req.method !== 'POST' || !SYNTHETIC_EMAILS.length || req.synthetic || SYNTHETIC_EMAIL_ROUTES.indexOf(req.path) === -1) return next();
-  let email = '';
-  try {
-    if (req.path === '/booking-confirmed') {
-      const sid = ((req.body && req.body.session_id) || '').toString().trim().slice(0, 100);
-      if (sid) {
-        const r = await pool.query('SELECT lower(email) AS email FROM leads WHERE session_id=$1', [sid]);
-        email = (r.rows[0] && r.rows[0].email) || '';
-      }
-    } else {
-      email = ((req.body && req.body.email) || '').toString().trim().slice(0, 254).toLowerCase();
-    }
-  } catch (err) {
-    /* Fails OPEN for a visitor: an unreadable row is not evidence that the
-       booking belongs to the monitor. */
-    console.warn(`[synthetic] monitor-address check on ${req.path} could not read the lead row (allowed):`, err.message);
-    return next();
-  }
-  if (email && SYNTHETIC_EMAILS.indexOf(email) !== -1) {
-    console.warn(`[synthetic] ${req.path} refused (403): a monitor address arrived without a valid synthetic token`);
-    res.locals.gwNotAVisitor = true;   // not a visitor's rejected submit: see the outcome counter
-    return res.status(403).json({ ok: false, error: 'monitor address outside a synthetic check' });
-  }
-  next();
-});
 
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, max: 100,
@@ -318,6 +288,54 @@ app.use('/verify-website', strictLimiter);
 // the same mistake that made the monitor dashboard trip its own limiter.
 app.use('/lm/track',  globalLimiter);
 app.use('/lm/submit', globalLimiter);
+
+/* ── THE MONITOR'S OWN ADDRESS, OUTSIDE A SYNTHETIC CHECK (v5.24.0) ────────
+   A second lock, keyed on WHO rather than on the token: SYNTHETIC_EMAILS
+   (Railway, comma-separated, empty by default) lists the addresses the
+   website monitor fills the form with. On the five routes that can save or
+   send something about a person, a request for one of those addresses that
+   is NOT a valid synthetic request is refused 403 before the route runs, so
+   the monitor's address can never become a real lead -- whatever happens to
+   the header or the token.
+
+   WHERE THE ADDRESS IS. /partial, /submit, /enrich and /verify-email carry
+   it in the body as `email`, read exactly as each route reads it (trimmed,
+   254 characters, lower-cased). /booking-confirmed carries NO email -- the
+   form sends the session and the booking only -- so it is read off that
+   session's lead row, and only while the list is non-empty, so a booking's
+   database calls are exactly as before when the variable is unset.
+
+   MOUNTED AFTER THE ROUTE LIMITERS, so that row read is behind
+   /booking-confirmed's own limiter and a stranger cannot drive database
+   reads with made-up session ids faster than the route already allows. */
+const SYNTHETIC_EMAILS = (process.env.SYNTHETIC_EMAILS || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+const SYNTHETIC_EMAIL_ROUTES = ['/partial', '/submit', '/enrich', '/verify-email', '/booking-confirmed'];
+app.use(async (req, res, next) => {
+  if (req.method !== 'POST' || !SYNTHETIC_EMAILS.length || req.synthetic || SYNTHETIC_EMAIL_ROUTES.indexOf(req.path) === -1) return next();
+  let email = '';
+  try {
+    if (req.path === '/booking-confirmed') {
+      const sid = ((req.body && req.body.session_id) || '').toString().trim().slice(0, 100);
+      if (sid) {
+        const r = await pool.query('SELECT lower(email) AS email FROM leads WHERE session_id=$1', [sid]);
+        email = (r.rows[0] && r.rows[0].email) || '';
+      }
+    } else {
+      email = ((req.body && req.body.email) || '').toString().trim().slice(0, 254).toLowerCase();
+    }
+  } catch (err) {
+    /* Fails OPEN for a visitor: an unreadable row is not evidence that the
+       booking belongs to the monitor. */
+    console.warn(`[synthetic] monitor-address check on ${req.path} could not read the lead row (allowed):`, err.message);
+    return next();
+  }
+  if (email && SYNTHETIC_EMAILS.indexOf(email) !== -1) {
+    console.warn(`[synthetic] ${req.path} refused (403): a monitor address arrived without a valid synthetic token`);
+    res.locals.gwNotAVisitor = true;   // not a visitor's rejected submit: see the outcome counter
+    return res.status(403).json({ ok: false, error: 'monitor address outside a synthetic check' });
+  }
+  next();
+});
 
 let awsPool = null;
 

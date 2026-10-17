@@ -213,7 +213,9 @@ async function send(s, req) {
       ok(`${req.label}: now 401 with the refusal body`, b.status === 401 && b.body === REFUSED, b.status + ' ' + b.body.slice(0, 120));
       ok(`${req.label}: now NOTHING ran -- no database statement, no outbound request`, tb.length === 0, tb.slice(0, 2).join(' ').slice(0, 200));
       ok(`${req.label}: the 401 carries the CORS header for the allowed origin`, b.headers['access-control-allow-origin'] === 'https://www.gushwork.ai', JSON.stringify(b.headers));
-      ok(`${req.label}: the 401 spends no visitor budget (no rate-limit headers)`, !('ratelimit-remaining' in b.headers), JSON.stringify(b.headers));
+      /* Its rate-limit headers are the refusals' own budget (60 an hour per
+         client), never a visitor budget (100 or 50). */
+      ok(`${req.label}: the 401 spends no visitor budget (its rate-limit headers are the refusals' own, limit 60)`, b.headers['ratelimit-limit'] === '60', JSON.stringify(b.headers));
       if (LIMITER[req.path]) refusedOn[LIMITER[req.path]]++;
       continue;
     }
