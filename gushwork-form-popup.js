@@ -747,33 +747,17 @@
       document.head.appendChild(s);
     }
 
-    /* ── NO jQUERY (v5.21.0) ───────────────────────────────────────────
-       This chain used to start with jQuery 3.6.0 from cdnjs (89.5 KB, about
-       28 KB as sent), and the whole file used it for exactly three things,
-       all in initPhoneInputs below: a typeof guard, finding the phone
-       inputs, and reading one attribute. Every other line here was already
-       plain DOM. So a phone visitor downloaded and parsed a library, and
-       waited one extra serial round trip before the phone field was set up,
-       to run three calls the browser does natively.
-
-       Each was replaced with its exact equivalent, not an approximation:
-         $('input[ms-code-phone-number]').each(fn) -> querySelectorAll +
-           forEach. jQuery hands that selector to querySelectorAll itself,
-           so it is the same static list in the same document order.
-         $(input).attr(name) -> input.getAttribute(name). The input was
-           matched BY that attribute, so it is always present; jQuery only
-           differs (undefined instead of null) when it is missing.
-         typeof $ guard -> dropped. It could only ever be reached after
-           jQuery's own onload, so it never decided anything.
-       tests/test-form-differential.js runs v5.20.0 and this file side by side
-       through every page and lead type and requires identical results.
-
-       WHAT THE PAGE NOTICES. window.$ and window.jQuery are no longer set
-       by this file. Every Webflow page loads its own jQuery 3.5.1, which
-       this load used to OVERWRITE once it arrived, so those pages now keep
-       their own copy. The Astro pages load none, so there window.jQuery is
-       now absent; nothing in gushwork-web used it when this was checked
-       on 17 Oct 2026. GTM tags are not in any repo and were not checked. */
+    /* ── NO jQUERY (v5.21.0) ──────────────────────────────────────────
+       jQuery 3.6.0 used to load first (89,501 bytes, and one more serial
+       round trip before the phone field is set up) for three calls, all in
+       initPhoneInputs: a typeof $ guard, only reachable after jQuery's own
+       onload, so it never decided anything; $('input[...]').each, which
+       jQuery hands to querySelectorAll, so the same static list in the same
+       order; and $(input).attr, i.e. getAttribute on an input matched BY
+       that attribute, so never missing. tests/test-form-differential.js runs
+       v5.20.0 and this file side by side and requires identical results.
+       window.jQuery is no longer set here: Webflow pages keep their own
+       3.5.1, which this used to overwrite; the Astro pages have none. */
     loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/intlTelInput.min.js', function () {
       loadScript('https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.8/js/utils.js', function () {
         initPhoneInputs();
