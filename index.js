@@ -159,7 +159,15 @@ app.use('/booking-confirmed-webhook-rh', express.raw({ type: 'application/json' 
    session id, a body over the 50kb limit, the rate limit). Mounted BEFORE
    express.json so a 413 is counted too, and after cors so a foreign
    origin's refused POST is not. In memory, so the count starts at boot and
-   the endpoint says when. Synthetic checks are never counted. */
+   the endpoint says when.
+
+   ANY REQUEST CARRYING X-GW-Synthetic IS LEFT OUT, matching token or not
+   (v5.24.0). A visitor's form never sends the header, so a refused
+   synthetic check is not a visitor's rejected submit, and counting it
+   would turn a monitor misconfiguration into a "failures spiked" alert
+   about real traffic. The monitor's own address refused 403 below
+   (SYNTHETIC_EMAILS) is left out for the same reason: it carries no header,
+   so it is marked on res.locals instead. */
 const SUBMIT_OUTCOMES_KEEP_H = 168;
 const _submitOutcomes = new Map();   // UTC hour ISO -> { failed, rejected }
 const SUBMIT_OUTCOMES_SINCE = new Date();
@@ -169,8 +177,9 @@ function submitOutcomeHour(ms) {
 }
 app.use('/submit', (req, res, next) => {
   if (req.method !== 'POST') return next();
-  if (synthetic.tokenMatches(req.get(synthetic.HEADER))) return next();
+  if (req.get(synthetic.HEADER) !== undefined) return next();
   res.on('finish', () => {
+    if (res.locals.gwNotAVisitor) return;
     const kind = res.statusCode >= 500 ? 'failed' : res.statusCode >= 400 ? 'rejected' : null;
     if (!kind) return;
     const key = submitOutcomeHour(Date.now());
@@ -193,7 +202,18 @@ app.use(express.json({ limit: '50kb' }));
    synthetic traffic shares it, whatever the IP, because a Worker's address
    is not stable), marked req.synthetic, run inside the synthetic context
    that every outbound choke point checks, and every JSON answer it gets
-   carries synthetic: true so the monitor can see the header took effect. */
+   carries synthetic: true so the monitor can see the header took effect.
+
+   FAILS CLOSED SINCE v5.24.0. Until then a header whose token did not match
+   was handled as an ordinary request -- so a monitor whose token had
+   drifted from Railway's would have turned its form check into a real lead,
+   with Salesforce, Slack, the mirror and Meta. A visitor's form never sends
+   this header (only a session holding gw_synthetic does), so a header that
+   does not match can only be a broken or forged check, and it is answered
+   401 here, before any handler, limiter or database call. An EMPTY header
+   is refused the same way, and so is every header while synthetic checks
+   are off (no SYNTHETIC_TOKEN, or one too short). No header: unchanged.
+   cors has already run, so an allowed origin can read the 401. */
 const SYNTHETIC_ROUTES = ['/session', '/partial', '/submit', '/enrich', '/verify-email',
   '/non-icp-check', '/verify-website', '/resolve-website', '/booking-confirmed'];
 const SYNTHETIC_RATE_PER_HOUR = Math.max(1, Number(process.env.SYNTHETIC_RATE_PER_HOUR) || 60);
@@ -203,6 +223,17 @@ const syntheticLimiter = rateLimit({
   message: { error: 'Synthetic check rate limit reached', synthetic: true },
   standardHeaders: true, legacyHeaders: false, validate: false,
 });
+/* THE REFUSAL HAS ITS OWN BUDGET, per client address (clientIpOf, like
+   syntheticOpsUnauthLimiter; req.ip is a Railway proxy hop here). The 401
+   is answered before every route limiter, so without this a flood of bad
+   headers would get unlimited 401s and a log line each. Past the budget it
+   is a 429, which writes no log line. */
+const syntheticRefusalLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, max: Math.max(1, Number(process.env.SYNTHETIC_REFUSED_PER_HOUR) || 60),
+  keyGenerator: (req) => 'synthetic-refused:' + (clientIpOf(req) || 'unknown'),
+  message: { ok: false, error: 'Too many requests', synthetic: false },
+  standardHeaders: true, legacyHeaders: false, validate: false,
+});
 if (process.env.SYNTHETIC_TOKEN && !synthetic.configuredToken()) {
   console.warn('[synthetic] SYNTHETIC_TOKEN is set but shorter than ' + synthetic.MIN_TOKEN_LENGTH
     + ' characters, so synthetic checks are OFF and the header is ignored.');
@@ -210,11 +241,13 @@ if (process.env.SYNTHETIC_TOKEN && !synthetic.configuredToken()) {
 app.use((req, res, next) => {
   if (req.method !== 'POST' || SYNTHETIC_ROUTES.indexOf(req.path) === -1) return next();
   const given = req.get(synthetic.HEADER);
-  if (given == null) return next();
+  if (given === undefined) return next();
   if (!synthetic.tokenMatches(given)) {
-    /* Never the value: a near-miss token in a log is half a leaked one. */
-    if (synthetic.configuredToken()) console.warn(`[synthetic] ${synthetic.HEADER} on ${req.path} did not match SYNTHETIC_TOKEN, so it was handled as an ordinary request`);
-    return next();
+    return syntheticRefusalLimiter(req, res, () => {
+      /* Never the value: a near-miss token in a log is half a leaked one. */
+      console.warn(`[synthetic] ${synthetic.HEADER} on ${req.path} refused (401): ${synthetic.configuredToken() ? 'the token did not match SYNTHETIC_TOKEN' : 'synthetic checks are off'}`);
+      res.status(401).json({ ok: false, error: 'synthetic token rejected', synthetic: false });
+    });
   }
   syntheticLimiter(req, res, () => {
     req.synthetic = true;
@@ -226,6 +259,7 @@ app.use((req, res, next) => {
     });
   });
 });
+
 
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, max: 100,
@@ -254,6 +288,54 @@ app.use('/verify-website', strictLimiter);
 // the same mistake that made the monitor dashboard trip its own limiter.
 app.use('/lm/track',  globalLimiter);
 app.use('/lm/submit', globalLimiter);
+
+/* ── THE MONITOR'S OWN ADDRESS, OUTSIDE A SYNTHETIC CHECK (v5.24.0) ────────
+   A second lock, keyed on WHO rather than on the token: SYNTHETIC_EMAILS
+   (Railway, comma-separated, empty by default) lists the addresses the
+   website monitor fills the form with. On the five routes that can save or
+   send something about a person, a request for one of those addresses that
+   is NOT a valid synthetic request is refused 403 before the route runs, so
+   the monitor's address can never become a real lead -- whatever happens to
+   the header or the token.
+
+   WHERE THE ADDRESS IS. /partial, /submit, /enrich and /verify-email carry
+   it in the body as `email`, read exactly as each route reads it (trimmed,
+   254 characters, lower-cased). /booking-confirmed carries NO email -- the
+   form sends the session and the booking only -- so it is read off that
+   session's lead row, and only while the list is non-empty, so a booking's
+   database calls are exactly as before when the variable is unset.
+
+   MOUNTED AFTER THE ROUTE LIMITERS, so that row read is behind
+   /booking-confirmed's own limiter and a stranger cannot drive database
+   reads with made-up session ids faster than the route already allows. */
+const SYNTHETIC_EMAILS = (process.env.SYNTHETIC_EMAILS || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+const SYNTHETIC_EMAIL_ROUTES = ['/partial', '/submit', '/enrich', '/verify-email', '/booking-confirmed'];
+app.use(async (req, res, next) => {
+  if (req.method !== 'POST' || !SYNTHETIC_EMAILS.length || req.synthetic || SYNTHETIC_EMAIL_ROUTES.indexOf(req.path) === -1) return next();
+  let email = '';
+  try {
+    if (req.path === '/booking-confirmed') {
+      const sid = ((req.body && req.body.session_id) || '').toString().trim().slice(0, 100);
+      if (sid) {
+        const r = await pool.query('SELECT lower(email) AS email FROM leads WHERE session_id=$1', [sid]);
+        email = (r.rows[0] && r.rows[0].email) || '';
+      }
+    } else {
+      email = ((req.body && req.body.email) || '').toString().trim().slice(0, 254).toLowerCase();
+    }
+  } catch (err) {
+    /* Fails OPEN for a visitor: an unreadable row is not evidence that the
+       booking belongs to the monitor. */
+    console.warn(`[synthetic] monitor-address check on ${req.path} could not read the lead row (allowed):`, err.message);
+    return next();
+  }
+  if (email && SYNTHETIC_EMAILS.indexOf(email) !== -1) {
+    console.warn(`[synthetic] ${req.path} refused (403): a monitor address arrived without a valid synthetic token`);
+    res.locals.gwNotAVisitor = true;   // not a visitor's rejected submit: see the outcome counter
+    return res.status(403).json({ ok: false, error: 'monitor address outside a synthetic check' });
+  }
+  next();
+});
 
 let awsPool = null;
 
@@ -2512,6 +2594,21 @@ const syntheticOpsLimiter = rateLimit({
   message: { error: 'Rate limit reached' },
   standardHeaders: true, legacyHeaders: false, validate: false,
 });
+/* THE TOKEN BEFORE THE BUDGET (v5.24.0). An unauthenticated call is answered
+   401 without touching the monitor's 120 an hour, so a stranger cannot spend
+   it. Those 401s have their own small budget per client IP (clientIpOf, the
+   repo's one definition: req.ip is a Railway proxy hop here, which would
+   lump every caller together). */
+const syntheticOpsUnauthLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, max: Math.max(1, Number(process.env.SYNTHETIC_OPS_UNAUTH_PER_HOUR) || 30),
+  keyGenerator: (req) => 'ops-unauth:' + (clientIpOf(req) || 'unknown'),
+  message: { error: 'Too many requests' },
+  standardHeaders: true, legacyHeaders: false, validate: false,
+});
+function syntheticOpsGate(req, res, next) {
+  if (synthetic.tokenMatches(req.get(synthetic.HEADER))) return next();
+  syntheticOpsUnauthLimiter(req, res, () => res.status(401).json({ error: 'Unauthorized' }));
+}
 function syntheticOpsAuthorised(req, res) {
   if (synthetic.tokenMatches(req.get(synthetic.HEADER))) return true;
   res.status(401).json({ error: 'Unauthorized' });
@@ -2568,7 +2665,7 @@ const DEEP_HEALTH_CHECKS = {
     if (!j || j.healthy !== true || j.is_logged_in !== true) throw new Error('Apollo says the key is not logged in');
   },
 };
-app.get('/health/deep', syntheticOpsLimiter, async (req, res) => {
+app.get('/health/deep', syntheticOpsGate, syntheticOpsLimiter, async (req, res) => {
   if (!syntheticOpsAuthorised(req, res)) return;
   res.setHeader('Cache-Control', 'no-store');
   const names = Object.keys(DEEP_HEALTH_CHECKS);
@@ -2593,7 +2690,7 @@ app.get('/health/deep', syntheticOpsLimiter, async (req, res) => {
    Our own test submissions are left out of submitted and booked, by the
    same rule as the Overview. Synthetic checks never write a row, so they
    are not in any count. */
-app.get('/metrics/submissions', syntheticOpsLimiter, async (req, res) => {
+app.get('/metrics/submissions', syntheticOpsGate, syntheticOpsLimiter, async (req, res) => {
   if (!syntheticOpsAuthorised(req, res)) return;
   res.setHeader('Cache-Control', 'no-store');
   const hours = Math.min(SUBMIT_OUTCOMES_KEEP_H, Math.max(1, parseInt(req.query.hours, 10) || 24));

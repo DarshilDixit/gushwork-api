@@ -19,9 +19,17 @@
    (which must be an ordinary request), the CORS preflight, a foreign
    origin, an oversized body and a missing session id.
 
-   KNOWN, INTENDED DIFFERENCES, asserted as such rather than hidden:
-     - the preflight's Access-Control-Allow-Headers names X-GW-Synthetic;
-     - /health/deep and /metrics/submissions exist (401 without a token).
+   RELEASE is v5.23.0 since v5.24.0 (it was v5.22.0 for v5.23.0's PR). The
+   same requests now also go out with the RIGHT token, which must behave
+   exactly as v5.23.0 did.
+
+   KNOWN, INTENDED DIFFERENCES (v5.24.0), asserted as such rather than hidden:
+     - a WRONG or EMPTY token: v5.23.0 handled it as a visitor; now it is
+       401 {"ok":false,"error":"synthetic token rejected","synthetic":false}
+       and the trace shows NOTHING ran -- no statement, no request;
+     - an unauthenticated /health/deep or /metrics/submissions is answered
+       before the monitor's budget, so its rate-limit headers are the
+       strangers' budget (30), not the monitor's (120).
 
    Generated values (UUIDs, timestamps, durations) are normalised; side
    effects that run after the response are compared as a set, because two
@@ -45,8 +53,11 @@ function ok(name, cond, extra) {
 }
 
 const ROOT = path.join(__dirname, '..');
-/* v5.22.0: the merge of PR 151, the last release without synthetic checks. */
-const RELEASE = '5db62fb9abd68e7b7b60decc72690cc18d13fde9';
+/* v5.23.0: the merge of PR 152, the release before synthetic checks failed
+   closed. (Was v5.22.0, 5db62fb, for v5.23.0's own PR.) */
+const RELEASE = 'c2220b1f646cec99c7fb1c08ff367b0981c5c06c';
+const RIGHT_TOKEN = 'the-real-token-0123456789abcdefghijklmnopqr';
+const REFUSED = JSON.stringify({ ok: false, error: 'synthetic token rejected', synthetic: false });
 const PORTS = { rel: 41311, cur: 41312 };
 const WRONG_TOKEN = 'not-the-token-0123456789abcdefghijklmnopq';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -77,7 +88,7 @@ function boot(which, dir) {
     MONITOR_TOKEN: 'stub',
     /* Set, so the working tree's synthetic path is LIVE -- and the wrong
        token below is a real near miss, not a feature that is switched off. */
-    SYNTHETIC_TOKEN: 'the-real-token-0123456789abcdefghijklmnopqr',
+    SYNTHETIC_TOKEN: RIGHT_TOKEN,
   });
   delete env.NODE_OPTIONS;
   const child = spawn(process.execPath, ['-r', path.join(__dirname, 'server-diff-harness.js'), path.join(dir, 'index.js')],
@@ -175,18 +186,45 @@ async function send(s, req) {
   const REQS = [];
   let n = 100;
   for (const [route, body] of ROUTES) REQS.push({ label: `${route} as a visitor`, path: route, headers: J, body: JSON.stringify(body(++n)) });
-  for (const [route, body] of ROUTES) REQS.push({ label: `${route} with a WRONG token`, path: route, headers: Object.assign({ 'X-GW-Synthetic': WRONG_TOKEN }, J), body: JSON.stringify(body(++n)) });
+  for (const [route, body] of ROUTES) REQS.push({ label: `${route} with the RIGHT token`, path: route, headers: Object.assign({ 'X-GW-Synthetic': RIGHT_TOKEN }, J), body: JSON.stringify(body(++n)) });
+  for (const [route, body] of ROUTES) REQS.push({ label: `${route} with a WRONG token`, refused: true, path: route, headers: Object.assign({ 'X-GW-Synthetic': WRONG_TOKEN }, J), body: JSON.stringify(body(++n)) });
+  for (const [route, body] of ROUTES) REQS.push({ label: `${route} with an EMPTY token`, refused: true, path: route, headers: Object.assign({ 'X-GW-Synthetic': '' }, J), body: JSON.stringify(body(++n)) });
   REQS.push({ label: '/submit with no session id', path: '/submit', headers: J, body: JSON.stringify(LEAD) });
   REQS.push({ label: '/submit with a body over 50kb', path: '/submit', headers: J, body: JSON.stringify(Object.assign({ session_id: sidOf(++n) }, LEAD, { about_business: 'x'.repeat(60000) })) });
   REQS.push({ label: '/submit from a foreign origin', path: '/submit', headers: Object.assign({}, J, { Origin: 'https://evil.example' }), body: JSON.stringify({ session_id: sidOf(++n) }) });
   REQS.push({ label: '/session from Webflow staging', path: '/session', headers: Object.assign({}, J, { Origin: 'https://gushwork.webflow.io' }), body: JSON.stringify({ session_id: sidOf(++n) }) });
   REQS.push({ label: '/health', method: 'GET', path: '/health', headers: {} });
 
+  /* Which per-IP visitor budget each route draws on. A refused request
+     (v5.24.0) is answered before any of them, where v5.23.0 ran it and spent
+     one -- so on later requests ratelimit-remaining is higher by EXACTLY the
+     number of refusals on the same budget, and that is what is required. */
+  const LIMITER = { '/partial': 'global', '/submit': 'global', '/session': 'global', '/booking-confirmed': 'global',
+                    '/verify-email': 'strict', '/enrich': 'strict', '/verify-website': 'strict', '/resolve-website': 'strict' };
+  const refusedOn = { global: 0, strict: 0 };
   for (const req of REQS) {
     const a = await send(rel, req);
     const b = await send(cur, req);
     await quiet(rel, cur);
     const ta = linesSince(rel).map(norm).sort(), tb = linesSince(cur).map(norm).sort();
+    if (req.refused) {
+      /* THE INTENDED DIFFERENCE: v5.23.0 ran it as a visitor; now nothing runs. */
+      ok(`${req.label}: v5.23.0 handled it as a visitor (${a.status}, ${ta.length} statements and requests)`, a.status !== 401 && ta.length > 0, a.status + ' ' + ta.length);
+      ok(`${req.label}: now 401 with the refusal body`, b.status === 401 && b.body === REFUSED, b.status + ' ' + b.body.slice(0, 120));
+      ok(`${req.label}: now NOTHING ran -- no database statement, no outbound request`, tb.length === 0, tb.slice(0, 2).join(' ').slice(0, 200));
+      ok(`${req.label}: the 401 carries the CORS header for the allowed origin`, b.headers['access-control-allow-origin'] === 'https://www.gushwork.ai', JSON.stringify(b.headers));
+      /* Its rate-limit headers are the refusals' own budget (60 an hour per
+         client), never a visitor budget (100 or 50). */
+      ok(`${req.label}: the 401 spends no visitor budget (its rate-limit headers are the refusals' own, limit 60)`, b.headers['ratelimit-limit'] === '60', JSON.stringify(b.headers));
+      if (LIMITER[req.path]) refusedOn[LIMITER[req.path]]++;
+      continue;
+    }
+    const lim = LIMITER[req.path];
+    if (lim && 'ratelimit-remaining' in a.headers) {
+      const d = Number(b.headers['ratelimit-remaining']) - Number(a.headers['ratelimit-remaining']);
+      ok(`${req.label}: visitor budget left is higher by exactly the ${refusedOn[lim]} refused requests on it (v5.23.0 spent one each)`, d === refusedOn[lim], `difference ${d}`);
+      a.headers['ratelimit-remaining'] = b.headers['ratelimit-remaining'] = '(compared above)';
+    }
     /* Byte for byte where the answer holds nothing generated; otherwise
        after normalising only the generated values. Which one applied is in
        the assertion's name, so a reader can see it. */
@@ -209,15 +247,17 @@ async function send(s, req) {
   const pre = { label: 'preflight', method: 'OPTIONS', path: '/submit',
     headers: { Origin: 'https://www.gushwork.ai', 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'content-type' } };
   const pa = await send(rel, pre), pb = await send(cur, pre);
-  ok('preflight: same status', pa.status === pb.status && pa.status === 204, pa.status + '/' + pb.status);
-  ok('preflight: RELEASE allowed Content-Type only', pa.headers['access-control-allow-headers'] === 'Content-Type', pa.headers['access-control-allow-headers']);
-  ok('preflight: the working tree allows Content-Type and X-GW-Synthetic, nothing else', pb.headers['access-control-allow-headers'] === 'Content-Type,X-GW-Synthetic', pb.headers['access-control-allow-headers']);
-  const rest = (h) => JSON.stringify(Object.assign({}, h, { 'access-control-allow-headers': null }));
-  ok('preflight: every other header is the same', rest(pa.headers) === rest(pb.headers), rest(pa.headers) + ' | ' + rest(pb.headers));
+  ok('preflight: identical to v5.23.0, X-GW-Synthetic allowed', pa.status === 204 && JSON.stringify(pa.headers) === JSON.stringify(pb.headers)
+     && pb.headers['access-control-allow-headers'] === 'Content-Type,X-GW-Synthetic', JSON.stringify([pa.headers, pb.headers]));
   for (const route of ['/health/deep', '/metrics/submissions']) {
     const ra = await send(rel, { method: 'GET', path: route, headers: {} });
     const rb = await send(cur, { method: 'GET', path: route, headers: {} });
-    ok(`${route}: new, and refused without the token (RELEASE had no such route)`, ra.status === 404 && rb.status === 401, ra.status + '/' + rb.status);
+    ok(`${route} without a token: 401 and the same body, as in v5.23.0`, ra.status === 401 && rb.status === 401 && ra.body === rb.body, ra.status + '/' + rb.status);
+    ok(`${route} without a token: answered BEFORE the monitor's budget -- v5.23.0 spent it (limit 120), now the strangers' budget (limit 30)`,
+       ra.headers['ratelimit-limit'] === '120' && rb.headers['ratelimit-limit'] === '30', JSON.stringify([ra.headers['ratelimit-limit'], rb.headers['ratelimit-limit']]));
+    const ga = await send(rel, { method: 'GET', path: route, headers: { 'X-GW-Synthetic': RIGHT_TOKEN } });
+    const gb = await send(cur, { method: 'GET', path: route, headers: { 'X-GW-Synthetic': RIGHT_TOKEN } });
+    ok(`${route} with the token: the same status as v5.23.0 (${ga.status})`, ga.status === gb.status, ga.status + '/' + gb.status);
   }
   linesSince(rel); linesSince(cur);
   finish();
