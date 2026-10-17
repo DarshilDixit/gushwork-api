@@ -82,14 +82,23 @@ node tests/test-gads-upload.js      # the Google Ads upload: Google's normalisat
 node tests/test-agency-exclusions.js # agency and our own leads never reach Salesforce, on EVERY Lead path
                                     #   (/submit, both safety nets BOOTED; the retry sweep and backfill
                                     #   executed), and the SDR list's mark and CSV
+node tests/test-form-differential.js # runs both form files WHOLE, the previous release against the working
+                                    #   tree and the .min.js, in a fake page; needs git and terser
+node tests/test-synthetic.js        # BOOTS every form route as a visitor and as the website monitor:
+                                    #   the monitor's run writes and sends NOTHING; /submit's "would" against
+                                    #   what the real path fired; the token, rate limit, /health/deep,
+                                    #   /metrics/submissions, the one origins list
+node tests/test-server-differential.js # BOOTS the previous release (from git) and the working tree side by
+                                    #   side: without a valid token, the same answers, queries and requests
 
-node tests/measure.js --check   # or just this: runs all sixteen and checks the totals
+node tests/measure.js --check   # or just this: runs all nineteen and checks the totals
 node tests/test-batch1-db.js    # needs DATABASE_URL
 node tests/test-batch1-e2e.js   # boots the real server, needs DATABASE_URL
 ```
 
-**The sixteen dependency-free suites are the bar.** They run anywhere in about a
-second each — run all sixteen after any change to `index.js`, `lead-magnet.js`,
+**The nineteen dependency-free suites are the bar** (count `SUITES` in
+`tests/measure.js`, do not trust this number). Most run in about a second, the
+three differential and synthetic ones in five to ten — run all nineteen after any change to `index.js`, `lead-magnet.js`,
 or either form file, always. Do not install Postgres and do not point anything at
 the production database from a feature branch.
 
@@ -114,9 +123,9 @@ had actually been read.
 If the output is genuinely too long to read, that is a reason to fix the
 output, not to pipe it.
 
-**Nine of the sixteen BOOT A ROUTE** rather than reading source text —
+**Eleven of the nineteen BOOT A ROUTE** rather than reading source text —
 `test-submit-gate`, `test-session-page-views`, `test-lead-field-changes`,
-`test-session-payload`, `test-apollo`, `test-monitor-next`, `test-gads-upload`, `test-agency-exclusions` and `test-non-icp-routes`. The last one goes furthest:
+`test-session-payload`, `test-apollo`, `test-monitor-next`, `test-gads-upload`, `test-agency-exclusions`, `test-synthetic`, `test-server-differential` and `test-non-icp-routes`. The last one goes furthest:
 it also **evaluates the dashboard's inline JavaScript** in a stubbed DOM and
 calls every tab loader, because three production breaks in one night were
 runtime behaviour no source assertion could see. They stub `pg` and `global.fetch` and drive the real
@@ -129,7 +138,7 @@ Tests read the real functions out of `index.js` rather than a copy. A test that
 exercises a duplicate of the source can pass while production is broken. Keep it
 that way.
 
-**All sixteen suites require `tests/crash-reporter.js` first, and it is not
+**All nineteen suites require `tests/crash-reporter.js` first, and it is not
 optional.** A suite that crashes prints a stack trace, zero `✗` lines and exits
 1 — which reads as a clean run to anything counting markers and as a caught
 mutation to anything counting exit codes. Three of the six did exactly that
@@ -416,7 +425,10 @@ before — a file missing from here reads as "forgotten," not "not documented ye
 | `gushwork-form.js` | The `/demo` form frontend. Lives here and is served live by jsDelivr — see below |
 | `gushwork-form-popup.js` | The Google Ads popup/modal form frontend. Lives here and is served live by jsDelivr — see below |
 | `gushwork-form.min.js`, `gushwork-form-popup.min.js` (+ `.map`) | GENERATED since v5.22.0 by `tools/build-form-min.js` from the two files above, and committed so jsDelivr serves our bytes at a SHA (an SRI hash holds). Never edit by hand; the readable files stay the source. `test-form-differential.js` fails if they are stale |
-| `tools/build-form-min.js` | Builds the two `.min.js` files and their maps with the pinned terser (`--check` writes nothing and exits 1 if stale). Not mounted |
+| `tools/build-form-min.js` | Writes `allowed-origins.js`'s hostnames into the `SESSION_HOSTS` line of BOTH readable form files (since v5.23.0), then builds the two `.min.js` files and their maps with the pinned terser (`--check` writes nothing and exits 1 if anything is stale). Not mounted |
+| `allowed-origins.js` | THE list of origins the API accepts (CORS) and, through the build, the hosts the forms send `/session` from. Since v5.23.0 the Railway `ALLOWED_ORIGIN` env is NOT read. Edit this, then rebuild |
+| `synthetic.js` | The website monitor's synthetic checks: the `X-GW-Synthetic` token check (constant time, `SYNTHETIC_TOKEN`, 32+ characters or off), the per-request flag (AsyncLocalStorage), the choke-point guard `refuseIfSynthetic`, the database write guard and the `[synthetic]` log prefix |
+| `tests/server-diff-harness.js` | Loaded with `node -r` into both servers `test-server-differential.js` boots: identical pg, fetch and DNS stubs that write a trace. Not a suite |
 | `package.json` | Dependencies, scripts, Node engine constraint |
 | `package-lock.json` | Locked dependency versions, committed so Railway installs exactly what was tested |
 | `.gitignore` | Keeps `node_modules/`, `.env`, logs, and local Claude settings out of the repo |
@@ -1158,6 +1170,21 @@ sees on screen is what the column keeps.
 **The about-business textarea is on THREE pages** (`/demo` behind the CRM tick, `/ai-demo` and `/ai-crm` always visible), and each must carry `maxlength="1000"`; Webflow's default is 5000. Background: `docs/background/product-and-forms.md`.
 
 **Apollo refuses with a reply, not an exception** (`{"error":"You have insufficient credits!"}`). `apolloReplyError` reads it and pages "Out of credits" at once (repeating every 3 hours); a refusal is recorded insert-only so it never overwrites a real enrichment; health counts what Apollo FOUND over business-email leads. Re-enrich afterwards with `tools/re-enrich-apollo.js`. Background: `docs/background/alerting.md`.
+
+**SYNTHETIC CHECKS (v5.23.0): A NEW OUTBOUND WRITE MUST OPEN WITH ITS GUARD.**
+gushwork-web's monitor fills the forms with `X-GW-Synthetic: <SYNTHETIC_TOKEN>`; nine form
+routes honour it and must leave NOTHING behind. Rules, all enforced by `test-synthetic.js`:
+- **A wrong or missing token is an ordinary request**, by design. A stale monitor token
+  creates real leads, so the monitor's address belongs in `INTERNAL_TEST_EMAILS`.
+- **A form route that writes needs a `req.synthetic` branch** after its parsing and
+  decisions; a route that only reads relies on the guarded helpers instead.
+- **A new Slack, email, Salesforce, Meta, PartnerStack, mirror or other outbound write
+  opens with `synthetic.refuseIfSynthetic('<point>', ...)`**, and a database write
+  inside a synthetic request resolves EMPTY (never throws) and is counted: the suite
+  requires the count to stay zero.
+- **`syntheticSubmitAnswer` mirrors `/submit` branch for branch.** A new gate on the
+  real path needs its line there, or section D's parity fails.
+- **A lift of a guarded function needs `synthetic`** among its names (the next rule).
 
 **A lifted `recordFailure` needs every name it reads.** Two suites and one
 tool lift it; adding `isCreditsExhausted` made the PartnerStack streak
